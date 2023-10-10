@@ -1,5 +1,5 @@
 use crate::crc32::Crc32;
-use crate::{preflate_token};
+use crate::preflate_token;
 
 use std::io::{Read, Seek};
 

@@ -1,4 +1,4 @@
-use crate::preflate_input::PreflateInput;
+use crate::{preflate_constants::MIN_MATCH, preflate_input::PreflateInput};
 
 pub struct PreflateHashIterator<'a> {
     chain: &'a [u16],
@@ -64,7 +64,6 @@ pub struct PreflateHashChainExt<'a> {
     head: Vec<u16>,
     chain_depth: Vec<u32>,
     prev: Vec<u16>,
-    hash_bits: u32,
     hash_shift: u32,
     running_hash: u32,
     hash_mask: u32,
@@ -73,28 +72,26 @@ pub struct PreflateHashChainExt<'a> {
 
 impl<'a> PreflateHashChainExt<'a> {
     pub fn new(i: &'a [u8], mem_level: u32) -> Self {
-        let input = PreflateInput::new(i);
         let hash_bits = mem_level + 7;
-        let hash_shift = (hash_bits + 1) - 3;
-        let hash_mask = (1 << hash_bits) - 1;
-        let total_shift = (hash_bits + 7) / 8;
+        let hash_mask = (1u32 << hash_bits) - 1;
 
-        let head_size = 1 << hash_bits;
-        let head = vec![0; head_size];
-        let chain_depth = vec![0; head_size];
-        let prev = vec![0; input.size() as usize];
-
-        PreflateHashChainExt {
-            _input: input,
-            head,
-            chain_depth,
-            prev,
-            hash_bits,
-            hash_shift,
+        let mut hash_chain_ext = PreflateHashChainExt {
+            _input: PreflateInput::new(i),
+            total_shift: 0,
+            hash_shift: (hash_bits + MIN_MATCH - 1) / MIN_MATCH,
+            hash_mask: hash_mask,
+            head: vec![0; hash_mask as usize + 1],
+            prev: vec![0; 1 << 16],
+            chain_depth: vec![0; 1 << 16],
             running_hash: 0,
-            hash_mask,
-            total_shift: total_shift.into(),
+        };
+
+        if i.len() > 2 {
+            hash_chain_ext.update_running_hash(i[0]);
+            hash_chain_ext.update_running_hash(i[1]);
         }
+
+        hash_chain_ext
     }
 
     pub fn next_hash(&self, b: u8) -> u32 {
@@ -109,8 +106,19 @@ impl<'a> PreflateHashChainExt<'a> {
         self.running_hash = (self.running_hash << self.hash_shift) ^ u32::from(b);
     }
 
-    pub fn reshift(&mut self) {
-        // Implement reshift logic here
+    fn reshift(&mut self) {
+        let delta: usize = 0x7e00;
+        for i in 0..(self.hash_mask + 1) as usize {
+            self.head[i] = std::cmp::max(self.head[i], delta as u16) - delta as u16;
+        }
+
+        for i in (delta + 8)..(1 << 16) {
+            self.prev[i - delta] = std::cmp::max(self.prev[i], delta as u16) - delta as u16;
+        }
+
+        let len = self.chain_depth.len();
+        self.chain_depth.copy_within((8 + delta)..len, 8);
+        self.total_shift += delta as u32;
     }
 
     pub fn hash_mask(&self) -> u32 {
@@ -183,15 +191,65 @@ impl<'a> PreflateHashChainExt<'a> {
         self.next_hash_double(self._input.cur_char(2), self._input.cur_char(3))
     }
 
-    pub fn update_hash(&mut self, _l: u32) {
-        // Implement update_hash logic here
+    pub fn update_hash(&mut self, mut l: u32) {
+        if l > 0x180 {
+            while l > 0 {
+                let blk = std::cmp::min(l, 0x180);
+                self.update_hash(blk);
+                l -= blk;
+            }
+            return;
+        }
+
+        let pos = self._input.pos();
+        if pos - self.total_shift >= 0xfe08 {
+            self.reshift();
+        }
+
+        for i in 2u32..std::cmp::min(l + 2, self._input.remaining()) {
+            self.update_running_hash(self._input.cur_char(i as i32));
+            let h = self.running_hash & self.hash_mask;
+            let p = (pos + i - 2) - self.total_shift;
+            self.chain_depth[p as usize] = self.chain_depth[self.head[h as usize] as usize] + 1;
+            self.prev[p as usize] = self.head[h as usize];
+            self.head[h as usize] = p as u16;
+        }
+
+        self._input.advance(l);
     }
 
-    pub fn update_hash_long(&mut self, _l: u32) {
-        // Implement update_hash_long logic here
-    }
+    pub fn skip_hash(&mut self, mut l: u32) {
+        let pos = self._input.pos();
+        if pos - self.total_shift >= 0xfe08 {
+            self.reshift();
+        }
 
-    pub fn skip_hash(&mut self, _l: u32) {
-        // Implement skip_hash logic here
+        let remaining = self._input.remaining();
+        if remaining > 2 {
+            self.update_running_hash(self._input.cur_char(2));
+            let h = self.running_hash & self.hash_mask;
+            let p = pos - self.total_shift;
+            self.chain_depth[p as usize] = self.chain_depth[self.head[h as usize] as usize] + 1;
+            self.prev[p as usize] = self.head[h as usize];
+            self.head[h as usize] = p as u16;
+
+            // Skipped data is not inserted into the hash chain,
+            // but we must still update the chainDepth, to avoid
+            // bad analysis results
+            // --------------------
+            for i in 1..l {
+                let p = (pos + i) - self.total_shift;
+                self.chain_depth[p as usize] = 0xffff8000;
+            }
+
+            if remaining > l {
+                self.update_running_hash(self._input.cur_char(l as i32));
+                if remaining > l + 1 {
+                    self.update_running_hash(self._input.cur_char(l as i32 + 1));
+                }
+            }
+        }
+
+        self._input.advance(l);
     }
 }

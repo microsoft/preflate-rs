@@ -26,7 +26,6 @@ use std::{
     io::{BufReader, Cursor, Read, Seek, SeekFrom},
 };
 
-
 mod crc32;
 mod zip_structs;
 
@@ -127,7 +126,7 @@ fn analyze_compressed_data<R: Read + Seek>(
     for i in 0..blocks.len() {
         tokenPredictorE
             .analyze_block(i, &blocks[i])
-            .context("analyze_block")?;
+            .with_context(|| format!("analyze_block {}", i))?;
         tokenPredictorE.update_counters(&mut counterE, i as u32);
     }
 

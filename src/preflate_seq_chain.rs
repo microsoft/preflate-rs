@@ -66,7 +66,7 @@ impl<'a> PreflateSeqChain<'a> {
     }
 
     pub fn valid(&self, ref_pos: u32) -> bool {
-        let index = (ref_pos - self.total_shift as u32) as usize;
+        let index = (ref_pos as i32 - self.total_shift) as usize;
         self.prev[index].dist_to_next != 0xffff
     }
 

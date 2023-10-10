@@ -1,5 +1,5 @@
 use crate::preflate_constants;
-use crate::preflate_hash_chain::{PreflateHashChainExt};
+use crate::preflate_hash_chain::PreflateHashChainExt;
 use crate::preflate_parse_config::{
     PreflateParserConfig, FAST_PREFLATE_PARSER_SETTINGS, SLOW_PREFLATE_PARSER_SETTINGS,
 };

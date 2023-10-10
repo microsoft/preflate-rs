@@ -113,6 +113,16 @@ impl<'a> PreflateTokenPredictor<'a> {
 
             let mut predicted_token = self.predict_token();
 
+            println!(
+                "B{}T{}: TGT({},{}), PT({},{})",
+                blockno,
+                i,
+                block.tokens[i].len(),
+                block.tokens[i].dist(),
+                predicted_token.len(),
+                predicted_token.dist()
+            );
+
             // Debug print statement
             // println!("B{}T{}: TGT({},{}) -> PRD({},{})", blockno, i, target_token.len, target_token.dist, predicted_token.len, predicted_token.dist);
 
