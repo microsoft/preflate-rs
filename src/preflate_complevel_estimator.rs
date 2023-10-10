@@ -39,16 +39,23 @@ impl<'a> PreflateCompLevelEstimatorState<'a> {
         off0: u32,
         blocks: &'a Vec<PreflateTokenBlock>,
     ) -> Self {
-        PreflateCompLevelEstimatorState::<'a> {
+        let mut r = PreflateCompLevelEstimatorState::<'a> {
             slow_hash: PreflateHashChainExt::<'a>::new(unpacked_output, mbits),
             fast_l1_hash: PreflateHashChainExt::<'a>::new(unpacked_output, mbits),
             fast_l2_hash: PreflateHashChainExt::<'a>::new(unpacked_output, mbits),
             fast_l3_hash: PreflateHashChainExt::<'a>::new(unpacked_output, mbits),
             blocks,
-            info: PreflateCompLevelInfo::default(),
+            info: PreflateCompLevelInfo {
+                possible_compression_levels: (1 << 10) - (1 << 1),
+                ..PreflateCompLevelInfo::default()
+            },
             wsize: 1 << wbits,
             off0,
-        }
+        };
+
+        r.update_hash(off0);
+
+        r
     }
 
     fn update_hash(&mut self, len: u32) {
@@ -266,16 +273,13 @@ impl<'a> PreflateCompLevelEstimatorState<'a> {
         let cur_max_dist = std::cmp::min(cur_pos, window_size);
 
         let start_depth = hash.get_node_depth(hash_head);
-        let chain_it = hash.iterate_from_pos(
-            cur_pos - target_reference.dist() as u32,
-            cur_pos,
-            cur_max_dist,
-        );
-        if chain_it.pos() != 0 || target_reference.dist() as u32 > cur_max_dist {
+        let chain_it =
+            hash.iterate_from_pos(cur_pos - target_reference.dist(), cur_pos, cur_max_dist);
+        if chain_it.pos() == 0 || target_reference.dist() > cur_max_dist {
             return 0xffff;
         }
         let end_depth = chain_it.depth();
-        std::cmp::min(start_depth - end_depth, 0xffff)
+        std::cmp::min(start_depth.wrapping_sub(end_depth), 0xffff)
     }
 
     fn window_size(&self) -> u32 {

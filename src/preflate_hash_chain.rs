@@ -60,14 +60,14 @@ impl<'a> PreflateHashIterator<'a> {
 }
 
 pub struct PreflateHashChainExt<'a> {
-    _input: PreflateInput<'a>,
+    input: PreflateInput<'a>,
     head: Vec<u16>,
     chain_depth: Vec<u32>,
     prev: Vec<u16>,
     hash_shift: u32,
     running_hash: u32,
     hash_mask: u32,
-    total_shift: u32,
+    total_shift: i32,
 }
 
 impl<'a> PreflateHashChainExt<'a> {
@@ -76,8 +76,8 @@ impl<'a> PreflateHashChainExt<'a> {
         let hash_mask = (1u32 << hash_bits) - 1;
 
         let mut hash_chain_ext = PreflateHashChainExt {
-            _input: PreflateInput::new(i),
-            total_shift: 0,
+            input: PreflateInput::new(i),
+            total_shift: -8,
             hash_shift: (hash_bits + MIN_MATCH - 1) / MIN_MATCH,
             hash_mask: hash_mask,
             head: vec![0; hash_mask as usize + 1],
@@ -103,22 +103,22 @@ impl<'a> PreflateHashChainExt<'a> {
     }
 
     pub fn update_running_hash(&mut self, b: u8) {
-        self.running_hash = (self.running_hash << self.hash_shift) ^ u32::from(b);
+        self.running_hash = ((self.running_hash << self.hash_shift) ^ u32::from(b)) & 0xffff;
     }
 
     fn reshift(&mut self) {
-        let delta: usize = 0x7e00;
+        const DELTA: usize = 0x7e00;
         for i in 0..(self.hash_mask + 1) as usize {
-            self.head[i] = std::cmp::max(self.head[i], delta as u16) - delta as u16;
+            self.head[i] = std::cmp::max(self.head[i], DELTA as u16) - DELTA as u16;
         }
 
-        for i in (delta + 8)..(1 << 16) {
-            self.prev[i - delta] = std::cmp::max(self.prev[i], delta as u16) - delta as u16;
+        for i in (DELTA + 8)..(1 << 16) {
+            self.prev[i - DELTA] = std::cmp::max(self.prev[i], DELTA as u16) - DELTA as u16;
         }
 
-        let len = self.chain_depth.len();
-        self.chain_depth.copy_within((8 + delta)..len, 8);
-        self.total_shift += delta as u32;
+        self.chain_depth
+            .copy_within((8 + DELTA)..(65536 - 8 - DELTA), 8);
+        self.total_shift += DELTA as i32;
     }
 
     pub fn hash_mask(&self) -> u32 {
@@ -135,7 +135,7 @@ impl<'a> PreflateHashChainExt<'a> {
 
     pub fn get_rel_pos_depth(&self, ref_pos: u32, head: u32) -> u32 {
         self.chain_depth[head as usize]
-            - self.chain_depth[(ref_pos - u32::from(self.total_shift)) as usize]
+            - self.chain_depth[(ref_pos as i32 - self.total_shift) as usize]
     }
 
     pub fn iterate_from_head(
@@ -148,7 +148,7 @@ impl<'a> PreflateHashChainExt<'a> {
         PreflateHashIterator::new(
             &self.prev,
             &self.chain_depth,
-            ref_pos - u32::from(self.total_shift),
+            (ref_pos as i32 - self.total_shift) as u32,
             max_dist,
             head.into(),
         )
@@ -163,7 +163,7 @@ impl<'a> PreflateHashChainExt<'a> {
         PreflateHashIterator::new(
             &self.prev,
             &self.chain_depth,
-            ref_pos - self.total_shift,
+            (ref_pos as i32 - self.total_shift) as u32,
             max_dist,
             node.into(),
         )
@@ -173,62 +173,62 @@ impl<'a> PreflateHashChainExt<'a> {
         PreflateHashIterator::new(
             &self.prev,
             &self.chain_depth,
-            ref_pos - u32::from(self.total_shift),
+            (ref_pos as i32 - self.total_shift) as u32,
             max_dist,
-            pos - u32::from(self.total_shift),
+            (pos as i32 - self.total_shift) as u32,
         )
     }
 
     pub fn input(&self) -> &PreflateInput {
-        &self._input
+        &self.input
     }
 
     pub fn cur_hash(&self) -> u32 {
-        self.next_hash(self._input.cur_char(2))
+        self.next_hash(self.input.cur_char(2))
     }
 
     pub fn cur_plus_1_hash(&self) -> u32 {
-        self.next_hash_double(self._input.cur_char(2), self._input.cur_char(3))
+        self.next_hash_double(self.input.cur_char(2), self.input.cur_char(3))
     }
 
-    pub fn update_hash(&mut self, mut l: u32) {
-        if l > 0x180 {
-            while l > 0 {
-                let blk = std::cmp::min(l, 0x180);
+    pub fn update_hash(&mut self, mut length: u32) {
+        if length > 0x180 {
+            while length > 0 {
+                let blk = std::cmp::min(length, 0x180);
                 self.update_hash(blk);
-                l -= blk;
+                length -= blk;
             }
             return;
         }
 
-        let pos = self._input.pos();
-        if pos - self.total_shift >= 0xfe08 {
+        let pos = self.input.pos();
+        if pos as i32 - self.total_shift >= 0xfe08 {
             self.reshift();
         }
 
-        for i in 2u32..std::cmp::min(l + 2, self._input.remaining()) {
-            self.update_running_hash(self._input.cur_char(i as i32));
+        for i in 2u32..std::cmp::min(length + 2, self.input.remaining()) {
+            self.update_running_hash(self.input.cur_char(i as i32));
             let h = self.running_hash & self.hash_mask;
-            let p = (pos + i - 2) - self.total_shift;
+            let p = (pos + i - 2) as i32 - self.total_shift;
             self.chain_depth[p as usize] = self.chain_depth[self.head[h as usize] as usize] + 1;
             self.prev[p as usize] = self.head[h as usize];
             self.head[h as usize] = p as u16;
         }
 
-        self._input.advance(l);
+        self.input.advance(length);
     }
 
-    pub fn skip_hash(&mut self, mut l: u32) {
-        let pos = self._input.pos();
-        if pos - self.total_shift >= 0xfe08 {
+    pub fn skip_hash(&mut self, l: u32) {
+        let pos = self.input.pos();
+        if pos as i32 - self.total_shift >= 0xfe08 {
             self.reshift();
         }
 
-        let remaining = self._input.remaining();
+        let remaining = self.input.remaining();
         if remaining > 2 {
-            self.update_running_hash(self._input.cur_char(2));
+            self.update_running_hash(self.input.cur_char(2));
             let h = self.running_hash & self.hash_mask;
-            let p = pos - self.total_shift;
+            let p = pos as i32 - self.total_shift;
             self.chain_depth[p as usize] = self.chain_depth[self.head[h as usize] as usize] + 1;
             self.prev[p as usize] = self.head[h as usize];
             self.head[h as usize] = p as u16;
@@ -238,18 +238,18 @@ impl<'a> PreflateHashChainExt<'a> {
             // bad analysis results
             // --------------------
             for i in 1..l {
-                let p = (pos + i) - self.total_shift;
+                let p = (pos + i) as i32 - self.total_shift;
                 self.chain_depth[p as usize] = 0xffff8000;
             }
 
             if remaining > l {
-                self.update_running_hash(self._input.cur_char(l as i32));
+                self.update_running_hash(self.input.cur_char(l as i32));
                 if remaining > l + 1 {
-                    self.update_running_hash(self._input.cur_char(l as i32 + 1));
+                    self.update_running_hash(self.input.cur_char(l as i32 + 1));
                 }
             }
         }
 
-        self._input.advance(l);
+        self.input.advance(l);
     }
 }

@@ -407,6 +407,8 @@ impl<'a> PreflateTokenPredictor<'a> {
         }
 
         let hash = self.state.calculate_hash();
+        println!("HASH: {0:x}", hash);
+
         let match_token = if self.pending_token.len() > 1 {
             self.pending_token
         } else {
@@ -426,7 +428,7 @@ impl<'a> PreflateTokenPredictor<'a> {
                     },
                 )
             } else {
-                self.state.do_match(
+                self.state.match_token(
                     head,
                     self.prev_len,
                     0,
@@ -477,7 +479,7 @@ impl<'a> PreflateTokenPredictor<'a> {
                     },
                 );
             } else {
-                match_next = self.state.do_match(
+                match_next = self.state.match_token(
                     head_next,
                     match_token.len(),
                     1,
@@ -521,12 +523,14 @@ impl<'a> PreflateTokenPredictor<'a> {
 
     fn repredict_reference(&mut self, token: &mut PreflateToken) -> anyhow::Result<()> {
         if self.state.current_input_pos() == 0 || self.state.available_input_size() < MIN_MATCH {
-            return Err(anyhow::Error::msg("Input too small"));
+            return Err(anyhow::Error::msg(
+                "Not enough space left to find a reference",
+            ));
         }
 
         let hash = self.state.calculate_hash();
         let head = self.state.get_current_hash_head(hash);
-        let match_token = self.state.do_match(
+        let match_token = self.state.match_token(
             head,
             0,
             0,
@@ -539,7 +543,7 @@ impl<'a> PreflateTokenPredictor<'a> {
         self.pending_token = TOKEN_NONE;
 
         if match_token.len() < MIN_MATCH {
-            return Err(anyhow::Error::msg("Match too small"));
+            return Err(anyhow::Error::msg("Didnt find another match"));
         }
 
         *token = match_token;

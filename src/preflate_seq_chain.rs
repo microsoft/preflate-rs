@@ -168,40 +168,38 @@ impl<'a> PreflateSeqChain<'a> {
             }
         }
 
-        let mut ptr_to_first_of_seq = start_off as usize;
-        self.prev[ptr_to_first_of_seq].length += 1;
+        self.prev[start_off as usize].length += 1;
 
         let mut prev_char = cur_char;
         for i in 1..size {
             cur_char = b.cur_char(i as i32);
             if prev_char == cur_char {
-                if self.prev[ptr_to_first_of_seq].length == 3 {
+                if self.prev[start_off as usize].length == 3 {
                     self.prev[start_off as usize].dist_to_next =
                         (start_off - self.heads[prev_char as usize] as u32) as u16;
                     self.heads[prev_char as usize] = start_off as u16;
                 }
                 self.prev[(off0 + i) as usize].dist_to_next = (off0 + i - start_off) as u16;
                 self.prev[(off0 + i) as usize].length = 1;
-                self.prev[ptr_to_first_of_seq].length += 1;
+                self.prev[start_off as usize].length += 1;
             } else {
                 // Last two of a sequence are not a sequence themselves
-                if self.prev[ptr_to_first_of_seq].length >= 2 {
-                    if self.prev[ptr_to_first_of_seq].length >= 3 {
+                if self.prev[start_off as usize].length >= 2 {
+                    if self.prev[start_off as usize].length >= 3 {
                         self.prev[(off0 + i - 2) as usize].dist_to_next = 0xffff;
                     }
                     self.prev[(off0 + i - 1) as usize].dist_to_next = 0xffff;
                 }
                 self.prev[(off0 + i) as usize] = start_of_seq;
                 start_off = off0 + i;
-                ptr_to_first_of_seq = start_off as usize;
-                self.prev[ptr_to_first_of_seq].length += 1;
+                self.prev[start_off as usize].length += 1;
             }
             prev_char = cur_char;
         }
 
         // Last two of a sequence are not a sequence themselves
-        if self.prev[ptr_to_first_of_seq].length >= 2 {
-            if self.prev[ptr_to_first_of_seq].length >= 3 {
+        if self.prev[start_off as usize].length >= 2 {
+            if self.prev[start_off as usize].length >= 3 {
                 self.prev[(off0 + size - 2) as usize].dist_to_next = 0xffff;
             }
             self.prev[(off0 + size - 1) as usize].dist_to_next = 0xffff;

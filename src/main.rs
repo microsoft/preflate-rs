@@ -321,12 +321,14 @@ fn main_with_result() -> anyhow::Result<()> {
                     log_string = "<<End>>".to_string();
                 }
 
+                let compressed_size = match zip_local_file_header.fhas_data_descriptor() {
+                    true => u64::MAX,
+                    false => zip_local_file_header.compressed_size,
+                };
+
                 analyze_compressed_data(
                     &mut binary_reader,
-                    match zip_local_file_header.fhas_data_descriptor() {
-                        true => u64::MAX,
-                        false => zip_local_file_header.compressed_size,
-                    },
+                    compressed_size,
                     zip_local_file_header.crc32,
                     deflate_info_dump_level,
                     &mut uncompressed_size,

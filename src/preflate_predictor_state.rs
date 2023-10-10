@@ -213,7 +213,7 @@ impl<'a> PreflatePredictorState<'a> {
         0
     }
 
-    pub fn do_match(
+    pub fn match_token(
         &self,
         hash_head: u32,
         prev_len: u32,
