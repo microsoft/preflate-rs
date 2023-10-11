@@ -148,6 +148,8 @@ impl<'a> PreflatePredictorState<'a> {
     }
 
     fn prefix_compare(s1: &[u8], s2: &[u8], best_len: u32, max_len: u32) -> u32 {
+        assert!(max_len >= 3 && s1.len() >= max_len as usize && s2.len() >= max_len as usize);
+
         if s1[best_len as usize] != s2[best_len as usize] {
             return 0;
         }
@@ -333,75 +335,78 @@ impl<'a> PreflatePredictorState<'a> {
             let mut best_seq_len = cmp::min(cur_seq_len, best_len);
 
             loop {
-                if chain_it.len() < best_seq_len {
-                    continue;
-                }
+                if chain_it.len() >= best_seq_len {
+                    let old_best_seq_len = best_seq_len;
+                    best_seq_len =
+                        std::cmp::min(cmp::min(cur_seq_len, chain_it.len().into()), h.nice_len);
+                    let best_dist = chain_it.dist() - chain_it.len() + best_seq_len;
+                    let mut error = 0;
 
-                let old_best_seq_len = best_seq_len;
-                best_seq_len =
-                    std::cmp::min(cmp::min(cur_seq_len, chain_it.len().into()), h.nice_len);
-                let best_dist = chain_it.dist() - chain_it.len() + best_seq_len;
-                let mut error = 0;
+                    if best_dist > cur_max_dist {
+                        error = best_dist - cur_max_dist;
 
-                if best_dist > cur_max_dist {
-                    error = best_dist - cur_max_dist;
-
-                    if error > chain_it.len() - preflate_constants::MIN_MATCH {
-                        break;
-                    }
-                }
-
-                let best_chain_depth = self
-                    .hash
-                    .get_rel_pos_depth(h.start_pos - best_dist + error, hash_head);
-
-                if best_chain_depth >= h.max_chain {
-                    error += best_chain_depth - h.max_chain + 1;
-
-                    if error > chain_it.len() - preflate_constants::MIN_MATCH {
-                        break;
-                    }
-                }
-
-                if error > 0 {
-                    if best_seq_len
-                        > cmp::max(old_best_seq_len, preflate_constants::MIN_MATCH - 1) + error
-                    {
-                        best_match = PreflateToken::new_reference(
-                            best_seq_len - error,
-                            best_dist - error,
-                            false,
-                        );
-                    }
-                    break;
-                }
-
-                if best_seq_len == h.max_len {
-                    best_match = PreflateToken::new_reference(best_seq_len, best_dist, false);
-                    break;
-                } else {
-                    let diff = start_pos as i32 - self.current_input_pos() as i32;
-
-                    let match_length = best_seq_len
-                        + Self::suffix_compare(
-                            self.hash
-                                .input()
-                                .cur_chars(diff - best_dist as i32 + best_seq_len as i32),
-                            self.hash.input().cur_chars(diff + best_seq_len as i32),
-                            std::cmp::max(best_len, best_seq_len) - best_seq_len,
-                            h.max_len - best_seq_len,
-                        );
-
-                    if match_length > best_len {
-                        best_len = match_length;
-                        best_match = PreflateToken::new_reference(match_length, best_dist, false);
-                        if best_len >= h.nice_len {
+                        if error > chain_it.len() - preflate_constants::MIN_MATCH {
                             break;
                         }
                     }
+
+                    let best_chain_depth = self
+                        .hash
+                        .get_rel_pos_depth(h.start_pos - best_dist + error, hash_head);
+
+                    if best_chain_depth >= h.max_chain {
+                        error += best_chain_depth - h.max_chain + 1;
+
+                        if error > chain_it.len() - preflate_constants::MIN_MATCH {
+                            break;
+                        }
+                    }
+
+                    if error > 0 {
+                        if best_seq_len
+                            > cmp::max(old_best_seq_len, preflate_constants::MIN_MATCH - 1) + error
+                        {
+                            best_match = PreflateToken::new_reference(
+                                best_seq_len - error,
+                                best_dist - error,
+                                false,
+                            );
+                        }
+                        break;
+                    }
+
+                    if best_seq_len == h.max_len {
+                        best_match = PreflateToken::new_reference(best_seq_len, best_dist, false);
+                        break;
+                    } else {
+                        let diff = start_pos as i32 - self.current_input_pos() as i32;
+
+                        let match_length = best_seq_len
+                            + Self::suffix_compare(
+                                self.hash
+                                    .input()
+                                    .cur_chars(diff - best_dist as i32 + best_seq_len as i32),
+                                self.hash.input().cur_chars(diff + best_seq_len as i32),
+                                std::cmp::max(best_len, best_seq_len) - best_seq_len,
+                                h.max_len - best_seq_len,
+                            );
+
+                        if match_length > best_len {
+                            best_len = match_length;
+                            best_match =
+                                PreflateToken::new_reference(match_length, best_dist, false);
+                            if best_len >= h.nice_len {
+                                break;
+                            }
+                        }
+                    }
+
+                    cur_max_dist = h.cur_max_dist_hop1_plus;
                 }
 
-                cur_max_dist = h.cur_max_dist_hop1_plus;
+                if !chain_it.next() {
+                    break;
+                }
             }
 
             best_match

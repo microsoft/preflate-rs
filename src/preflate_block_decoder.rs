@@ -60,7 +60,7 @@ impl<'a, R: Read + Seek> PreflateBlockDecoder<'a, R> {
                 blk = PreflateTokenBlock::new(BlockType::Stored);
                 blk.uncompressed_start_pos = self.output.len() as u32;
                 blk.block_type = BlockType::Stored;
-                blk.padding_bit_count = ((-self.input.bit_position()?) & 7) as u8;
+                blk.padding_bit_count = 8 - self.input.bit_position_in_current_byte() as u8;
                 blk.padding_bits = self.read_bits(blk.padding_bit_count.into())? as u8;
                 let len = self.read_bits(16)?;
                 let ilen = self.read_bits(16)?;

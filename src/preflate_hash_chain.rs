@@ -217,7 +217,9 @@ impl<'a> PreflateHashChainExt<'a> {
             self.reshift();
         }
 
-        for i in 2u32..std::cmp::min(length + 2, self.input.remaining()) {
+        let limit = std::cmp::min(length + 2, self.input.remaining());
+
+        for i in 2u32..limit {
             self.update_running_hash(self.input.cur_char(i as i32));
             let h = self.running_hash & self.hash_mask;
             let p = (pos + i - 2) as i32 - self.total_shift;

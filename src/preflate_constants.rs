@@ -72,13 +72,14 @@ pub const TREE_CODE_ORDER_TABLE: [u8; CODETREE_CODE_COUNT as usize] = [
     16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15,
 ];
 
-pub fn DCode(dist: u32) -> u8 {
+pub fn DCode(dist: u32) -> u32 {
     DIST_CODE_TABLE[if dist <= 256 {
         dist - 1
     } else {
         256 + ((dist - 1) >> 7)
     } as usize]
+        .into()
 }
-pub fn LCode(len: u32) -> u8 {
-    LENGTH_CODE_TABLE[len as usize - MIN_MATCH as usize]
+pub fn LCode(len: u32) -> u32 {
+    LENGTH_CODE_TABLE[len as usize - MIN_MATCH as usize].into()
 }

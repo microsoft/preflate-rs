@@ -15,6 +15,7 @@ mod preflate_statistical_model;
 mod preflate_stream_info;
 mod preflate_token;
 mod preflate_token_predictor;
+mod preflate_tree_predictor;
 mod zip_bit_reader;
 
 use anyhow::{self, Context};

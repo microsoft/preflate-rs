@@ -2,14 +2,14 @@ use std::cmp;
 
 use crate::preflate_token::BlockType;
 
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub struct PreflateStatisticsCounter {
     pub block: BlockPrediction,
     pub treecode: TreeCodePrediction,
     pub token: TokenPrediction,
 }
 
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub struct BlockPrediction {
     block_type: [u32; 3],
     eob_misprediction: [u32; 2],
@@ -57,7 +57,7 @@ impl BlockPrediction {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub struct TreeCodePrediction {
     tc_count_misprediction: [u32; 2],
     tc_bitlength_correction: [u32; 7],
@@ -128,7 +128,7 @@ impl TreeCodePrediction {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub struct TokenPrediction {
     pub l_it_misprediction: [u32; 2],
     pub ref_misprediction: [u32; 2],
