@@ -1,3 +1,5 @@
+use std::cmp;
+
 use crate::{preflate_constants::MIN_MATCH, preflate_input::PreflateInput};
 
 #[derive(Clone, Copy, Default)]
@@ -60,7 +62,7 @@ impl<'a> PreflateSeqChain<'a> {
             input: PreflateInput::new(i),
         };
 
-        r._build(8, std::cmp::min((1 << 16) - 8, r.input.remaining()));
+        r.build(8, cmp::min((1 << 16) - 8, r.input.remaining()));
 
         r
     }
@@ -79,7 +81,7 @@ impl<'a> PreflateSeqChain<'a> {
     pub fn update_seq(&mut self, l: u32) {
         self.cur_pos += l;
         while self.cur_pos as i32 - self.total_shift >= 0xfe08 {
-            self._reshift();
+            self.reshift();
         }
     }
 
@@ -87,26 +89,29 @@ impl<'a> PreflateSeqChain<'a> {
         PreflateSeqIterator::new(&self.prev, (ref_pos as i32 - self.total_shift) as u32)
     }
 
-    fn _reshift(&mut self) {
-        let delta = 0x7e00 as usize;
-        let remaining = (1 << 16) - (delta + 8);
+    fn reshift(&mut self) {
+        const DELTA: usize = 0x7e00;
+        let remaining = (1 << 16) - (DELTA + 8);
 
-        if self.prev[delta + 8].dist_to_next != 0xffff
-            && (self.prev[delta + 8].length as u32) < MIN_MATCH
+        if self.prev[DELTA + 8].dist_to_next != 0xffff
+            && (self.prev[DELTA + 8].length as u32) < MIN_MATCH
         {
-            let d = self.prev[delta + 8].dist_to_next;
-            self.prev[delta + 8].dist_to_next = 0xffff;
-            self.prev[delta + 8].length = self.prev[delta + 8 - d as usize].length - d;
-            for i in 3..self.prev[delta + 8].length {
-                self.prev[delta + 8 + i as usize - 2].dist_to_next -= d;
+            let d = self.prev[DELTA + 8].dist_to_next;
+
+            self.prev[DELTA + 8].dist_to_next = 0xffff;
+            self.prev[DELTA + 8].length = self.prev[DELTA + 8 - d as usize].length - d;
+            for i in 3..self.prev[DELTA + 8].length as usize {
+                self.prev[DELTA + 8 + i - 2].dist_to_next -= d;
             }
-            let c = self.input.cur_char(-(remaining as i32) - 1);
-            if self.heads[c as usize] == delta as u16 + 8 - d {
+
+            let c = self.input.cur_char(-(remaining as i32));
+
+            if self.heads[c as usize] == DELTA as u16 + 8 - d {
                 self.heads[c as usize] += d;
             } else {
-                for i in (self.prev[delta + 8].length as usize)..remaining {
-                    if self.prev[delta + 8 + i].dist_to_next == (i as u16 + d) {
-                        self.prev[delta + 8 + i].dist_to_next -= d;
+                for i in (self.prev[DELTA + 8].length as usize)..remaining {
+                    if self.prev[DELTA + 8 + i].dist_to_next == (i as u16 + d) {
+                        self.prev[DELTA + 8 + i].dist_to_next -= d;
                         break;
                     }
                 }
@@ -114,18 +119,18 @@ impl<'a> PreflateSeqChain<'a> {
         }
 
         for i in 0..256 {
-            self.heads[i] = std::cmp::max(self.heads[i], delta as u16) - delta as u16;
+            self.heads[i] = cmp::max(self.heads[i], DELTA as u16) - DELTA as u16;
         }
 
-        self.prev.copy_within(delta + 8..delta + 8 + remaining, 8);
-        self.total_shift += delta as i32;
-        self._build(
+        self.prev.copy_within(DELTA + 8..65536, 8);
+        self.total_shift += DELTA as i32;
+        self.build(
             8 + remaining as u32,
-            std::cmp::min(delta as u32, self.input.size() as u32) as u32,
+            cmp::min(DELTA as u32, self.input.remaining()),
         );
     }
 
-    fn _build(&mut self, off0: u32, size: u32) {
+    fn build(&mut self, off0: u32, size: u32) {
         if size == 0 {
             return;
         }

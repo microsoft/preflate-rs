@@ -111,16 +111,23 @@ impl<'a> PreflateTokenPredictor<'a> {
                 analysis.block_size_predicted = false;
             }
 
+            let hash = self.state.calculate_hash();
+
+            if i == 2138 {
+                println!("hi");
+            }
+
             let mut predicted_token = self.predict_token();
 
             println!(
-                "B{}T{}: TGT({},{}), PT({},{})",
+                "B{}T{}: TGT({},{}) -> PRD({},{}), H({})",
                 blockno,
                 i,
                 block.tokens[i].len(),
                 block.tokens[i].dist(),
                 predicted_token.len(),
-                predicted_token.dist()
+                predicted_token.dist(),
+                hash
             );
 
             // Debug print statement
@@ -146,7 +153,7 @@ impl<'a> PreflateTokenPredictor<'a> {
                     analysis.correctives.push(predicted_token.len() as i32);
                     analysis
                         .correctives
-                        .push((target_token.len() - predicted_token.len()) as i32);
+                        .push(target_token.len() as i32 - predicted_token.len() as i32);
                     rematch = self.repredict_match(&target_token);
 
                     if rematch.requested_match_depth >= 0xffff {
@@ -406,7 +413,6 @@ impl<'a> PreflateTokenPredictor<'a> {
         }
 
         let hash = self.state.calculate_hash();
-        println!("HASH: {0:x}", hash);
 
         let match_token = if self.pending_token.len() > 1 {
             self.pending_token
@@ -453,10 +459,13 @@ impl<'a> PreflateTokenPredictor<'a> {
             return match_token;
         }
 
+        // match is too small and far way to be worth encoding as a distance/length pair.
         if match_token.len() == 3 && match_token.dist() > TOO_FAR {
             return TOKEN_LITERAL;
         }
 
+        // Check for a longer match that starts at the next byte, in which case we should
+        // just emit a literal instead of a distance/length pair.
         if match_token.len() < self.state.lazy_match_length()
             && self.state.available_input_size() >= match_token.len() + 2
         {

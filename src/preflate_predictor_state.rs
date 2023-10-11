@@ -240,11 +240,11 @@ impl<'a> PreflatePredictorState<'a> {
             let mut best_len = prev_len;
             let mut best_match = TOKEN_NONE;
             let input = self.hash.input().cur_chars(offset as i32);
-            while chain_it.next() && h.max_chain > 1 {
+            loop {
                 let match_start = self
                     .hash
                     .input()
-                    .cur_chars((offset - chain_it.dist()) as i32);
+                    .cur_chars(offset as i32 - chain_it.dist() as i32);
 
                 let match_length = Self::prefix_compare(match_start, input, best_len, h.max_len);
                 if match_length > best_len {
@@ -254,6 +254,11 @@ impl<'a> PreflatePredictorState<'a> {
                         break;
                     }
                 }
+
+                if !(chain_it.next() && h.max_chain > 1) {
+                    break;
+                }
+
                 h.max_chain -= 1;
             }
             best_match
@@ -427,15 +432,15 @@ impl<'a> PreflatePredictorState<'a> {
             nice_len: 0,
         };
 
-        let max_dist_to_start = if matches_to_start { 0 } else { 1 };
+        let max_dist_to_start = start_pos - if matches_to_start { 0 } else { 1 };
 
         if very_far_matches {
-            helper.cur_max_dist_hop0 = std::cmp::min(max_dist_to_start, self.window_size().into());
+            helper.cur_max_dist_hop0 = cmp::min(max_dist_to_start, self.window_size());
             helper.cur_max_dist_hop1_plus = helper.cur_max_dist_hop0;
         } else {
             let max_dist: u32 = (self.window_size() - MIN_LOOKAHEAD).into();
-            helper.cur_max_dist_hop0 = std::cmp::min(max_dist_to_start, max_dist);
-            helper.cur_max_dist_hop1_plus = std::cmp::min(max_dist_to_start, max_dist - 1);
+            helper.cur_max_dist_hop0 = cmp::min(max_dist_to_start, max_dist);
+            helper.cur_max_dist_hop1_plus = cmp::min(max_dist_to_start, max_dist - 1);
         }
 
         if max_depth > 0 {

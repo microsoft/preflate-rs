@@ -94,7 +94,6 @@ impl<'a> PreflateHashChainExt<'a> {
         hash_chain_ext
     }
 
-    #[allow(dead_code)]
     pub fn checksum_whole_struct(&self) -> u32 {
         let mut checksum: u32 = 0;
         for i in 0..65536 {
@@ -111,7 +110,8 @@ impl<'a> PreflateHashChainExt<'a> {
     }
 
     pub fn next_hash_double(&self, b1: u8, b2: u8) -> u32 {
-        ((self.running_hash << self.hash_shift) ^ u32::from(b1) << self.hash_shift) ^ u32::from(b2)
+        (((self.running_hash << self.hash_shift) ^ u32::from(b1)) << self.hash_shift)
+            ^ u32::from(b2)
     }
 
     pub fn update_running_hash(&mut self, b: u8) {
@@ -227,6 +227,9 @@ impl<'a> PreflateHashChainExt<'a> {
         }
 
         self.input.advance(length);
+
+        let c = self.checksum_whole_struct();
+        println!("u {} = {}", length, c);
     }
 
     pub fn skip_hash(&mut self, l: u32) {
@@ -262,5 +265,8 @@ impl<'a> PreflateHashChainExt<'a> {
         }
 
         self.input.advance(l);
+
+        let c = self.checksum_whole_struct();
+        println!("s {} = {}", l, c);
     }
 }
