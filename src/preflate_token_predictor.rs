@@ -278,8 +278,7 @@ impl<'a> PreflateTokenPredictor<'a> {
         let bt = codec.decode_block_type();
         match bt {
             BlockType::Stored => {
-                block = PreflateTokenBlock::new_stored_block(0);
-                block.block_type = BlockType::Stored;
+                block = PreflateTokenBlock::new(BlockType::Stored);
                 block.uncompressed_len = codec.decode_value(16);
                 block.padding_bits = 0;
                 block.padding_bit_count = 0;
@@ -298,10 +297,10 @@ impl<'a> PreflateTokenPredictor<'a> {
                 return Ok(block);
             }
             BlockType::StaticHuff => {
-                block = PreflateTokenBlock::new_huff_block(BlockType::StaticHuff);
+                block = PreflateTokenBlock::new(BlockType::StaticHuff);
             }
             BlockType::DynamicHuff => {
-                block = PreflateTokenBlock::new_huff_block(BlockType::DynamicHuff);
+                block = PreflateTokenBlock::new(BlockType::DynamicHuff);
             }
         }
 

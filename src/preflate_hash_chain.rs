@@ -94,6 +94,7 @@ impl<'a> PreflateHashChainExt<'a> {
         hash_chain_ext
     }
 
+    #[allow(dead_code)]
     pub fn checksum_whole_struct(&self) -> u32 {
         let mut checksum: u32 = 0;
         for i in 0..65536 {

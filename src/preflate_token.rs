@@ -74,27 +74,9 @@ pub struct PreflateTokenBlock {
 }
 
 impl PreflateTokenBlock {
-    pub fn new_stored_block(len: u32) -> PreflateTokenBlock {
+    pub fn new(block_type: BlockType) -> PreflateTokenBlock {
         PreflateTokenBlock {
-            block_type: BlockType::Stored,
-            uncompressed_start_pos: 0,
-            uncompressed_len: len,
-            context_len: 0,
-            nlen: 0,
-            ndist: 0,
-            ncode: 0,
-            padding_bit_count: 0,
-            padding_bits: 0,
-            tree_codes: Vec::new(),
-            tokens: Vec::new(),
-        }
-    }
-
-    pub fn new_huff_block(t: BlockType) -> PreflateTokenBlock {
-        assert!(t != BlockType::Stored);
-
-        PreflateTokenBlock {
-            block_type: t,
+            block_type: block_type,
             uncompressed_start_pos: 0,
             uncompressed_len: 0,
             context_len: 0,

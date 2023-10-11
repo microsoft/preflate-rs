@@ -57,7 +57,7 @@ impl<'a, R: Read + Seek> PreflateBlockDecoder<'a, R> {
 
         match mode {
             0 => {
-                blk = PreflateTokenBlock::new_stored_block(0);
+                blk = PreflateTokenBlock::new(BlockType::Stored);
                 blk.uncompressed_start_pos = self.output.len() as u32;
                 blk.block_type = BlockType::Stored;
                 blk.padding_bit_count = ((-self.input.bit_position()?) & 7) as u8;
@@ -78,7 +78,7 @@ impl<'a, R: Read + Seek> PreflateBlockDecoder<'a, R> {
                 Ok(blk)
             }
             1 => {
-                blk = PreflateTokenBlock::new_huff_block(BlockType::StaticHuff);
+                blk = PreflateTokenBlock::new(BlockType::StaticHuff);
                 blk.uncompressed_start_pos = self.output.len() as u32;
                 let decoder = HuffmanDecoder::create_fixed()?;
                 self.decode_block(&decoder, &mut blk, crc)?;
@@ -86,7 +86,7 @@ impl<'a, R: Read + Seek> PreflateBlockDecoder<'a, R> {
             }
 
             2 => {
-                blk = PreflateTokenBlock::new_huff_block(BlockType::DynamicHuff);
+                blk = PreflateTokenBlock::new(BlockType::DynamicHuff);
                 blk.uncompressed_start_pos = self.output.len() as u32;
                 let decoder = HuffmanDecoder::create_from_bit_reader(&mut self.input, 0)?;
                 self.decode_block(&decoder, &mut blk, crc)?;
