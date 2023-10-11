@@ -142,6 +142,7 @@ impl<'a> PreflateCompLevelEstimatorState<'a> {
                 token,
                 &self.slow_hash,
                 self.window_size().into(),
+                false,
             );
             if mdepth >= 0x8001 {
                 self.info.unfound_references += 1;
@@ -256,7 +257,7 @@ impl<'a> PreflateCompLevelEstimatorState<'a> {
         hash_head: u32,
         window_size: u32,
     ) -> bool {
-        let mdepth = Self::match_depth(hash.get_head(hash_head), token, hash, window_size);
+        let mdepth = Self::match_depth(hash.get_head(hash_head), token, hash, window_size, true);
         if mdepth > config.max_chain {
             return false;
         }
@@ -268,6 +269,7 @@ impl<'a> PreflateCompLevelEstimatorState<'a> {
         target_reference: &PreflateToken,
         hash: &PreflateHashChainExt,
         window_size: u32,
+        allow_nonmatch: bool,
     ) -> u32 {
         let cur_pos = hash.input().pos();
         let cur_max_dist = std::cmp::min(cur_pos, window_size);
@@ -279,6 +281,12 @@ impl<'a> PreflateCompLevelEstimatorState<'a> {
             return 0xffff;
         }
         let end_depth = chain_it.depth();
+
+        if start_depth < end_depth {
+            assert!(allow_nonmatch);
+            return 0xffff;
+        }
+
         std::cmp::min(start_depth.wrapping_sub(end_depth), 0xffff)
     }
 

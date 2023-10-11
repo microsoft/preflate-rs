@@ -94,6 +94,17 @@ impl<'a> PreflateHashChainExt<'a> {
         hash_chain_ext
     }
 
+    pub fn checksum_whole_struct(&self) -> u32 {
+        let mut checksum: u32 = 0;
+        for i in 0..65536 {
+            checksum = checksum
+                .wrapping_mul(7)
+                .wrapping_add(self.chain_depth[i] as u32);
+        }
+
+        checksum
+    }
+
     pub fn next_hash(&self, b: u8) -> u32 {
         (self.running_hash << self.hash_shift) ^ u32::from(b)
     }
@@ -116,8 +127,7 @@ impl<'a> PreflateHashChainExt<'a> {
             self.prev[i - DELTA] = std::cmp::max(self.prev[i], DELTA as u16) - DELTA as u16;
         }
 
-        self.chain_depth
-            .copy_within((8 + DELTA)..(65536 - 8 - DELTA), 8);
+        self.chain_depth.copy_within(8 + DELTA..65536, 8);
         self.total_shift += DELTA as i32;
     }
 
