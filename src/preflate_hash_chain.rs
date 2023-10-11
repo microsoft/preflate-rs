@@ -228,8 +228,8 @@ impl<'a> PreflateHashChainExt<'a> {
 
         self.input.advance(length);
 
-        let c = self.checksum_whole_struct();
-        println!("u {} = {}", length, c);
+        //let c = self.checksum_whole_struct();
+        //println!("u {} = {}", length, c);
     }
 
     pub fn skip_hash(&mut self, l: u32) {
@@ -266,7 +266,7 @@ impl<'a> PreflateHashChainExt<'a> {
 
         self.input.advance(l);
 
-        let c = self.checksum_whole_struct();
-        println!("s {} = {}", l, c);
+        //let c = self.checksum_whole_struct();
+        //println!("s {} = {}", l, c);
     }
 }

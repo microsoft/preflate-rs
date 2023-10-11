@@ -491,11 +491,7 @@ impl<'a> PreflatePredictorState<'a> {
         let mut max_chain = max_chain_org; // max hash chain length
         let best_len = target_reference.len();
 
-        while max_chain > 0 {
-            if !chain_it.next() {
-                break;
-            }
-
+        loop {
             let match_pos = self.input_cursor_offset(-(chain_it.dist() as i32));
             let match_length =
                 Self::prefix_compare(match_pos, self.input_cursor(), best_len - 1, best_len);
@@ -511,6 +507,10 @@ impl<'a> PreflatePredictorState<'a> {
                     result.requested_match_depth = max_chain_org - max_chain;
                 }
                 return result;
+            }
+
+            if !chain_it.next() || max_chain <= 1 {
+                break;
             }
 
             max_chain -= 1;

@@ -146,7 +146,7 @@ impl TokenPrediction {
         self.ref_misprediction[mispredicted as usize] += 1;
     }
     pub fn inc_length_diff_to_prediction(&mut self, len_diff: i32) {
-        self.len_correction[cmp::max(cmp::min(len_diff, 6), -6) as usize + 6] += 1;
+        self.len_correction[(cmp::max(cmp::min(len_diff, 6), -6) + 6) as usize] += 1;
     }
     pub fn inc_irregular_length_258_encoding(&mut self, irregular: bool) {
         self.len_258_irregular_encoding[irregular as usize] += 1;

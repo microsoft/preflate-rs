@@ -111,14 +111,14 @@ impl<'a> PreflateTokenPredictor<'a> {
                 analysis.block_size_predicted = false;
             }
 
-            let hash = self.state.calculate_hash();
-
-            if i == 2138 {
+            /*if blockno == 1 && i == 704 {
                 println!("hi");
-            }
+            }*/
 
             let mut predicted_token = self.predict_token();
 
+            /*
+            let hash = self.state.calculate_hash();
             println!(
                 "B{}T{}: TGT({},{}) -> PRD({},{}), H({})",
                 blockno,
@@ -129,6 +129,7 @@ impl<'a> PreflateTokenPredictor<'a> {
                 predicted_token.dist(),
                 hash
             );
+            */
 
             // Debug print statement
             // println!("B{}T{}: TGT({},{}) -> PRD({},{})", blockno, i, target_token.len, target_token.dist, predicted_token.len, predicted_token.dist);
