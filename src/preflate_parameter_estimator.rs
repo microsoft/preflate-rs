@@ -8,16 +8,16 @@ use crate::{
 };
 
 pub enum PreflateStrategy {
-    PREFLATE_DEFAULT,
-    PREFLATE_RLE_ONLY,
-    PREFLATE_HUFF_ONLY,
-    PREFLATE_STORE,
+    PreflateDefault,
+    PreflateRleOnly,
+    PreflateHuffOnly,
+    PreflateStore,
 }
 
 pub enum PreflateHuffStrategy {
-    PREFLATE_HUFF_DYNAMIC,
-    PREFLATE_HUFF_MIXED,
-    PREFLATE_HUFF_STATIC,
+    PreflateHuffDynamic,
+    PreflateHuffMixed,
+    PreflateHuffStatic,
 }
 
 pub struct PreflateParameters {
@@ -75,25 +75,25 @@ pub fn estimate_preflate_window_bits(max_dist_: u32) -> u32 {
 
 pub fn estimate_preflate_strategy(info: &PreflateStreamInfo) -> PreflateStrategy {
     if info.count_stored_blocks == info.count_blocks {
-        return PreflateStrategy::PREFLATE_STORE;
+        return PreflateStrategy::PreflateStore;
     }
     if info.count_huff_blocks == info.count_blocks {
-        return PreflateStrategy::PREFLATE_HUFF_ONLY;
+        return PreflateStrategy::PreflateHuffOnly;
     }
     if info.count_rle_blocks == info.count_blocks {
-        return PreflateStrategy::PREFLATE_RLE_ONLY;
+        return PreflateStrategy::PreflateRleOnly;
     }
-    return PreflateStrategy::PREFLATE_DEFAULT;
+    return PreflateStrategy::PreflateDefault;
 }
 
 pub fn estimate_preflate_huff_strategy(info: &PreflateStreamInfo) -> PreflateHuffStrategy {
     if info.count_static_huff_tree_blocks == info.count_blocks {
-        return PreflateHuffStrategy::PREFLATE_HUFF_STATIC;
+        return PreflateHuffStrategy::PreflateHuffStatic;
     }
     if info.count_static_huff_tree_blocks == 0 {
-        return PreflateHuffStrategy::PREFLATE_HUFF_DYNAMIC;
+        return PreflateHuffStrategy::PreflateHuffDynamic;
     }
-    return PreflateHuffStrategy::PREFLATE_HUFF_MIXED;
+    return PreflateHuffStrategy::PreflateHuffMixed;
 }
 
 pub fn estimate_preflate_parameters(
