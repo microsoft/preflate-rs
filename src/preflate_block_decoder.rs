@@ -62,6 +62,7 @@ impl<'a, R: Read + Seek> PreflateBlockDecoder<'a, R> {
                 blk.block_type = BlockType::Stored;
                 blk.padding_bit_count = 8 - self.input.bit_position_in_current_byte() as u8;
                 blk.padding_bits = self.read_bits(blk.padding_bit_count.into())? as u8;
+
                 let len = self.read_bits(16)?;
                 let ilen = self.read_bits(16)?;
                 if (len ^ ilen) != 0xffff {
@@ -69,6 +70,8 @@ impl<'a, R: Read + Seek> PreflateBlockDecoder<'a, R> {
                 }
                 blk.uncompressed_len = len.into();
                 blk.context_len = 0;
+
+                self.input.flush_buffer_to_byte_boundary()?;
 
                 for _i in 0..len {
                     let b = self.input.read_byte()?;

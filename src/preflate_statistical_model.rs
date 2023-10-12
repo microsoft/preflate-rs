@@ -183,13 +183,88 @@ impl TokenPrediction {
         cnt
     }
 
+    /// Prints token prediction statistics.
     pub fn print(&self) {
-        // implementation needed
+        print_flag_statistics(", !LIT MP", self.l_it_misprediction);
+        print_flag_statistics(", !REF MP", self.ref_misprediction);
+        let sum_len_correction = self.len_correction.iter().sum::<u32>();
+        print_correction_statistics_fixed(" L", self.len_correction, sum_len_correction, 6);
+        let sum_dist_after_len_correction = self.dist_after_len_correction.iter().sum::<u32>();
+        print_correction_statistics_fixed(
+            " L->D+",
+            self.dist_after_len_correction,
+            sum_dist_after_len_correction,
+            0,
+        );
+        let sum_dist_only_correction = self.dist_only_correction.iter().sum::<u32>();
+        print_correction_statistics_fixed(
+            " ->D+",
+            self.dist_only_correction,
+            sum_dist_only_correction,
+            0,
+        );
+        print_flag_statistics(", !L258 MP", self.len_258_irregular_encoding);
     }
 }
 
-impl PreflateStatisticsCounter {
-    pub fn print(&self) {
-        // implementation needed
+/// Prints flag statistics for the given text and flag array.
+fn print_flag_statistics(txt: &str, flag: [u32; 2]) {
+    if flag[1] > 0 {
+        println!(
+            "{} {:.2}% ({})",
+            txt,
+            flag[1] as f64 * 100.0 / (flag[0] + flag[1]) as f64,
+            flag[0] + flag[1]
+        );
+    }
+}
+
+/// Prints correction statistics for the given text, data array, sum, and offset.
+fn print_correction_statistics_fixed<const N: usize>(
+    txt: &str,
+    data: [u32; N],
+    sum: u32,
+    offset: i32,
+) {
+    {
+        let txt = txt;
+        let data: &[u32] = &data;
+        let sum = sum;
+        let offset = offset as usize;
+        if data[offset] == sum {
+            return;
+        }
+        let mut on = false;
+        for i in 0..N {
+            if data[i] > 0 {
+                if !on {
+                    print!("{}:", txt);
+                }
+                on = true;
+                if i != offset && (i == 0 || i + 1 == N) {
+                    print!(
+                        " {}x {:.2}%",
+                        if i == 0 { "-" } else { "+" },
+                        data[i] as f64 * 100.0 / sum as f64
+                    );
+                } else {
+                    print!(
+                        " {}{} {:.2}%",
+                        if i == offset {
+                            ""
+                        } else if i < offset {
+                            "-"
+                        } else {
+                            "+"
+                        },
+                        i.saturating_sub(offset),
+                        data[i] as f64 * 100.0 / sum as f64
+                    );
+                }
+            }
+        }
+        if on {
+            println!(" ({})", sum);
+        }
     }
 }

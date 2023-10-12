@@ -131,6 +131,8 @@ fn analyze_compressed_data<R: Read + Seek>(
         tokenPredictorE.update_counters(&mut counterE, i as u32);
     }
 
+    counterE.token.print();
+
     if header_crc32 == 0 {
         if deflate_info_dump_level > 0 {
             println!("CRC: {:8X}", crc32.finalize_and_return_crc());

@@ -87,10 +87,10 @@ impl<'a, R: Read + Seek> ZipBitReader<'a, R> {
     /// </summary>
     pub fn position(&mut self) -> anyhow::Result<i64> {
         let result = self.binary_reader.stream_position()?
-            - ((match self.count_of_bits_in_buffer == 0 {
+            - (match self.count_of_bits_in_buffer == 0 {
                 true => 0,
-                false => 1,
-            }) + ((self.count_of_bits_in_buffer - 1) / 8)) as u64;
+                false => 1 + ((self.count_of_bits_in_buffer - 1) / 8),
+            }) as u64;
 
         Ok(result as i64)
     }
