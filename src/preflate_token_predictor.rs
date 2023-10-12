@@ -10,13 +10,11 @@ use crate::{
 pub struct PreflateTokenPredictor<'a> {
     state: PreflatePredictorState<'a>,
     params: &'a PreflateParameters,
-    prediction_failure: bool,
     fast: bool,
     prev_len: u32,
     pending_token: PreflateToken,
     current_token_count: u32,
     empty_block_at_end: bool,
-    analysis_results: Vec<BlockAnalysisResult>,
 }
 
 pub struct BlockAnalysisResult {
@@ -47,13 +45,11 @@ impl<'a> PreflateTokenPredictor<'a> {
                 params.mem_level,
             ),
             params,
-            prediction_failure: false,
             fast: params.is_fast_compressor(),
             prev_len: 0,
             pending_token: TOKEN_NONE,
             current_token_count: 0,
             empty_block_at_end: false,
-            analysis_results: Vec::new(),
         };
 
         if r.state.available_input_size() >= 2 {
@@ -72,16 +68,11 @@ impl<'a> PreflateTokenPredictor<'a> {
 
     pub fn analyze_block(
         &mut self,
-        blockno: usize,
         block: &PreflateTokenBlock,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<BlockAnalysisResult> {
         self.current_token_count = 0;
         self.prev_len = 0;
         self.pending_token = TOKEN_NONE;
-
-        if blockno != self.analysis_results.len() || self.prediction_failure {
-            return Err(anyhow::Error::msg("Prediction failure"));
-        }
 
         let mut analysis = BlockAnalysisResult {
             block_type: block.block_type,
@@ -101,8 +92,7 @@ impl<'a> PreflateTokenPredictor<'a> {
             self.state.update_seq(analysis.token_count);
             analysis.input_eof = self.state.available_input_size() == 0;
 
-            self.analysis_results.push(analysis);
-            return Ok(());
+            return Ok(analysis);
         }
 
         for i in 0..block.tokens.len() {
@@ -143,7 +133,7 @@ impl<'a> PreflateTokenPredictor<'a> {
             } else {
                 if predicted_token.len() == 1 {
                     analysis.token_info[self.current_token_count as usize] = 3; // badly predicted REF
-                    self.repredict_reference(&mut predicted_token)?;
+                    predicted_token = self.repredict_reference()?;
                 } else {
                     analysis.token_info[self.current_token_count as usize] = 1; // well predicted REF
                 }
@@ -158,7 +148,6 @@ impl<'a> PreflateTokenPredictor<'a> {
                     rematch = self.repredict_match(&target_token);
 
                     if rematch.requested_match_depth >= 0xffff {
-                        self.prediction_failure = true;
                         return Err(anyhow::Error::msg("Prediction failure"));
                     }
 
@@ -171,7 +160,6 @@ impl<'a> PreflateTokenPredictor<'a> {
                         rematch = self.repredict_match(&target_token);
 
                         if rematch.requested_match_depth >= 0xffff {
-                            self.prediction_failure = true;
                             return Err(anyhow::Error::msg("Prediction failure"));
                         }
 
@@ -198,71 +186,8 @@ impl<'a> PreflateTokenPredictor<'a> {
         }
 
         analysis.input_eof = self.state.available_input_size() == 0;
-        self.analysis_results.push(analysis);
 
-        Ok(())
-    }
-
-    pub fn update_counters(&mut self, model: &mut PreflateStatisticsCounter, blockno: u32) {
-        let analysis = &self.analysis_results[blockno as usize];
-        model.block.inc_block_type(analysis.block_type);
-
-        if analysis.block_type == BlockType::Stored {
-            model.block.inc_non_zero_padding(analysis.padding_bits != 0);
-            return;
-        }
-
-        model
-            .block
-            .inc_eob_prediction_wrong(!analysis.block_size_predicted);
-
-        let mut corrective_pos = 0;
-        for i in 0..analysis.token_count as usize {
-            let info = &analysis.token_info[i];
-            match info & 3 {
-                0 => model.token.inc_literal_prediction_wrong(false),
-                2 => model.token.inc_reference_prediction_wrong(true),
-                1 => model.token.inc_reference_prediction_wrong(false),
-                3 => model.token.inc_literal_prediction_wrong(true),
-                _ => {}
-            }
-
-            if info & 4 != 0 {
-                let _pred = analysis.correctives[corrective_pos];
-                let diff = analysis.correctives[corrective_pos + 1];
-                let hops = analysis.correctives[corrective_pos + 2];
-                model.token.inc_length_diff_to_prediction(diff);
-                model
-                    .token
-                    .inc_distance_diff_to_prediction_after_incorrect_length_prediction(hops);
-                corrective_pos += 3;
-            } else {
-                model.token.inc_length_diff_to_prediction(0);
-                if info & 8 != 0 {
-                    let hops = analysis.correctives[corrective_pos];
-                    model
-                        .token
-                        .inc_distance_diff_to_prediction_after_correct_length_prediction(hops);
-                    corrective_pos += 1;
-                } else {
-                    model
-                        .token
-                        .inc_distance_diff_to_prediction_after_correct_length_prediction(0);
-                }
-            }
-
-            if info & 16 != 0 {
-                model
-                    .token
-                    .inc_irregular_length_258_encoding(info & 32 != 0);
-            }
-        }
-    }
-
-    fn encode_block(&self, _codec: &mut PreflatePredictionEncoder, _blockno: u32) {
-        // Implement encode_block logic here
-        // Use the codec to encode the block information
-        unreachable!("decode_block not implemented")
+        Ok(analysis)
     }
 
     fn encode_eof(&self, _codec: &mut PreflatePredictionEncoder, _blockno: u32, _last_block: bool) {
@@ -271,7 +196,7 @@ impl<'a> PreflateTokenPredictor<'a> {
         unreachable!("decode_block not implemented")
     }
 
-    fn decode_block(
+    pub fn decode_block(
         &mut self,
         codec: &mut PreflatePredictionDecoder,
     ) -> anyhow::Result<PreflateTokenBlock> {
@@ -339,10 +264,10 @@ impl<'a> PreflateTokenPredictor<'a> {
                     continue;
                 }
 
-                self.repredict_reference(&mut predicted_token)?;
+                predicted_token = self.repredict_reference()?;
             } else {
                 let not_ok = codec.decode_reference_prediction_wrong();
-                if !not_ok {
+                if not_ok {
                     predicted_token = TOKEN_LITERAL;
                     self.commit_token(&predicted_token);
                     block.tokens.push(predicted_token);
@@ -365,7 +290,6 @@ impl<'a> PreflateTokenPredictor<'a> {
                     || predicted_token.len() > 258
                     || predicted_token.dist() == 0
                 {
-                    self.prediction_failure = true;
                     return Err(anyhow::Error::msg("Prediction failure"));
                 }
             } else {
@@ -373,7 +297,6 @@ impl<'a> PreflateTokenPredictor<'a> {
                 if hops != 0 {
                     predicted_token.set_dist(self.recalculate_distance(&predicted_token, hops));
                     if predicted_token.dist() == 0 {
-                        self.prediction_failure = true;
                         return Err(anyhow::Error::msg("Prediction failure"));
                     }
                 }
@@ -530,7 +453,7 @@ impl<'a> PreflateTokenPredictor<'a> {
         match_token
     }
 
-    fn repredict_reference(&mut self, token: &mut PreflateToken) -> anyhow::Result<()> {
+    fn repredict_reference(&mut self) -> anyhow::Result<PreflateToken> {
         if self.state.current_input_pos() == 0 || self.state.available_input_size() < MIN_MATCH {
             return Err(anyhow::Error::msg(
                 "Not enough space left to find a reference",
@@ -555,8 +478,7 @@ impl<'a> PreflateTokenPredictor<'a> {
             return Err(anyhow::Error::msg("Didnt find another match"));
         }
 
-        *token = match_token;
-        Ok(())
+        Ok(match_token)
     }
 
     fn repredict_match(&mut self, token: &PreflateToken) -> PreflateRematchInfo {
@@ -577,5 +499,139 @@ impl<'a> PreflateTokenPredictor<'a> {
             self.state.update_hash(token.len());
         }
         self.state.update_seq(token.len());
+    }
+}
+
+impl BlockAnalysisResult {
+    pub fn encode_block(&self, codec: &mut PreflatePredictionEncoder) {
+        codec.encode_block_type(self.block_type);
+
+        if self.block_type == BlockType::Stored {
+            codec.encode_value(self.token_count, 16);
+            let pad = self.padding_bits != 0;
+            codec.encode_non_zero_padding(pad);
+            if pad {
+                let bits_to_save = self.padding_bits.count_ones();
+                codec.encode_value(bits_to_save as u32, 3);
+                if bits_to_save > 1 {
+                    codec.encode_value(
+                        self.padding_bits as u32 & ((1 << (bits_to_save - 1)) - 1),
+                        bits_to_save - 1,
+                    );
+                }
+            }
+            return;
+        }
+
+        codec.encode_eob_misprediction(!self.block_size_predicted);
+        if !self.block_size_predicted {
+            let block_size_bits = self.token_count.count_ones();
+            codec.encode_value(block_size_bits as u32, 5);
+            if block_size_bits >= 2 {
+                codec.encode_value(self.token_count, block_size_bits as u32);
+            }
+        }
+
+        let mut corrective_pos = 0;
+        for i in 0..self.token_count as usize {
+            let info = self.token_info[i] as u8;
+            match info & 3 {
+                0 => {
+                    // well predicted LIT
+                    codec.encode_literal_prediction_wrong(false);
+                    continue;
+                }
+                2 => {
+                    // badly predicted LIT
+                    codec.encode_reference_prediction_wrong(true);
+                    continue;
+                }
+                1 => {
+                    // well predicted REF
+                    codec.encode_reference_prediction_wrong(false)
+                }
+                3 => {
+                    // badly predicted REF
+                    codec.encode_literal_prediction_wrong(true)
+                }
+                _ => unreachable!(),
+            }
+            if info & 4 != 0 {
+                let pred = self.correctives[corrective_pos];
+                let diff = self.correctives[corrective_pos + 1];
+                let hops = self.correctives[corrective_pos + 2] as u32;
+                codec.encode_len_correction(pred as u32, (pred + diff) as u32);
+                codec.encode_dist_after_len_correction(hops);
+                corrective_pos += 3;
+            } else {
+                codec.encode_len_correction(3, 3);
+                if info & 8 != 0 {
+                    let hops = self.correctives[corrective_pos] as u32;
+                    codec.encode_dist_only_correction(hops);
+                    corrective_pos += 1;
+                } else {
+                    codec.encode_dist_only_correction(0);
+                }
+            }
+            if info & 16 != 0 {
+                let is_irregular = (info & 32) != 0;
+                codec.encode_irregular_len258(is_irregular);
+            }
+        }
+    }
+
+    pub fn update_counters(&self, model: &mut PreflateStatisticsCounter) {
+        model.block.inc_block_type(self.block_type);
+
+        if self.block_type == BlockType::Stored {
+            model.block.inc_non_zero_padding(self.padding_bits != 0);
+            return;
+        }
+
+        model
+            .block
+            .inc_eob_prediction_wrong(!self.block_size_predicted);
+
+        let mut corrective_pos = 0;
+        for i in 0..self.token_count as usize {
+            let info = &self.token_info[i];
+            match info & 3 {
+                0 => model.token.inc_literal_prediction_wrong(false),
+                2 => model.token.inc_reference_prediction_wrong(true),
+                1 => model.token.inc_reference_prediction_wrong(false),
+                3 => model.token.inc_literal_prediction_wrong(true),
+                _ => {}
+            }
+
+            if info & 4 != 0 {
+                let _pred = self.correctives[corrective_pos];
+                let diff = self.correctives[corrective_pos + 1];
+                let hops = self.correctives[corrective_pos + 2];
+                model.token.inc_length_diff_to_prediction(diff);
+                model
+                    .token
+                    .inc_distance_diff_to_prediction_after_incorrect_length_prediction(hops);
+                corrective_pos += 3;
+            } else {
+                model.token.inc_length_diff_to_prediction(0);
+                if info & 8 != 0 {
+                    let hops = self.correctives[corrective_pos];
+                    model
+                        .token
+                        .inc_distance_diff_to_prediction_after_correct_length_prediction(hops);
+                    corrective_pos += 1;
+                } else {
+                    model
+                        .token
+                        .inc_distance_diff_to_prediction_after_correct_length_prediction(0);
+                }
+            }
+
+            if info & 16 != 0 {
+                model
+                    .token
+                    .inc_irregular_length_258_encoding(info & 32 != 0);
+            }
+        }
     }
 }

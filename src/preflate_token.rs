@@ -1,4 +1,4 @@
-#[derive(Copy, Clone, Debug, Default)]
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
 pub struct PreflateToken {
     len: u16,
     irregular258: bool,

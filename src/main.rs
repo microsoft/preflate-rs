@@ -33,6 +33,7 @@ mod zip_structs;
 use crate::{
     crc32::Crc32,
     preflate_parameter_estimator::estimate_preflate_parameters,
+    preflate_statistical_codec::PreflatePredictionEncoder,
     preflate_statistical_model::PreflateStatisticsCounter,
     preflate_token_predictor::PreflateTokenPredictor,
     zip_structs::{
@@ -122,13 +123,25 @@ fn analyze_compressed_data<R: Read + Seek>(
 
     let mut counterE = PreflateStatisticsCounter::default();
 
-    let mut tokenPredictorE = PreflateTokenPredictor::new(&block_decoder.output, &params_e, 0);
+    let mut tokenPredictorIn = PreflateTokenPredictor::new(&block_decoder.output, &params_e, 0);
+
+    let mut tokenPredictorOut = PreflateTokenPredictor::new(&block_decoder.output, &params_e, 0);
 
     for i in 0..blocks.len() {
-        tokenPredictorE
-            .analyze_block(i, &blocks[i])
+        let analysis = tokenPredictorIn
+            .analyze_block(&blocks[i])
             .with_context(|| format!("analyze_block {}", i))?;
-        tokenPredictorE.update_counters(&mut counterE, i as u32);
+        analysis.update_counters(&mut counterE);
+
+        let mut encoder = PreflatePredictionEncoder::new();
+        analysis.encode_block(&mut encoder);
+
+        let mut decoder = encoder.make_decoder();
+
+        let outblock = tokenPredictorOut.decode_block(&mut decoder)?;
+
+        // assert the decoded blocks are the same as the encoded ones
+        assert_eq!(blocks[i].tokens, outblock.tokens, "block {}", i);
     }
 
     counterE.token.print();
