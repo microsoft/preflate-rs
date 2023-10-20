@@ -105,24 +105,6 @@ impl<'a> PreflatePredictorState<'a> {
         self.hash.get_head(hash_next)
     }
 
-    pub fn iterate_from_head(
-        &self,
-        hash_: u32,
-        ref_pos: u32,
-        max_dist: u32,
-    ) -> PreflateHashIterator {
-        self.hash.iterate_from_head(hash_, ref_pos, max_dist)
-    }
-
-    pub fn iterate_from_node(
-        &self,
-        node_: u32,
-        ref_pos: u32,
-        max_dist: u32,
-    ) -> PreflateHashIterator {
-        self.hash.iterate_from_node(node_, ref_pos, max_dist)
-    }
-
     fn iterate_from_dist(&self, dist_: u32, ref_pos: u32, max_dist: u32) -> PreflateHashIterator {
         self.hash
             .iterate_from_pos(ref_pos - dist_, ref_pos, max_dist)
@@ -173,7 +155,7 @@ impl<'a> PreflatePredictorState<'a> {
 
         let hash = self.calculate_hash();
 
-        let mut chain_it = self.iterate_from_head(hash, cur_pos, cur_max_dist);
+        let mut chain_it = self.hash.iterate_from_head(hash, cur_pos, cur_max_dist);
         if !chain_it.valid() {
             return 0;
         }
@@ -212,7 +194,8 @@ impl<'a> PreflatePredictorState<'a> {
             max_depth,
         ) {
             let mut chain_it =
-                self.iterate_from_node(hash_head, h.start_pos, h.cur_max_dist_hop1_plus);
+                self.hash
+                    .iterate_from_node(hash_head, h.start_pos, h.cur_max_dist_hop1_plus);
             // Handle ZLIB quirk: the very first entry in the hash chain can have a larger
             // distance than all following entries
             if chain_it.dist() > h.cur_max_dist_hop0 {

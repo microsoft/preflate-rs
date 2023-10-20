@@ -18,7 +18,7 @@ impl<'a> PreflateHashIterator<'a> {
         max_dist: u32,
         start_pos: u32,
     ) -> Self {
-        let cur_dist = Self::calcdist(ref_pos, start_pos);
+        let cur_dist = Self::calc_dist(ref_pos, start_pos);
         let is_valid = cur_dist <= max_dist;
         Self {
             chain,
@@ -35,7 +35,7 @@ impl<'a> PreflateHashIterator<'a> {
         self.is_valid
     }
 
-    fn calcdist(p1: u32, p2: u32) -> u32 {
+    fn calc_dist(p1: u32, p2: u32) -> u32 {
         p1 - p2
     }
 
@@ -53,7 +53,7 @@ impl<'a> PreflateHashIterator<'a> {
 
     pub fn next(&mut self) -> bool {
         self.cur_pos = self.chain[self.cur_pos as usize].into();
-        self.cur_dist = Self::calcdist(self.ref_pos, self.cur_pos);
+        self.cur_dist = Self::calc_dist(self.ref_pos, self.cur_pos);
         self.is_valid = self.cur_pos > 0 && self.cur_dist <= self.max_dist;
         self.is_valid
     }
@@ -167,7 +167,7 @@ impl<'a> PreflateHashChainExt<'a> {
 
     pub fn iterate_from_node(
         &self,
-        node: u32,
+        hash_head: u32,
         ref_pos: u32,
         max_dist: u32,
     ) -> PreflateHashIterator {
@@ -176,7 +176,7 @@ impl<'a> PreflateHashChainExt<'a> {
             &self.chain_depth,
             (ref_pos as i32 - self.total_shift) as u32,
             max_dist,
-            node.into(),
+            hash_head.into(),
         )
     }
 

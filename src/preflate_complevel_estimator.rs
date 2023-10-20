@@ -134,14 +134,14 @@ impl<'a> PreflateCompLevelEstimatorState<'a> {
             }
         }
 
-        if self.slow_hash.input().pos() >= token.dist().into() {
+        if self.slow_hash.input().pos() >= token.dist() {
             self.info.reference_count += 1;
 
             let mdepth = Self::match_depth(
-                self.slow_hash.get_head(hash_head).into(),
+                self.slow_hash.get_head(hash_head),
                 token,
                 &self.slow_hash,
-                self.window_size().into(),
+                self.window_size(),
                 false,
             );
             if mdepth >= 0x8001 {
