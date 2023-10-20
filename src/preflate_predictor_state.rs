@@ -5,16 +5,6 @@ use crate::preflate_seq_chain::PreflateSeqChain;
 use crate::preflate_token::{PreflateToken, TOKEN_NONE};
 use std::cmp;
 
-struct PreflatePreviousMatchInfo {
-    previous_matches: [PreflateToken; 256],
-}
-
-struct PreflateNextMatchInfo {
-    next_chain_depth: u16,
-    next_len: u16,
-    next_dist: u16,
-}
-
 #[derive(Default)]
 pub struct PreflateRematchInfo {
     pub first_match_depth: u32,
@@ -27,25 +17,32 @@ pub struct PreflatePredictorState<'a> {
     hash: PreflateHashChainExt<'a>,
     seq: PreflateSeqChain<'a>,
     window_bytes: u32,
-    pub max_token_count: u32,
-    config: &'a PreflateParserConfig,
+    max_chain_length: u32,
+    nice_match_length: u32,
+    good_match_length: u32,
+    lazy_match_length: u32,
 }
 
 impl<'a> PreflatePredictorState<'a> {
     pub fn new(
         uncompressed: &'a [u8],
         mem_level: u32,
-        config: &'a PreflateParserConfig,
+        config: &PreflateParserConfig,
         wbits: u32,
-        mbits: u32,
     ) -> Self {
         Self {
             hash: PreflateHashChainExt::new(uncompressed, mem_level),
             seq: PreflateSeqChain::new(uncompressed),
             window_bytes: 1 << wbits,
-            max_token_count: ((1 << (6 + mbits)) - 1),
-            config,
+            max_chain_length: config.max_chain,
+            nice_match_length: config.nice_length,
+            good_match_length: config.good_length,
+            lazy_match_length: config.max_lazy,
         }
+    }
+
+    pub fn lazy_match_length(&self) -> u32 {
+        self.lazy_match_length
     }
 
     pub fn update_running_hash(&mut self, b: u8) {
@@ -94,22 +91,6 @@ impl<'a> PreflatePredictorState<'a> {
 
     pub fn available_input_size(&self) -> u32 {
         self.hash.input().remaining()
-    }
-
-    fn max_chain_length(&self) -> u32 {
-        self.config.max_chain.into()
-    }
-
-    fn nice_match_length(&self) -> u32 {
-        self.config.nice_length.into()
-    }
-
-    fn good_match_length(&self) -> u32 {
-        self.config.good_length.into()
-    }
-
-    pub fn lazy_match_length(&self) -> u32 {
-        self.config.max_lazy.into()
     }
 
     pub fn calculate_hash(&self) -> u32 {
@@ -212,7 +193,6 @@ impl<'a> PreflatePredictorState<'a> {
                 return 0;
             }
         }
-        0
     }
 
     pub fn match_token(
@@ -452,10 +432,10 @@ impl<'a> PreflatePredictorState<'a> {
             helper.max_chain = max_depth;
             helper.nice_len = helper.max_len;
         } else {
-            helper.max_chain = self.max_chain_length().into(); // max hash chain length
-            helper.nice_len = std::cmp::min(self.nice_match_length().into(), helper.max_len);
+            helper.max_chain = self.max_chain_length; // max hash chain length
+            helper.nice_len = std::cmp::min(self.nice_match_length, helper.max_len);
 
-            if prev_len >= self.good_match_length().into() {
+            if prev_len >= self.good_match_length {
                 helper.max_chain >>= 2;
             }
         }
@@ -580,14 +560,4 @@ struct MatchHelper {
     cur_max_dist_hop1_plus: u32,
     max_chain: u32,
     nice_len: u32,
-}
-
-impl MatchHelper {
-    fn valid_hop0_dist(&self, d: u32) -> bool {
-        d <= self.cur_max_dist_hop0
-    }
-
-    fn valid_hop1_plus_dist(&self, d: u32) -> bool {
-        d <= self.cur_max_dist_hop1_plus
-    }
 }

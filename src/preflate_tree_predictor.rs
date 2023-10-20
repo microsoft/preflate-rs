@@ -1,4 +1,4 @@
-use std::{cmp::Ordering, collections::BinaryHeap};
+use std::cmp::Ordering;
 
 use crate::{
     preflate_constants::{
@@ -54,22 +54,22 @@ fn pq_smaller(p1: &FreqIdxPair, p2: &FreqIdxPair, node_depth: &[u8]) -> Ordering
 impl<'a> PreflateTreePredictor<'a> {
     // Function to calculate bit lengths for Huffman codes
     fn calc_bit_lengths(
-        sym_bit_len: &mut [u8],
-        sym_freq: &[u32],
-        max_bits: u32,
-        min_max_code: u32,
+        _sym_bit_len: &mut [u8],
+        _sym_freq: &[u32],
+        _max_bits: u32,
+        _min_max_code: u32,
     ) -> u32 {
         // Vector to hold sorted frequency-index pairs
         0
     }
 
-    fn build_l_bit_lengths(&self, bit_lengths: &mut [u8], lcodes: &[u32]) -> u32 {
+    fn build_l_bit_lengths(&self, _bit_lengths: &mut [u8], _lcodes: &[u32]) -> u32 {
         // Implementation for build_l_bit_lengths
         // ...
         0
     }
 
-    fn build_d_bit_lengths(&self, bit_lengths: &mut [u8], dcodes: &[u32]) -> u32 {
+    fn build_d_bit_lengths(&self, _bit_lengths: &mut [u8], _dcodes: &[u32]) -> u32 {
         // Implementation for build_d_bit_lengths
         // ...
         0
@@ -77,15 +77,20 @@ impl<'a> PreflateTreePredictor<'a> {
 
     fn build_tc_bit_lengths(
         &self,
-        bit_lengths: &mut [u8; CODETREE_CODE_COUNT as usize],
-        bl_freqs: &[u32; CODETREE_CODE_COUNT as usize],
+        _bit_lengths: &mut [u8; CODETREE_CODE_COUNT as usize],
+        _bl_freqs: &[u32; CODETREE_CODE_COUNT as usize],
     ) -> u32 {
         // Implementation for build_tc_bit_lengths
         // ...
         0
     }
 
-    fn predict_code_type(&self, sym_bit_len: &[u8], sym_count: u32, first: bool) -> TreeCodeType {
+    fn predict_code_type(
+        &self,
+        _sym_bit_len: &[u8],
+        _sym_count: u32,
+        _first: bool,
+    ) -> TreeCodeType {
         // Implementation for predict_code_type
         // ...
         TreeCodeType::TCT_BITS
@@ -93,10 +98,10 @@ impl<'a> PreflateTreePredictor<'a> {
 
     fn predict_code_data(
         &self,
-        sym_bit_len: &[u8],
-        typ: TreeCodeType,
-        sym_count: u32,
-        first: bool,
+        _sym_bit_len: &[u8],
+        _typ: TreeCodeType,
+        _sym_count: u32,
+        _first: bool,
     ) -> u8 {
         // Implementation for predict_code_data
         // ...
@@ -105,13 +110,13 @@ impl<'a> PreflateTreePredictor<'a> {
 
     fn predict_ld_trees(
         &self,
-        analysis: &mut BlockAnalysisResult,
-        frequencies: &mut [u32],
-        sym_bit_len: &[u8],
-        sym_l_count: u32,
-        sym_d_count: u32,
-        target_codes: &[u8],
-        target_code_size: u32,
+        _analysis: &mut BlockAnalysisResult,
+        _frequencies: &mut [u32],
+        _sym_bit_len: &[u8],
+        _sym_l_count: u32,
+        _sym_d_count: u32,
+        _target_codes: &[u8],
+        _target_code_size: u32,
     ) {
         // Implementation for predict_ld_trees
         // ...
@@ -119,13 +124,13 @@ impl<'a> PreflateTreePredictor<'a> {
 
     fn reconstruct_ld_trees(
         &self,
-        codec: &mut PreflatePredictionDecoder,
-        frequencies: &mut [u32],
-        target_codes: &mut [u8],
-        target_code_size: u32,
-        sym_bit_len: &[u8],
-        sym_l_count: u32,
-        sym_d_count: u32,
+        _codec: &mut PreflatePredictionDecoder,
+        _frequencies: &mut [u32],
+        _target_codes: &mut [u8],
+        _target_code_size: u32,
+        _sym_bit_len: &[u8],
+        _sym_l_count: u32,
+        _sym_d_count: u32,
     ) -> u32 {
         // Implementation for reconstruct_ld_trees
         // ...
@@ -192,7 +197,7 @@ impl<'a> PreflateTreePredictor<'a> {
             correctives: Vec::new(),
         };
 
-        let (l_codes, d_codes, l_count, d_count) = self.collect_token_statistics(block);
+        let (l_codes, d_codes, _l_count, _d_count) = self.collect_token_statistics(block);
 
         let mut bit_lengths = vec![0; LITLENDIST_CODE_COUNT as usize];
         let mut predicted_l_tree_size = self.build_l_bit_lengths(&mut bit_lengths, &l_codes[..]);
@@ -245,20 +250,20 @@ impl<'a> PreflateTreePredictor<'a> {
         self.analysis_results.push(analysis);
     }
 
-    fn update_counters(&mut self, counter: &mut PreflateStatisticsCounter, blockno: u32) {
+    fn update_counters(&mut self, _counter: &mut PreflateStatisticsCounter, _blockno: u32) {
         // Implementation for update_counters
         // ...
     }
 
-    fn encode_block(&mut self, encoder: &mut PreflatePredictionEncoder, blockno: u32) {
+    fn encode_block(&mut self, _encoder: &mut PreflatePredictionEncoder, _blockno: u32) {
         // Implementation for encode_block
         // ...
     }
 
     fn decode_block(
         &mut self,
-        block: &mut PreflateTokenBlock,
-        decoder: &mut PreflatePredictionDecoder,
+        _block: &mut PreflateTokenBlock,
+        _decoder: &mut PreflatePredictionDecoder,
     ) -> bool {
         // Implementation for decode_block
         // ...

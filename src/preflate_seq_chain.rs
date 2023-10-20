@@ -96,7 +96,7 @@ impl<'a> PreflateSeqChain<'a> {
         if self.prev[DELTA + 8].dist_to_next != 0xffff
             && (self.prev[DELTA + 8].length as u32) < MIN_MATCH
         {
-            let d = self.prev[DELTA + 8].dist_to_next;
+            let d: u16 = self.prev[DELTA + 8].dist_to_next;
 
             self.prev[DELTA + 8].dist_to_next = 0xffff;
             self.prev[DELTA + 8].length = self.prev[DELTA + 8 - d as usize].length - d;

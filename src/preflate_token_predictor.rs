@@ -15,18 +15,20 @@ pub struct PreflateTokenPredictor<'a> {
     pending_token: PreflateToken,
     current_token_count: u32,
     empty_block_at_end: bool,
+    max_token_count: u32,
+    lazy_match_length: u32,
 }
 
 pub struct BlockAnalysisResult {
-    block_type: BlockType,
-    token_count: u32,
-    block_size_predicted: bool,
-    input_eof: bool,
-    last_block: bool,
-    padding_bits: u8,
-    padding_counts: u8,
-    token_info: Vec<u8>,
-    correctives: Vec<i32>,
+    pub block_type: BlockType,
+    pub token_count: u32,
+    pub block_size_predicted: bool,
+    pub input_eof: bool,
+    pub last_block: bool,
+    pub padding_bits: u8,
+    pub padding_counts: u8,
+    pub token_info: Vec<u8>,
+    pub correctives: Vec<i32>,
 }
 
 impl<'a> PreflateTokenPredictor<'a> {
@@ -42,7 +44,6 @@ impl<'a> PreflateTokenPredictor<'a> {
                 params.mem_level,
                 params.config(),
                 params.window_bits,
-                params.mem_level,
             ),
             params,
             fast: params.is_fast_compressor(),
@@ -50,6 +51,8 @@ impl<'a> PreflateTokenPredictor<'a> {
             pending_token: TOKEN_NONE,
             current_token_count: 0,
             empty_block_at_end: false,
+            max_token_count: ((1 << (6 + params.mem_level)) - 1),
+            lazy_match_length: params.config().max_lazy,
         };
 
         if r.state.available_input_size() >= 2 {
@@ -138,14 +141,13 @@ impl<'a> PreflateTokenPredictor<'a> {
                     analysis.token_info[self.current_token_count as usize] = 1; // well predicted REF
                 }
 
-                let mut rematch = PreflateRematchInfo::default();
                 if predicted_token.len() != target_token.len() {
                     analysis.token_info[self.current_token_count as usize] += 4; // bad LEN prediction, adds two corrective actions
                     analysis.correctives.push(predicted_token.len() as i32);
                     analysis
                         .correctives
                         .push(target_token.len() as i32 - predicted_token.len() as i32);
-                    rematch = self.repredict_match(&target_token);
+                    let rematch = self.repredict_match(&target_token);
 
                     if rematch.requested_match_depth >= 0xffff {
                         return Err(anyhow::Error::msg("Prediction failure"));
@@ -157,7 +159,7 @@ impl<'a> PreflateTokenPredictor<'a> {
                 } else {
                     if target_token.dist() != predicted_token.dist() {
                         analysis.token_info[self.current_token_count as usize] += 8; // bad DIST ONLY prediction, adds one corrective action
-                        rematch = self.repredict_match(&target_token);
+                        let rematch = self.repredict_match(&target_token);
 
                         if rematch.requested_match_depth >= 0xffff {
                             return Err(anyhow::Error::msg("Prediction failure"));
@@ -327,8 +329,7 @@ impl<'a> PreflateTokenPredictor<'a> {
     }
 
     fn predict_eob(&self) -> bool {
-        self.state.available_input_size() == 0
-            || self.current_token_count == self.state.max_token_count
+        self.state.available_input_size() == 0 || self.current_token_count == self.max_token_count
     }
 
     fn predict_token(&mut self) -> PreflateToken {
@@ -390,7 +391,7 @@ impl<'a> PreflateTokenPredictor<'a> {
 
         // Check for a longer match that starts at the next byte, in which case we should
         // just emit a literal instead of a distance/length pair.
-        if match_token.len() < self.state.lazy_match_length()
+        if match_token.len() < self.lazy_match_length
             && self.state.available_input_size() >= match_token.len() + 2
         {
             let mut match_next;

@@ -1,4 +1,5 @@
-use crate::crc32::Crc32;
+use anyhow::Context;
+
 use crate::preflate_token;
 
 use std::io::{Read, Seek};
@@ -31,25 +32,19 @@ impl<'a, R: Read + Seek> PreflateBlockDecoder<'a, R> {
         self.input.get(cbits)
     }
 
-    fn write_literal(&mut self, byte: u8, crc: &mut Crc32) {
+    fn write_literal(&mut self, byte: u8) {
         self.output.push(byte);
-        crc.update_crc(byte);
     }
 
-    fn write_reference(&mut self, dist: u32, len: u32, crc: &mut Crc32) {
+    fn write_reference(&mut self, dist: u32, len: u32) {
         let start = self.output.len() - dist as usize;
         for i in 0..len {
             let byte = self.output[start + i as usize];
-            crc.update_crc(byte);
             self.output.push(byte);
         }
     }
 
-    pub fn read_block(
-        &mut self,
-        last: &mut bool,
-        crc: &mut Crc32,
-    ) -> anyhow::Result<PreflateTokenBlock> {
+    pub fn read_block(&mut self, last: &mut bool) -> anyhow::Result<PreflateTokenBlock> {
         let mut blk;
 
         *last = self.read_bit()?;
@@ -75,7 +70,7 @@ impl<'a, R: Read + Seek> PreflateBlockDecoder<'a, R> {
 
                 for _i in 0..len {
                     let b = self.input.read_byte()?;
-                    self.write_literal(b, crc);
+                    self.write_literal(b);
                 }
 
                 Ok(blk)
@@ -84,7 +79,7 @@ impl<'a, R: Read + Seek> PreflateBlockDecoder<'a, R> {
                 blk = PreflateTokenBlock::new(BlockType::StaticHuff);
                 blk.uncompressed_start_pos = self.output.len() as u32;
                 let decoder = HuffmanDecoder::create_fixed()?;
-                self.decode_block(&decoder, &mut blk, crc)?;
+                self.decode_block(&decoder, &mut blk)?;
                 return Ok(blk);
             }
 
@@ -92,7 +87,8 @@ impl<'a, R: Read + Seek> PreflateBlockDecoder<'a, R> {
                 blk = PreflateTokenBlock::new(BlockType::DynamicHuff);
                 blk.uncompressed_start_pos = self.output.len() as u32;
                 let decoder = HuffmanDecoder::create_from_bit_reader(&mut self.input, 0)?;
-                self.decode_block(&decoder, &mut blk, crc)?;
+                self.decode_block(&decoder, &mut blk)
+                    .with_context(|| "decode_block dyn")?;
                 return Ok(blk);
             }
 
@@ -106,7 +102,6 @@ impl<'a, R: Read + Seek> PreflateBlockDecoder<'a, R> {
         &mut self,
         decoder: &HuffmanDecoder,
         blk: &mut PreflateTokenBlock,
-        crc: &mut Crc32,
     ) -> anyhow::Result<()> {
         let mut earliest_reference = i32::MAX;
         let mut cur_pos = 0;
@@ -114,7 +109,7 @@ impl<'a, R: Read + Seek> PreflateBlockDecoder<'a, R> {
         Ok(loop {
             let lit_len: u32 = decoder.fetch_next_literal_code(&mut self.input)?.into();
             if lit_len < 256 {
-                self.write_literal(lit_len as u8, crc);
+                self.write_literal(lit_len as u8);
                 blk.tokens.push(preflate_token::TOKEN_LITERAL);
                 cur_pos += 1;
             } else if lit_len == 256 {
@@ -143,7 +138,7 @@ impl<'a, R: Read + Seek> PreflateBlockDecoder<'a, R> {
                 if dist as usize > self.output.len() {
                     return Err(anyhow::Error::msg("Invalid distance"));
                 }
-                self.write_reference(dist as u32, len as u32, crc);
+                self.write_reference(dist as u32, len as u32);
                 blk.tokens
                     .push(PreflateToken::new_reference(len, dist, irregular_258));
                 earliest_reference = std::cmp::min(earliest_reference, cur_pos - (dist as i32));

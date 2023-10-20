@@ -46,7 +46,7 @@ impl<'a> PreflateCompLevelEstimatorState<'a> {
             fast_l3_hash: PreflateHashChainExt::<'a>::new(unpacked_output, mbits),
             blocks,
             info: PreflateCompLevelInfo {
-                possible_compression_levels: (1 << 10) - (1 << 1),
+                possible_compression_levels: 0b_111111110,
                 ..PreflateCompLevelInfo::default()
             },
             wsize: 1 << wbits,
