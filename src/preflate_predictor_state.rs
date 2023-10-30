@@ -168,17 +168,11 @@ impl<'a> PreflatePredictorState<'a> {
         hash_head: u32,
         prev_len: u32,
         offset: u32,
-        very_far_matches: bool,
-        matches_to_start: bool,
         max_depth: u32,
     ) -> PreflateToken {
-        if let Some(mut h) = self.create_match_helper(
-            prev_len,
-            self.current_input_pos() + offset,
-            very_far_matches,
-            matches_to_start,
-            max_depth,
-        ) {
+        if let Some(mut h) =
+            self.create_match_helper(prev_len, self.current_input_pos() + offset, max_depth)
+        {
             let mut chain_it =
                 self.hash
                     .iterate_from_node(hash_head, h.start_pos, h.cur_max_dist_hop1_plus);
@@ -231,13 +225,7 @@ impl<'a> PreflatePredictorState<'a> {
         matches_to_start: bool,
         max_depth: u32,
     ) -> PreflateToken {
-        if let Some(h) = self.create_match_helper(
-            prev_len,
-            start_pos,
-            very_far_matches,
-            matches_to_start,
-            max_depth,
-        ) {
+        if let Some(h) = self.create_match_helper(prev_len, start_pos, max_depth) {
             let mut chain_it = self.seq.iterate_from_pos(start_pos);
             if !chain_it.valid() {
                 return TOKEN_NONE;
@@ -372,8 +360,6 @@ impl<'a> PreflatePredictorState<'a> {
         &self,
         prev_len: u32,
         start_pos: u32,
-        very_far_matches: bool,
-        matches_to_start: bool,
         max_depth: u32,
     ) -> Option<MatchHelper> {
         let max_len = std::cmp::min(self.total_input_size() - start_pos, MAX_MATCH as u32);
@@ -391,9 +377,14 @@ impl<'a> PreflatePredictorState<'a> {
             chain_explored: 0,
         };
 
-        let max_dist_to_start = start_pos - if matches_to_start { 0 } else { 1 };
+        let max_dist_to_start = start_pos
+            - if self.params.matches_to_start_detected {
+                0
+            } else {
+                1
+            };
 
-        if very_far_matches {
+        if self.params.very_far_matches_detected {
             helper.cur_max_dist_hop0 = cmp::min(max_dist_to_start, self.window_size());
             helper.cur_max_dist_hop1_plus = helper.cur_max_dist_hop0;
         } else {

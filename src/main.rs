@@ -166,6 +166,8 @@ fn main_with_result() -> anyhow::Result<()> {
         }
     }
 
+    return Ok(());
+
     // Zlib compression with different compression levels
     for level in 0..10 {
         println!("level: {}", level);

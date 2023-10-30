@@ -33,7 +33,7 @@ pub struct PreflateParameters {
     pub very_far_matches_detected: bool,
     pub matches_to_start_detected: bool,
     pub log2_of_max_chain_depth_m1: u32,
-    pub max_chain_depth: u32,
+    max_chain_depth: u32,
     pub is_fast_compressor: bool,
     pub good_length: u32,
     pub max_lazy: u32,

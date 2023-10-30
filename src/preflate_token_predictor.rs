@@ -360,8 +360,6 @@ impl<'a> PreflateTokenPredictor<'a> {
                     head,
                     self.prev_len,
                     0,
-                    self.params.very_far_matches_detected,
-                    self.params.matches_to_start_detected,
                     if self.params.zlib_compatible {
                         0
                     } else {
@@ -416,8 +414,6 @@ impl<'a> PreflateTokenPredictor<'a> {
                     head_next,
                     match_token.len(),
                     1,
-                    self.params.very_far_matches_detected,
-                    self.params.matches_to_start_detected,
                     if self.params.zlib_compatible {
                         0
                     } else {
@@ -463,14 +459,9 @@ impl<'a> PreflateTokenPredictor<'a> {
 
         let hash = self.state.calculate_hash();
         let head = self.state.get_current_hash_head(hash);
-        let match_token = self.state.match_token(
-            head,
-            0,
-            0,
-            self.params.very_far_matches_detected,
-            self.params.matches_to_start_detected,
-            2 << self.params.log2_of_max_chain_depth_m1,
-        );
+        let match_token =
+            self.state
+                .match_token(head, 0, 0, 2 << self.params.log2_of_max_chain_depth_m1);
 
         self.prev_len = 0;
         self.pending_token = TOKEN_NONE;
