@@ -221,8 +221,6 @@ impl<'a> PreflatePredictorState<'a> {
         start_pos: u32,
         hash_head: u32,
         prev_len: u32,
-        very_far_matches: bool,
-        matches_to_start: bool,
         max_depth: u32,
     ) -> PreflateToken {
         if let Some(h) = self.create_match_helper(prev_len, start_pos, max_depth) {

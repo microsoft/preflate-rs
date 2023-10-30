@@ -33,7 +33,6 @@ pub struct PreflateParameters {
     pub very_far_matches_detected: bool,
     pub matches_to_start_detected: bool,
     pub log2_of_max_chain_depth_m1: u32,
-    max_chain_depth: u32,
     pub is_fast_compressor: bool,
     pub good_length: u32,
     pub max_lazy: u32,
@@ -131,7 +130,6 @@ pub fn estimate_preflate_parameters(
         } else {
             bit_length(cl.max_chain_depth as u32 - 1)
         },
-        max_chain_depth: cl.max_chain_depth,
         is_fast_compressor,
         good_length: config.good_length,
         max_lazy: config.max_lazy,

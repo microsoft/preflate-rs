@@ -347,8 +347,6 @@ impl<'a> PreflateTokenPredictor<'a> {
                     self.state.current_input_pos(),
                     head,
                     self.prev_len,
-                    self.params.very_far_matches_detected,
-                    self.params.matches_to_start_detected,
                     if self.params.zlib_compatible {
                         0
                     } else {
@@ -401,8 +399,6 @@ impl<'a> PreflateTokenPredictor<'a> {
                     self.state.current_input_pos() + 1,
                     head_next,
                     match_token.len(),
-                    self.params.very_far_matches_detected,
-                    self.params.matches_to_start_detected,
                     if self.params.zlib_compatible {
                         0
                     } else {
