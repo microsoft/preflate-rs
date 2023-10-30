@@ -7,6 +7,7 @@ use crate::{
     preflate_token::PreflateTokenBlock,
 };
 
+#[derive(Debug, Copy, Clone)]
 pub enum PreflateStrategy {
     PreflateDefault,
     PreflateRleOnly,
@@ -14,48 +15,33 @@ pub enum PreflateStrategy {
     PreflateStore,
 }
 
+#[derive(Debug, Copy, Clone)]
 pub enum PreflateHuffStrategy {
     PreflateHuffDynamic,
     PreflateHuffMixed,
     PreflateHuffStatic,
 }
 
+#[derive(Debug, Copy, Clone)]
 pub struct PreflateParameters {
     pub strategy: PreflateStrategy,
     pub huff_strategy: PreflateHuffStrategy,
     pub zlib_compatible: bool,
     pub window_bits: u32,
     pub mem_level: u32,
-    pub comp_level: u32,
     pub far_len3_matches_detected: bool,
     pub very_far_matches_detected: bool,
     pub matches_to_start_detected: bool,
     pub log2_of_max_chain_depth_m1: u32,
+    pub max_chain_depth: u32,
+    pub is_fast_compressor: bool,
+    pub good_length: u32,
+    pub max_lazy: u32,
+    pub nice_length: u32,
+    pub max_chain: u32,
 }
 
-impl PreflateParameters {
-    pub fn is_fast_compressor(&self) -> bool {
-        self.comp_level >= 1 && self.comp_level <= 3
-    }
-
-    pub fn is_slow_compressor(&self) -> bool {
-        self.comp_level >= 4 && self.comp_level <= 9
-    }
-
-    pub fn config(&self) -> &PreflateParserConfig {
-        if self.is_fast_compressor() {
-            &FAST_PREFLATE_PARSER_SETTINGS[(self.comp_level - 1) as usize]
-        } else {
-            &SLOW_PREFLATE_PARSER_SETTINGS[if self.is_slow_compressor() {
-                (self.comp_level - 4) as usize
-            } else {
-                5
-            }]
-        }
-    }
-}
-
-pub fn estimate_preflate_mem_level(max_block_size_: u32) -> u32 {
+fn estimate_preflate_mem_level(max_block_size_: u32) -> u32 {
     let mut max_block_size = max_block_size_;
     let mut mbits = 0;
     while max_block_size > 0 {
@@ -103,37 +89,53 @@ pub fn estimate_preflate_parameters(
 ) -> PreflateParameters {
     let info = extract_preflate_info(blocks);
 
-    let mut result = PreflateParameters {
-        window_bits: estimate_preflate_window_bits(info.max_dist),
-        mem_level: estimate_preflate_mem_level(info.max_tokens_per_block),
-        strategy: estimate_preflate_strategy(&info),
-        huff_strategy: estimate_preflate_huff_strategy(&info),
-        zlib_compatible: false,
-        far_len3_matches_detected: false,
-        very_far_matches_detected: false,
-        matches_to_start_detected: false,
-        log2_of_max_chain_depth_m1: 0,
-        comp_level: 0,
-    };
+    let window_bits = estimate_preflate_window_bits(info.max_dist);
+    let mem_level = estimate_preflate_mem_level(info.max_tokens_per_block);
 
     let cl = estimate_preflate_comp_level(
-        result.window_bits.into(),
-        result.mem_level.into(),
+        window_bits.into(),
+        mem_level.into(),
         unpacked_output,
         off0,
         blocks,
         false,
     );
 
-    result.comp_level = cl.recommended_compression_level;
-    result.zlib_compatible = cl.zlib_compatible;
-    result.far_len3_matches_detected = cl.far_len_3_matches;
-    result.very_far_matches_detected = cl.very_far_matches;
-    result.matches_to_start_detected = cl.match_to_start;
-    result.log2_of_max_chain_depth_m1 = if cl.max_chain_depth == 0 {
-        0
+    let config;
+    let comp_level = cl.recommended_compression_level;
+    let is_fast_compressor;
+
+    if comp_level >= 1 && comp_level <= 3 {
+        is_fast_compressor = true;
+        config = &FAST_PREFLATE_PARSER_SETTINGS[(comp_level - 1) as usize]
     } else {
-        bit_length(cl.max_chain_depth as u32 - 1)
-    };
-    result
+        is_fast_compressor = false;
+        config = &SLOW_PREFLATE_PARSER_SETTINGS[if comp_level >= 4 && comp_level <= 9 {
+            (comp_level - 4) as usize
+        } else {
+            5
+        }]
+    }
+
+    PreflateParameters {
+        window_bits,
+        mem_level,
+        strategy: estimate_preflate_strategy(&info),
+        huff_strategy: estimate_preflate_huff_strategy(&info),
+        zlib_compatible: cl.zlib_compatible,
+        far_len3_matches_detected: cl.far_len_3_matches,
+        very_far_matches_detected: cl.very_far_matches,
+        matches_to_start_detected: cl.match_to_start,
+        log2_of_max_chain_depth_m1: if cl.max_chain_depth == 0 {
+            0
+        } else {
+            bit_length(cl.max_chain_depth as u32 - 1)
+        },
+        max_chain_depth: cl.max_chain_depth,
+        is_fast_compressor,
+        good_length: config.good_length,
+        max_lazy: config.max_lazy,
+        nice_length: config.nice_length,
+        max_chain: config.max_chain,
+    }
 }

@@ -72,17 +72,16 @@ fn analyze_compressed_data<R: Read + Seek>(
     }
 
     let params_e = estimate_preflate_parameters(&block_decoder.output, 0, &blocks);
-    println!("prediction parameters: w {}, c {}, m {}, zlib {}, farL3M {}, very far M {}, M2S {}, log2CD {}",
-            params_e.window_bits, params_e.comp_level, params_e.mem_level,
-            params_e.zlib_compatible, params_e.far_len3_matches_detected,
-            params_e.very_far_matches_detected, params_e.matches_to_start_detected,
-            params_e.log2_of_max_chain_depth_m1);
+
+    //params_e.max_lazy = 258;
+
+    println!("prediction parameters: {:?}", params_e);
 
     let mut counterE = PreflateStatisticsCounter::default();
 
-    let mut tokenPredictorIn = PreflateTokenPredictor::new(&block_decoder.output, &params_e, 0);
+    let mut tokenPredictorIn = PreflateTokenPredictor::new(&block_decoder.output, params_e, 0);
 
-    let mut tokenPredictorOut = PreflateTokenPredictor::new(&block_decoder.output, &params_e, 0);
+    let mut tokenPredictorOut = PreflateTokenPredictor::new(&block_decoder.output, params_e, 0);
 
     for i in 0..blocks.len() {
         let analysis = tokenPredictorIn
@@ -133,7 +132,7 @@ fn main_with_result() -> anyhow::Result<()> {
     }
 
     // Zlib compression with different compression levels
-    for level in 9..10 {
+    for level in 1..10 {
         println!("zlib level: {}", level);
 
         let mut output = Vec::new();
@@ -165,8 +164,6 @@ fn main_with_result() -> anyhow::Result<()> {
         if output.len() != 0 {
             do_analyze(&v, minusheader)?;
         }
-
-        return Ok(());
     }
 
     // Zlib compression with different compression levels

@@ -1,5 +1,6 @@
 use crate::preflate_constants::{self, MAX_MATCH, MIN_LOOKAHEAD, MIN_MATCH};
 use crate::preflate_hash_chain::{PreflateHashChainExt, PreflateHashIterator};
+use crate::preflate_parameter_estimator::PreflateParameters;
 use crate::preflate_parse_config::PreflateParserConfig;
 use crate::preflate_seq_chain::PreflateSeqChain;
 use crate::preflate_token::{PreflateToken, TOKEN_NONE};
@@ -16,33 +17,18 @@ pub struct PreflateRematchInfo {
 pub struct PreflatePredictorState<'a> {
     hash: PreflateHashChainExt<'a>,
     seq: PreflateSeqChain<'a>,
+    params: PreflateParameters,
     window_bytes: u32,
-    max_chain_length: u32,
-    nice_match_length: u32,
-    good_match_length: u32,
-    lazy_match_length: u32,
 }
 
 impl<'a> PreflatePredictorState<'a> {
-    pub fn new(
-        uncompressed: &'a [u8],
-        mem_level: u32,
-        config: &PreflateParserConfig,
-        wbits: u32,
-    ) -> Self {
+    pub fn new(uncompressed: &'a [u8], params: PreflateParameters) -> Self {
         Self {
-            hash: PreflateHashChainExt::new(uncompressed, mem_level),
+            hash: PreflateHashChainExt::new(uncompressed, params.mem_level),
             seq: PreflateSeqChain::new(uncompressed),
-            window_bytes: 1 << wbits,
-            max_chain_length: config.max_chain,
-            nice_match_length: config.nice_length,
-            good_match_length: config.good_length,
-            lazy_match_length: config.max_lazy,
+            window_bytes: 1 << params.window_bits,
+            params: params,
         }
-    }
-
-    pub fn lazy_match_length(&self) -> u32 {
-        self.lazy_match_length
     }
 
     pub fn update_running_hash(&mut self, b: u8) {
@@ -225,6 +211,10 @@ impl<'a> PreflatePredictorState<'a> {
                 }
 
                 h.max_chain -= 1;
+                h.chain_explored += 1;
+                if h.chain_explored > 900 {
+                    println!("chain_explored: {}", h.chain_explored);
+                }
             }
             best_match
         } else {
@@ -398,6 +388,7 @@ impl<'a> PreflatePredictorState<'a> {
             cur_max_dist_hop1_plus: 0,
             max_chain: 0,
             nice_len: 0,
+            chain_explored: 0,
         };
 
         let max_dist_to_start = start_pos - if matches_to_start { 0 } else { 1 };
@@ -415,10 +406,10 @@ impl<'a> PreflatePredictorState<'a> {
             helper.max_chain = max_depth;
             helper.nice_len = helper.max_len;
         } else {
-            helper.max_chain = self.max_chain_length; // max hash chain length
-            helper.nice_len = std::cmp::min(self.nice_match_length, helper.max_len);
+            helper.max_chain = self.params.max_chain; // max hash chain length
+            helper.nice_len = std::cmp::min(self.params.nice_length, helper.max_len);
 
-            if prev_len >= self.good_match_length {
+            if prev_len >= self.params.good_length {
                 helper.max_chain >>= 2;
             }
         }
@@ -543,4 +534,5 @@ struct MatchHelper {
     cur_max_dist_hop1_plus: u32,
     max_chain: u32,
     nice_len: u32,
+    chain_explored: u32,
 }

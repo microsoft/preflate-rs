@@ -9,14 +9,12 @@ use crate::{
 
 pub struct PreflateTokenPredictor<'a> {
     state: PreflatePredictorState<'a>,
-    params: &'a PreflateParameters,
-    fast: bool,
+    params: PreflateParameters,
     prev_len: u32,
     pending_token: PreflateToken,
     current_token_count: u32,
     empty_block_at_end: bool,
     max_token_count: u32,
-    lazy_match_length: u32,
 }
 
 pub struct BlockAnalysisResult {
@@ -32,27 +30,25 @@ pub struct BlockAnalysisResult {
 }
 
 impl<'a> PreflateTokenPredictor<'a> {
-    pub fn new(uncompressed: &'a [u8], params: &'a PreflateParameters, offset: u32) -> Self {
+    pub fn new(
+        uncompressed: &'a [u8],
+        params: PreflateParameters,
+        //params: &'a PreflateParameters,
+        offset: u32,
+    ) -> Self {
         // Implement constructor logic for PreflateTokenPredictor
         // Initialize fields as necessary
         // Create and initialize PreflatePredictorState, PreflateHashChainExt, and PreflateSeqChain instances
         // Construct the analysisResults vector
 
         let mut r = Self {
-            state: PreflatePredictorState::<'a>::new(
-                uncompressed,
-                params.mem_level,
-                params.config(),
-                params.window_bits,
-            ),
+            state: PreflatePredictorState::<'a>::new(uncompressed, params),
             params,
-            fast: params.is_fast_compressor(),
             prev_len: 0,
             pending_token: TOKEN_NONE,
             current_token_count: 0,
             empty_block_at_end: false,
             max_token_count: ((1 << (6 + params.mem_level)) - 1),
-            lazy_match_length: params.config().max_lazy,
         };
 
         if r.state.available_input_size() >= 2 {
@@ -344,7 +340,9 @@ impl<'a> PreflateTokenPredictor<'a> {
         } else {
             let head = self.state.get_current_hash_head(hash);
 
-            if !self.fast && self.state.seq_valid(self.state.current_input_pos()) {
+            if !self.params.is_fast_compressor
+                && self.state.seq_valid(self.state.current_input_pos())
+            {
                 self.state.seq_match(
                     self.state.current_input_pos(),
                     head,
@@ -380,7 +378,7 @@ impl<'a> PreflateTokenPredictor<'a> {
             return TOKEN_LITERAL;
         }
 
-        if self.fast {
+        if self.params.is_fast_compressor {
             return match_token;
         }
 
@@ -391,14 +389,16 @@ impl<'a> PreflateTokenPredictor<'a> {
 
         // Check for a longer match that starts at the next byte, in which case we should
         // just emit a literal instead of a distance/length pair.
-        if match_token.len() < self.lazy_match_length
+        if match_token.len() < self.params.max_lazy
             && self.state.available_input_size() >= match_token.len() + 2
         {
             let mut match_next;
             let hash_next = self.state.calculate_hash_next();
             let head_next = self.state.get_current_hash_head(hash_next);
 
-            if !self.fast && self.state.seq_valid(self.state.current_input_pos() + 1) {
+            if !self.params.is_fast_compressor
+                && self.state.seq_valid(self.state.current_input_pos() + 1)
+            {
                 match_next = self.state.seq_match(
                     self.state.current_input_pos() + 1,
                     head_next,
@@ -494,7 +494,7 @@ impl<'a> PreflateTokenPredictor<'a> {
     }
 
     fn commit_token(&mut self, token: &PreflateToken) {
-        if self.fast && token.len() > self.state.lazy_match_length() {
+        if self.params.is_fast_compressor && token.len() > self.params.max_lazy {
             self.state.skip_hash(token.len());
         } else {
             self.state.update_hash(token.len());

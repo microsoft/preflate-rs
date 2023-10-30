@@ -3,9 +3,22 @@ use std::cmp;
 use crate::{preflate_constants::MIN_MATCH, preflate_input::PreflateInput};
 
 #[derive(Clone, Copy, Default)]
-pub struct SeqChainEntry {
+struct SeqChainEntry {
     dist_to_next: u16,
     length: u16,
+}
+
+/// This structure is used to find consecutive sequences of bytes of the same value
+///
+/// It is used to find sequences of bytes that can be compressed using a backreference
+/// the structure is a hash table with 2^16 entries, each entry is a linked list of
+/// sequences of bytes of the same value.
+pub struct PreflateSeqChain<'a> {
+    prev: Vec<SeqChainEntry>,
+    total_shift: i32,
+    cur_pos: u32,
+    heads: [u16; 256],
+    input: PreflateInput<'a>,
 }
 
 pub struct PreflateSeqIterator<'a> {
@@ -15,7 +28,7 @@ pub struct PreflateSeqIterator<'a> {
 }
 
 impl<'a> PreflateSeqIterator<'a> {
-    pub fn new(chain: &'a [SeqChainEntry], ref_pos: u32) -> Self {
+    fn new(chain: &'a [SeqChainEntry], ref_pos: u32) -> Self {
         let cur_dist = chain[ref_pos as usize].dist_to_next;
         Self {
             chain,
@@ -42,14 +55,6 @@ impl<'a> PreflateSeqIterator<'a> {
         self.cur_dist += self.chain[(self.ref_pos - self.cur_dist as u32) as usize].dist_to_next;
         self.valid()
     }
-}
-
-pub struct PreflateSeqChain<'a> {
-    prev: Vec<SeqChainEntry>,
-    total_shift: i32,
-    cur_pos: u32,
-    heads: [u16; 256],
-    input: PreflateInput<'a>,
 }
 
 impl<'a> PreflateSeqChain<'a> {
