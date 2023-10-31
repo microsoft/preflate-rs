@@ -5,11 +5,12 @@ use crate::preflate_parse_config::PreflateParserConfig;
 use crate::preflate_seq_chain::PreflateSeqChain;
 use crate::preflate_token::{PreflateToken, TOKEN_NONE};
 use std::cmp;
+use std::f32::consts::E;
 
 #[derive(Default)]
 pub struct PreflateRematchInfo {
-    pub first_match_depth: u32,
-    pub first_match_dist: u32,
+    first_match_depth: u32,
+    first_match_dist: u32,
     pub requested_match_depth: u32,
     pub condensed_hops: u32,
 }
@@ -406,22 +407,17 @@ impl<'a> PreflatePredictorState<'a> {
         Some(helper)
     }
 
-    pub fn rematch_info(
+    /// Tries to find the match by continuing on the hash chain, returns how many hops we went
+    /// or none if it wasn't found
+    pub fn calculate_hops(
         &self,
         hash_head: u32,
         target_reference: &PreflateToken,
-    ) -> PreflateRematchInfo {
-        let mut result = PreflateRematchInfo {
-            first_match_dist: 0,
-            first_match_depth: 0xffff,
-            requested_match_depth: 0xffff,
-            condensed_hops: 0,
-        };
-
+    ) -> anyhow::Result<u32> {
         let max_len = std::cmp::min(self.available_input_size(), MAX_MATCH);
 
         if max_len < target_reference.len() {
-            return result;
+            return Err(anyhow::anyhow!("max_len < target_reference.len()"));
         }
 
         let max_dist = self.window_size();
@@ -432,12 +428,13 @@ impl<'a> PreflatePredictorState<'a> {
             .hash
             .iterate_from_node(hash_head, cur_pos, cur_max_dist);
         if !chain_it.valid() {
-            return result;
+            return Err(anyhow::anyhow!("no valid chain_it"));
         }
 
         let max_chain_org = 0xffff; // max hash chain length
         let mut max_chain = max_chain_org; // max hash chain length
         let best_len = target_reference.len();
+        let mut hops = 0;
 
         loop {
             let match_pos = self.input_cursor_offset(-(chain_it.dist() as i32));
@@ -445,16 +442,15 @@ impl<'a> PreflatePredictorState<'a> {
                 Self::prefix_compare(match_pos, self.input_cursor(), best_len - 1, best_len);
 
             if match_length >= best_len {
-                result.first_match_depth =
-                    std::cmp::min(result.first_match_depth, max_chain_org - max_chain);
-                result.condensed_hops += 1;
+                hops += 1;
             }
 
             if chain_it.dist() >= target_reference.dist() {
                 if chain_it.dist() == target_reference.dist() {
-                    result.requested_match_depth = max_chain_org - max_chain;
+                    return Ok(hops);
+                } else {
+                    break;
                 }
-                return result;
             }
 
             if !chain_it.next() || max_chain <= 1 {
@@ -464,20 +460,21 @@ impl<'a> PreflatePredictorState<'a> {
             max_chain -= 1;
         }
 
-        result
+        Err(anyhow::anyhow!("no match found"))
     }
 
-    pub fn hop_match(&self, target_reference: &PreflateToken, hops: u32) -> u32 {
+    /// Does the inverse of calculate_hops, where we start from the predicted token and
+    /// get the new distance based on the number of hops
+    pub fn hop_match(&self, target_reference: &PreflateToken, hops: u32) -> anyhow::Result<u32> {
         if hops == 0 {
-            return target_reference.dist();
+            return Ok(target_reference.dist());
         }
 
         let cur_pos = self.current_input_pos();
-        let error_dist = 0;
         let max_len = std::cmp::min(self.available_input_size(), MAX_MATCH);
 
         if max_len < target_reference.len() {
-            return error_dist;
+            return Err(anyhow::anyhow!("max_len < target_reference.len()"));
         }
 
         let max_dist = self.window_size();
@@ -486,7 +483,7 @@ impl<'a> PreflatePredictorState<'a> {
         let mut chain_it: PreflateHashIterator<'_> =
             self.iterate_from_dist(target_reference.dist(), cur_pos, cur_max_dist);
         if !chain_it.valid() {
-            return error_dist;
+            return Err(anyhow::anyhow!("no valid chain_it"));
         }
 
         let best_len = target_reference.len();
@@ -507,12 +504,12 @@ impl<'a> PreflatePredictorState<'a> {
             if match_length >= best_len {
                 todo -= 1;
                 if todo == 0 {
-                    return chain_it.dist();
+                    return Ok(chain_it.dist());
                 }
             }
         }
 
-        error_dist
+        Err(anyhow::anyhow!("no match found"))
     }
 }
 

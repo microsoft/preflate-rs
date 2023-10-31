@@ -1,7 +1,6 @@
 mod bit_helper;
 mod huffman_decoder;
 mod huffman_helper;
-mod minz_compress;
 mod preflate_block_decoder;
 mod preflate_complevel_estimator;
 mod preflate_constants;
@@ -20,19 +19,17 @@ mod preflate_tree_predictor;
 mod zip_bit_reader;
 
 use anyhow::{self, Context};
-use byteorder::{LittleEndian, ReadBytesExt};
 use flate2::{read::GzEncoder, read::ZlibEncoder, Compression};
 use preflate_block_decoder::PreflateBlockDecoder;
 use std::{
     env,
     fs::File,
-    io::{BufReader, Cursor, Read, Seek, SeekFrom, Write},
+    io::{Cursor, Read, Seek, Write},
 };
 
 mod zip_structs;
 
 use crate::{
-    minz_compress::estimate_zlib_comp_level,
     preflate_parameter_estimator::estimate_preflate_parameters,
     preflate_statistical_codec::PreflatePredictionEncoder,
     preflate_statistical_model::PreflateStatisticsCounter,
@@ -81,7 +78,7 @@ fn analyze_compressed_data<R: Read + Seek>(
 
     let mut tokenPredictorIn = PreflateTokenPredictor::new(&block_decoder.output, params_e, 0);
 
-    let mut tokenPredictorOut = PreflateTokenPredictor::new(&block_decoder.output, params_e, 0);
+    let mut token_predictor_out = PreflateTokenPredictor::new(&block_decoder.output, params_e, 0);
 
     for i in 0..blocks.len() {
         let analysis = tokenPredictorIn
@@ -94,7 +91,7 @@ fn analyze_compressed_data<R: Read + Seek>(
 
         let mut decoder = encoder.make_decoder();
 
-        let outblock = tokenPredictorOut.decode_block(&mut decoder)?;
+        let outblock = token_predictor_out.decode_block(&mut decoder)?;
 
         // assert the decoded blocks are the same as the encoded ones
         assert_eq!(blocks[i].tokens, outblock.tokens, "block {}", i);
@@ -165,8 +162,6 @@ fn main_with_result() -> anyhow::Result<()> {
             do_analyze(&v, minusheader)?;
         }
     }
-
-    return Ok(());
 
     // Zlib compression with different compression levels
     for level in 0..10 {

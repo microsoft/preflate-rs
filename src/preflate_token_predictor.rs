@@ -140,30 +140,21 @@ impl<'a> PreflateTokenPredictor<'a> {
                 if predicted_token.len() != target_token.len() {
                     analysis.token_info[self.current_token_count as usize] += 4; // bad LEN prediction, adds two corrective actions
                     analysis.correctives.push(predicted_token.len() as i32);
+
                     analysis
                         .correctives
                         .push(target_token.len() as i32 - predicted_token.len() as i32);
-                    let rematch = self.repredict_match(&target_token);
 
-                    if rematch.requested_match_depth >= 0xffff {
-                        return Err(anyhow::Error::msg("Prediction failure"));
-                    }
+                    let rematch = self.repredict_match(&target_token)?;
 
-                    analysis
-                        .correctives
-                        .push((rematch.condensed_hops - 1) as i32);
+                    analysis.correctives.push((rematch - 1) as i32);
                 } else {
                     if target_token.dist() != predicted_token.dist() {
                         analysis.token_info[self.current_token_count as usize] += 8; // bad DIST ONLY prediction, adds one corrective action
-                        let rematch = self.repredict_match(&target_token);
 
-                        if rematch.requested_match_depth >= 0xffff {
-                            return Err(anyhow::Error::msg("Prediction failure"));
-                        }
+                        let rematch = self.repredict_match(&target_token)?;
 
-                        analysis
-                            .correctives
-                            .push((rematch.condensed_hops - 1) as i32);
+                        analysis.correctives.push((rematch - 1) as i32);
                     }
                 }
             }
@@ -281,22 +272,16 @@ impl<'a> PreflateTokenPredictor<'a> {
                 predicted_token.set_len(new_len);
                 predicted_token.set_dist(self.state.first_match(predicted_token.len()));
                 if hops != 0 {
-                    predicted_token.set_dist(self.recalculate_distance(&predicted_token, hops));
+                    predicted_token.set_dist(self.recalculate_distance(&predicted_token, hops)?);
                 }
 
-                if predicted_token.len() < 3
-                    || predicted_token.len() > 258
-                    || predicted_token.dist() == 0
-                {
+                if predicted_token.len() < 3 || predicted_token.len() > 258 {
                     return Err(anyhow::Error::msg("Prediction failure"));
                 }
             } else {
                 let hops = codec.decode_dist_only_correction();
                 if hops != 0 {
-                    predicted_token.set_dist(self.recalculate_distance(&predicted_token, hops));
-                    if predicted_token.dist() == 0 {
-                        return Err(anyhow::Error::msg("Prediction failure"));
-                    }
+                    predicted_token.set_dist(self.recalculate_distance(&predicted_token, hops)?);
                 }
             }
 
@@ -469,18 +454,20 @@ impl<'a> PreflateTokenPredictor<'a> {
         Ok(match_token)
     }
 
-    fn repredict_match(&mut self, token: &PreflateToken) -> PreflateRematchInfo {
+    /// For a given target token to match and the current state, find how many hops it takes to get to the same match
+    fn repredict_match(&mut self, token: &PreflateToken) -> anyhow::Result<u32> {
         let hash = self.state.calculate_hash();
         let head = self.state.get_current_hash_head(hash);
-        let rematch_info = self.state.rematch_info(head, token);
-        rematch_info
+        self.state.calculate_hops(head, token)
     }
 
-    fn recalculate_distance(&self, token: &PreflateToken, hops: u32) -> u32 {
+    fn recalculate_distance(&self, token: &PreflateToken, hops: u32) -> anyhow::Result<u32> {
         self.state.hop_match(token, hops)
     }
 
     fn commit_token(&mut self, token: &PreflateToken) {
+        // max_lazy is reused by the fast compressor to mean that if a match is larger than a
+        // certain size it should not be added to the dictionary in order to save on speed.
         if self.params.is_fast_compressor && token.len() > self.params.max_lazy {
             self.state.skip_hash(token.len());
         } else {

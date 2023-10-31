@@ -11,7 +11,7 @@ pub struct PreflatePredictionEncoder {
 
 #[derive(Clone)]
 pub enum PreflateAction {
-    EncodeValue(u32, u32),
+    EncodeValue { value: u32, max_bits: u32 },
     EncodeBlockType(BlockType),
     EncodeEOBMisprediction(bool),
     EncodeNonZeroPadding(bool),
@@ -47,7 +47,7 @@ impl PreflatePredictionEncoder {
 
     pub fn encode_value(&mut self, value: u32, max_bits: u32) {
         self.actions
-            .push(PreflateAction::EncodeValue(value, max_bits));
+            .push(PreflateAction::EncodeValue { value, max_bits });
     }
 
     // Block
@@ -161,9 +161,9 @@ impl PreflatePredictionDecoder {
         &self.actions[self.index - 1]
     }
 
-    pub fn decode_value(&mut self, _max_bits_orig: u32) -> u32 {
-        if let &PreflateAction::EncodeValue(value, _max_bits) = self.pop() {
-            assert_eq!(_max_bits, _max_bits_orig);
+    pub fn decode_value(&mut self, max_bits_orig: u32) -> u32 {
+        if let &PreflateAction::EncodeValue { value, max_bits } = self.pop() {
+            assert_eq!(max_bits, max_bits_orig);
             return value;
         }
         unreachable!();
