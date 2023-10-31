@@ -1,4 +1,4 @@
-use crate::preflate_token::BlockType;
+use crate::{preflate_token::BlockType, preflate_tree_predictor::TreeCodeType};
 
 pub struct PreflatePredictionDecoder {
     actions: Vec<PreflateAction>,
@@ -26,9 +26,9 @@ pub enum PreflateAction {
     EncodeLiteralCountMisprediction(bool),
     EncodeDistanceCountMisprediction(bool),
     EncodeTreeCodeBitLengthCorrection(u32, u32),
-    EncodeLDTypeCorrection(u32, u32),
-    EncodeRepeatCountCorrection(u32, u32, u32),
-    EncodeLDBitLengthCorrection(u32, u32),
+    EncodeLDTypeCorrection(TreeCodeType, TreeCodeType),
+    EncodeRepeatCountCorrection(u8, u8, TreeCodeType),
+    EncodeLDBitLengthCorrection(u8, u8),
 }
 
 impl PreflatePredictionEncoder {
@@ -96,19 +96,24 @@ impl PreflatePredictionEncoder {
             ));
     }
 
-    pub fn encode_ld_type_correction(&mut self, pred_val: u32, act_val: u32) {
+    pub fn encode_ld_type_correction(&mut self, pred_val: TreeCodeType, act_val: TreeCodeType) {
         self.actions
             .push(PreflateAction::EncodeLDTypeCorrection(pred_val, act_val));
     }
 
-    pub fn encode_repeat_count_correction(&mut self, pred_val: u32, act_val: u32, ld_type: u32) {
+    pub fn encode_repeat_count_correction(
+        &mut self,
+        pred_val: u8,
+        act_val: u8,
+        ld_type: TreeCodeType,
+    ) {
         self.actions
             .push(PreflateAction::EncodeRepeatCountCorrection(
                 pred_val, act_val, ld_type,
             ));
     }
 
-    pub fn encode_ld_bit_length_correction(&mut self, pred_val: u32, act_val: u32) {
+    pub fn encode_ld_bit_length_correction(&mut self, pred_val: u8, act_val: u8) {
         self.actions
             .push(PreflateAction::EncodeLDBitLengthCorrection(
                 pred_val, act_val,
@@ -219,7 +224,7 @@ impl PreflatePredictionDecoder {
         unreachable!();
     }
 
-    pub fn decode_ld_type_correction(&mut self, _predtype: u32) -> u32 {
+    pub fn decode_ld_type_correction(&mut self, _predtype: TreeCodeType) -> TreeCodeType {
         if let &PreflateAction::EncodeLDTypeCorrection(predtype, acttype) = self.pop() {
             assert_eq!(predtype, _predtype);
             return acttype;
@@ -227,7 +232,7 @@ impl PreflatePredictionDecoder {
         unreachable!();
     }
 
-    pub fn decode_repeat_count_correction(&mut self, _predval: u32, _ldtype: u32) -> u32 {
+    pub fn decode_repeat_count_correction(&mut self, _predval: u8, _ldtype: TreeCodeType) -> u8 {
         if let &PreflateAction::EncodeRepeatCountCorrection(predval, actval, ldtype) = self.pop() {
             assert_eq!(predval, _predval);
             assert_eq!(ldtype, _ldtype);
@@ -236,7 +241,7 @@ impl PreflatePredictionDecoder {
         unreachable!();
     }
 
-    pub fn decode_ld_bit_length_correction(&mut self, _predval: u32) -> u32 {
+    pub fn decode_ld_bit_length_correction(&mut self, _predval: u8) -> u8 {
         if let &PreflateAction::EncodeLDBitLengthCorrection(predval, actval) = self.pop() {
             assert_eq!(predval, _predval);
             return actval;

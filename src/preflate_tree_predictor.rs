@@ -11,7 +11,8 @@ use crate::{
     preflate_token::{BlockType, PreflateTokenBlock},
 };
 
-enum TreeCodeType {
+#[derive(PartialEq, Eq, Clone, Copy, Debug)]
+pub enum TreeCodeType {
     TCT_BITS = 0,
     TCT_REP = 1,
     TCT_REPZS = 2,
@@ -96,18 +97,6 @@ impl<'a> PreflateTreePredictor<'a> {
         TreeCodeType::TCT_BITS
     }
 
-    fn predict_code_data(
-        &self,
-        _sym_bit_len: &[u8],
-        _typ: TreeCodeType,
-        _sym_count: u32,
-        _first: bool,
-    ) -> u8 {
-        // Implementation for predict_code_data
-        // ...
-        0
-    }
-
     fn predict_ld_trees(
         &self,
         _analysis: &mut BlockAnalysisResult,
@@ -124,17 +113,79 @@ impl<'a> PreflateTreePredictor<'a> {
 
     fn reconstruct_ld_trees(
         &self,
-        _codec: &mut PreflatePredictionDecoder,
-        _frequencies: &mut [u32],
-        _target_codes: &mut [u8],
-        _target_code_size: u32,
-        _sym_bit_len: &[u8],
-        _sym_l_count: u32,
-        _sym_d_count: u32,
-    ) -> u32 {
-        // Implementation for reconstruct_ld_trees
-        // ...
-        0
+        codec: &mut PreflatePredictionDecoder,
+        frequencies: &mut [u32],
+        target_codes: &mut [u8],
+        target_code_size: u32,
+        sym_bit_len: &[u8],
+        sym_l_count: u32,
+        sym_d_count: u32,
+    ) -> anyhow::Result<u32> {
+        frequencies.iter_mut().for_each(|freq| *freq = 0);
+        let mut ptr = sym_bit_len;
+        let mut osize: u32 = 0;
+        let mut count1 = sym_l_count;
+        let mut count2 = sym_d_count;
+        let mut first = true;
+
+        while count1 + count2 > 0 {
+            let predicted_tree_code_type = predict_code_type(ptr, count1, first);
+            let predicted_tree_code_type =
+                codec.decode_ld_type_correction(predicted_tree_code_type);
+
+            let mut predicted_tree_code_data =
+                predict_code_data(ptr, predicted_tree_code_type, count1, first);
+            first = false;
+            if predicted_tree_code_type != TreeCodeType::TCT_BITS {
+                predicted_tree_code_data = codec.decode_repeat_count_correction(
+                    predicted_tree_code_data,
+                    predicted_tree_code_type,
+                );
+            } else {
+                predicted_tree_code_data =
+                    codec.decode_ld_bit_length_correction(predicted_tree_code_data);
+            }
+
+            let l: u32;
+            if predicted_tree_code_type != TreeCodeType::TCT_BITS {
+                frequencies[(predicted_tree_code_type as usize) + 15] += 1;
+                l = predicted_tree_code_data.into();
+                if osize + 2 > target_code_size {
+                    return Err(anyhow::anyhow!("Reconstruction failed"));
+                }
+                target_codes[osize as usize] = (predicted_tree_code_type as u8) + 15;
+                target_codes[osize as usize + 1] = predicted_tree_code_data;
+                osize += 2;
+            } else {
+                frequencies[predicted_tree_code_data as usize] += 1;
+                l = 1;
+                if osize >= target_code_size {
+                    return Err(anyhow::anyhow!("Reconstruction failed"));
+                }
+                target_codes[osize as usize] = predicted_tree_code_data;
+                osize += 1;
+            }
+
+            ptr = &ptr[l as usize..];
+            if count1 > l {
+                count1 -= l;
+            } else {
+                count1 += count2;
+                count2 = 0;
+                first = true;
+                if count1 >= l {
+                    count1 -= l;
+                } else {
+                    return Err(anyhow::anyhow!("Reconstruction failed"));
+                }
+            }
+        }
+
+        if count1 + count2 != 0 {
+            return Err(anyhow::anyhow!("Reconstruction failed"));
+        }
+
+        Ok(osize)
     }
 
     fn new(dump: &'a [u8], offset: u32) -> Self {
@@ -268,5 +319,75 @@ impl<'a> PreflateTreePredictor<'a> {
         // Implementation for decode_block
         // ...
         false
+    }
+}
+
+fn predict_code_type(sym_bit_len: &[u8], sym_count: u32, first: bool) -> TreeCodeType {
+    let code = sym_bit_len[0];
+    if code == 0 {
+        let mut curlen = 1;
+        let max_cur_len = std::cmp::min(sym_count, 11);
+        while curlen < max_cur_len && sym_bit_len[curlen as usize] == 0 {
+            curlen += 1;
+        }
+        if curlen >= 11 {
+            TreeCodeType::TCT_REPZL
+        } else if curlen >= 3 {
+            TreeCodeType::TCT_REPZS
+        } else {
+            TreeCodeType::TCT_BITS
+        }
+    } else if !first && code == sym_bit_len[sym_count as usize - 1] {
+        let mut curlen = 1;
+        let max_cur_len = std::cmp::min(sym_count, 3);
+        while curlen < max_cur_len && sym_bit_len[curlen as usize] == code {
+            curlen += 1;
+        }
+        if curlen >= 3 {
+            TreeCodeType::TCT_REP
+        } else {
+            TreeCodeType::TCT_BITS
+        }
+    } else {
+        TreeCodeType::TCT_BITS
+    }
+}
+
+fn predict_code_data(
+    sym_bit_len: &[u8],
+    code_type: TreeCodeType,
+    sym_count: u32,
+    first: bool,
+) -> u8 {
+    let code = sym_bit_len[0];
+    match code_type {
+        TreeCodeType::TCT_BITS => code,
+        TreeCodeType::TCT_REP => {
+            let mut curlen = 3;
+            let max_cur_len = std::cmp::min(sym_count, 6);
+            while curlen < max_cur_len && sym_bit_len[curlen as usize] == code {
+                curlen += 1;
+            }
+            curlen as u8
+        }
+        TreeCodeType::TCT_REPZS | TreeCodeType::TCT_REPZL => {
+            let mut curlen = if code_type == TreeCodeType::TCT_REPZS {
+                3
+            } else {
+                11
+            };
+            let max_cur_len = std::cmp::min(
+                sym_count,
+                if code_type == TreeCodeType::TCT_REPZS {
+                    10
+                } else {
+                    138
+                },
+            );
+            while curlen < max_cur_len && sym_bit_len[curlen as usize] == 0 {
+                curlen += 1;
+            }
+            curlen as u8
+        }
     }
 }
