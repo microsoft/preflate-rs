@@ -1,10 +1,10 @@
-pub const LITERAL_COUNT: u32 = 256;
-pub const NONLEN_CODE_COUNT: u32 = LITERAL_COUNT + 1; // EOB
-pub const LEN_CODE_COUNT: u32 = 29;
-pub const LITLEN_CODE_COUNT: u32 = NONLEN_CODE_COUNT + LEN_CODE_COUNT;
-pub const DIST_CODE_COUNT: u32 = 30;
-pub const LITLENDIST_CODE_COUNT: u32 = LITLEN_CODE_COUNT + DIST_CODE_COUNT;
-pub const CODETREE_CODE_COUNT: u32 = 19;
+pub const LITERAL_COUNT: usize = 256;
+pub const NONLEN_CODE_COUNT: usize = LITERAL_COUNT + 1; // EOB
+pub const LEN_CODE_COUNT: usize = 29;
+pub const LITLEN_CODE_COUNT: usize = NONLEN_CODE_COUNT + LEN_CODE_COUNT;
+pub const DIST_CODE_COUNT: usize = 30;
+pub const LITLENDIST_CODE_COUNT: usize = LITLEN_CODE_COUNT + DIST_CODE_COUNT;
+pub const CODETREE_CODE_COUNT: usize = 19;
 
 /// Matches of length 3 are discarded if their distance exceeds TOO_FAR
 pub const TOO_FAR: u32 = 4096;
@@ -61,18 +61,18 @@ pub const DIST_BASE_TABLE: [u16; DIST_CODE_COUNT as usize] = [
     2048, 3072, 4096, 6144, 8192, 12288, 16384, 24576,
 ];
 
-pub const LENGTH_EXTRA_TABLE: [u8; LEN_CODE_COUNT as usize] = [
+pub const LENGTH_EXTRA_TABLE: [u8; LEN_CODE_COUNT] = [
     0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0,
 ];
-pub const DIST_EXTRA_TABLE: [u8; DIST_CODE_COUNT as usize] = [
+pub const DIST_EXTRA_TABLE: [u8; DIST_CODE_COUNT] = [
     0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13,
     13,
 ];
-pub const TREE_CODE_ORDER_TABLE: [u8; CODETREE_CODE_COUNT as usize] = [
+pub const TREE_CODE_ORDER_TABLE: [u8; CODETREE_CODE_COUNT] = [
     16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15,
 ];
 
-pub fn DCode(dist: u32) -> u32 {
+pub fn quantize_distance(dist: u32) -> usize {
     DIST_CODE_TABLE[if dist <= 256 {
         dist - 1
     } else {
@@ -80,6 +80,6 @@ pub fn DCode(dist: u32) -> u32 {
     } as usize]
         .into()
 }
-pub fn LCode(len: u32) -> u32 {
+pub fn quantize_length(len: u32) -> usize {
     LENGTH_CODE_TABLE[len as usize - MIN_MATCH as usize].into()
 }

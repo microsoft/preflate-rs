@@ -1,6 +1,11 @@
 use anyhow::Context;
 
-use crate::preflate_token;
+use crate::{
+    preflate_constants::{
+        quantize_distance, quantize_length, LITLEN_CODE_COUNT, NONLEN_CODE_COUNT,
+    },
+    preflate_token,
+};
 
 use std::io::{Read, Seek};
 
@@ -110,7 +115,7 @@ impl<'a, R: Read + Seek> PreflateBlockDecoder<'a, R> {
             let lit_len: u32 = decoder.fetch_next_literal_code(&mut self.input)?.into();
             if lit_len < 256 {
                 self.write_literal(lit_len as u8);
-                blk.tokens.push(preflate_token::TOKEN_LITERAL);
+                blk.add_literal(lit_len as u8);
                 cur_pos += 1;
             } else if lit_len == 256 {
                 blk.uncompressed_len = self.output.len() as u32 - blk.uncompressed_start_pos;
@@ -118,7 +123,7 @@ impl<'a, R: Read + Seek> PreflateBlockDecoder<'a, R> {
                 break;
             } else {
                 let lcode: u32 = lit_len - preflate_constants::NONLEN_CODE_COUNT as u32;
-                if lcode >= preflate_constants::LEN_CODE_COUNT.into() {
+                if lcode >= preflate_constants::LEN_CODE_COUNT as u32 {
                     return Err(anyhow::Error::msg("Invalid length code"));
                 }
                 let len: u32 = preflate_constants::MIN_MATCH as u32
@@ -128,7 +133,7 @@ impl<'a, R: Read + Seek> PreflateBlockDecoder<'a, R> {
                 let irregular_258 =
                     len == 258 && lcode != preflate_constants::LEN_CODE_COUNT as u32 - 1;
                 let dcode = decoder.fetch_next_distance_char(&mut self.input)? as u32;
-                if dcode >= preflate_constants::DIST_CODE_COUNT.into() {
+                if dcode >= preflate_constants::DIST_CODE_COUNT as u32 {
                     return Err(anyhow::Error::msg("Invalid distance code"));
                 }
                 let dist = 1
@@ -139,8 +144,8 @@ impl<'a, R: Read + Seek> PreflateBlockDecoder<'a, R> {
                     return Err(anyhow::Error::msg("Invalid distance"));
                 }
                 self.write_reference(dist as u32, len as u32);
-                blk.tokens
-                    .push(PreflateToken::new_reference(len, dist, irregular_258));
+                blk.add_reference(len, dist, irregular_258);
+
                 earliest_reference = std::cmp::min(earliest_reference, cur_pos - (dist as i32));
                 cur_pos += len as i32;
             }

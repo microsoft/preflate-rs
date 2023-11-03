@@ -34,6 +34,7 @@ use crate::{
     preflate_statistical_codec::PreflatePredictionEncoder,
     preflate_statistical_model::PreflateStatisticsCounter,
     preflate_token_predictor::PreflateTokenPredictor,
+    preflate_tree_predictor::{decode_tree_for_block, encode_tree_for_block},
     zip_structs::{
         Zip64ExtendedInformation, ZipCentralDirectoryFileHeader, ZipEndOfCentralDirectoryRecord,
         ZipExtendedInformationHeader, ZipLocalFileHeader,
@@ -76,22 +77,26 @@ fn analyze_compressed_data<R: Read + Seek>(
 
     let mut counterE = PreflateStatisticsCounter::default();
 
-    let mut tokenPredictorIn = PreflateTokenPredictor::new(&block_decoder.output, params_e, 0);
+    let mut token_predictor_in = PreflateTokenPredictor::new(&block_decoder.output, params_e, 0);
 
     let mut token_predictor_out = PreflateTokenPredictor::new(&block_decoder.output, params_e, 0);
 
     for i in 0..blocks.len() {
-        let analysis = tokenPredictorIn
+        let token_predictor = token_predictor_in
             .analyze_block(&blocks[i])
             .with_context(|| format!("analyze_block {}", i))?;
-        analysis.update_counters(&mut counterE);
+        token_predictor.update_counters(&mut counterE);
 
         let mut encoder = PreflatePredictionEncoder::new();
-        analysis.encode_block(&mut encoder);
+        token_predictor.encode_block(&mut encoder);
+
+        //encode_tree_for_block(&blocks[i], &mut encoder)?;
 
         let mut decoder = encoder.make_decoder();
 
         let outblock = token_predictor_out.decode_block(&mut decoder)?;
+
+        let decoder = decode_tree_for_block(&outblock, &mut decoder)?;
 
         // assert the decoded blocks are the same as the encoded ones
         assert_eq!(blocks[i].tokens, outblock.tokens, "block {}", i);

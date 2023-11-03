@@ -2,7 +2,28 @@ use std::io::{Read, Seek};
 
 use crate::zip_bit_reader::ZipBitReader;
 
+#[derive(PartialEq, Eq, Clone, Copy, Debug)]
+pub enum TreeCodeType {
+    Code,
+    ZeroShort,
+    ZeroLong,
+    Repeat,
+}
+
+#[derive(Debug, Default)]
+pub struct HuffmanOriginalEncoding {
+    pub lengths: Vec<(TreeCodeType, u8)>,
+
+    pub code_lengths: Vec<u16>,
+
+    /// 5 Bits: HLIT, # of Literal/Length codes - 257 (257 - 286)
+    pub num_literals: usize,
+    /// 5 Bits: HDIST, # of Distance codes - 1        (1 - 32)
+    pub num_dist: usize,
+}
+
 pub struct HuffmanDecoder {
+    encoding: HuffmanOriginalEncoding,
     rg_literal_alphabet_code_lengths: Vec<u16>,
     rg_literal_alphabet_huffman_codes: Vec<u16>,
     rg_distance_alphabet_code_lengths: Vec<u16>,
@@ -37,6 +58,7 @@ impl HuffmanDecoder {
     /// construction.
     pub fn create_fixed() -> anyhow::Result<Self> {
         let mut hd = HuffmanDecoder {
+            encoding: HuffmanOriginalEncoding::default(),
             rg_literal_alphabet_code_lengths: vec![0; 288],
             rg_literal_alphabet_huffman_codes: vec![0; 288],
             rg_distance_alphabet_code_lengths: vec![5; 32], // Distance codes are represented by 5-bit codes
@@ -91,23 +113,18 @@ impl HuffmanDecoder {
         Ok(hd)
     }
 
+    /// returns the original encoding information so that we can see if it matches
+    /// the predictions and if not, emit the appropriate diffs so we can recreate it exactly
+    pub fn get_encoding(&self) -> &HuffmanOriginalEncoding {
+        &self.encoding
+    }
+
     /// Create Huffman code table for Literal alphabet 0-287 and distance alphabet 0-29 by
     /// reading the Huffman code length tables from the file.
     pub fn create_from_bit_reader<R: Read + Seek>(
         bit_reader: &mut ZipBitReader<R>,
         huffman_info_dump_level: i32,
     ) -> anyhow::Result<Self> {
-        let mut hd = HuffmanDecoder {
-            rg_literal_alphabet_code_lengths: vec![0; 286],
-            rg_literal_alphabet_huffman_codes: vec![0; 286],
-            rg_distance_alphabet_code_lengths: vec![0; 30],
-            rg_distance_alphabet_huffman_codes: vec![0; 30],
-            rg_literal_alphabet_huff_code_tree: vec![0; 0], // set below
-            rg_distance_alphabet_huff_code_tree: vec![0; 0], // set below
-            number_of_non_zero_literal_alphabet_code_lengths: 288,
-            number_of_non_zero_distance_alphabet_code_lengths: 32,
-        };
-
         let mut rg_code_length_alphabet_code_lengths: Vec<u16> = vec![0; 19];
         let mut rg_code_length_alphabet_huffman_codes: Vec<u16> = vec![0; 19];
 
@@ -160,6 +177,23 @@ impl HuffmanDecoder {
             println!("Reading Huffman encoded code lengths using above Huffman codes");
         }
 
+        let mut hd = HuffmanDecoder {
+            encoding: HuffmanOriginalEncoding {
+                lengths: Vec::new(),
+                code_lengths: rg_code_length_alphabet_code_lengths[0..hclen as usize + 4].to_vec(),
+                num_literals: hlit as usize,
+                num_dist: hdist as usize,
+            },
+            rg_literal_alphabet_code_lengths: vec![0; 286],
+            rg_literal_alphabet_huffman_codes: vec![0; 286],
+            rg_distance_alphabet_code_lengths: vec![0; 30],
+            rg_distance_alphabet_huffman_codes: vec![0; 30],
+            rg_literal_alphabet_huff_code_tree: vec![0; 0], // set below
+            rg_distance_alphabet_huff_code_tree: vec![0; 0], // set below
+            number_of_non_zero_literal_alphabet_code_lengths: 288,
+            number_of_non_zero_distance_alphabet_code_lengths: 32,
+        };
+
         // HLIT + 257 code lengths for the literal/length alphabet,
         // encoded using the code length Huffman code
         // HDIST + 1 code lengths for the distance alphabet,
@@ -194,6 +228,8 @@ impl HuffmanDecoder {
                         w_next
                     );
                 }
+
+                hd.encoding.lengths.push((TreeCodeType::Code, w_next as u8));
             } else {
                 let mut c_copy: i32 = 0;
                 let mut w_copy: u16 = 0;
@@ -205,7 +241,9 @@ impl HuffmanDecoder {
                     //		Example:  Codes 8, 16 (+2 bits 11),
                     //		16 (+2 bits 10) will expand to
                     //		12 code lengths of 8 (1 + 6 + 5)
-                    c_copy = 3 + bit_reader.get(2)? as i32;
+                    let v = bit_reader.get(2)?;
+
+                    c_copy = 3 + v as i32;
                     w_copy = rg_combined_lengths[cli as usize - 1];
                     if huffman_info_dump_level == 3 {
                         println!(
@@ -217,9 +255,15 @@ impl HuffmanDecoder {
                             c_copy
                         );
                     }
+
+                    hd.encoding
+                        .lengths
+                        .push((TreeCodeType::Repeat, c_copy as u8));
                 } else if w_next == 17 {
                     // 17: Repeat a code length of 0 for 3 - 10 times. (3 bits of length)
-                    c_copy = 3 + bit_reader.get(3)? as i32;
+                    let v = bit_reader.get(3)?;
+
+                    c_copy = 3 + v as i32;
                     w_copy = 0;
                     if huffman_info_dump_level == 3 {
                         println!(
@@ -231,9 +275,15 @@ impl HuffmanDecoder {
                             c_copy
                         );
                     }
+
+                    hd.encoding
+                        .lengths
+                        .push((TreeCodeType::ZeroShort, c_copy as u8));
                 } else if w_next == 18 {
                     // 18: Repeat a code length of 0 for 11 - 138 times (7 bits of length)
-                    c_copy = 11 + bit_reader.get(7)? as i32;
+                    let v = bit_reader.get(7)?;
+
+                    c_copy = 11 + v as i32;
                     w_copy = 0;
                     if huffman_info_dump_level == 3 {
                         println!(
@@ -245,6 +295,10 @@ impl HuffmanDecoder {
                             c_copy
                         );
                     }
+
+                    hd.encoding
+                        .lengths
+                        .push((TreeCodeType::ZeroLong, c_copy as u8));
                 } else {
                     println!("Bogus value returned");
                 }
