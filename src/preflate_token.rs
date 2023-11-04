@@ -76,19 +76,20 @@ pub struct PreflateTokenBlock {
 #[derive(Debug)]
 pub struct TokenFrequency {
     pub literal_codes: [u16; LITLENDIST_CODE_COUNT],
-    pub lcode_count: u32,
     pub distance_codes: [u16; DIST_CODE_COUNT],
-    pub dcode_count: u32,
 }
 
 impl Default for TokenFrequency {
     fn default() -> Self {
-        TokenFrequency {
+        let mut t = TokenFrequency {
             literal_codes: [0; LITLENDIST_CODE_COUNT],
-            lcode_count: 0,
             distance_codes: [0; DIST_CODE_COUNT],
-            dcode_count: 0,
-        }
+        };
+
+        // include the end of block code
+        t.literal_codes[256] = 1;
+
+        t
     }
 }
 
@@ -110,7 +111,6 @@ impl PreflateTokenBlock {
     pub fn add_literal(&mut self, lit: u8) {
         self.tokens.push(TOKEN_LITERAL);
         self.freq.literal_codes[lit as usize] += 1;
-        self.freq.lcode_count += 1;
     }
 
     pub fn add_reference(&mut self, len: u32, dist: u32, irregular258: bool) {
@@ -118,7 +118,5 @@ impl PreflateTokenBlock {
             .push(PreflateToken::new_reference(len, dist, irregular258));
         self.freq.literal_codes[NONLEN_CODE_COUNT as usize + quantize_length(len)] += 1;
         self.freq.distance_codes[quantize_distance(dist)] += 1;
-        self.freq.lcode_count += 1;
-        self.freq.dcode_count += 1;
     }
 }

@@ -209,6 +209,8 @@ pub fn calc_bit_lengths(
     }; MAX_HUFF_SYMBOLS];
 
     let mut num_used_symbols = 0;
+    let mut max_used = 0;
+
     for i in 0..table_len {
         if sym_count[i] != 0 {
             symbols0[num_used_symbols] = SymFreq {
@@ -216,6 +218,7 @@ pub fn calc_bit_lengths(
                 sym_index: i as u16,
             };
             num_used_symbols += 1;
+            max_used = i + 1;
         }
     }
 
@@ -247,5 +250,5 @@ pub fn calc_bit_lengths(
         last = first;
     }
 
-    num_used_symbols
+    max_used
 }

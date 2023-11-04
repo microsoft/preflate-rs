@@ -166,8 +166,7 @@ impl<'a> PreflateTokenPredictor<'a> {
                 }
             }
 
-            self.commit_token(&target_token);
-            self.current_token_count += 1;
+            self.commit_token(&target_token, None);
         }
 
         if !self.predict_eob() {
@@ -247,10 +246,7 @@ impl<'a> PreflateTokenPredictor<'a> {
             if predicted_token.len() == 1 {
                 let not_ok = codec.decode_literal_prediction_wrong();
                 if !not_ok {
-                    self.commit_token(&predicted_token);
-
-                    block.tokens.push(predicted_token);
-                    self.current_token_count += 1;
+                    self.commit_token(&predicted_token, Some(&mut block));
                     continue;
                 }
 
@@ -259,9 +255,7 @@ impl<'a> PreflateTokenPredictor<'a> {
                 let not_ok = codec.decode_reference_prediction_wrong();
                 if not_ok {
                     predicted_token = TOKEN_LITERAL;
-                    self.commit_token(&predicted_token);
-                    block.tokens.push(predicted_token);
-                    self.current_token_count += 1;
+                    self.commit_token(&predicted_token, Some(&mut block));
                     continue;
                 }
             }
@@ -290,9 +284,7 @@ impl<'a> PreflateTokenPredictor<'a> {
                 predicted_token.set_irregular258(true);
             }
 
-            self.commit_token(&predicted_token);
-            block.tokens.push(predicted_token);
-            self.current_token_count += 1;
+            self.commit_token(&predicted_token, Some(&mut block));
         }
 
         Ok(block)
@@ -356,90 +348,90 @@ impl<'a> PreflateTokenPredictor<'a> {
         self.prev_len = 0;
         self.pending_token = None;
 
-        let match_token;
-        if let Some(m) = m {
-            match_token = m;
-        } else {
-            return TOKEN_LITERAL;
-        }
+        if let Some(match_token) = m {
+            if match_token.len() < MIN_MATCH {
+                return TOKEN_LITERAL;
+            }
 
-        if match_token.len() < MIN_MATCH {
-            return TOKEN_LITERAL;
-        }
+            if self.params.is_fast_compressor {
+                return match_token;
+            }
 
-        if self.params.is_fast_compressor {
-            return match_token;
-        }
+            // match is too small and far way to be worth encoding as a distance/length pair.
+            if match_token.len() == 3 && match_token.dist() > TOO_FAR {
+                return TOKEN_LITERAL;
+            }
 
-        // match is too small and far way to be worth encoding as a distance/length pair.
-        if match_token.len() == 3 && match_token.dist() > TOO_FAR {
-            return TOKEN_LITERAL;
-        }
-
-        // Check for a longer match that starts at the next byte, in which case we should
-        // just emit a literal instead of a distance/length pair.
-        if match_token.len() < self.params.max_lazy
-            && self.state.available_input_size() >= match_token.len() + 2
-        {
-            let mut match_next;
-            let hash_next = self.state.calculate_hash_next();
-            let head_next = self.state.get_current_hash_head(hash_next);
-
-            if !self.params.is_fast_compressor
-                && self.state.seq_valid(self.state.current_input_pos() + 1)
+            // Check for a longer match that starts at the next byte, in which case we should
+            // just emit a literal instead of a distance/length pair.
+            if match_token.len() < self.params.max_lazy
+                && self.state.available_input_size() >= match_token.len() + 2
             {
-                match_next = self.state.seq_match(
-                    self.state.current_input_pos() + 1,
-                    head_next,
-                    match_token.len(),
-                    if self.params.zlib_compatible {
-                        0
-                    } else {
-                        2 << self.params.log2_of_max_chain_depth_m1
-                    },
-                );
-            } else {
-                match_next = self.state.match_token(
-                    head_next,
-                    match_token.len(),
-                    1,
-                    if self.params.zlib_compatible {
-                        0
-                    } else {
-                        2 << self.params.log2_of_max_chain_depth_m1
-                    },
-                );
+                let mut match_next;
+                let hash_next = self.state.calculate_hash_next();
+                let head_next = self.state.get_current_hash_head(hash_next);
 
-                if (hash_next ^ hash) & self.state.hash_mask() == 0 {
-                    let max_size = std::cmp::min(self.state.available_input_size() - 1, MAX_MATCH);
-                    let mut rle = 0;
-                    let c = self.state.input_cursor();
-                    let b = c[0];
-                    while rle < max_size && c[1 + rle as usize] == b {
-                        rle += 1;
+                if !self.params.is_fast_compressor
+                    && self.state.seq_valid(self.state.current_input_pos() + 1)
+                {
+                    match_next = self.state.seq_match(
+                        self.state.current_input_pos() + 1,
+                        head_next,
+                        match_token.len(),
+                        if self.params.zlib_compatible {
+                            0
+                        } else {
+                            2 << self.params.log2_of_max_chain_depth_m1
+                        },
+                    );
+                } else {
+                    match_next = self.state.match_token(
+                        head_next,
+                        match_token.len(),
+                        1,
+                        if self.params.zlib_compatible {
+                            0
+                        } else {
+                            2 << self.params.log2_of_max_chain_depth_m1
+                        },
+                    );
+
+                    if (hash_next ^ hash) & self.state.hash_mask() == 0 {
+                        let max_size =
+                            std::cmp::min(self.state.available_input_size() - 1, MAX_MATCH);
+                        let mut rle = 0;
+                        let c = self.state.input_cursor();
+                        let b = c[0];
+                        while rle < max_size && c[1 + rle as usize] == b {
+                            rle += 1;
+                        }
+                        if rle > match_token.len() && match_next.is_some_and(|x| rle >= x.len()) {
+                            match_next = Some(PreflateToken::new_reference(rle, 1, false));
+                        }
                     }
-                    if rle > match_token.len() && match_next.is_some_and(|x| rle >= x.len()) {
-                        match_next = Some(PreflateToken::new_reference(rle, 1, false));
+                }
+
+                if let Some(m) = match_next {
+                    if m.len() > match_token.len() {
+                        self.prev_len = match_token.len();
+                        self.pending_token = match_next;
+                        if !self.params.zlib_compatible {
+                            self.prev_len = 0;
+                            self.pending_token = None;
+                        }
+                        return TOKEN_LITERAL;
                     }
                 }
             }
 
-            if let Some(m) = match_next {
-                if m.len() > match_token.len() {
-                    self.prev_len = match_token.len();
-                    self.pending_token = match_next;
-                    if !self.params.zlib_compatible {
-                        self.prev_len = 0;
-                        self.pending_token = None;
-                    }
-                    return TOKEN_LITERAL;
-                }
-            }
+            match_token
+        } else {
+            TOKEN_LITERAL
         }
-
-        match_token
     }
 
+    /// When the predicted token was a literal, but the actual token was a reference, try again
+    /// to find a match for the reference.
     fn repredict_reference(&mut self) -> anyhow::Result<PreflateToken> {
         if self.state.current_input_pos() == 0 || self.state.available_input_size() < MIN_MATCH {
             return Err(anyhow::Error::msg(
@@ -475,7 +467,17 @@ impl<'a> PreflateTokenPredictor<'a> {
         self.state.hop_match(token, hops)
     }
 
-    fn commit_token(&mut self, token: &PreflateToken) {
+    fn commit_token(&mut self, token: &PreflateToken, block: Option<&mut PreflateTokenBlock>) {
+        if let Some(block) = block {
+            if token.len() == 1 {
+                block.add_literal(self.state.input_cursor()[0]);
+            } else {
+                block.add_reference(token.len(), token.dist(), token.get_irregular258());
+            }
+        }
+
+        self.current_token_count += 1;
+
         // max_lazy is reused by the fast compressor to mean that if a match is larger than a
         // certain size it should not be added to the dictionary in order to save on speed.
         if self.params.is_fast_compressor && token.len() > self.params.max_lazy {

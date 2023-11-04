@@ -7,6 +7,14 @@ pub struct PreflatePredictionDecoder {
 
 pub struct PreflatePredictionEncoder {
     actions: Vec<PreflateAction>,
+
+    encode_tree_code_count_misprediction: u32,
+    encode_literal_count_misprediction: u32,
+    encode_distance_count_misprediction: u32,
+    encode_tree_code_bit_length_correction: u32,
+    encode_ldtype_correction: u32,
+    encode_repeat_count_correction: u32,
+    encode_ldbit_length_correction: u32,
 }
 
 #[derive(Clone)]
@@ -35,6 +43,13 @@ impl PreflatePredictionEncoder {
     pub fn new() -> Self {
         Self {
             actions: Vec::new(),
+            encode_tree_code_count_misprediction: 0,
+            encode_literal_count_misprediction: 0,
+            encode_distance_count_misprediction: 0,
+            encode_tree_code_bit_length_correction: 0,
+            encode_ldtype_correction: 0,
+            encode_repeat_count_correction: 0,
+            encode_ldbit_length_correction: 0,
         }
     }
 
@@ -72,6 +87,10 @@ impl PreflatePredictionEncoder {
             .push(PreflateAction::EncodeTreeCodeCountMisprediction(
                 misprediction,
             ));
+
+        if misprediction {
+            self.encode_tree_code_count_misprediction += 1;
+        }
     }
 
     pub fn encode_literal_count_misprediction(&mut self, misprediction: bool) {
@@ -79,6 +98,10 @@ impl PreflatePredictionEncoder {
             .push(PreflateAction::EncodeLiteralCountMisprediction(
                 misprediction,
             ));
+
+        if misprediction {
+            self.encode_literal_count_misprediction += 1;
+        }
     }
 
     pub fn encode_distance_count_misprediction(&mut self, misprediction: bool) {
@@ -86,6 +109,10 @@ impl PreflatePredictionEncoder {
             .push(PreflateAction::EncodeDistanceCountMisprediction(
                 misprediction,
             ));
+
+        if misprediction {
+            self.encode_distance_count_misprediction += 1;
+        }
     }
 
     pub fn encode_tree_code_bit_length_correction(&mut self, pred_val: u8, act_val: u8) {
@@ -93,11 +120,19 @@ impl PreflatePredictionEncoder {
             .push(PreflateAction::EncodeTreeCodeBitLengthCorrection(
                 pred_val, act_val,
             ));
+
+        if pred_val != act_val {
+            self.encode_tree_code_bit_length_correction += 1;
+        }
     }
 
     pub fn encode_ld_type_correction(&mut self, pred_val: TreeCodeType, act_val: TreeCodeType) {
         self.actions
             .push(PreflateAction::EncodeLDTypeCorrection(pred_val, act_val));
+
+        if pred_val != act_val {
+            self.encode_ldtype_correction += 1;
+        }
     }
 
     pub fn encode_repeat_count_correction(
@@ -110,6 +145,10 @@ impl PreflatePredictionEncoder {
             .push(PreflateAction::EncodeRepeatCountCorrection(
                 pred_val, act_val, ld_type,
             ));
+
+        if pred_val != act_val {
+            self.encode_repeat_count_correction += 1;
+        }
     }
 
     pub fn encode_ld_bit_length_correction(&mut self, pred_val: u8, act_val: u8) {
@@ -117,6 +156,10 @@ impl PreflatePredictionEncoder {
             .push(PreflateAction::EncodeLDBitLengthCorrection(
                 pred_val, act_val,
             ));
+
+        if pred_val != act_val {
+            self.encode_ldbit_length_correction += 1;
+        }
     }
 
     // Token

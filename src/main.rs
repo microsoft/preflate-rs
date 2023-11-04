@@ -35,10 +35,6 @@ use crate::{
     preflate_statistical_model::PreflateStatisticsCounter,
     preflate_token_predictor::PreflateTokenPredictor,
     preflate_tree_predictor::{decode_tree_for_block, encode_tree_for_block},
-    zip_structs::{
-        Zip64ExtendedInformation, ZipCentralDirectoryFileHeader, ZipEndOfCentralDirectoryRecord,
-        ZipExtendedInformationHeader, ZipLocalFileHeader,
-    },
 };
 
 fn analyze_compressed_data<R: Read + Seek>(
@@ -101,7 +97,16 @@ fn analyze_compressed_data<R: Read + Seek>(
         // assert the decoded blocks are the same as the encoded ones
         assert_eq!(blocks[i].tokens, outblock.tokens, "block {}", i);
 
-        //let decoder = decode_tree_for_block(&outblock.freq, &mut decoder)?;
+        {
+            let mut encoder = PreflatePredictionEncoder::new();
+            encode_tree_for_block(&blocks[i].huffman_encoding, &blocks[i].freq, &mut encoder)?;
+
+            let mut decoder = encoder.make_decoder();
+
+            let decoded_tree = decode_tree_for_block(&outblock.freq, &mut decoder)?;
+        }
+
+        //
     }
 
     counterE.token.print();

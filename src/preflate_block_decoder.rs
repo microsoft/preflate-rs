@@ -1,18 +1,11 @@
 use anyhow::Context;
 
-use crate::{
-    preflate_constants::{
-        quantize_distance, quantize_length, LITLEN_CODE_COUNT, NONLEN_CODE_COUNT,
-    },
-    preflate_token,
-};
-
 use std::io::{Read, Seek};
 
 use crate::{
     huffman_decoder::HuffmanDecoder,
     preflate_constants,
-    preflate_token::{BlockType, PreflateToken, PreflateTokenBlock},
+    preflate_token::{BlockType, PreflateTokenBlock},
     zip_bit_reader::ZipBitReader,
 };
 

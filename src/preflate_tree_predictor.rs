@@ -1,17 +1,75 @@
-use std::{cmp::Ordering, collections::BinaryHeap, f32::consts::E, os::windows::fs::symlink_dir};
-
 use crate::{
     huffman_decoder::{HuffmanOriginalEncoding, TreeCodeType},
     huffman_helper::calc_bit_lengths,
     preflate_constants::{
-        quantize_distance, quantize_length, CODETREE_CODE_COUNT, DIST_CODE_COUNT,
-        LITLENDIST_CODE_COUNT, LITLEN_CODE_COUNT, NONLEN_CODE_COUNT, TREE_CODE_ORDER_TABLE,
+        CODETREE_CODE_COUNT, DIST_CODE_COUNT, LITLENDIST_CODE_COUNT, LITLEN_CODE_COUNT,
+        NONLEN_CODE_COUNT, TREE_CODE_ORDER_TABLE,
     },
-    preflate_input::PreflateInput,
     preflate_statistical_codec::{PreflatePredictionDecoder, PreflatePredictionEncoder},
-    preflate_statistical_model::PreflateStatisticsCounter,
-    preflate_token::{BlockType, PreflateTokenBlock, TokenFrequency},
+    preflate_token::TokenFrequency,
 };
+
+pub fn encode_tree_for_block(
+    huffman_encoding: &HuffmanOriginalEncoding,
+    freq: &TokenFrequency,
+    encoder: &mut PreflatePredictionEncoder,
+) -> anyhow::Result<()> {
+    // bit_lengths is a vector of huffman code sizes for literals followed by length codes
+    let mut bit_lengths = vec![0; LITLENDIST_CODE_COUNT as usize];
+
+    // first predict the size of the literal tree
+    let mut predicted_l_tree_size = build_l_bit_lengths(&mut bit_lengths, &freq.literal_codes);
+
+    encoder
+        .encode_literal_count_misprediction(predicted_l_tree_size != huffman_encoding.num_literals);
+
+    // if incorrect, include the actual size
+    if predicted_l_tree_size != huffman_encoding.num_literals {
+        encoder.encode_value(huffman_encoding.num_literals as u32, 7);
+        predicted_l_tree_size = huffman_encoding.num_literals;
+    }
+
+    // now predict the size of the distance tree
+    let mut predicted_d_tree_size = build_d_bit_lengths(
+        &mut bit_lengths[predicted_l_tree_size as usize..],
+        &freq.distance_codes,
+    );
+
+    encoder.encode_distance_count_misprediction(predicted_d_tree_size != huffman_encoding.num_dist);
+
+    // if incorrect, include the actual size
+    if predicted_d_tree_size != huffman_encoding.num_dist {
+        encoder.encode_value(huffman_encoding.num_dist as u32, 5);
+        predicted_d_tree_size = huffman_encoding.num_dist;
+    }
+
+    // now predict each length code
+    predict_ld_trees(encoder, &bit_lengths, huffman_encoding.lengths.as_slice())?;
+
+    // final step, we need to construct the second level huffman tree that is used
+    // to store the bit lengths of the huffman tree we just created
+    let codetree_freq = calc_codetree_freq(&huffman_encoding.lengths);
+
+    let mut tc_code_tree = [0u8; CODETREE_CODE_COUNT as usize];
+    let predicted_c_tree_size = build_tc_bit_lengths(&mut tc_code_tree, &codetree_freq);
+
+    if predicted_c_tree_size != huffman_encoding.code_lengths.len() {
+        encoder.encode_tree_code_count_misprediction(true);
+        encoder.encode_value(huffman_encoding.code_lengths.len() as u32 - 4, 4);
+    } else {
+        encoder.encode_tree_code_count_misprediction(false);
+    }
+
+    for i in 0..huffman_encoding.code_lengths.len() {
+        let predicted_bl = tc_code_tree[i];
+        encoder.encode_tree_code_bit_length_correction(
+            predicted_bl,
+            huffman_encoding.code_lengths[i] as u8,
+        );
+    }
+
+    Ok(())
+}
 
 pub fn decode_tree_for_block(
     freq: &TokenFrequency,
@@ -45,27 +103,17 @@ pub fn decode_tree_for_block(
 
     let mut simple_code_tree = [0u8; CODETREE_CODE_COUNT as usize];
     let mut predicted_c_tree_size = build_tc_bit_lengths(&mut simple_code_tree, &bl_freqs);
+
     if codec.decode_tree_code_count_misprediction() {
         predicted_c_tree_size = codec.decode_value(4) as usize + 4;
     }
-    //block.ncode = predicted_c_tree_size as u16;
 
-    let mut shuffled_code_tree = [0u8; CODETREE_CODE_COUNT as usize];
     for i in 0..predicted_c_tree_size {
-        let predicted_bl = simple_code_tree[TREE_CODE_ORDER_TABLE[i] as usize];
-        shuffled_code_tree[i as usize] = codec.decode_tree_code_bit_length_correction(predicted_bl);
+        result
+            .code_lengths
+            .push(codec.decode_tree_code_bit_length_correction(simple_code_tree[i]));
     }
 
-    /*block
-            .tree_codes
-            .reserve(predicted_c_tree_size as usize + target_code_size);
-        block
-            .tree_codes
-            .extend_from_slice(&shuffled_code_tree[..predicted_c_tree_size as usize]);
-        block
-            .tree_codes
-            .extend_from_slice(&compressed_ld_trees[..target_code_size as usize]);
-    */
     Ok(result)
 }
 
@@ -171,42 +219,6 @@ fn reconstruct_ld_trees(
     Ok(result)
 }
 
-pub fn encode_tree_for_block(
-    huffman_encoding: &HuffmanOriginalEncoding,
-    freq: &TokenFrequency,
-    encoder: &mut PreflatePredictionEncoder,
-) -> anyhow::Result<()> {
-    let mut bit_lengths = vec![0; LITLENDIST_CODE_COUNT as usize];
-    let mut predicted_l_tree_size = build_l_bit_lengths(&mut bit_lengths, &freq.literal_codes);
-
-    encoder
-        .encode_literal_count_misprediction(predicted_l_tree_size != huffman_encoding.num_literals);
-    if predicted_l_tree_size != huffman_encoding.num_literals {
-        encoder.encode_value(huffman_encoding.num_literals as u32, 7);
-    }
-
-    predicted_l_tree_size = huffman_encoding.num_literals;
-
-    let mut predicted_d_tree_size = build_d_bit_lengths(
-        &mut bit_lengths[predicted_l_tree_size as usize..],
-        &freq.distance_codes,
-    );
-
-    encoder
-        .encode_tree_code_count_misprediction(predicted_d_tree_size != huffman_encoding.num_dist);
-    if predicted_d_tree_size != huffman_encoding.num_dist {
-        encoder.encode_value(huffman_encoding.num_dist as u32, 5);
-    }
-
-    predicted_d_tree_size = huffman_encoding.num_dist;
-
-    predict_ld_trees(encoder, &bit_lengths, huffman_encoding.lengths.as_slice())?;
-
-    let freq = calc_codetree_freq(&huffman_encoding.lengths);
-
-    Ok(())
-}
-
 /// calculates the treecode frequence for the given block, which is used to
 /// to calculate the huffman tree for encoding the treecodes themselves
 fn calc_codetree_freq(codes: &[(TreeCodeType, u8)]) -> [u16; CODETREE_CODE_COUNT] {
@@ -294,4 +306,11 @@ fn predict_code_data(sym_bit_len: &[u8], code_type: TreeCodeType) -> u8 {
             curlen as u8
         }
     }
+}
+
+#[test]
+fn encode_tree_for_block_roundtrip() {
+    let mut freq = TokenFrequency::default();
+    freq.literal_codes.fill(1);
+    freq.distance_codes.fill(1);
 }

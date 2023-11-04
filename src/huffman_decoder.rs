@@ -1,9 +1,6 @@
 use std::io::{Read, Seek};
 
-use crate::{
-    preflate_constants::{DIST_CODE_COUNT, LITLENDIST_CODE_COUNT},
-    zip_bit_reader::ZipBitReader,
-};
+use crate::zip_bit_reader::ZipBitReader;
 
 #[derive(PartialEq, Eq, Clone, Copy, Debug)]
 pub enum TreeCodeType {
@@ -13,11 +10,11 @@ pub enum TreeCodeType {
     Repeat,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub struct HuffmanOriginalEncoding {
     pub lengths: Vec<(TreeCodeType, u8)>,
 
-    pub code_lengths: Vec<u16>,
+    pub code_lengths: Vec<u8>,
 
     /// 5 Bits: HLIT, # of Literal/Length codes - 257 (257 - 286)
     pub num_literals: usize,
@@ -37,9 +34,9 @@ impl Default for HuffmanOriginalEncoding {
 }
 
 pub struct HuffmanDecoder {
-    rg_literal_alphabet_code_lengths: Vec<u16>,
+    rg_literal_alphabet_code_lengths: Vec<u8>,
     rg_literal_alphabet_huffman_codes: Vec<u16>,
-    rg_distance_alphabet_code_lengths: Vec<u16>,
+    rg_distance_alphabet_code_lengths: Vec<u8>,
     rg_distance_alphabet_huffman_codes: Vec<u16>,
     rg_literal_alphabet_huff_code_tree: Vec<i32>,
     rg_distance_alphabet_huff_code_tree: Vec<i32>,
@@ -88,7 +85,7 @@ impl HuffmanDecoder {
         // 256 - 279     7
         // 280 - 287     8
         for i in 0..288 {
-            let mut wbits: u16 = 8;
+            let mut wbits: u8 = 8;
             if i >= 144 && i <= 255 {
                 wbits = 9;
             } else if i >= 256 && i <= 279 {
@@ -131,7 +128,7 @@ impl HuffmanDecoder {
         bit_reader: &mut ZipBitReader<R>,
         huffman_info_dump_level: i32,
     ) -> anyhow::Result<(Self, HuffmanOriginalEncoding)> {
-        let mut rg_code_length_alphabet_code_lengths: Vec<u16> = vec![0; 19];
+        let mut rg_code_length_alphabet_code_lengths: Vec<u8> = vec![0; 19];
         let mut rg_code_length_alphabet_huffman_codes: Vec<u16> = vec![0; 19];
 
         let bit_position_at_start = bit_reader.bit_position()?;
@@ -162,7 +159,7 @@ impl HuffmanDecoder {
         ];
         for i in 0..hclen + 4 {
             rg_code_length_alphabet_code_lengths
-                [rg_map_code_length_alphabet_code_lengths[i as usize]] = bit_reader.get(3)? as u16;
+                [rg_map_code_length_alphabet_code_lengths[i as usize]] = bit_reader.get(3)? as u8;
         }
 
         Self::calc_huffman_codes(
@@ -186,8 +183,8 @@ impl HuffmanDecoder {
         let mut huffman_encoding = HuffmanOriginalEncoding {
             lengths: Vec::new(),
             code_lengths: rg_code_length_alphabet_code_lengths[0..hclen as usize + 4].to_vec(),
-            num_literals: hlit as usize,
-            num_dist: hdist as usize,
+            num_literals: hlit as usize + 257,
+            num_dist: hdist as usize + 1,
         };
 
         let mut hd = HuffmanDecoder {
@@ -211,7 +208,7 @@ impl HuffmanDecoder {
 
         let bit_position_start_of_combined_lengths = bit_reader.bit_position()?;
         let c_lengths_combined = hlit + 257 + hdist + 1;
-        let mut rg_combined_lengths: Vec<u16> = vec![0; c_lengths_combined as usize];
+        let mut rg_combined_lengths: Vec<u8> = vec![0; c_lengths_combined as usize];
         let mut cli = 0;
         while cli < c_lengths_combined {
             let _bits_consumed: i32 = 0;
@@ -223,7 +220,7 @@ impl HuffmanDecoder {
 
             if w_next <= 15 {
                 //	0 - 15: Represent code lengths of 0 - 15
-                rg_combined_lengths[cli as usize] = w_next;
+                rg_combined_lengths[cli as usize] = w_next as u8;
                 if huffman_info_dump_level == 3 {
                     println!(
                         "{} {} Code Length(v0-15) = {2}",
@@ -241,7 +238,7 @@ impl HuffmanDecoder {
                     .push((TreeCodeType::Code, w_next as u8));
             } else {
                 let mut c_copy: i32 = 0;
-                let mut w_copy: u16 = 0;
+                let mut w_copy: u8 = 0;
 
                 if w_next == 16 {
                     // 16: Copy the previous code length 3 - 6 times.
@@ -440,7 +437,7 @@ impl HuffmanDecoder {
 
     /// Calculates Huffman code array given an array of Huffman Code Lengths using the RFC 1951 algorithm
     fn calc_huffman_codes(
-        rg_code_lengths: &Vec<u16>,
+        rg_code_lengths: &Vec<u8>,
         rg_codes: &mut Vec<u16>,
     ) -> anyhow::Result<()> {
         if rg_code_lengths.len() != rg_codes.len() {
@@ -499,7 +496,7 @@ impl HuffmanDecoder {
     ///	2. If rgHuffNodes[i] is less than zero then it is a leaf and the literal alphabet value is -rgHuffNodes[i] + 1
     ///	3. The root node index 'N' is rgHuffNodes.Length - 2. Search should start at that node.
     fn calculate_huffman_code_tree(
-        rg_code_lengths: &Vec<u16>,
+        rg_code_lengths: &Vec<u8>,
         rg_codes: &Vec<u16>,
     ) -> anyhow::Result<Vec<i32>> {
         let mut c_codes: i32 = 0;

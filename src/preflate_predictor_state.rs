@@ -1,16 +1,12 @@
 use crate::preflate_constants::{self, MAX_MATCH, MIN_LOOKAHEAD, MIN_MATCH};
 use crate::preflate_hash_chain::{PreflateHashChainExt, PreflateHashIterator};
 use crate::preflate_parameter_estimator::PreflateParameters;
-use crate::preflate_parse_config::PreflateParserConfig;
 use crate::preflate_seq_chain::PreflateSeqChain;
 use crate::preflate_token::PreflateToken;
 use std::cmp;
-use std::f32::consts::E;
 
 #[derive(Default)]
 pub struct PreflateRematchInfo {
-    first_match_depth: u32,
-    first_match_dist: u32,
     pub requested_match_depth: u32,
     pub condensed_hops: u32,
 }
