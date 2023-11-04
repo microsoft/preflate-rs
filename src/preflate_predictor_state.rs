@@ -3,7 +3,7 @@ use crate::preflate_hash_chain::{PreflateHashChainExt, PreflateHashIterator};
 use crate::preflate_parameter_estimator::PreflateParameters;
 use crate::preflate_parse_config::PreflateParserConfig;
 use crate::preflate_seq_chain::PreflateSeqChain;
-use crate::preflate_token::{PreflateToken, TOKEN_NONE};
+use crate::preflate_token::PreflateToken;
 use std::cmp;
 use std::f32::consts::E;
 
@@ -170,7 +170,7 @@ impl<'a> PreflatePredictorState<'a> {
         prev_len: u32,
         offset: u32,
         max_depth: u32,
-    ) -> PreflateToken {
+    ) -> Option<PreflateToken> {
         if let Some(mut h) =
             self.create_match_helper(prev_len, self.current_input_pos() + offset, max_depth)
         {
@@ -180,11 +180,11 @@ impl<'a> PreflatePredictorState<'a> {
             // Handle ZLIB quirk: the very first entry in the hash chain can have a larger
             // distance than all following entries
             if chain_it.dist() > h.cur_max_dist_hop0 {
-                return TOKEN_NONE;
+                return None;
             }
 
             let mut best_len = prev_len;
-            let mut best_match = TOKEN_NONE;
+            let mut best_match = None;
             let input = self.hash.input().cur_chars(offset as i32);
             loop {
                 let match_start = self
@@ -195,7 +195,11 @@ impl<'a> PreflatePredictorState<'a> {
                 let match_length = Self::prefix_compare(match_start, input, best_len, h.max_len);
                 if match_length > best_len {
                     best_len = match_length;
-                    best_match = PreflateToken::new_reference(match_length, chain_it.dist(), false);
+                    best_match = Some(PreflateToken::new_reference(
+                        match_length,
+                        chain_it.dist(),
+                        false,
+                    ));
                     if best_len >= h.nice_len {
                         break;
                     }
@@ -213,7 +217,7 @@ impl<'a> PreflatePredictorState<'a> {
             }
             best_match
         } else {
-            TOKEN_NONE
+            None
         }
     }
 
@@ -223,24 +227,24 @@ impl<'a> PreflatePredictorState<'a> {
         hash_head: u32,
         prev_len: u32,
         max_depth: u32,
-    ) -> PreflateToken {
+    ) -> Option<PreflateToken> {
         if let Some(h) = self.create_match_helper(prev_len, start_pos, max_depth) {
             let mut chain_it = self.seq.iterate_from_pos(start_pos);
             if !chain_it.valid() {
-                return TOKEN_NONE;
+                return None;
             }
 
             let mut cur_seq_len = std::cmp::min(self.seq.len(start_pos) as u32, h.max_len);
             let mut cur_max_dist = h.cur_max_dist_hop1_plus;
             let mut best_len = prev_len;
-            let mut best_match = TOKEN_NONE;
+            let mut best_match = None;
 
             if cur_seq_len < preflate_constants::MIN_MATCH as u32 {
                 cur_seq_len = std::cmp::min(chain_it.len() - chain_it.dist(), h.max_len);
 
                 if cur_seq_len > prev_len && 1 <= h.cur_max_dist_hop0 {
                     best_len = cur_seq_len;
-                    best_match = PreflateToken::new_reference(cur_seq_len, 1, false);
+                    best_match = Some(PreflateToken::new_reference(cur_seq_len, 1, false));
                 }
 
                 if best_len >= h.nice_len || !chain_it.next() {
@@ -306,17 +310,18 @@ impl<'a> PreflatePredictorState<'a> {
                         if best_seq_len
                             > cmp::max(old_best_seq_len, preflate_constants::MIN_MATCH - 1) + error
                         {
-                            best_match = PreflateToken::new_reference(
+                            best_match = Some(PreflateToken::new_reference(
                                 best_seq_len - error,
                                 best_dist - error,
                                 false,
-                            );
+                            ));
                         }
                         break;
                     }
 
                     if best_seq_len == h.max_len {
-                        best_match = PreflateToken::new_reference(best_seq_len, best_dist, false);
+                        best_match =
+                            Some(PreflateToken::new_reference(best_seq_len, best_dist, false));
                         break;
                     } else {
                         let diff = start_pos as i32 - self.current_input_pos() as i32;
@@ -334,7 +339,7 @@ impl<'a> PreflatePredictorState<'a> {
                         if match_length > best_len {
                             best_len = match_length;
                             best_match =
-                                PreflateToken::new_reference(match_length, best_dist, false);
+                                Some(PreflateToken::new_reference(match_length, best_dist, false));
                             if best_len >= h.nice_len {
                                 break;
                             }
@@ -351,7 +356,7 @@ impl<'a> PreflatePredictorState<'a> {
 
             best_match
         } else {
-            TOKEN_NONE
+            None
         }
     }
 

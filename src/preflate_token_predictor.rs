@@ -4,14 +4,14 @@ use crate::{
     preflate_predictor_state::{PreflatePredictorState, PreflateRematchInfo},
     preflate_statistical_codec::{PreflatePredictionDecoder, PreflatePredictionEncoder},
     preflate_statistical_model::PreflateStatisticsCounter,
-    preflate_token::{BlockType, PreflateToken, PreflateTokenBlock, TOKEN_LITERAL, TOKEN_NONE},
+    preflate_token::{BlockType, PreflateToken, PreflateTokenBlock, TOKEN_LITERAL},
 };
 
 pub struct PreflateTokenPredictor<'a> {
     state: PreflatePredictorState<'a>,
     params: PreflateParameters,
     prev_len: u32,
-    pending_token: PreflateToken,
+    pending_token: Option<PreflateToken>,
     current_token_count: u32,
     empty_block_at_end: bool,
     max_token_count: u32,
@@ -45,7 +45,7 @@ impl<'a> PreflateTokenPredictor<'a> {
             state: PreflatePredictorState::<'a>::new(uncompressed, params),
             params,
             prev_len: 0,
-            pending_token: TOKEN_NONE,
+            pending_token: None,
             current_token_count: 0,
             empty_block_at_end: false,
             max_token_count: ((1 << (6 + params.mem_level)) - 1),
@@ -71,7 +71,7 @@ impl<'a> PreflateTokenPredictor<'a> {
     ) -> anyhow::Result<BlockAnalysisResult> {
         self.current_token_count = 0;
         self.prev_len = 0;
-        self.pending_token = TOKEN_NONE;
+        self.pending_token = None;
 
         let mut analysis = BlockAnalysisResult {
             block_type: block.block_type,
@@ -192,7 +192,7 @@ impl<'a> PreflateTokenPredictor<'a> {
         let mut block;
         self.current_token_count = 0;
         self.prev_len = 0;
-        self.pending_token = TOKEN_NONE;
+        self.pending_token = None;
 
         let mut blocksize = 0;
         let mut check_eob = true;
@@ -321,7 +321,7 @@ impl<'a> PreflateTokenPredictor<'a> {
 
         let hash = self.state.calculate_hash();
 
-        let match_token = if self.pending_token.len() > 1 {
+        let m = if self.pending_token.is_some() {
             self.pending_token
         } else {
             let head = self.state.get_current_hash_head(hash);
@@ -354,7 +354,14 @@ impl<'a> PreflateTokenPredictor<'a> {
         };
 
         self.prev_len = 0;
-        self.pending_token = TOKEN_NONE;
+        self.pending_token = None;
+
+        let match_token;
+        if let Some(m) = m {
+            match_token = m;
+        } else {
+            return TOKEN_LITERAL;
+        }
 
         if match_token.len() < MIN_MATCH {
             return TOKEN_LITERAL;
@@ -411,21 +418,22 @@ impl<'a> PreflateTokenPredictor<'a> {
                     while rle < max_size && c[1 + rle as usize] == b {
                         rle += 1;
                     }
-                    if rle > match_token.len() && rle >= match_next.len() {
-                        match_next.set_len(rle);
-                        match_next.set_dist(1);
+                    if rle > match_token.len() && match_next.is_some_and(|x| rle >= x.len()) {
+                        match_next = Some(PreflateToken::new_reference(rle, 1, false));
                     }
                 }
             }
 
-            if match_next.len() > match_token.len() {
-                self.prev_len = match_token.len();
-                self.pending_token = match_next;
-                if !self.params.zlib_compatible {
-                    self.prev_len = 0;
-                    self.pending_token = TOKEN_NONE;
+            if let Some(m) = match_next {
+                if m.len() > match_token.len() {
+                    self.prev_len = match_token.len();
+                    self.pending_token = match_next;
+                    if !self.params.zlib_compatible {
+                        self.prev_len = 0;
+                        self.pending_token = None;
+                    }
+                    return TOKEN_LITERAL;
                 }
-                return TOKEN_LITERAL;
             }
         }
 
@@ -446,13 +454,14 @@ impl<'a> PreflateTokenPredictor<'a> {
                 .match_token(head, 0, 0, 2 << self.params.log2_of_max_chain_depth_m1);
 
         self.prev_len = 0;
-        self.pending_token = TOKEN_NONE;
+        self.pending_token = None;
 
-        if match_token.len() < MIN_MATCH {
-            return Err(anyhow::Error::msg("Didnt find another match"));
+        if let Some(m) = match_token {
+            if m.len() >= MIN_MATCH {
+                return Ok(m);
+            }
         }
-
-        Ok(match_token)
+        return Err(anyhow::Error::msg("Didnt find a match"));
     }
 
     /// For a given target token to match and the current state, find how many hops it takes to get to the same match

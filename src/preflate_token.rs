@@ -13,12 +13,6 @@ pub struct PreflateToken {
     dist: u16,
 }
 
-pub const TOKEN_NONE: PreflateToken = PreflateToken {
-    len: 0,
-    irregular258: false,
-    dist: 0,
-};
-
 pub const TOKEN_LITERAL: PreflateToken = PreflateToken {
     len: 1,
     irregular258: false,
