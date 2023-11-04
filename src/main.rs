@@ -90,16 +90,18 @@ fn analyze_compressed_data<R: Read + Seek>(
         let mut encoder = PreflatePredictionEncoder::new();
         token_predictor.encode_block(&mut encoder);
 
+        encode_tree_for_block(&blocks[i].huffman_encoding, &blocks[i].freq, &mut encoder)?;
+
         //encode_tree_for_block(&blocks[i], &mut encoder)?;
 
         let mut decoder = encoder.make_decoder();
 
         let outblock = token_predictor_out.decode_block(&mut decoder)?;
 
-        let decoder = decode_tree_for_block(&outblock, &mut decoder)?;
-
         // assert the decoded blocks are the same as the encoded ones
         assert_eq!(blocks[i].tokens, outblock.tokens, "block {}", i);
+
+        let decoder = decode_tree_for_block(&outblock.freq, &mut decoder)?;
     }
 
     counterE.token.print();

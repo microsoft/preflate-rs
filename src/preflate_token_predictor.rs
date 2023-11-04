@@ -248,6 +248,7 @@ impl<'a> PreflateTokenPredictor<'a> {
                 let not_ok = codec.decode_literal_prediction_wrong();
                 if !not_ok {
                     self.commit_token(&predicted_token);
+
                     block.tokens.push(predicted_token);
                     self.current_token_count += 1;
                     continue;

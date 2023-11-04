@@ -74,11 +74,28 @@ pub struct PreflateTokenBlock {
     pub context_len: i32,
     pub padding_bit_count: u8,
     pub padding_bits: u8,
+    pub tokens: Vec<PreflateToken>,
+    pub huffman_encoding: HuffmanOriginalEncoding,
+    pub freq: TokenFrequency,
+}
+
+#[derive(Debug)]
+pub struct TokenFrequency {
     pub literal_codes: [u16; LITLENDIST_CODE_COUNT],
     pub lcode_count: u32,
     pub distance_codes: [u16; DIST_CODE_COUNT],
     pub dcode_count: u32,
-    pub tokens: Vec<PreflateToken>,
+}
+
+impl Default for TokenFrequency {
+    fn default() -> Self {
+        TokenFrequency {
+            literal_codes: [0; LITLENDIST_CODE_COUNT],
+            lcode_count: 0,
+            distance_codes: [0; DIST_CODE_COUNT],
+            dcode_count: 0,
+        }
+    }
 }
 
 impl PreflateTokenBlock {
@@ -91,29 +108,23 @@ impl PreflateTokenBlock {
             padding_bit_count: 0,
             padding_bits: 0,
             tokens: Vec::new(),
-            literal_codes: [0; LITLENDIST_CODE_COUNT],
-            lcode_count: 0,
-            distance_codes: [0; DIST_CODE_COUNT],
-            dcode_count: 0,
+            freq: TokenFrequency::default(),
+            huffman_encoding: HuffmanOriginalEncoding::default(),
         }
-    }
-
-    pub fn add_token(&mut self, token: PreflateToken) {
-        self.tokens.push(token);
     }
 
     pub fn add_literal(&mut self, lit: u8) {
         self.tokens.push(TOKEN_LITERAL);
-        self.literal_codes[lit as usize] += 1;
-        self.lcode_count += 1;
+        self.freq.literal_codes[lit as usize] += 1;
+        self.freq.lcode_count += 1;
     }
 
     pub fn add_reference(&mut self, len: u32, dist: u32, irregular258: bool) {
         self.tokens
             .push(PreflateToken::new_reference(len, dist, irregular258));
-        self.literal_codes[NONLEN_CODE_COUNT as usize + quantize_length(len)] += 1;
-        self.distance_codes[quantize_distance(dist)] += 1;
-        self.lcode_count += 1;
-        self.dcode_count += 1;
+        self.freq.literal_codes[NONLEN_CODE_COUNT as usize + quantize_length(len)] += 1;
+        self.freq.distance_codes[quantize_distance(dist)] += 1;
+        self.freq.lcode_count += 1;
+        self.freq.dcode_count += 1;
     }
 }

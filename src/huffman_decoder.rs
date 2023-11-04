@@ -1,6 +1,9 @@
 use std::io::{Read, Seek};
 
-use crate::zip_bit_reader::ZipBitReader;
+use crate::{
+    preflate_constants::{DIST_CODE_COUNT, LITLENDIST_CODE_COUNT},
+    zip_bit_reader::ZipBitReader,
+};
 
 #[derive(PartialEq, Eq, Clone, Copy, Debug)]
 pub enum TreeCodeType {
@@ -10,7 +13,7 @@ pub enum TreeCodeType {
     Repeat,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone)]
 pub struct HuffmanOriginalEncoding {
     pub lengths: Vec<(TreeCodeType, u8)>,
 
@@ -22,8 +25,18 @@ pub struct HuffmanOriginalEncoding {
     pub num_dist: usize,
 }
 
+impl Default for HuffmanOriginalEncoding {
+    fn default() -> Self {
+        HuffmanOriginalEncoding {
+            lengths: Vec::new(),
+            code_lengths: Vec::new(),
+            num_literals: 0,
+            num_dist: 0,
+        }
+    }
+}
+
 pub struct HuffmanDecoder {
-    encoding: HuffmanOriginalEncoding,
     rg_literal_alphabet_code_lengths: Vec<u16>,
     rg_literal_alphabet_huffman_codes: Vec<u16>,
     rg_distance_alphabet_code_lengths: Vec<u16>,
@@ -58,7 +71,6 @@ impl HuffmanDecoder {
     /// construction.
     pub fn create_fixed() -> anyhow::Result<Self> {
         let mut hd = HuffmanDecoder {
-            encoding: HuffmanOriginalEncoding::default(),
             rg_literal_alphabet_code_lengths: vec![0; 288],
             rg_literal_alphabet_huffman_codes: vec![0; 288],
             rg_distance_alphabet_code_lengths: vec![5; 32], // Distance codes are represented by 5-bit codes
@@ -113,18 +125,12 @@ impl HuffmanDecoder {
         Ok(hd)
     }
 
-    /// returns the original encoding information so that we can see if it matches
-    /// the predictions and if not, emit the appropriate diffs so we can recreate it exactly
-    pub fn get_encoding(&self) -> &HuffmanOriginalEncoding {
-        &self.encoding
-    }
-
     /// Create Huffman code table for Literal alphabet 0-287 and distance alphabet 0-29 by
     /// reading the Huffman code length tables from the file.
     pub fn create_from_bit_reader<R: Read + Seek>(
         bit_reader: &mut ZipBitReader<R>,
         huffman_info_dump_level: i32,
-    ) -> anyhow::Result<Self> {
+    ) -> anyhow::Result<(Self, HuffmanOriginalEncoding)> {
         let mut rg_code_length_alphabet_code_lengths: Vec<u16> = vec![0; 19];
         let mut rg_code_length_alphabet_huffman_codes: Vec<u16> = vec![0; 19];
 
@@ -177,13 +183,14 @@ impl HuffmanDecoder {
             println!("Reading Huffman encoded code lengths using above Huffman codes");
         }
 
+        let mut huffman_encoding = HuffmanOriginalEncoding {
+            lengths: Vec::new(),
+            code_lengths: rg_code_length_alphabet_code_lengths[0..hclen as usize + 4].to_vec(),
+            num_literals: hlit as usize,
+            num_dist: hdist as usize,
+        };
+
         let mut hd = HuffmanDecoder {
-            encoding: HuffmanOriginalEncoding {
-                lengths: Vec::new(),
-                code_lengths: rg_code_length_alphabet_code_lengths[0..hclen as usize + 4].to_vec(),
-                num_literals: hlit as usize,
-                num_dist: hdist as usize,
-            },
             rg_literal_alphabet_code_lengths: vec![0; 286],
             rg_literal_alphabet_huffman_codes: vec![0; 286],
             rg_distance_alphabet_code_lengths: vec![0; 30],
@@ -229,7 +236,9 @@ impl HuffmanDecoder {
                     );
                 }
 
-                hd.encoding.lengths.push((TreeCodeType::Code, w_next as u8));
+                huffman_encoding
+                    .lengths
+                    .push((TreeCodeType::Code, w_next as u8));
             } else {
                 let mut c_copy: i32 = 0;
                 let mut w_copy: u16 = 0;
@@ -256,7 +265,7 @@ impl HuffmanDecoder {
                         );
                     }
 
-                    hd.encoding
+                    huffman_encoding
                         .lengths
                         .push((TreeCodeType::Repeat, c_copy as u8));
                 } else if w_next == 17 {
@@ -276,7 +285,7 @@ impl HuffmanDecoder {
                         );
                     }
 
-                    hd.encoding
+                    huffman_encoding
                         .lengths
                         .push((TreeCodeType::ZeroShort, c_copy as u8));
                 } else if w_next == 18 {
@@ -296,7 +305,7 @@ impl HuffmanDecoder {
                         );
                     }
 
-                    hd.encoding
+                    huffman_encoding
                         .lengths
                         .push((TreeCodeType::ZeroLong, c_copy as u8));
                 } else {
@@ -391,7 +400,7 @@ impl HuffmanDecoder {
             &hd.rg_distance_alphabet_huffman_codes,
         )?;
 
-        Ok(hd)
+        Ok((hd, huffman_encoding))
     }
 
     pub fn fetch_next_literal_code<R: Read + Seek>(

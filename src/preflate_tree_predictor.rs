@@ -10,29 +10,27 @@ use crate::{
     preflate_input::PreflateInput,
     preflate_statistical_codec::{PreflatePredictionDecoder, PreflatePredictionEncoder},
     preflate_statistical_model::PreflateStatisticsCounter,
-    preflate_token::{BlockType, PreflateTokenBlock},
+    preflate_token::{BlockType, PreflateTokenBlock, TokenFrequency},
 };
 
 pub fn decode_tree_for_block(
-    block: &PreflateTokenBlock,
+    freq: &TokenFrequency,
     codec: &mut PreflatePredictionDecoder,
 ) -> anyhow::Result<HuffmanOriginalEncoding> {
     let mut result: HuffmanOriginalEncoding = Default::default();
 
-    assert!(block.block_type == BlockType::DynamicHuff);
-
     let mut bit_lengths = [0u8; LITLENDIST_CODE_COUNT as usize];
-    let mut predicted_l_tree_size = build_l_bit_lengths(&mut bit_lengths, &block.literal_codes);
+    let mut predicted_l_tree_size = build_l_bit_lengths(&mut bit_lengths, &freq.literal_codes);
 
     if codec.decode_literal_count_misprediction() {
-        predicted_l_tree_size = codec.decode_value(5) as usize + NONLEN_CODE_COUNT;
+        predicted_l_tree_size = codec.decode_value(7) as usize + NONLEN_CODE_COUNT;
     }
 
     result.num_literals = predicted_l_tree_size;
 
     let mut predicted_d_tree_size = build_d_bit_lengths(
         &mut bit_lengths[predicted_l_tree_size as usize..],
-        &block.distance_codes,
+        &freq.distance_codes,
     );
 
     if codec.decode_distance_count_misprediction() {
@@ -84,11 +82,10 @@ fn build_tc_bit_lengths(
     bl_freqs: &[u16; CODETREE_CODE_COUNT],
 ) -> usize {
     let mut predicted_c_tree_size = CODETREE_CODE_COUNT;
-    let mut simple_code_tree_copy = [0; CODETREE_CODE_COUNT];
-    calc_bit_lengths(&mut simple_code_tree_copy, bl_freqs, CODETREE_CODE_COUNT, 7);
+    calc_bit_lengths(bit_lengths, bl_freqs, CODETREE_CODE_COUNT, 7);
 
     while predicted_c_tree_size > 4
-        && simple_code_tree_copy[TREE_CODE_ORDER_TABLE[predicted_c_tree_size - 1] as usize] == 0
+        && bit_lengths[TREE_CODE_ORDER_TABLE[predicted_c_tree_size - 1] as usize] == 0
     {
         predicted_c_tree_size -= 1;
     }
@@ -174,51 +171,13 @@ fn reconstruct_ld_trees(
     Ok(result)
 }
 
-fn collect_token_statistics(
-    plain_text: &[u8],
-    block: &PreflateTokenBlock,
-) -> (
-    [u32; LITLEN_CODE_COUNT as usize],
-    [u32; DIST_CODE_COUNT as usize],
-    u32,
-    u32,
-) {
-    let mut input = PreflateInput::new(plain_text);
-
-    let mut Lcodes = [0; LITLEN_CODE_COUNT as usize];
-    let mut Dcodes = [0; DIST_CODE_COUNT as usize];
-    let mut Lcount = 0;
-    let mut Dcount = 0;
-
-    for token in &block.tokens {
-        if token.len() == 1 {
-            Lcodes[input.cur_char(0) as usize] += 1;
-            Lcount += 1;
-            input.advance(1);
-        } else {
-            Lcodes[(NONLEN_CODE_COUNT + quantize_length(token.len())) as usize] += 1;
-            Lcount += 1;
-            Dcodes[quantize_distance(token.dist()) as usize] += 1;
-            Dcount += 1;
-            input.advance(token.len());
-        }
-    }
-    Lcodes[256] = 1;
-
-    (Lcodes, Dcodes, Lcount, Dcount)
-}
-
 pub fn encode_tree_for_block(
-    block: &PreflateTokenBlock,
     huffman_encoding: &HuffmanOriginalEncoding,
+    freq: &TokenFrequency,
     encoder: &mut PreflatePredictionEncoder,
 ) -> anyhow::Result<()> {
-    if block.block_type != BlockType::DynamicHuff {
-        return Ok(());
-    }
-
     let mut bit_lengths = vec![0; LITLENDIST_CODE_COUNT as usize];
-    let mut predicted_l_tree_size = build_l_bit_lengths(&mut bit_lengths, &block.literal_codes);
+    let mut predicted_l_tree_size = build_l_bit_lengths(&mut bit_lengths, &freq.literal_codes);
 
     encoder
         .encode_literal_count_misprediction(predicted_l_tree_size != huffman_encoding.num_literals);
@@ -230,7 +189,7 @@ pub fn encode_tree_for_block(
 
     let mut predicted_d_tree_size = build_d_bit_lengths(
         &mut bit_lengths[predicted_l_tree_size as usize..],
-        &block.distance_codes,
+        &freq.distance_codes,
     );
 
     encoder

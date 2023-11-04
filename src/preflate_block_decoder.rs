@@ -91,7 +91,10 @@ impl<'a, R: Read + Seek> PreflateBlockDecoder<'a, R> {
             2 => {
                 blk = PreflateTokenBlock::new(BlockType::DynamicHuff);
                 blk.uncompressed_start_pos = self.output.len() as u32;
-                let decoder = HuffmanDecoder::create_from_bit_reader(&mut self.input, 0)?;
+                let (decoder, huffman_encoding) =
+                    HuffmanDecoder::create_from_bit_reader(&mut self.input, 0)?;
+                blk.huffman_encoding = huffman_encoding;
+
                 self.decode_block(&decoder, &mut blk)
                     .with_context(|| "decode_block dyn")?;
                 return Ok(blk);
