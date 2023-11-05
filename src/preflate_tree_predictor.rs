@@ -5,14 +5,17 @@ use crate::{
         CODETREE_CODE_COUNT, DIST_CODE_COUNT, LITLENDIST_CODE_COUNT, LITLEN_CODE_COUNT,
         NONLEN_CODE_COUNT, TREE_CODE_ORDER_TABLE,
     },
-    preflate_statistical_codec::{PreflatePredictionDecoder, PreflatePredictionEncoder},
+    preflate_statistical_codec::{
+        AssertEmptyEncoder, EmptyDecoder, PredictionDecoder, PredictionEncoder,
+        PreflatePredictionEncoder,
+    },
     preflate_token::TokenFrequency,
 };
 
-pub fn encode_tree_for_block(
+pub fn encode_tree_for_block<D: PredictionEncoder>(
     huffman_encoding: &HuffmanOriginalEncoding,
     freq: &TokenFrequency,
-    encoder: &mut PreflatePredictionEncoder,
+    encoder: &mut D,
 ) -> anyhow::Result<()> {
     // bit_lengths is a vector of huffman code sizes for literals followed by length codes
     let mut bit_lengths = vec![0; LITLENDIST_CODE_COUNT as usize];
@@ -71,9 +74,9 @@ pub fn encode_tree_for_block(
     Ok(())
 }
 
-pub fn decode_tree_for_block(
+pub fn decode_tree_for_block<D: PredictionDecoder>(
     freq: &TokenFrequency,
-    codec: &mut PreflatePredictionDecoder,
+    codec: &mut D,
 ) -> anyhow::Result<HuffmanOriginalEncoding> {
     let mut result: HuffmanOriginalEncoding = Default::default();
 
@@ -97,9 +100,9 @@ pub fn decode_tree_for_block(
 
     result.num_dist = predicted_d_tree_size;
 
-    let tree_codes = reconstruct_ld_trees(codec, &bit_lengths)?;
+    result.lengths = reconstruct_ld_trees(codec, &bit_lengths)?;
 
-    let bl_freqs = calc_codetree_freq(&tree_codes);
+    let bl_freqs = calc_codetree_freq(&result.lengths);
 
     let mut simple_code_tree = [0u8; CODETREE_CODE_COUNT as usize];
     let mut predicted_c_tree_size = build_tc_bit_lengths(&mut simple_code_tree, &bl_freqs);
@@ -141,8 +144,8 @@ fn build_tc_bit_lengths(
     predicted_c_tree_size
 }
 
-fn predict_ld_trees(
-    encoder: &mut PreflatePredictionEncoder,
+fn predict_ld_trees<D: PredictionEncoder>(
+    encoder: &mut D,
     sym_bit_len: &[u8],
     target_codes: &[(TreeCodeType, u8)],
 ) -> anyhow::Result<()> {
@@ -183,8 +186,8 @@ fn predict_ld_trees(
     Ok(())
 }
 
-fn reconstruct_ld_trees(
-    codec: &mut PreflatePredictionDecoder,
+fn reconstruct_ld_trees<D: PredictionDecoder>(
+    codec: &mut D,
     sym_bit_len: &[u8],
 ) -> anyhow::Result<Vec<(TreeCodeType, u8)>> {
     let mut symbols = sym_bit_len;
@@ -309,8 +312,67 @@ fn predict_code_data(sym_bit_len: &[u8], code_type: TreeCodeType) -> u8 {
 }
 
 #[test]
-fn encode_tree_for_block_roundtrip() {
+fn encode_roundtrip_perfect() {
     let mut freq = TokenFrequency::default();
-    freq.literal_codes.fill(1);
-    freq.distance_codes.fill(1);
+    freq.literal_codes[0] = 100;
+    freq.literal_codes[1] = 50;
+    freq.literal_codes[2] = 25;
+
+    freq.distance_codes[0] = 100;
+    freq.distance_codes[1] = 50;
+    freq.distance_codes[2] = 25;
+
+    let mut empty_decoder = EmptyDecoder {};
+    let regenerated_header = decode_tree_for_block(&freq, &mut empty_decoder).unwrap();
+
+    assert_eq!(regenerated_header.num_literals, 257);
+    assert_eq!(regenerated_header.num_dist, 3);
+    assert_eq!(regenerated_header.lengths[0], (TreeCodeType::Code, 1));
+    assert_eq!(regenerated_header.lengths[1], (TreeCodeType::Code, 2));
+    assert_eq!(regenerated_header.lengths[2], (TreeCodeType::Code, 3));
+
+    let mut empty_encoder = AssertEmptyEncoder {};
+    encode_tree_for_block(&regenerated_header, &freq, &mut empty_encoder).unwrap();
+
+    println!("regenerated_header: {:?}", regenerated_header);
+}
+
+#[test]
+fn encode_tree_roundtrip() {
+    let mut freq = TokenFrequency::default();
+    freq.literal_codes[0] = 100;
+    freq.literal_codes[1] = 50;
+    freq.literal_codes[2] = 25;
+
+    freq.distance_codes[0] = 100;
+    freq.distance_codes[1] = 50;
+    freq.distance_codes[2] = 25;
+
+    let huff_origin = HuffmanOriginalEncoding {
+        lengths: vec![
+            (TreeCodeType::Code, 4),
+            (TreeCodeType::Code, 4),
+            (TreeCodeType::Code, 4),
+            (TreeCodeType::ZeroLong, 138),
+            (TreeCodeType::ZeroLong, 115),
+            (TreeCodeType::Code, 3),
+            (TreeCodeType::Code, 1),
+            (TreeCodeType::Code, 2),
+            (TreeCodeType::Code, 2),
+            (TreeCodeType::ZeroLong, 56),
+        ],
+        code_lengths: vec![0, 3, 2, 3, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        num_literals: 257,
+        num_dist: 4,
+    };
+
+    let mut encoder = PreflatePredictionEncoder::new();
+
+    encode_tree_for_block(&huff_origin, &freq, &mut encoder).unwrap();
+
+    let mut decoder = encoder.make_decoder();
+
+    let regenerated_header = decode_tree_for_block(&freq, &mut decoder).unwrap();
+
+    assert_eq!(huff_origin, regenerated_header);
 }

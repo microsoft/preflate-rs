@@ -2,7 +2,9 @@ use crate::{
     preflate_constants::{MAX_MATCH, MIN_MATCH, TOO_FAR},
     preflate_parameter_estimator::PreflateParameters,
     preflate_predictor_state::{PreflatePredictorState, PreflateRematchInfo},
-    preflate_statistical_codec::{PreflatePredictionDecoder, PreflatePredictionEncoder},
+    preflate_statistical_codec::{
+        PredictionDecoder, PredictionEncoder, PreflatePredictionDecoder, PreflatePredictionEncoder,
+    },
     preflate_statistical_model::PreflateStatisticsCounter,
     preflate_token::{BlockType, PreflateToken, PreflateTokenBlock, TOKEN_LITERAL},
 };
@@ -184,9 +186,9 @@ impl<'a> PreflateTokenPredictor<'a> {
         unreachable!("decode_block not implemented")
     }
 
-    pub fn decode_block(
+    pub fn decode_block<D: PredictionDecoder>(
         &mut self,
-        codec: &mut PreflatePredictionDecoder,
+        codec: &mut D,
     ) -> anyhow::Result<PreflateTokenBlock> {
         let mut block;
         self.current_token_count = 0;
@@ -490,7 +492,7 @@ impl<'a> PreflateTokenPredictor<'a> {
 }
 
 impl BlockAnalysisResult {
-    pub fn encode_block(&self, codec: &mut PreflatePredictionEncoder) {
+    pub fn encode_block<D: PredictionEncoder>(&self, codec: &mut D) {
         codec.encode_block_type(self.block_type);
 
         if self.block_type == BlockType::Stored {
@@ -562,7 +564,7 @@ impl BlockAnalysisResult {
             }
             if info & 16 != 0 {
                 let is_irregular = (info & 32) != 0;
-                codec.encode_irregular_len258(is_irregular);
+                codec.encode_irregular_len_258(is_irregular);
             }
         }
     }
