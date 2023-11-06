@@ -28,7 +28,7 @@ pub fn encode_tree_for_block<D: PredictionEncoder>(
 
     // if incorrect, include the actual size
     if predicted_l_tree_size != huffman_encoding.num_literals {
-        encoder.encode_value(huffman_encoding.num_literals as u32, 7);
+        encoder.encode_value(huffman_encoding.num_literals as u16, 7);
         predicted_l_tree_size = huffman_encoding.num_literals;
     }
 
@@ -42,7 +42,7 @@ pub fn encode_tree_for_block<D: PredictionEncoder>(
 
     // if incorrect, include the actual size
     if predicted_d_tree_size != huffman_encoding.num_dist {
-        encoder.encode_value(huffman_encoding.num_dist as u32, 5);
+        encoder.encode_value(huffman_encoding.num_dist as u16, 5);
         predicted_d_tree_size = huffman_encoding.num_dist;
     }
 
@@ -58,7 +58,7 @@ pub fn encode_tree_for_block<D: PredictionEncoder>(
 
     if predicted_c_tree_size != huffman_encoding.code_lengths.len() {
         encoder.encode_tree_code_count_misprediction(true);
-        encoder.encode_value(huffman_encoding.code_lengths.len() as u32 - 4, 4);
+        encoder.encode_value(huffman_encoding.code_lengths.len() as u16 - 4, 4);
     } else {
         encoder.encode_tree_code_count_misprediction(false);
     }
@@ -366,7 +366,7 @@ fn encode_tree_roundtrip() {
         num_dist: 4,
     };
 
-    let mut encoder = PreflatePredictionEncoder::new();
+    let mut encoder = PreflatePredictionEncoder::default();
 
     encode_tree_for_block(&huff_origin, &freq, &mut encoder).unwrap();
 

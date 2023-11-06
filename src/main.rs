@@ -11,7 +11,6 @@ mod preflate_parse_config;
 mod preflate_predictor_state;
 mod preflate_seq_chain;
 mod preflate_statistical_codec;
-mod preflate_statistical_model;
 mod preflate_stream_info;
 mod preflate_token;
 mod preflate_token_predictor;
@@ -32,7 +31,7 @@ mod zip_structs;
 use crate::{
     preflate_parameter_estimator::estimate_preflate_parameters,
     preflate_statistical_codec::PreflatePredictionEncoder,
-    preflate_statistical_model::PreflateStatisticsCounter,
+    preflate_token::BlockType,
     preflate_token_predictor::PreflateTokenPredictor,
     preflate_tree_predictor::{decode_tree_for_block, encode_tree_for_block},
 };
@@ -65,53 +64,58 @@ fn analyze_compressed_data<R: Read + Seek>(
         blocks.push(block);
     }
 
-    let params_e = estimate_preflate_parameters(&block_decoder.output, 0, &blocks);
-
-    //params_e.max_lazy = 258;
+    let params_e = estimate_preflate_parameters(block_decoder.get_plain_text(), &blocks);
 
     println!("prediction parameters: {:?}", params_e);
 
-    let mut counterE = PreflateStatisticsCounter::default();
+    let mut token_predictor_in =
+        PreflateTokenPredictor::new(&block_decoder.get_plain_text(), params_e, 0);
 
-    let mut token_predictor_in = PreflateTokenPredictor::new(&block_decoder.output, params_e, 0);
-
-    let mut token_predictor_out = PreflateTokenPredictor::new(&block_decoder.output, params_e, 0);
+    let mut encoder = PreflatePredictionEncoder::default();
 
     for i in 0..blocks.len() {
-        let token_predictor = token_predictor_in
-            .analyze_block(&blocks[i])
-            .with_context(|| format!("analyze_block {}", i))?;
-        token_predictor.update_counters(&mut counterE);
+        token_predictor_in
+            .encode_block(&blocks[i], &mut encoder)
+            .with_context(|| format!("encode_block {}", i))?;
 
-        let mut encoder = PreflatePredictionEncoder::new();
-        token_predictor.encode_block(&mut encoder);
-
-        //encode_tree_for_block(&blocks[i].huffman_encoding, &blocks[i].freq, &mut encoder)?;
-
-        //encode_tree_for_block(&blocks[i], &mut encoder)?;
-
-        let mut decoder = encoder.make_decoder();
-
-        let outblock = token_predictor_out.decode_block(&mut decoder)?;
-
-        // assert the decoded blocks are the same as the encoded ones
-        assert_eq!(blocks[i].tokens, outblock.tokens, "block {}", i);
-
-        {
-            let mut encoder = PreflatePredictionEncoder::new();
+        if blocks[i].block_type == BlockType::DynamicHuff {
             encode_tree_for_block(&blocks[i].huffman_encoding, &blocks[i].freq, &mut encoder)?;
-
-            let mut decoder = encoder.make_decoder();
-
-            let decoded_tree = decode_tree_for_block(&outblock.freq, &mut decoder)?;
         }
-
-        //
     }
 
-    counterE.token.print();
+    let mut decoder = encoder.make_decoder();
 
-    let result_crc = crc32fast::hash(&block_decoder.output);
+    let mut token_predictor_out =
+        PreflateTokenPredictor::new(block_decoder.get_plain_text(), params_e, 0);
+
+    let mut output_blocks = Vec::new();
+    while !token_predictor_out.input_eof() {
+        let mut block = token_predictor_out.decode_block(&mut decoder)?;
+
+        if block.block_type == BlockType::DynamicHuff {
+            block.huffman_encoding = decode_tree_for_block(&block.freq, &mut decoder)?;
+        }
+
+        output_blocks.push(block);
+    }
+
+    assert_eq!(blocks.len(), output_blocks.len());
+
+    blocks.iter().zip(output_blocks).all(|(a, b)| {
+        assert_eq!(a.block_type, b.block_type);
+        assert_eq!(a.padding_bit_count, b.padding_bit_count);
+        assert_eq!(a.padding_bits, b.padding_bits);
+        assert_eq!(a.tokens.len(), b.tokens.len());
+        assert_eq!(a.freq.literal_codes, b.freq.literal_codes);
+        assert_eq!(a.freq.distance_codes, b.freq.distance_codes);
+        assert_eq!(a.huffman_encoding, b.huffman_encoding);
+        assert_eq!(a.tokens, b.tokens);
+        true
+    });
+
+    encoder.print();
+
+    let result_crc = crc32fast::hash(block_decoder.get_plain_text());
 
     if header_crc32 == 0 {
         if deflate_info_dump_level > 0 {
@@ -176,7 +180,7 @@ fn main_with_result() -> anyhow::Result<()> {
     }
 
     // Zlib compression with different compression levels
-    for level in 0..10 {
+    for level in 1..10 {
         println!("level: {}", level);
         let mut zlib_encoder: ZlibEncoder<Cursor<&Vec<u8>>> =
             ZlibEncoder::new(Cursor::new(&v), Compression::new(level));

@@ -28,32 +28,27 @@ struct PreflateCompLevelEstimatorState<'a> {
     blocks: &'a Vec<PreflateTokenBlock>,
     info: PreflateCompLevelInfo,
     wsize: u16,
-    off0: u32,
 }
 
 impl<'a> PreflateCompLevelEstimatorState<'a> {
     pub fn new(
         wbits: u32,
         mbits: u32,
-        unpacked_output: &'a Vec<u8>,
-        off0: u32,
+        plain_text: &'a [u8],
         blocks: &'a Vec<PreflateTokenBlock>,
     ) -> Self {
         let mut r = PreflateCompLevelEstimatorState::<'a> {
-            slow_hash: PreflateHashChainExt::<'a>::new(unpacked_output, mbits),
-            fast_l1_hash: PreflateHashChainExt::<'a>::new(unpacked_output, mbits),
-            fast_l2_hash: PreflateHashChainExt::<'a>::new(unpacked_output, mbits),
-            fast_l3_hash: PreflateHashChainExt::<'a>::new(unpacked_output, mbits),
+            slow_hash: PreflateHashChainExt::<'a>::new(plain_text, mbits),
+            fast_l1_hash: PreflateHashChainExt::<'a>::new(plain_text, mbits),
+            fast_l2_hash: PreflateHashChainExt::<'a>::new(plain_text, mbits),
+            fast_l3_hash: PreflateHashChainExt::<'a>::new(plain_text, mbits),
             blocks,
             info: PreflateCompLevelInfo {
                 possible_compression_levels: 0b_111111110,
                 ..PreflateCompLevelInfo::default()
             },
             wsize: 1 << wbits,
-            off0,
         };
-
-        r.update_hash(off0);
 
         r
     }
@@ -98,7 +93,7 @@ impl<'a> PreflateCompLevelEstimatorState<'a> {
 
     fn check_match(&mut self, token: &PreflateToken) {
         let hash_head = self.slow_hash.cur_hash();
-        if self.slow_hash.input().pos() >= token.dist() as u32 + self.off0 {
+        if self.slow_hash.input().pos() >= token.dist() as u32 {
             if self.info.possible_compression_levels & (1 << 1) != 0 {
                 if !Self::check_match_single_fast_hash(
                     token,
@@ -298,13 +293,11 @@ impl<'a> PreflateCompLevelEstimatorState<'a> {
 pub fn estimate_preflate_comp_level(
     wbits: u32,
     mbits: u32,
-    unpacked_output: &Vec<u8>,
-    off0: u32,
+    plain_text: &[u8],
     blocks: &Vec<PreflateTokenBlock>,
     early_out: bool,
 ) -> PreflateCompLevelInfo {
-    let mut state =
-        PreflateCompLevelEstimatorState::new(wbits, mbits, &unpacked_output, off0, &blocks);
+    let mut state = PreflateCompLevelEstimatorState::new(wbits, mbits, plain_text, &blocks);
     state.check_dump(early_out);
     state.recommend();
     return state.info;

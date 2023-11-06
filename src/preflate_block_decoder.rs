@@ -11,15 +11,19 @@ use crate::{
 
 pub struct PreflateBlockDecoder<'a, R> {
     input: ZipBitReader<'a, R>,
-    pub output: Vec<u8>,
+    plain_text: Vec<u8>,
 }
 
 impl<'a, R: Read + Seek> PreflateBlockDecoder<'a, R> {
-    pub fn new(input: &'a mut R, max_readable_bytes: i64) -> anyhow::Result<Self> {
+    pub fn new(compressed_text: &'a mut R, max_readable_bytes: i64) -> anyhow::Result<Self> {
         Ok(PreflateBlockDecoder {
-            input: ZipBitReader::new(input, max_readable_bytes)?,
-            output: Vec::new(),
+            input: ZipBitReader::new(compressed_text, max_readable_bytes)?,
+            plain_text: Vec::new(),
         })
+    }
+
+    pub fn get_plain_text(&self) -> &[u8] {
+        &self.plain_text
     }
 
     fn read_bit(&mut self) -> anyhow::Result<bool> {
@@ -31,14 +35,14 @@ impl<'a, R: Read + Seek> PreflateBlockDecoder<'a, R> {
     }
 
     fn write_literal(&mut self, byte: u8) {
-        self.output.push(byte);
+        self.plain_text.push(byte);
     }
 
     fn write_reference(&mut self, dist: u32, len: u32) {
-        let start = self.output.len() - dist as usize;
+        let start = self.plain_text.len() - dist as usize;
         for i in 0..len {
-            let byte = self.output[start + i as usize];
-            self.output.push(byte);
+            let byte = self.plain_text[start + i as usize];
+            self.plain_text.push(byte);
         }
     }
 
@@ -51,7 +55,7 @@ impl<'a, R: Read + Seek> PreflateBlockDecoder<'a, R> {
         match mode {
             0 => {
                 blk = PreflateTokenBlock::new(BlockType::Stored);
-                blk.uncompressed_start_pos = self.output.len() as u32;
+                blk.uncompressed_start_pos = self.plain_text.len() as u32;
                 blk.block_type = BlockType::Stored;
                 blk.padding_bit_count = 8 - self.input.bit_position_in_current_byte() as u8;
                 blk.padding_bits = self.read_bits(blk.padding_bit_count.into())? as u8;
@@ -75,7 +79,7 @@ impl<'a, R: Read + Seek> PreflateBlockDecoder<'a, R> {
             }
             1 => {
                 blk = PreflateTokenBlock::new(BlockType::StaticHuff);
-                blk.uncompressed_start_pos = self.output.len() as u32;
+                blk.uncompressed_start_pos = self.plain_text.len() as u32;
                 let decoder = HuffmanDecoder::create_fixed()?;
                 self.decode_block(&decoder, &mut blk)?;
                 return Ok(blk);
@@ -83,7 +87,7 @@ impl<'a, R: Read + Seek> PreflateBlockDecoder<'a, R> {
 
             2 => {
                 blk = PreflateTokenBlock::new(BlockType::DynamicHuff);
-                blk.uncompressed_start_pos = self.output.len() as u32;
+                blk.uncompressed_start_pos = self.plain_text.len() as u32;
                 let (decoder, huffman_encoding) =
                     HuffmanDecoder::create_from_bit_reader(&mut self.input, 0)?;
                 blk.huffman_encoding = huffman_encoding;
@@ -114,7 +118,7 @@ impl<'a, R: Read + Seek> PreflateBlockDecoder<'a, R> {
                 blk.add_literal(lit_len as u8);
                 cur_pos += 1;
             } else if lit_len == 256 {
-                blk.uncompressed_len = self.output.len() as u32 - blk.uncompressed_start_pos;
+                blk.uncompressed_len = self.plain_text.len() as u32 - blk.uncompressed_start_pos;
                 blk.context_len = -earliest_reference;
                 break;
             } else {
@@ -136,7 +140,7 @@ impl<'a, R: Read + Seek> PreflateBlockDecoder<'a, R> {
                     + preflate_constants::DIST_BASE_TABLE[dcode as usize] as u32
                     + self
                         .read_bits(preflate_constants::DIST_EXTRA_TABLE[dcode as usize].into())?;
-                if dist as usize > self.output.len() {
+                if dist as usize > self.plain_text.len() {
                     return Err(anyhow::Error::msg("Invalid distance"));
                 }
                 self.write_reference(dist as u32, len as u32);

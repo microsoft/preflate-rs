@@ -82,8 +82,7 @@ pub fn estimate_preflate_huff_strategy(info: &PreflateStreamInfo) -> PreflateHuf
 }
 
 pub fn estimate_preflate_parameters(
-    unpacked_output: &Vec<u8>,
-    off0: u32,
+    unpacked_output: &[u8],
     blocks: &Vec<PreflateTokenBlock>,
 ) -> PreflateParameters {
     let info = extract_preflate_info(blocks);
@@ -95,7 +94,6 @@ pub fn estimate_preflate_parameters(
         window_bits.into(),
         mem_level.into(),
         unpacked_output,
-        off0,
         blocks,
         false,
     );
