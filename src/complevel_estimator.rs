@@ -1,12 +1,12 @@
+use crate::hash_chain::HashChain;
 use crate::preflate_constants;
-use crate::preflate_hash_chain::PreflateHashChainExt;
 use crate::preflate_parse_config::{
     PreflateParserConfig, FAST_PREFLATE_PARSER_SETTINGS, SLOW_PREFLATE_PARSER_SETTINGS,
 };
 use crate::preflate_token::{BlockType, PreflateToken, PreflateTokenBlock};
 
 #[derive(Default)]
-pub struct PreflateCompLevelInfo {
+pub struct CompLevelInfo {
     pub possible_compression_levels: u32,
     pub recommended_compression_level: u32,
     pub zlib_compatible: bool,
@@ -20,37 +20,35 @@ pub struct PreflateCompLevelInfo {
     pub very_far_matches: bool,
     pub far_len_3_matches: bool,
 }
-struct PreflateCompLevelEstimatorState<'a> {
-    slow_hash: PreflateHashChainExt<'a>,
-    fast_l1_hash: PreflateHashChainExt<'a>,
-    fast_l2_hash: PreflateHashChainExt<'a>,
-    fast_l3_hash: PreflateHashChainExt<'a>,
+struct CompLevelEstimatorState<'a> {
+    slow_hash: HashChain<'a>,
+    fast_l1_hash: HashChain<'a>,
+    fast_l2_hash: HashChain<'a>,
+    fast_l3_hash: HashChain<'a>,
     blocks: &'a Vec<PreflateTokenBlock>,
-    info: PreflateCompLevelInfo,
+    info: CompLevelInfo,
     wsize: u16,
 }
 
-impl<'a> PreflateCompLevelEstimatorState<'a> {
+impl<'a> CompLevelEstimatorState<'a> {
     pub fn new(
         wbits: u32,
         mbits: u32,
         plain_text: &'a [u8],
         blocks: &'a Vec<PreflateTokenBlock>,
     ) -> Self {
-        let mut r = PreflateCompLevelEstimatorState::<'a> {
-            slow_hash: PreflateHashChainExt::<'a>::new(plain_text, mbits),
-            fast_l1_hash: PreflateHashChainExt::<'a>::new(plain_text, mbits),
-            fast_l2_hash: PreflateHashChainExt::<'a>::new(plain_text, mbits),
-            fast_l3_hash: PreflateHashChainExt::<'a>::new(plain_text, mbits),
+        CompLevelEstimatorState::<'a> {
+            slow_hash: HashChain::<'a>::new(plain_text, mbits),
+            fast_l1_hash: HashChain::<'a>::new(plain_text, mbits),
+            fast_l2_hash: HashChain::<'a>::new(plain_text, mbits),
+            fast_l3_hash: HashChain::<'a>::new(plain_text, mbits),
             blocks,
-            info: PreflateCompLevelInfo {
+            info: CompLevelInfo {
                 possible_compression_levels: 0b_111111110,
-                ..PreflateCompLevelInfo::default()
+                ..CompLevelInfo::default()
             },
             wsize: 1 << wbits,
-        };
-
-        r
+        }
     }
 
     fn update_hash(&mut self, len: u32) {
@@ -234,7 +232,7 @@ impl<'a> PreflateCompLevelEstimatorState<'a> {
     }
 
     fn update_or_skip_single_fast_hash(
-        hash: &mut PreflateHashChainExt,
+        hash: &mut HashChain,
         len: u32,
         config: &PreflateParserConfig,
     ) {
@@ -247,7 +245,7 @@ impl<'a> PreflateCompLevelEstimatorState<'a> {
 
     fn check_match_single_fast_hash(
         token: &PreflateToken,
-        hash: &PreflateHashChainExt,
+        hash: &HashChain,
         config: &PreflateParserConfig,
         hash_head: u32,
         window_size: u32,
@@ -262,7 +260,7 @@ impl<'a> PreflateCompLevelEstimatorState<'a> {
     pub fn match_depth(
         hash_head: u32,
         target_reference: &PreflateToken,
-        hash: &PreflateHashChainExt,
+        hash: &HashChain,
         window_size: u32,
         allow_nonmatch: bool,
     ) -> u32 {
@@ -296,8 +294,8 @@ pub fn estimate_preflate_comp_level(
     plain_text: &[u8],
     blocks: &Vec<PreflateTokenBlock>,
     early_out: bool,
-) -> PreflateCompLevelInfo {
-    let mut state = PreflateCompLevelEstimatorState::new(wbits, mbits, plain_text, &blocks);
+) -> CompLevelInfo {
+    let mut state = CompLevelEstimatorState::new(wbits, mbits, plain_text, &blocks);
     state.check_dump(early_out);
     state.recommend();
     return state.info;

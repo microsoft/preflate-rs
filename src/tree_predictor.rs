@@ -5,14 +5,14 @@ use crate::{
         CODETREE_CODE_COUNT, DIST_CODE_COUNT, LITLENDIST_CODE_COUNT, LITLEN_CODE_COUNT,
         NONLEN_CODE_COUNT, TREE_CODE_ORDER_TABLE,
     },
-    preflate_statistical_codec::{
+    preflate_token::TokenFrequency,
+    statistical_codec::{
         AssertEmptyEncoder, EmptyDecoder, PredictionDecoder, PredictionEncoder,
         PreflatePredictionEncoder,
     },
-    preflate_token::TokenFrequency,
 };
 
-pub fn encode_tree_for_block<D: PredictionEncoder>(
+pub fn predict_tree_for_block<D: PredictionEncoder>(
     huffman_encoding: &HuffmanOriginalEncoding,
     freq: &TokenFrequency,
     encoder: &mut D,
@@ -33,7 +33,7 @@ pub fn encode_tree_for_block<D: PredictionEncoder>(
     }
 
     // now predict the size of the distance tree
-    let mut predicted_d_tree_size = build_d_bit_lengths(
+    let predicted_d_tree_size = build_d_bit_lengths(
         &mut bit_lengths[predicted_l_tree_size as usize..],
         &freq.distance_codes,
     );
@@ -43,7 +43,6 @@ pub fn encode_tree_for_block<D: PredictionEncoder>(
     // if incorrect, include the actual size
     if predicted_d_tree_size != huffman_encoding.num_dist {
         encoder.encode_value(huffman_encoding.num_dist as u16, 5);
-        predicted_d_tree_size = huffman_encoding.num_dist;
     }
 
     // now predict each length code
@@ -74,7 +73,7 @@ pub fn encode_tree_for_block<D: PredictionEncoder>(
     Ok(())
 }
 
-pub fn decode_tree_for_block<D: PredictionDecoder>(
+pub fn recreate_tree_for_block<D: PredictionDecoder>(
     freq: &TokenFrequency,
     codec: &mut D,
 ) -> anyhow::Result<HuffmanOriginalEncoding> {
@@ -323,7 +322,7 @@ fn encode_roundtrip_perfect() {
     freq.distance_codes[2] = 25;
 
     let mut empty_decoder = EmptyDecoder {};
-    let regenerated_header = decode_tree_for_block(&freq, &mut empty_decoder).unwrap();
+    let regenerated_header = recreate_tree_for_block(&freq, &mut empty_decoder).unwrap();
 
     assert_eq!(regenerated_header.num_literals, 257);
     assert_eq!(regenerated_header.num_dist, 3);
@@ -332,7 +331,7 @@ fn encode_roundtrip_perfect() {
     assert_eq!(regenerated_header.lengths[2], (TreeCodeType::Code, 3));
 
     let mut empty_encoder = AssertEmptyEncoder {};
-    encode_tree_for_block(&regenerated_header, &freq, &mut empty_encoder).unwrap();
+    predict_tree_for_block(&regenerated_header, &freq, &mut empty_encoder).unwrap();
 
     println!("regenerated_header: {:?}", regenerated_header);
 }
@@ -368,11 +367,11 @@ fn encode_tree_roundtrip() {
 
     let mut encoder = PreflatePredictionEncoder::default();
 
-    encode_tree_for_block(&huff_origin, &freq, &mut encoder).unwrap();
+    predict_tree_for_block(&huff_origin, &freq, &mut encoder).unwrap();
 
     let mut decoder = encoder.make_decoder();
 
-    let regenerated_header = decode_tree_for_block(&freq, &mut decoder).unwrap();
+    let regenerated_header = recreate_tree_for_block(&freq, &mut decoder).unwrap();
 
     assert_eq!(huff_origin, regenerated_header);
 }

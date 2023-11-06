@@ -1,8 +1,8 @@
+use crate::hash_chain::{HashChain, HashIterator};
 use crate::preflate_constants::{self, MAX_MATCH, MIN_LOOKAHEAD, MIN_MATCH};
-use crate::preflate_hash_chain::{PreflateHashChainExt, PreflateHashIterator};
 use crate::preflate_parameter_estimator::PreflateParameters;
-use crate::preflate_seq_chain::PreflateSeqChain;
 use crate::preflate_token::PreflateToken;
+use crate::seq_chain::SeqChain;
 use std::cmp;
 
 #[derive(Default)]
@@ -11,18 +11,18 @@ pub struct PreflateRematchInfo {
     pub condensed_hops: u32,
 }
 
-pub struct PreflatePredictorState<'a> {
-    hash: PreflateHashChainExt<'a>,
-    seq: PreflateSeqChain<'a>,
+pub struct PredictorState<'a> {
+    hash: HashChain<'a>,
+    seq: SeqChain<'a>,
     params: PreflateParameters,
     window_bytes: u32,
 }
 
-impl<'a> PreflatePredictorState<'a> {
+impl<'a> PredictorState<'a> {
     pub fn new(uncompressed: &'a [u8], params: PreflateParameters) -> Self {
         Self {
-            hash: PreflateHashChainExt::new(uncompressed, params.mem_level),
-            seq: PreflateSeqChain::new(uncompressed),
+            hash: HashChain::new(uncompressed, params.mem_level),
+            seq: SeqChain::new(uncompressed),
             window_bytes: 1 << params.window_bits,
             params: params,
         }
@@ -88,7 +88,7 @@ impl<'a> PreflatePredictorState<'a> {
         self.hash.get_head(hash_next)
     }
 
-    fn iterate_from_dist(&self, dist_: u32, ref_pos: u32, max_dist: u32) -> PreflateHashIterator {
+    fn iterate_from_dist(&self, dist_: u32, ref_pos: u32, max_dist: u32) -> HashIterator {
         self.hash
             .iterate_from_pos(ref_pos - dist_, ref_pos, max_dist)
     }
@@ -481,7 +481,7 @@ impl<'a> PreflatePredictorState<'a> {
         let max_dist = self.window_size();
         let cur_max_dist = std::cmp::min(cur_pos, max_dist);
 
-        let mut chain_it: PreflateHashIterator<'_> =
+        let mut chain_it: HashIterator<'_> =
             self.iterate_from_dist(target_reference.dist(), cur_pos, cur_max_dist);
         if !chain_it.valid() {
             return Err(anyhow::anyhow!("no valid chain_it"));

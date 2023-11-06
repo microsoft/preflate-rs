@@ -1,6 +1,6 @@
 use crate::{preflate_constants::MIN_MATCH, preflate_input::PreflateInput};
 
-pub struct PreflateHashIterator<'a> {
+pub struct HashIterator<'a> {
     chain: &'a [u16],
     chain_depth: &'a [u32],
     ref_pos: u32,
@@ -10,7 +10,7 @@ pub struct PreflateHashIterator<'a> {
     is_valid: bool,
 }
 
-impl<'a> PreflateHashIterator<'a> {
+impl<'a> HashIterator<'a> {
     fn new(
         chain: &'a [u16],
         chain_depth: &'a [u32],
@@ -59,7 +59,7 @@ impl<'a> PreflateHashIterator<'a> {
     }
 }
 
-pub struct PreflateHashChainExt<'a> {
+pub struct HashChain<'a> {
     input: PreflateInput<'a>,
     head: Vec<u16>,
     chain_depth: Vec<u32>,
@@ -70,12 +70,12 @@ pub struct PreflateHashChainExt<'a> {
     total_shift: i32,
 }
 
-impl<'a> PreflateHashChainExt<'a> {
+impl<'a> HashChain<'a> {
     pub fn new(i: &'a [u8], mem_level: u32) -> Self {
         let hash_bits = mem_level + 7;
         let hash_mask = (1u32 << hash_bits) - 1;
 
-        let mut hash_chain_ext = PreflateHashChainExt {
+        let mut hash_chain_ext = HashChain {
             input: PreflateInput::new(i),
             total_shift: -8,
             hash_shift: (hash_bits + MIN_MATCH - 1) / MIN_MATCH,
@@ -149,14 +149,9 @@ impl<'a> PreflateHashChainExt<'a> {
             - self.chain_depth[(ref_pos as i32 - self.total_shift) as usize]
     }
 
-    pub fn iterate_from_head(
-        &self,
-        hash: u32,
-        ref_pos: u32,
-        max_dist: u32,
-    ) -> PreflateHashIterator {
+    pub fn iterate_from_head(&self, hash: u32, ref_pos: u32, max_dist: u32) -> HashIterator {
         let head = self.get_head(hash);
-        PreflateHashIterator::new(
+        HashIterator::new(
             &self.prev,
             &self.chain_depth,
             (ref_pos as i32 - self.total_shift) as u32,
@@ -165,13 +160,8 @@ impl<'a> PreflateHashChainExt<'a> {
         )
     }
 
-    pub fn iterate_from_node(
-        &self,
-        hash_head: u32,
-        ref_pos: u32,
-        max_dist: u32,
-    ) -> PreflateHashIterator {
-        PreflateHashIterator::new(
+    pub fn iterate_from_node(&self, hash_head: u32, ref_pos: u32, max_dist: u32) -> HashIterator {
+        HashIterator::new(
             &self.prev,
             &self.chain_depth,
             (ref_pos as i32 - self.total_shift) as u32,
@@ -180,8 +170,8 @@ impl<'a> PreflateHashChainExt<'a> {
         )
     }
 
-    pub fn iterate_from_pos(&self, pos: u32, ref_pos: u32, max_dist: u32) -> PreflateHashIterator {
-        PreflateHashIterator::new(
+    pub fn iterate_from_pos(&self, pos: u32, ref_pos: u32, max_dist: u32) -> HashIterator {
+        HashIterator::new(
             &self.prev,
             &self.chain_depth,
             (ref_pos as i32 - self.total_shift) as u32,

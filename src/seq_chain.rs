@@ -13,7 +13,7 @@ struct SeqChainEntry {
 /// It is used to find sequences of bytes that can be compressed using a backreference
 /// the structure is a hash table with 2^16 entries, each entry is a linked list of
 /// sequences of bytes of the same value.
-pub struct PreflateSeqChain<'a> {
+pub struct SeqChain<'a> {
     prev: Vec<SeqChainEntry>,
     total_shift: i32,
     cur_pos: u32,
@@ -57,7 +57,7 @@ impl<'a> PreflateSeqIterator<'a> {
     }
 }
 
-impl<'a> PreflateSeqChain<'a> {
+impl<'a> SeqChain<'a> {
     pub fn new(i: &'a [u8]) -> Self {
         let mut r = Self {
             prev: vec![SeqChainEntry::default(); 1 << 16],

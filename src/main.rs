@@ -1,25 +1,26 @@
 mod bit_helper;
+mod bit_writer;
+mod block_decoder;
+mod complevel_estimator;
+mod hash_chain;
 mod huffman_decoder;
 mod huffman_helper;
-mod preflate_block_decoder;
-mod preflate_complevel_estimator;
+mod predictor_state;
 mod preflate_constants;
-mod preflate_hash_chain;
 mod preflate_input;
 mod preflate_parameter_estimator;
 mod preflate_parse_config;
-mod preflate_predictor_state;
-mod preflate_seq_chain;
-mod preflate_statistical_codec;
 mod preflate_stream_info;
 mod preflate_token;
-mod preflate_token_predictor;
-mod preflate_tree_predictor;
+mod seq_chain;
+mod statistical_codec;
+mod token_predictor;
+mod tree_predictor;
 mod zip_bit_reader;
 
 use anyhow::{self, Context};
+use block_decoder::BlockDecoder;
 use flate2::{read::GzEncoder, read::ZlibEncoder, Compression};
-use preflate_block_decoder::PreflateBlockDecoder;
 use std::{
     env,
     fs::File,
@@ -30,10 +31,10 @@ mod zip_structs;
 
 use crate::{
     preflate_parameter_estimator::estimate_preflate_parameters,
-    preflate_statistical_codec::PreflatePredictionEncoder,
     preflate_token::BlockType,
-    preflate_token_predictor::PreflateTokenPredictor,
-    preflate_tree_predictor::{decode_tree_for_block, encode_tree_for_block},
+    statistical_codec::PreflatePredictionEncoder,
+    token_predictor::TokenPredictor,
+    tree_predictor::{predict_tree_for_block, recreate_tree_for_block},
 };
 
 fn analyze_compressed_data<R: Read + Seek>(
@@ -46,8 +47,7 @@ fn analyze_compressed_data<R: Read + Seek>(
     let mut output_data: Vec<u8> = vec![0; 4096];
     let output_stream = Cursor::new(&mut output_data);
 
-    let mut block_decoder =
-        PreflateBlockDecoder::new(binary_reader, compressed_size_in_bytes as i64)?;
+    let mut block_decoder = BlockDecoder::new(binary_reader, compressed_size_in_bytes as i64)?;
 
     let mut blocks = Vec::new();
     let mut last = false;
@@ -68,32 +68,30 @@ fn analyze_compressed_data<R: Read + Seek>(
 
     println!("prediction parameters: {:?}", params_e);
 
-    let mut token_predictor_in =
-        PreflateTokenPredictor::new(&block_decoder.get_plain_text(), params_e, 0);
+    let mut token_predictor_in = TokenPredictor::new(&block_decoder.get_plain_text(), params_e, 0);
 
     let mut encoder = PreflatePredictionEncoder::default();
 
     for i in 0..blocks.len() {
         token_predictor_in
-            .encode_block(&blocks[i], &mut encoder)
+            .predict_block(&blocks[i], &mut encoder)
             .with_context(|| format!("encode_block {}", i))?;
 
         if blocks[i].block_type == BlockType::DynamicHuff {
-            encode_tree_for_block(&blocks[i].huffman_encoding, &blocks[i].freq, &mut encoder)?;
+            predict_tree_for_block(&blocks[i].huffman_encoding, &blocks[i].freq, &mut encoder)?;
         }
     }
 
     let mut decoder = encoder.make_decoder();
 
-    let mut token_predictor_out =
-        PreflateTokenPredictor::new(block_decoder.get_plain_text(), params_e, 0);
+    let mut token_predictor_out = TokenPredictor::new(block_decoder.get_plain_text(), params_e, 0);
 
     let mut output_blocks = Vec::new();
     while !token_predictor_out.input_eof() {
-        let mut block = token_predictor_out.decode_block(&mut decoder)?;
+        let mut block = token_predictor_out.recreate_block(&mut decoder)?;
 
         if block.block_type == BlockType::DynamicHuff {
-            block.huffman_encoding = decode_tree_for_block(&block.freq, &mut decoder)?;
+            block.huffman_encoding = recreate_tree_for_block(&block.freq, &mut decoder)?;
         }
 
         output_blocks.push(block);
@@ -103,7 +101,6 @@ fn analyze_compressed_data<R: Read + Seek>(
 
     blocks.iter().zip(output_blocks).all(|(a, b)| {
         assert_eq!(a.block_type, b.block_type);
-        assert_eq!(a.padding_bit_count, b.padding_bit_count);
         assert_eq!(a.padding_bits, b.padding_bits);
         assert_eq!(a.tokens.len(), b.tokens.len());
         assert_eq!(a.freq.literal_codes, b.freq.literal_codes);
@@ -145,7 +142,7 @@ fn main_with_result() -> anyhow::Result<()> {
     }
 
     // Zlib compression with different compression levels
-    for level in 1..10 {
+    for level in 0..10 {
         println!("zlib level: {}", level);
 
         let mut output = Vec::new();

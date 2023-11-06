@@ -9,14 +9,14 @@ use crate::{
     zip_bit_reader::ZipBitReader,
 };
 
-pub struct PreflateBlockDecoder<'a, R> {
+pub struct BlockDecoder<'a, R> {
     input: ZipBitReader<'a, R>,
     plain_text: Vec<u8>,
 }
 
-impl<'a, R: Read + Seek> PreflateBlockDecoder<'a, R> {
+impl<'a, R: Read + Seek> BlockDecoder<'a, R> {
     pub fn new(compressed_text: &'a mut R, max_readable_bytes: i64) -> anyhow::Result<Self> {
-        Ok(PreflateBlockDecoder {
+        Ok(BlockDecoder {
             input: ZipBitReader::new(compressed_text, max_readable_bytes)?,
             plain_text: Vec::new(),
         })
@@ -57,8 +57,8 @@ impl<'a, R: Read + Seek> PreflateBlockDecoder<'a, R> {
                 blk = PreflateTokenBlock::new(BlockType::Stored);
                 blk.uncompressed_start_pos = self.plain_text.len() as u32;
                 blk.block_type = BlockType::Stored;
-                blk.padding_bit_count = 8 - self.input.bit_position_in_current_byte() as u8;
-                blk.padding_bits = self.read_bits(blk.padding_bit_count.into())? as u8;
+                let padding_bit_count = 8 - self.input.bit_position_in_current_byte() as u8;
+                blk.padding_bits = self.read_bits(padding_bit_count.into())? as u8;
 
                 let len = self.read_bits(16)?;
                 let ilen = self.read_bits(16)?;

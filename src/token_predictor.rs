@@ -1,37 +1,22 @@
 use crate::{
     bit_helper::bit_length,
+    predictor_state::PredictorState,
     preflate_constants::{MAX_MATCH, MIN_MATCH, TOO_FAR},
     preflate_parameter_estimator::PreflateParameters,
-    preflate_predictor_state::{PreflatePredictorState, PreflateRematchInfo},
-    preflate_statistical_codec::{
-        PredictionDecoder, PredictionEncoder, PreflatePredictionDecoder, PreflatePredictionEncoder,
-    },
     preflate_token::{BlockType, PreflateToken, PreflateTokenBlock, TOKEN_LITERAL},
+    statistical_codec::{PredictionDecoder, PredictionEncoder},
 };
 
-pub struct PreflateTokenPredictor<'a> {
-    state: PreflatePredictorState<'a>,
+pub struct TokenPredictor<'a> {
+    state: PredictorState<'a>,
     params: PreflateParameters,
     prev_len: u32,
     pending_token: Option<PreflateToken>,
     current_token_count: u32,
-    empty_block_at_end: bool,
     max_token_count: u32,
 }
 
-pub struct BlockAnalysisResult {
-    pub block_type: BlockType,
-    pub token_count: u32,
-    pub block_size_predicted: bool,
-    pub input_eof: bool,
-    pub last_block: bool,
-    pub padding_bits: u8,
-    pub padding_counts: u8,
-    pub token_info: Vec<u8>,
-    pub correctives: Vec<i32>,
-}
-
-impl<'a> PreflateTokenPredictor<'a> {
+impl<'a> TokenPredictor<'a> {
     pub fn new(
         uncompressed: &'a [u8],
         params: PreflateParameters,
@@ -44,12 +29,11 @@ impl<'a> PreflateTokenPredictor<'a> {
         // Construct the analysisResults vector
 
         let mut r = Self {
-            state: PreflatePredictorState::<'a>::new(uncompressed, params),
+            state: PredictorState::<'a>::new(uncompressed, params),
             params,
             prev_len: 0,
             pending_token: None,
             current_token_count: 0,
-            empty_block_at_end: false,
             max_token_count: ((1 << (6 + params.mem_level)) - 1),
         };
 
@@ -67,7 +51,7 @@ impl<'a> PreflateTokenPredictor<'a> {
         r
     }
 
-    pub fn encode_block<D: PredictionEncoder>(
+    pub fn predict_block<D: PredictionEncoder>(
         &mut self,
         block: &PreflateTokenBlock,
         codec: &mut D,
@@ -84,14 +68,7 @@ impl<'a> PreflateTokenPredictor<'a> {
             let pad = block.padding_bits != 0;
             codec.encode_non_zero_padding(pad);
             if pad {
-                let bits_to_save = bit_length(block.padding_bits.into()) as u8;
-                codec.encode_value(bits_to_save.into(), 3);
-                if bits_to_save > 1 {
-                    codec.encode_value(
-                        block.padding_bits as u16 & ((1 << (bits_to_save - 1)) - 1),
-                        bits_to_save - 1,
-                    );
-                }
+                codec.encode_value(block.padding_bits.into(), 8);
             }
             self.state.update_hash(block.uncompressed_len as u32);
             self.state.update_seq(block.uncompressed_len as u32);
@@ -177,7 +154,7 @@ impl<'a> PreflateTokenPredictor<'a> {
         Ok(())
     }
 
-    pub fn decode_block<D: PredictionDecoder>(
+    pub fn recreate_block<D: PredictionDecoder>(
         &mut self,
         codec: &mut D,
     ) -> anyhow::Result<PreflateTokenBlock> {
@@ -195,16 +172,8 @@ impl<'a> PreflateTokenPredictor<'a> {
                 block = PreflateTokenBlock::new(BlockType::Stored);
                 block.uncompressed_len = codec.decode_value(16).into();
                 block.padding_bits = 0;
-                block.padding_bit_count = 0;
                 if codec.decode_non_zero_padding() {
-                    block.padding_bit_count = codec.decode_value(3) as u8;
-                    if block.padding_bit_count > 0 {
-                        block.padding_bits = ((1 << (block.padding_bit_count - 1))
-                            + codec.decode_value(block.padding_bit_count - 1))
-                            as u8;
-                    } else {
-                        block.padding_bits = 0;
-                    }
+                    block.padding_bits = codec.decode_value(8) as u8;
                 }
                 self.state.update_hash(block.uncompressed_len);
                 self.state.update_seq(block.uncompressed_len);

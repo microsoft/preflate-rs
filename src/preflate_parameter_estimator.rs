@@ -1,6 +1,6 @@
 use crate::{
     bit_helper::bit_length,
-    preflate_complevel_estimator::estimate_preflate_comp_level,
+    complevel_estimator::estimate_preflate_comp_level,
     preflate_constants,
     preflate_parse_config::*,
     preflate_stream_info::{extract_preflate_info, PreflateStreamInfo},
