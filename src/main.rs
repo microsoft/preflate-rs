@@ -1,10 +1,11 @@
 mod bit_helper;
 mod bit_writer;
-mod block_decoder;
 mod complevel_estimator;
+mod deflate_decoder;
+pub mod deflate_encoder;
 mod hash_chain;
-mod huffman_decoder;
 mod huffman_helper;
+mod huffman_table;
 mod predictor_state;
 mod preflate_constants;
 mod preflate_input;
@@ -19,7 +20,7 @@ mod tree_predictor;
 mod zip_bit_reader;
 
 use anyhow::{self, Context};
-use block_decoder::BlockDecoder;
+use deflate_decoder::DeflateDecoder;
 use flate2::{read::GzEncoder, read::ZlibEncoder, Compression};
 use std::{
     env,
@@ -47,7 +48,7 @@ fn analyze_compressed_data<R: Read + Seek>(
     let mut output_data: Vec<u8> = vec![0; 4096];
     let output_stream = Cursor::new(&mut output_data);
 
-    let mut block_decoder = BlockDecoder::new(binary_reader, compressed_size_in_bytes as i64)?;
+    let mut block_decoder = DeflateDecoder::new(binary_reader, compressed_size_in_bytes as i64)?;
 
     let mut blocks = Vec::new();
     let mut last = false;
@@ -101,6 +102,8 @@ fn analyze_compressed_data<R: Read + Seek>(
 
     blocks.iter().zip(output_blocks).all(|(a, b)| {
         assert_eq!(a.block_type, b.block_type);
+        //assert_eq!(a.uncompressed_len, b.uncompressed_len);
+        //assert_eq!(a.uncompressed_start_pos, b.uncompressed_start_pos);
         assert_eq!(a.padding_bits, b.padding_bits);
         assert_eq!(a.tokens.len(), b.tokens.len());
         assert_eq!(a.freq.literal_codes, b.freq.literal_codes);

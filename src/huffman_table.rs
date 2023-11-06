@@ -1,3 +1,4 @@
+use anyhow::Result;
 use std::io::{Read, Seek};
 
 use crate::zip_bit_reader::ZipBitReader;
@@ -33,18 +34,18 @@ impl Default for HuffmanOriginalEncoding {
     }
 }
 
-pub struct HuffmanDecoder {
-    rg_literal_alphabet_code_lengths: Vec<u8>,
-    rg_literal_alphabet_huffman_codes: Vec<u16>,
-    rg_distance_alphabet_code_lengths: Vec<u8>,
-    rg_distance_alphabet_huffman_codes: Vec<u16>,
-    rg_literal_alphabet_huff_code_tree: Vec<i32>,
-    rg_distance_alphabet_huff_code_tree: Vec<i32>,
+pub struct HuffmanTable {
+    lit_code_lengths: Vec<u8>,
+    lit_huffman_codes: Vec<u16>,
+    dist_code_lengths: Vec<u8>,
+    dist_huffman_codes: Vec<u16>,
+    lit_huff_code_tree: Vec<i32>,
+    dist_huff_code_tree: Vec<i32>,
     number_of_non_zero_literal_alphabet_code_lengths: i32,
     number_of_non_zero_distance_alphabet_code_lengths: i32,
 }
 
-impl HuffmanDecoder {
+impl HuffmanTable {
     /// Create Fixed Huffman code tables
     ///
     /// The Huffman codes for the two alphabets are fixed, and are not
@@ -67,13 +68,13 @@ impl HuffmanDecoder {
     /// occur in the compressed data, but participate in the code
     /// construction.
     pub fn create_fixed() -> anyhow::Result<Self> {
-        let mut hd = HuffmanDecoder {
-            rg_literal_alphabet_code_lengths: vec![0; 288],
-            rg_literal_alphabet_huffman_codes: vec![0; 288],
-            rg_distance_alphabet_code_lengths: vec![5; 32], // Distance codes are represented by 5-bit codes
-            rg_distance_alphabet_huffman_codes: vec![0; 32],
-            rg_literal_alphabet_huff_code_tree: vec![0; 0], // set below
-            rg_distance_alphabet_huff_code_tree: vec![0; 0], // set below
+        let mut hd = HuffmanTable {
+            lit_code_lengths: vec![0; 288],
+            lit_huffman_codes: vec![0; 288],
+            dist_code_lengths: vec![5; 32], // Distance codes are represented by 5-bit codes
+            dist_huffman_codes: vec![0; 32],
+            lit_huff_code_tree: vec![0; 0],  // set below
+            dist_huff_code_tree: vec![0; 0], // set below
             number_of_non_zero_literal_alphabet_code_lengths: 288,
             number_of_non_zero_distance_alphabet_code_lengths: 32,
         };
@@ -92,17 +93,13 @@ impl HuffmanDecoder {
                 wbits = 7;
             }
 
-            hd.rg_literal_alphabet_code_lengths[i] = wbits;
+            hd.lit_code_lengths[i] = wbits;
         }
 
-        Self::calc_huffman_codes(
-            &hd.rg_literal_alphabet_code_lengths,
-            &mut hd.rg_literal_alphabet_huffman_codes,
-        )?;
-        hd.rg_literal_alphabet_huff_code_tree = Self::calculate_huffman_code_tree(
-            &hd.rg_literal_alphabet_code_lengths,
-            &hd.rg_literal_alphabet_huffman_codes,
-        )?;
+        hd.lit_huffman_codes = Self::calc_huffman_codes(&hd.lit_code_lengths)?;
+
+        hd.lit_huff_code_tree =
+            Self::calculate_huffman_code_tree(&hd.lit_code_lengths, &hd.lit_huffman_codes)?;
 
         // Create the Length table for the Distance Alphabet
         // Distance codes 0-31 are represented by (fixed-length) 5-bit
@@ -110,16 +107,56 @@ impl HuffmanDecoder {
         // shown in Paragraph 3.2.5, above.  Note that distance codes 30-
         // 31 will never actually occur in the compressed data.
 
-        Self::calc_huffman_codes(
-            &hd.rg_distance_alphabet_code_lengths,
-            &mut hd.rg_distance_alphabet_huffman_codes,
-        )?;
-        hd.rg_distance_alphabet_huff_code_tree = Self::calculate_huffman_code_tree(
-            &hd.rg_distance_alphabet_code_lengths,
-            &hd.rg_distance_alphabet_huffman_codes,
-        )?;
+        hd.dist_huffman_codes = Self::calc_huffman_codes(&hd.dist_code_lengths)?;
+
+        hd.dist_huff_code_tree =
+            Self::calculate_huffman_code_tree(&hd.dist_code_lengths, &hd.dist_huffman_codes)?;
 
         Ok(hd)
+    }
+
+    pub fn create_from_original_encoding(
+        huffman_original_encoding: &HuffmanOriginalEncoding,
+    ) -> Result<Self> {
+        let mut lengths = Vec::new();
+        let mut prevcode = 0;
+        for (tree_code, length) in huffman_original_encoding.lengths.iter() {
+            match *tree_code {
+                TreeCodeType::Code => {
+                    lengths.push(*length);
+                    prevcode = *length;
+                }
+                TreeCodeType::Repeat => {
+                    for _ in 0..*length {
+                        lengths.push(prevcode);
+                    }
+                }
+                TreeCodeType::ZeroShort => {
+                    for _ in 0..*length {
+                        lengths.push(0);
+                    }
+                }
+                TreeCodeType::ZeroLong => {
+                    for _ in 0..*length {
+                        lengths.push(0);
+                    }
+                }
+            }
+        }
+
+        let lit_lengths = &lengths[0..huffman_original_encoding.num_literals];
+        let dist_lengths = &lengths[huffman_original_encoding.num_literals..];
+
+        Ok(HuffmanTable {
+            lit_code_lengths: lit_lengths.to_vec(),
+            lit_huffman_codes: Self::calc_huffman_codes(lit_lengths)?,
+            dist_code_lengths: dist_lengths.to_vec(),
+            dist_huffman_codes: Self::calc_huffman_codes(dist_lengths)?,
+            lit_huff_code_tree: vec![0; 0],  // set below
+            dist_huff_code_tree: vec![0; 0], // set below
+            number_of_non_zero_literal_alphabet_code_lengths: 288,
+            number_of_non_zero_distance_alphabet_code_lengths: 32,
+        })
     }
 
     /// Create Huffman code table for Literal alphabet 0-287 and distance alphabet 0-29 by
@@ -162,10 +199,8 @@ impl HuffmanDecoder {
                 [rg_map_code_length_alphabet_code_lengths[i as usize]] = bit_reader.get(3)? as u8;
         }
 
-        Self::calc_huffman_codes(
-            &rg_code_length_alphabet_code_lengths,
-            &mut rg_code_length_alphabet_huffman_codes,
-        )?;
+        rg_code_length_alphabet_huffman_codes =
+            Self::calc_huffman_codes(&rg_code_length_alphabet_code_lengths)?;
         let rg_code_length_huff_code_tree = Self::calculate_huffman_code_tree(
             &rg_code_length_alphabet_code_lengths,
             &rg_code_length_alphabet_huffman_codes,
@@ -187,13 +222,13 @@ impl HuffmanDecoder {
             num_dist: hdist as usize + 1,
         };
 
-        let mut hd = HuffmanDecoder {
-            rg_literal_alphabet_code_lengths: vec![0; 286],
-            rg_literal_alphabet_huffman_codes: vec![0; 286],
-            rg_distance_alphabet_code_lengths: vec![0; 30],
-            rg_distance_alphabet_huffman_codes: vec![0; 30],
-            rg_literal_alphabet_huff_code_tree: vec![0; 0], // set below
-            rg_distance_alphabet_huff_code_tree: vec![0; 0], // set below
+        let mut hd = HuffmanTable {
+            lit_code_lengths: vec![0; 286],
+            lit_huffman_codes: vec![0; 286],
+            dist_code_lengths: vec![0; 30],
+            dist_huffman_codes: vec![0; 30],
+            lit_huff_code_tree: vec![0; 0],  // set below
+            dist_huff_code_tree: vec![0; 0], // set below
             number_of_non_zero_literal_alphabet_code_lengths: 288,
             number_of_non_zero_distance_alphabet_code_lengths: 32,
         };
@@ -332,7 +367,7 @@ impl HuffmanDecoder {
         // Copy from Combined Lengths to individual Length Arrays);
         for i in 0..hlit + 257 {
             let literal_length = rg_combined_lengths[i as usize];
-            hd.rg_literal_alphabet_code_lengths[i as usize] = literal_length;
+            hd.lit_code_lengths[i as usize] = literal_length;
             if literal_length != 0 {
                 hd.number_of_non_zero_literal_alphabet_code_lengths += 1;
             }
@@ -341,7 +376,7 @@ impl HuffmanDecoder {
         cli = hlit + 257;
         for j in 0..hdist + 1 {
             let distance_length = rg_combined_lengths[cli as usize];
-            hd.rg_distance_alphabet_code_lengths[j as usize] = distance_length;
+            hd.dist_code_lengths[j as usize] = distance_length;
             if distance_length != 0 {
                 hd.number_of_non_zero_distance_alphabet_code_lengths += 1;
             }
@@ -349,14 +384,10 @@ impl HuffmanDecoder {
             cli += 1;
         }
 
-        Self::calc_huffman_codes(
-            &hd.rg_literal_alphabet_code_lengths,
-            &mut hd.rg_literal_alphabet_huffman_codes,
-        )?;
-        hd.rg_literal_alphabet_huff_code_tree = Self::calculate_huffman_code_tree(
-            &hd.rg_literal_alphabet_code_lengths,
-            &hd.rg_literal_alphabet_huffman_codes,
-        )?;
+        hd.lit_huffman_codes = Self::calc_huffman_codes(&hd.lit_code_lengths)?;
+
+        hd.lit_huff_code_tree =
+            Self::calculate_huffman_code_tree(&hd.lit_code_lengths, &hd.lit_huffman_codes)?;
 
         if huffman_info_dump_level == 2 {
             println!("Literal Alpahbet Huffman code Lengths and codes");
@@ -380,7 +411,7 @@ impl HuffmanDecoder {
 
                     data_row += format!(
                         " {:1} {:1X} ",
-                        displaychar, hd.rg_literal_alphabet_code_lengths[alphabetchar as usize]
+                        displaychar, hd.lit_code_lengths[alphabetchar as usize]
                     )
                     .as_str();
                 }
@@ -388,14 +419,10 @@ impl HuffmanDecoder {
             }
         }
 
-        Self::calc_huffman_codes(
-            &hd.rg_distance_alphabet_code_lengths,
-            &mut hd.rg_distance_alphabet_huffman_codes,
-        )?;
-        hd.rg_distance_alphabet_huff_code_tree = Self::calculate_huffman_code_tree(
-            &hd.rg_distance_alphabet_code_lengths,
-            &hd.rg_distance_alphabet_huffman_codes,
-        )?;
+        hd.dist_huffman_codes = Self::calc_huffman_codes(&hd.dist_code_lengths)?;
+
+        hd.dist_huff_code_tree =
+            Self::calculate_huffman_code_tree(&hd.dist_code_lengths, &hd.dist_huffman_codes)?;
 
         Ok((hd, huffman_encoding))
     }
@@ -404,14 +431,14 @@ impl HuffmanDecoder {
         &self,
         bit_reader: &mut ZipBitReader<R>,
     ) -> anyhow::Result<u16> {
-        Self::fetch_next_char(bit_reader, &self.rg_literal_alphabet_huff_code_tree)
+        Self::fetch_next_char(bit_reader, &self.lit_huff_code_tree)
     }
 
     pub fn fetch_next_distance_char<R: Read + Seek>(
         &self,
         bit_reader: &mut ZipBitReader<R>,
     ) -> anyhow::Result<u16> {
-        Self::fetch_next_char(bit_reader, &self.rg_distance_alphabet_huff_code_tree)
+        Self::fetch_next_char(bit_reader, &self.dist_huff_code_tree)
     }
 
     /// Reads the next Huffman encoded char from bitReader using the Huffman tree encoded in rgHuffCodeTree
@@ -436,10 +463,9 @@ impl HuffmanDecoder {
     }
 
     /// Calculates Huffman code array given an array of Huffman Code Lengths using the RFC 1951 algorithm
-    fn calc_huffman_codes(
-        rg_code_lengths: &Vec<u8>,
-        rg_codes: &mut Vec<u16>,
-    ) -> anyhow::Result<()> {
+    pub fn calc_huffman_codes(rg_code_lengths: &[u8]) -> anyhow::Result<Vec<u16>> {
+        let mut rg_codes: Vec<u16> = vec![0; rg_code_lengths.len()];
+
         if rg_code_lengths.len() != rg_codes.len() {
             return Err(anyhow::Error::msg("ArgumentException"));
         }
@@ -486,7 +512,7 @@ impl HuffmanDecoder {
             }
         }
 
-        Ok(())
+        Ok(rg_codes)
     }
 
     /// Calculates Huffman code array given an array of Huffman Code Lengths using the RFC 1951 algorithm
@@ -495,18 +521,15 @@ impl HuffmanDecoder {
     ///		rgHuffNodes[N+1] is the array index of the '1' child
     ///	2. If rgHuffNodes[i] is less than zero then it is a leaf and the literal alphabet value is -rgHuffNodes[i] + 1
     ///	3. The root node index 'N' is rgHuffNodes.Length - 2. Search should start at that node.
-    fn calculate_huffman_code_tree(
-        rg_code_lengths: &Vec<u8>,
-        rg_codes: &Vec<u16>,
-    ) -> anyhow::Result<Vec<i32>> {
+    fn calculate_huffman_code_tree(code_lengths: &[u8], codes: &[u16]) -> anyhow::Result<Vec<i32>> {
         let mut c_codes: i32 = 0;
         let mut c_bits_largest = 0;
-        if rg_code_lengths.len() != rg_codes.len() {
+        if code_lengths.len() != codes.len() {
             return Err(anyhow::Error::msg("ArgumentException"));
         }
 
         // First calculate total number of leaf nodes in the Huffman Tree and the max huffman code length
-        for c_bits in rg_code_lengths {
+        for c_bits in code_lengths {
             if *c_bits != 0 {
                 c_codes += 1;
             }
@@ -526,8 +549,8 @@ impl HuffmanDecoder {
         for c_bits_cur in (1..=c_bits_largest).rev() {
             let i_huff_nodes_start = i_huff_nodes;
             // Create parent nodes for all leaf codes at current bit length
-            for j in 0..rg_code_lengths.len() {
-                if rg_code_lengths[j] == c_bits_cur {
+            for j in 0..code_lengths.len() {
+                if code_lengths[j] == c_bits_cur {
                     rg_huff_nodes[i_huff_nodes as usize] = -1 - j as i32; // Leaf nodes links store the actual literal character negative biased by -1
                     i_huff_nodes += 1;
                 }

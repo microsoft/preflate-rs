@@ -3,20 +3,22 @@ use anyhow::Context;
 use std::io::{Read, Seek};
 
 use crate::{
-    huffman_decoder::HuffmanDecoder,
+    huffman_table::HuffmanTable,
     preflate_constants,
     preflate_token::{BlockType, PreflateTokenBlock},
     zip_bit_reader::ZipBitReader,
 };
 
-pub struct BlockDecoder<'a, R> {
+/// Used to read binary data in deflate format and convert it to plaintext and a list of tokenized blocks
+/// containing the literals and distance codes that were used to compress the file
+pub struct DeflateDecoder<'a, R> {
     input: ZipBitReader<'a, R>,
     plain_text: Vec<u8>,
 }
 
-impl<'a, R: Read + Seek> BlockDecoder<'a, R> {
+impl<'a, R: Read + Seek> DeflateDecoder<'a, R> {
     pub fn new(compressed_text: &'a mut R, max_readable_bytes: i64) -> anyhow::Result<Self> {
-        Ok(BlockDecoder {
+        Ok(DeflateDecoder {
             input: ZipBitReader::new(compressed_text, max_readable_bytes)?,
             plain_text: Vec::new(),
         })
@@ -80,7 +82,7 @@ impl<'a, R: Read + Seek> BlockDecoder<'a, R> {
             1 => {
                 blk = PreflateTokenBlock::new(BlockType::StaticHuff);
                 blk.uncompressed_start_pos = self.plain_text.len() as u32;
-                let decoder = HuffmanDecoder::create_fixed()?;
+                let decoder = HuffmanTable::create_fixed()?;
                 self.decode_block(&decoder, &mut blk)?;
                 return Ok(blk);
             }
@@ -89,7 +91,7 @@ impl<'a, R: Read + Seek> BlockDecoder<'a, R> {
                 blk = PreflateTokenBlock::new(BlockType::DynamicHuff);
                 blk.uncompressed_start_pos = self.plain_text.len() as u32;
                 let (decoder, huffman_encoding) =
-                    HuffmanDecoder::create_from_bit_reader(&mut self.input, 0)?;
+                    HuffmanTable::create_from_bit_reader(&mut self.input, 0)?;
                 blk.huffman_encoding = huffman_encoding;
 
                 self.decode_block(&decoder, &mut blk)
@@ -105,7 +107,7 @@ impl<'a, R: Read + Seek> BlockDecoder<'a, R> {
 
     fn decode_block(
         &mut self,
-        decoder: &HuffmanDecoder,
+        decoder: &HuffmanTable,
         blk: &mut PreflateTokenBlock,
     ) -> anyhow::Result<()> {
         let mut earliest_reference = i32::MAX;
