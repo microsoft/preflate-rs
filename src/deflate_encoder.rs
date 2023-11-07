@@ -2,7 +2,7 @@ use anyhow::Result;
 
 use crate::{
     bit_writer::BitWriter,
-    huffman_table::{calc_huffman_codes, HuffmanReader, TreeCodeType},
+    huffman_table::HuffmanReader,
     preflate_token::{BlockType, PreflateTokenBlock},
 };
 
