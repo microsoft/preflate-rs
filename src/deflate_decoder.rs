@@ -3,7 +3,7 @@ use anyhow::Context;
 use std::io::{Read, Seek};
 
 use crate::{
-    huffman_table::HuffmanTable,
+    huffman_table::{HuffmanOriginalEncoding, HuffmanReader},
     preflate_constants,
     preflate_token::{BlockType, PreflateTokenBlock},
     zip_bit_reader::ZipBitReader,
@@ -82,7 +82,7 @@ impl<'a, R: Read + Seek> DeflateDecoder<'a, R> {
             1 => {
                 blk = PreflateTokenBlock::new(BlockType::StaticHuff);
                 blk.uncompressed_start_pos = self.plain_text.len() as u32;
-                let decoder = HuffmanTable::create_fixed()?;
+                let decoder = HuffmanReader::create_fixed()?;
                 self.decode_block(&decoder, &mut blk)?;
                 return Ok(blk);
             }
@@ -90,9 +90,10 @@ impl<'a, R: Read + Seek> DeflateDecoder<'a, R> {
             2 => {
                 blk = PreflateTokenBlock::new(BlockType::DynamicHuff);
                 blk.uncompressed_start_pos = self.plain_text.len() as u32;
-                let (decoder, huffman_encoding) =
-                    HuffmanTable::create_from_bit_reader(&mut self.input, 0)?;
-                blk.huffman_encoding = huffman_encoding;
+
+                blk.huffman_encoding = HuffmanOriginalEncoding::read(&mut self.input)?;
+
+                let decoder = HuffmanReader::create_from_original_encoding(&blk.huffman_encoding)?;
 
                 self.decode_block(&decoder, &mut blk)
                     .with_context(|| "decode_block dyn")?;
@@ -107,7 +108,7 @@ impl<'a, R: Read + Seek> DeflateDecoder<'a, R> {
 
     fn decode_block(
         &mut self,
-        decoder: &HuffmanTable,
+        decoder: &HuffmanReader,
         blk: &mut PreflateTokenBlock,
     ) -> anyhow::Result<()> {
         let mut earliest_reference = i32::MAX;

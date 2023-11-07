@@ -68,7 +68,7 @@ pub const DIST_EXTRA_TABLE: [u8; DIST_CODE_COUNT] = [
     0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13,
     13,
 ];
-pub const TREE_CODE_ORDER_TABLE: [u8; CODETREE_CODE_COUNT] = [
+pub const TREE_CODE_ORDER_TABLE: [usize; CODETREE_CODE_COUNT] = [
     16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15,
 ];
 
