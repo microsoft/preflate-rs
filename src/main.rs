@@ -39,9 +39,8 @@ use crate::{
     tree_predictor::{predict_tree_for_block, recreate_tree_for_block},
 };
 
-fn analyze_compressed_data<R: Read + Seek>(
-    binary_reader: &mut R,
-    compressed_size_in_bytes: u64,
+fn analyze_compressed_data(
+    compressed_data: &[u8],
     header_crc32: u32,
     deflate_info_dump_level: i32,
     uncompressed_size: &mut u64,
@@ -49,7 +48,8 @@ fn analyze_compressed_data<R: Read + Seek>(
     let mut output_data: Vec<u8> = vec![0; 4096];
     let output_stream = Cursor::new(&mut output_data);
 
-    let mut block_decoder = DeflateDecoder::new(binary_reader, compressed_size_in_bytes as i64)?;
+    let mut input_stream = Cursor::new(compressed_data);
+    let mut block_decoder = DeflateDecoder::new(&mut input_stream, compressed_data.len() as i64)?;
 
     let mut blocks = Vec::new();
     let mut last = false;
@@ -223,19 +223,12 @@ fn main_with_result() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn do_analyze(v: &Vec<u8>, output: &[u8]) -> Result<(), anyhow::Error> {
-    let crc = crc32fast::hash(v);
-    let compressed_size = output.len() as u64;
+fn do_analyze(plain_text: &Vec<u8>, compressed_data: &[u8]) -> Result<(), anyhow::Error> {
+    let crc = crc32fast::hash(plain_text);
     let mut uncompressed_size = 0;
-    let mut reader = Cursor::new(&output);
-    analyze_compressed_data(
-        &mut reader,
-        compressed_size - 2,
-        crc,
-        10,
-        &mut uncompressed_size,
-    )
-    .with_context(|| "analyze_compressed_data")?;
+
+    analyze_compressed_data(compressed_data, crc, 10, &mut uncompressed_size)
+        .with_context(|| "analyze_compressed_data")?;
     Ok(())
 }
 

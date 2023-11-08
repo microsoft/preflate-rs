@@ -12,8 +12,6 @@ pub const TOO_FAR: u32 = 4096;
 pub const MIN_MATCH: u32 = 3;
 pub const MAX_MATCH: u32 = 258;
 
-pub const MAX_BITS: u32 = 15;
-
 pub const MIN_LOOKAHEAD: u32 = MAX_MATCH + MIN_MATCH + 1;
 
 const DIST_CODE_TABLE: [u8; 512] = [

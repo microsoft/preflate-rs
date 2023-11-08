@@ -460,7 +460,7 @@ impl PredictionDecoder for EmptyDecoder {
     fn decode_ld_type_correction(&mut self, predtype: TreeCodeType) -> TreeCodeType {
         predtype
     }
-    fn decode_repeat_count_correction(&mut self, predval: u8, ldtype: TreeCodeType) -> u8 {
+    fn decode_repeat_count_correction(&mut self, predval: u8, _ldtype: TreeCodeType) -> u8 {
         predval
     }
     fn decode_ld_bit_length_correction(&mut self, predval: u8) -> u8 {

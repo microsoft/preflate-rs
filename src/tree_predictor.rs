@@ -6,9 +6,7 @@ use crate::{
         NONLEN_CODE_COUNT, TREE_CODE_ORDER_TABLE,
     },
     preflate_token::TokenFrequency,
-    statistical_codec::{
-        EmptyDecoder, PredictionDecoder, PredictionEncoder, PreflatePredictionEncoder,
-    },
+    statistical_codec::{PredictionDecoder, PredictionEncoder},
 };
 
 pub fn predict_tree_for_block<D: PredictionEncoder>(
@@ -313,6 +311,8 @@ fn predict_code_data(sym_bit_len: &[u8], code_type: TreeCodeType) -> u8 {
 
 #[test]
 fn encode_roundtrip_perfect() {
+    use crate::statistical_codec::EmptyDecoder;
+
     let mut freq = TokenFrequency::default();
     freq.literal_codes[0] = 100;
     freq.literal_codes[1] = 50;
@@ -341,6 +341,8 @@ fn encode_roundtrip_perfect() {
 
 #[test]
 fn encode_tree_roundtrip() {
+    use crate::statistical_codec::PreflatePredictionEncoder;
+
     let mut freq = TokenFrequency::default();
     freq.literal_codes[0] = 100;
     freq.literal_codes[1] = 50;
