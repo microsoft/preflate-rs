@@ -25,7 +25,7 @@ use flate2::{read::GzEncoder, read::ZlibEncoder, Compression};
 use std::{
     env,
     fs::File,
-    io::{Cursor, Read, Seek, Write},
+    io::{Cursor, Read, Write},
 };
 
 mod zip_structs;
@@ -120,10 +120,7 @@ fn analyze_compressed_data(
     };
     deflate_encoder.flush_with_padding(padding);
 
-    //assert_eq!(deflate_encoder.get_output().len(), compressed_data.len(), "re-compressed version should be same");
-
     assert_eq!(blocks.len(), output_blocks.len());
-
     blocks.iter().zip(output_blocks).all(|(a, b)| {
         assert_eq!(a.block_type, b.block_type);
         //assert_eq!(a.uncompressed_len, b.uncompressed_len);
@@ -137,7 +134,16 @@ fn analyze_compressed_data(
         true
     });
 
-    encoder.print();
+    assert_eq!(
+        deflate_encoder.get_output().len(),
+        compressed_data.len(),
+        "re-compressed version should be same"
+    );
+    assert_eq!(
+        deflate_encoder.get_output(),
+        compressed_data,
+        "re-compressed version should be same"
+    );
 
     let result_crc = crc32fast::hash(block_decoder.get_plain_text());
 
@@ -211,7 +217,8 @@ fn main_with_result() -> anyhow::Result<()> {
         let mut output = Vec::new();
         zlib_encoder.read_to_end(&mut output).unwrap();
 
-        do_analyze(&v, &output[2..])?;
+        // skip header and final crc
+        do_analyze(&v, &output[2..output.len() - 4])?;
     }
 
     // Gzip compression with different compression levels

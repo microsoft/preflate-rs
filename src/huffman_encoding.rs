@@ -310,21 +310,7 @@ impl HuffmanWriter {
     ) -> Result<Self> {
         bitwriter.write(2, 2, output_buffer);
 
-        bitwriter.write(huffman_encoding.num_literals as u32 - 257, 5, output_buffer);
-        bitwriter.write(huffman_encoding.num_dist as u32 - 1, 5, output_buffer);
-        bitwriter.write(
-            huffman_encoding.num_code_lengths as u32 - 4,
-            4,
-            output_buffer,
-        );
-
-        for i in 0..huffman_encoding.num_code_lengths {
-            bitwriter.write(
-                huffman_encoding.code_lengths[TREE_CODE_ORDER_TABLE[i]].into(),
-                3,
-                output_buffer,
-            );
-        }
+        huffman_encoding.write(bitwriter, output_buffer)?; // write the huffman table
 
         let (lit_lengths, dist_lengths) = huffman_encoding.get_literal_distance_lengths();
 
