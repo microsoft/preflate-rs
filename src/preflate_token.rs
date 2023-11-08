@@ -63,7 +63,6 @@ pub enum BlockType {
 #[derive(Debug)]
 pub struct PreflateTokenBlock {
     pub block_type: BlockType,
-    pub uncompressed_start_pos: u32,
     pub uncompressed_len: u32,
     pub context_len: i32,
     pub padding_bits: u8,
@@ -96,7 +95,6 @@ impl PreflateTokenBlock {
     pub fn new(block_type: BlockType) -> PreflateTokenBlock {
         PreflateTokenBlock {
             block_type: block_type,
-            uncompressed_start_pos: 0,
             uncompressed_len: 0,
             context_len: 0,
             padding_bits: 0,

@@ -24,6 +24,12 @@ impl<'a, R: Read + Seek> DeflateDecoder<'a, R> {
         })
     }
 
+    /// reads the padding at the end of the file
+    pub fn read_eof_padding(&mut self) -> u8 {
+        let padding_bit_count = 8 - self.input.bit_position_in_current_byte() as u8;
+        self.input.get(padding_bit_count.into()).unwrap() as u8
+    }
+
     pub fn get_plain_text(&self) -> &[u8] {
         &self.plain_text
     }
@@ -57,7 +63,6 @@ impl<'a, R: Read + Seek> DeflateDecoder<'a, R> {
         match mode {
             0 => {
                 blk = PreflateTokenBlock::new(BlockType::Stored);
-                blk.uncompressed_start_pos = self.plain_text.len() as u32;
                 blk.block_type = BlockType::Stored;
                 let padding_bit_count = 8 - self.input.bit_position_in_current_byte() as u8;
                 blk.padding_bits = self.read_bits(padding_bit_count.into())? as u8;
@@ -81,7 +86,6 @@ impl<'a, R: Read + Seek> DeflateDecoder<'a, R> {
             }
             1 => {
                 blk = PreflateTokenBlock::new(BlockType::StaticHuff);
-                blk.uncompressed_start_pos = self.plain_text.len() as u32;
                 let decoder = HuffmanReader::create_fixed()?;
                 self.decode_block(&decoder, &mut blk)?;
                 return Ok(blk);
@@ -89,7 +93,6 @@ impl<'a, R: Read + Seek> DeflateDecoder<'a, R> {
 
             2 => {
                 blk = PreflateTokenBlock::new(BlockType::DynamicHuff);
-                blk.uncompressed_start_pos = self.plain_text.len() as u32;
 
                 blk.huffman_encoding = HuffmanOriginalEncoding::read(&mut self.input)?;
 
@@ -121,7 +124,7 @@ impl<'a, R: Read + Seek> DeflateDecoder<'a, R> {
                 blk.add_literal(lit_len as u8);
                 cur_pos += 1;
             } else if lit_len == 256 {
-                blk.uncompressed_len = self.plain_text.len() as u32 - blk.uncompressed_start_pos;
+                blk.uncompressed_len = cur_pos as u32;
                 blk.context_len = -earliest_reference;
                 break;
             } else {
@@ -133,8 +136,11 @@ impl<'a, R: Read + Seek> DeflateDecoder<'a, R> {
                     + preflate_constants::LENGTH_BASE_TABLE[lcode as usize] as u32
                     + self
                         .read_bits(preflate_constants::LENGTH_EXTRA_TABLE[lcode as usize].into())?;
+
+                // length of 258 can be encoded two ways: 284 with 5 one bits (non-standard) or as 285 with 0 extra bits (standard)
                 let irregular_258 =
                     len == 258 && lcode != preflate_constants::LEN_CODE_COUNT as u32 - 1;
+
                 let dcode = decoder.fetch_next_distance_char(&mut self.input)? as u32;
                 if dcode >= preflate_constants::DIST_CODE_COUNT as u32 {
                     return Err(anyhow::Error::msg("Invalid distance code"));

@@ -126,6 +126,7 @@ impl HuffmanOriginalEncoding {
         })
     }
 
+    /// writes dynamic huffman table to the output buffer using the bitwriter
     pub fn write(
         &self,
         bitwriter: &mut BitWriter,
@@ -171,7 +172,7 @@ impl HuffmanOriginalEncoding {
     }
 
     /// returns the length and distance tables for the fixed huffman table
-    pub fn get_fixed_distance_lengths() -> (Vec<u8>, Vec<u8>) {
+    fn get_fixed_distance_lengths() -> (Vec<u8>, Vec<u8>) {
         let mut lit_code_lengths = Vec::new();
         lit_code_lengths.reserve_exact(288);
 
@@ -196,7 +197,7 @@ impl HuffmanOriginalEncoding {
     }
 
     /// returns the combined literal and distance lengths
-    pub fn get_literal_distance_lengths(&self) -> (Vec<u8>, Vec<u8>) {
+    fn get_literal_distance_lengths(&self) -> (Vec<u8>, Vec<u8>) {
         let mut lengths = Vec::new();
         let mut prevcode = 0;
 
@@ -358,12 +359,7 @@ impl HuffmanWriter {
         }
     }
 
-    pub fn write_literal(
-        &mut self,
-        bitwriter: &mut BitWriter,
-        output_buffer: &mut Vec<u8>,
-        lit: u16,
-    ) {
+    pub fn write_literal(&self, bitwriter: &mut BitWriter, output_buffer: &mut Vec<u8>, lit: u16) {
         let code = self.lit_huffman_codes[lit as usize];
         let c_bits = self.lit_code_lengths[lit as usize];
 
@@ -371,7 +367,7 @@ impl HuffmanWriter {
     }
 
     pub fn write_distance(
-        &mut self,
+        &self,
         bitwriter: &mut BitWriter,
         output_buffer: &mut Vec<u8>,
         dist: u16,

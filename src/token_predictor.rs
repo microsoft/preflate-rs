@@ -170,7 +170,6 @@ impl<'a> TokenPredictor<'a> {
         match bt {
             BlockType::Stored => {
                 block = PreflateTokenBlock::new(BlockType::Stored);
-                block.uncompressed_start_pos = self.state.current_input_pos();
                 block.uncompressed_len = codec.decode_value(16).into();
                 block.padding_bits = 0;
                 if codec.decode_non_zero_padding() {

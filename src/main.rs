@@ -31,9 +31,10 @@ use std::{
 mod zip_structs;
 
 use crate::{
+    deflate_encoder::DeflateEncoder,
     preflate_parameter_estimator::estimate_preflate_parameters,
     preflate_token::BlockType,
-    statistical_codec::PreflatePredictionEncoder,
+    statistical_codec::{PredictionDecoder, PredictionEncoder, PreflatePredictionEncoder},
     token_predictor::TokenPredictor,
     tree_predictor::{predict_tree_for_block, recreate_tree_for_block},
 };
@@ -65,6 +66,8 @@ fn analyze_compressed_data<R: Read + Seek>(
         blocks.push(block);
     }
 
+    let eof_padding = block_decoder.read_eof_padding();
+
     let params_e = estimate_preflate_parameters(block_decoder.get_plain_text(), &blocks);
 
     println!("prediction parameters: {:?}", params_e);
@@ -83,11 +86,19 @@ fn analyze_compressed_data<R: Read + Seek>(
         }
     }
 
+    encoder.encode_non_zero_padding(eof_padding != 0);
+    if eof_padding != 0 {
+        encoder.encode_value(eof_padding.into(), 8);
+    }
+
     let mut decoder = encoder.make_decoder();
 
     let mut token_predictor_out = TokenPredictor::new(block_decoder.get_plain_text(), params_e, 0);
 
     let mut output_blocks = Vec::new();
+
+    let mut deflate_encoder = DeflateEncoder::new(block_decoder.get_plain_text());
+
     while !token_predictor_out.input_eof() {
         let mut block = token_predictor_out.recreate_block(&mut decoder)?;
 
@@ -95,8 +106,19 @@ fn analyze_compressed_data<R: Read + Seek>(
             block.huffman_encoding = recreate_tree_for_block(&block.freq, &mut decoder)?;
         }
 
+        deflate_encoder.encode_block(&block)?;
+
         output_blocks.push(block);
     }
+
+    // flush the last byte, which may be incomplete and normally
+    // padded with zeros, but maybe not
+    let padding = if decoder.decode_non_zero_padding() {
+        decoder.decode_value(8) as u8
+    } else {
+        0
+    };
+    deflate_encoder.flush_with_padding(padding);
 
     assert_eq!(blocks.len(), output_blocks.len());
 
