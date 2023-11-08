@@ -3,7 +3,7 @@ use anyhow::Context;
 use std::io::{Read, Seek};
 
 use crate::{
-    huffman_table::{HuffmanOriginalEncoding, HuffmanReader},
+    huffman_encoding::{HuffmanOriginalEncoding, HuffmanReader},
     preflate_constants,
     preflate_token::{BlockType, PreflateTokenBlock},
     zip_bit_reader::ZipBitReader,

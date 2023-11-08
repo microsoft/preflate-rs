@@ -5,7 +5,7 @@ mod deflate_decoder;
 pub mod deflate_encoder;
 mod hash_chain;
 mod huffman_helper;
-mod huffman_table;
+mod huffman_encoding;
 mod predictor_state;
 mod preflate_constants;
 mod preflate_input;

@@ -1,6 +1,6 @@
 use crate::{
     huffman_helper::calc_bit_lengths,
-    huffman_table::{HuffmanOriginalEncoding, TreeCodeType},
+    huffman_encoding::{HuffmanOriginalEncoding, TreeCodeType},
     preflate_constants::{
         CODETREE_CODE_COUNT, DIST_CODE_COUNT, LITLENDIST_CODE_COUNT, LITLEN_CODE_COUNT,
         NONLEN_CODE_COUNT, TREE_CODE_ORDER_TABLE,

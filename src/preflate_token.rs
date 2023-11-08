@@ -1,5 +1,5 @@
 use crate::{
-    huffman_table::HuffmanOriginalEncoding,
+    huffman_encoding::HuffmanOriginalEncoding,
     preflate_constants::{
         quantize_distance, quantize_length, DIST_CODE_COUNT, LITLENDIST_CODE_COUNT,
         NONLEN_CODE_COUNT,

@@ -1,6 +1,6 @@
 use std::cmp;
 
-use crate::{huffman_table::TreeCodeType, preflate_token::BlockType};
+use crate::{huffman_encoding::TreeCodeType, preflate_token::BlockType};
 
 pub struct PreflatePredictionDecoder {
     actions: Vec<PreflateAction>,

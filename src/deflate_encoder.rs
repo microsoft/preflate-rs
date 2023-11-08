@@ -2,7 +2,7 @@ use anyhow::Result;
 
 use crate::{
     bit_writer::BitWriter,
-    huffman_table::HuffmanWriter,
+    huffman_encoding::HuffmanWriter,
     preflate_constants::{
         quantize_distance, quantize_length, DIST_BASE_TABLE, DIST_EXTRA_TABLE, LENGTH_BASE_TABLE,
         LENGTH_EXTRA_TABLE, LITLEN_CODE_COUNT, MIN_MATCH, NONLEN_CODE_COUNT,
