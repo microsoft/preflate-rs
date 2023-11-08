@@ -6,20 +6,34 @@ use crate::{
     },
 };
 
-#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
-pub struct PreflateToken {
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct PreflateTokenReference {
     len: u16,
-    irregular258: bool,
     dist: u16,
+    irregular258: bool,
 }
 
-pub const TOKEN_LITERAL: PreflateToken = PreflateToken {
-    len: 1,
-    irregular258: false,
-    dist: 0,
-};
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum PreflateToken {
+    Literal,
+    Reference(PreflateTokenReference),
+}
 
 impl PreflateToken {
+    pub fn new_reference(len: u32, dist: u32, irregular258: bool) -> PreflateToken {
+        PreflateToken::Reference(PreflateTokenReference::new(len, dist, irregular258))
+    }
+}
+
+impl PreflateTokenReference {
+    pub fn new(len: u32, dist: u32, irregular258: bool) -> PreflateTokenReference {
+        PreflateTokenReference {
+            len: len as u16,
+            dist: dist as u16,
+            irregular258,
+        }
+    }
+
     pub fn len(&self) -> u32 {
         self.len as u32
     }
@@ -42,14 +56,6 @@ impl PreflateToken {
 
     pub fn set_irregular258(&mut self, irregular258: bool) {
         self.irregular258 = irregular258;
-    }
-
-    pub fn new_reference(len: u32, dist: u32, irregular258: bool) -> PreflateToken {
-        PreflateToken {
-            len: len as u16,
-            irregular258,
-            dist: dist as u16,
-        }
     }
 }
 
@@ -105,7 +111,7 @@ impl PreflateTokenBlock {
     }
 
     pub fn add_literal(&mut self, lit: u8) {
-        self.tokens.push(TOKEN_LITERAL);
+        self.tokens.push(PreflateToken::Literal);
         self.freq.literal_codes[lit as usize] += 1;
     }
 

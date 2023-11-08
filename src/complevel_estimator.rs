@@ -1,9 +1,11 @@
+use std::io::LineWriter;
+
 use crate::hash_chain::HashChain;
 use crate::preflate_constants;
 use crate::preflate_parse_config::{
     PreflateParserConfig, FAST_PREFLATE_PARSER_SETTINGS, SLOW_PREFLATE_PARSER_SETTINGS,
 };
-use crate::preflate_token::{BlockType, PreflateToken, PreflateTokenBlock};
+use crate::preflate_token::{BlockType, PreflateToken, PreflateTokenBlock, PreflateTokenReference};
 
 #[derive(Default)]
 pub struct CompLevelInfo {
@@ -89,7 +91,7 @@ impl<'a> CompLevelEstimatorState<'a> {
         self.slow_hash.update_hash(len);
     }
 
-    fn check_match(&mut self, token: &PreflateToken) {
+    fn check_match(&mut self, token: &PreflateTokenReference) {
         let hash_head = self.slow_hash.cur_hash();
         if self.slow_hash.input().pos() >= token.dist() as u32 {
             if self.info.possible_compression_levels & (1 << 1) != 0 {
@@ -180,11 +182,14 @@ impl<'a> CompLevelEstimatorState<'a> {
                 continue;
             }
             for (_j, t) in b.tokens.iter().enumerate() {
-                if t.len() == 1 {
-                    self.update_hash(1);
-                } else {
-                    self.check_match(t);
-                    self.update_or_skip_hash(t.len().into());
+                match t {
+                    PreflateToken::Literal => {
+                        self.update_hash(1);
+                    }
+                    PreflateToken::Reference(r) => {
+                        self.check_match(r);
+                        self.update_or_skip_hash(r.len().into());
+                    }
                 }
                 if early_out
                     && (self.info.possible_compression_levels
@@ -244,7 +249,7 @@ impl<'a> CompLevelEstimatorState<'a> {
     }
 
     fn check_match_single_fast_hash(
-        token: &PreflateToken,
+        token: &PreflateTokenReference,
         hash: &HashChain,
         config: &PreflateParserConfig,
         hash_head: u32,
@@ -259,7 +264,7 @@ impl<'a> CompLevelEstimatorState<'a> {
 
     pub fn match_depth(
         hash_head: u32,
-        target_reference: &PreflateToken,
+        target_reference: &PreflateTokenReference,
         hash: &HashChain,
         window_size: u32,
         allow_nonmatch: bool,

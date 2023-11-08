@@ -1,7 +1,7 @@
 use crate::hash_chain::{HashChain, HashIterator};
 use crate::preflate_constants::{self, MAX_MATCH, MIN_LOOKAHEAD, MIN_MATCH};
 use crate::preflate_parameter_estimator::PreflateParameters;
-use crate::preflate_token::PreflateToken;
+use crate::preflate_token::{PreflateToken, PreflateTokenReference};
 use crate::seq_chain::SeqChain;
 use std::cmp;
 
@@ -166,7 +166,7 @@ impl<'a> PredictorState<'a> {
         prev_len: u32,
         offset: u32,
         max_depth: u32,
-    ) -> Option<PreflateToken> {
+    ) -> Option<PreflateTokenReference> {
         if let Some(mut h) =
             self.create_match_helper(prev_len, self.current_input_pos() + offset, max_depth)
         {
@@ -191,7 +191,7 @@ impl<'a> PredictorState<'a> {
                 let match_length = Self::prefix_compare(match_start, input, best_len, h.max_len);
                 if match_length > best_len {
                     best_len = match_length;
-                    best_match = Some(PreflateToken::new_reference(
+                    best_match = Some(PreflateTokenReference::new(
                         match_length,
                         chain_it.dist(),
                         false,
@@ -223,7 +223,7 @@ impl<'a> PredictorState<'a> {
         hash_head: u32,
         prev_len: u32,
         max_depth: u32,
-    ) -> Option<PreflateToken> {
+    ) -> Option<PreflateTokenReference> {
         if let Some(h) = self.create_match_helper(prev_len, start_pos, max_depth) {
             let mut chain_it = self.seq.iterate_from_pos(start_pos);
             if !chain_it.valid() {
@@ -240,7 +240,7 @@ impl<'a> PredictorState<'a> {
 
                 if cur_seq_len > prev_len && 1 <= h.cur_max_dist_hop0 {
                     best_len = cur_seq_len;
-                    best_match = Some(PreflateToken::new_reference(cur_seq_len, 1, false));
+                    best_match = Some(PreflateTokenReference::new(cur_seq_len, 1, false));
                 }
 
                 if best_len >= h.nice_len || !chain_it.next() {
@@ -306,7 +306,7 @@ impl<'a> PredictorState<'a> {
                         if best_seq_len
                             > cmp::max(old_best_seq_len, preflate_constants::MIN_MATCH - 1) + error
                         {
-                            best_match = Some(PreflateToken::new_reference(
+                            best_match = Some(PreflateTokenReference::new(
                                 best_seq_len - error,
                                 best_dist - error,
                                 false,
@@ -317,7 +317,7 @@ impl<'a> PredictorState<'a> {
 
                     if best_seq_len == h.max_len {
                         best_match =
-                            Some(PreflateToken::new_reference(best_seq_len, best_dist, false));
+                            Some(PreflateTokenReference::new(best_seq_len, best_dist, false));
                         break;
                     } else {
                         let diff = start_pos as i32 - self.current_input_pos() as i32;
@@ -335,7 +335,7 @@ impl<'a> PredictorState<'a> {
                         if match_length > best_len {
                             best_len = match_length;
                             best_match =
-                                Some(PreflateToken::new_reference(match_length, best_dist, false));
+                                Some(PreflateTokenReference::new(match_length, best_dist, false));
                             if best_len >= h.nice_len {
                                 break;
                             }
@@ -413,7 +413,7 @@ impl<'a> PredictorState<'a> {
     pub fn calculate_hops(
         &self,
         hash_head: u32,
-        target_reference: &PreflateToken,
+        target_reference: &PreflateTokenReference,
     ) -> anyhow::Result<u32> {
         let max_len = std::cmp::min(self.available_input_size(), MAX_MATCH);
 
@@ -466,7 +466,11 @@ impl<'a> PredictorState<'a> {
 
     /// Does the inverse of calculate_hops, where we start from the predicted token and
     /// get the new distance based on the number of hops
-    pub fn hop_match(&self, target_reference: &PreflateToken, hops: u32) -> anyhow::Result<u32> {
+    pub fn hop_match(
+        &self,
+        target_reference: &PreflateTokenReference,
+        hops: u32,
+    ) -> anyhow::Result<u32> {
         if hops == 0 {
             return Ok(target_reference.dist());
         }

@@ -7,7 +7,7 @@ use crate::{
         quantize_distance, quantize_length, DIST_BASE_TABLE, DIST_EXTRA_TABLE, LENGTH_BASE_TABLE,
         LENGTH_EXTRA_TABLE, LITLEN_CODE_COUNT, MIN_MATCH, NONLEN_CODE_COUNT,
     },
-    preflate_token::{BlockType, PreflateTokenBlock},
+    preflate_token::{BlockType, PreflateToken, PreflateTokenBlock},
 };
 
 pub struct DeflateEncoder<'a> {
@@ -90,56 +90,59 @@ impl<'a> DeflateEncoder<'a> {
         let mut index = self.plain_text_index;
 
         for token in &block.tokens {
-            if token.len() == 1 {
-                huffman_writer.write_literal(
-                    &mut self.bitwriter,
-                    &mut self.output,
-                    self.plain_text[index].into(),
-                );
-                index += 1;
-            } else {
-                if token.get_irregular258() {
+            match token {
+                PreflateToken::Literal => {
                     huffman_writer.write_literal(
                         &mut self.bitwriter,
                         &mut self.output,
-                        LITLEN_CODE_COUNT as u16 - 2,
+                        self.plain_text[index].into(),
                     );
-                    self.bitwriter.write(5, 31, &mut self.output);
-                } else {
-                    let lencode = quantize_length(token.len());
-                    huffman_writer.write_literal(
-                        &mut self.bitwriter,
-                        &mut self.output,
-                        NONLEN_CODE_COUNT as u16 + lencode as u16,
-                    );
-
-                    let lenextra = LENGTH_EXTRA_TABLE[lencode];
-                    if lenextra > 0 {
-                        self.bitwriter.write(
-                            token.len() - MIN_MATCH - LENGTH_BASE_TABLE[lencode] as u32,
-                            lenextra.into(),
-                            &mut self.output,
-                        );
-                    }
-
-                    let distcode = quantize_distance(token.dist());
-                    huffman_writer.write_distance(
-                        &mut self.bitwriter,
-                        &mut self.output,
-                        distcode as u16,
-                    );
-
-                    let distextra = DIST_EXTRA_TABLE[distcode];
-                    if distextra > 0 {
-                        self.bitwriter.write(
-                            token.dist() - 1 - DIST_BASE_TABLE[distcode] as u32,
-                            distextra.into(),
-                            &mut self.output,
-                        );
-                    }
+                    index += 1;
                 }
+                PreflateToken::Reference(reference) => {
+                    if reference.get_irregular258() {
+                        huffman_writer.write_literal(
+                            &mut self.bitwriter,
+                            &mut self.output,
+                            LITLEN_CODE_COUNT as u16 - 2,
+                        );
+                        self.bitwriter.write(5, 31, &mut self.output);
+                    } else {
+                        let lencode = quantize_length(reference.len());
+                        huffman_writer.write_literal(
+                            &mut self.bitwriter,
+                            &mut self.output,
+                            NONLEN_CODE_COUNT as u16 + lencode as u16,
+                        );
 
-                index += token.len() as usize;
+                        let lenextra = LENGTH_EXTRA_TABLE[lencode];
+                        if lenextra > 0 {
+                            self.bitwriter.write(
+                                reference.len() - MIN_MATCH - LENGTH_BASE_TABLE[lencode] as u32,
+                                lenextra.into(),
+                                &mut self.output,
+                            );
+                        }
+
+                        let distcode = quantize_distance(reference.dist());
+                        huffman_writer.write_distance(
+                            &mut self.bitwriter,
+                            &mut self.output,
+                            distcode as u16,
+                        );
+
+                        let distextra = DIST_EXTRA_TABLE[distcode];
+                        if distextra > 0 {
+                            self.bitwriter.write(
+                                reference.dist() - 1 - DIST_BASE_TABLE[distcode] as u32,
+                                distextra.into(),
+                                &mut self.output,
+                            );
+                        }
+                    }
+
+                    index += reference.len() as usize;
+                }
             }
 
             self.plain_text_index = index;

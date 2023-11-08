@@ -1,4 +1,4 @@
-use crate::preflate_token::{BlockType, PreflateTokenBlock};
+use crate::preflate_token::{BlockType, PreflateToken, PreflateTokenBlock};
 
 pub struct PreflateStreamInfo {
     pub token_count: u32,
@@ -41,12 +41,14 @@ pub fn extract_preflate_info(blocks: &Vec<PreflateTokenBlock>) -> PreflateStream
             std::cmp::max(result.max_tokens_per_block, b.tokens.len() as u32);
         let mut block_max_dist = 0;
         for j in 0..b.tokens.len() {
-            let t = &b.tokens[j];
-            if t.len() == 1 {
-                result.literal_count += 1;
-            } else {
-                result.reference_count += 1;
-                block_max_dist = std::cmp::max(block_max_dist, t.dist().into());
+            match &b.tokens[j] {
+                PreflateToken::Literal => {
+                    result.literal_count += 1;
+                }
+                PreflateToken::Reference(t) => {
+                    result.reference_count += 1;
+                    block_max_dist = std::cmp::max(block_max_dist, t.dist().into());
+                }
             }
         }
         result.max_dist = std::cmp::max(result.max_dist, block_max_dist);
