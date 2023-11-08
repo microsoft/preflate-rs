@@ -2,12 +2,22 @@ use std::io::{Read, Seek, SeekFrom};
 
 use byteorder::{LittleEndian, ReadBytesExt};
 
+pub trait ReadBits {
+    fn get(&mut self, cbit: u32) -> anyhow::Result<u32>;
+}
+
 pub struct ZipBitReader<'a, R> {
     binary_reader: &'a mut R,
     max_readable_bytes: i64, // Data can be read up to and including this position. Use to detect corruption. If negative no checking is done
     count_of_bits_in_buffer: u32, // Number of bits in m_returnValueBuffer
     return_value_buffer: u64, // Buffer used to assemble bits for the caller
     initial_position_in_binary_reader: i64, // Initial byte offset into underlying stream
+}
+
+impl<'a, R: Read + Seek> ReadBits for ZipBitReader<'_, R> {
+    fn get(&mut self, cbit: u32) -> anyhow::Result<u32> {
+        ZipBitReader::get(self, cbit)
+    }
 }
 
 impl<'a, R: Read + Seek> ZipBitReader<'a, R> {

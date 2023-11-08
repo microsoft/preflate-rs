@@ -1,8 +1,10 @@
 use anyhow::Result;
-use std::io::{Read, Seek};
 
 use crate::{
-    bit_writer::BitWriter, preflate_constants::TREE_CODE_ORDER_TABLE, zip_bit_reader::ZipBitReader,
+    bit_writer::BitWriter,
+    huffman_helper::{calc_huffman_codes, calculate_huffman_code_tree, decode_symbol},
+    preflate_constants::TREE_CODE_ORDER_TABLE,
+    zip_bit_reader::ReadBits,
 };
 
 #[derive(PartialEq, Eq, Clone, Copy, Debug)]
@@ -53,9 +55,7 @@ impl HuffmanOriginalEncoding {
     /// Reads a dynamic huffman table from the bit reader. The structure
     /// holds all the information necessary to recode the huffman table
     /// exactly as it was written.
-    pub fn read<R: Read + Seek>(
-        bit_reader: &mut ZipBitReader<R>,
-    ) -> anyhow::Result<HuffmanOriginalEncoding> {
+    pub fn read<R: ReadBits>(bit_reader: &mut R) -> anyhow::Result<HuffmanOriginalEncoding> {
         // 5 Bits: HLIT, # of Literal/Length codes - 257 (257 - 286)
         let hlit = bit_reader.get(5)? as usize + 257;
         // 5 Bits: HDIST, # of Distance codes - 1        (1 - 32)
@@ -87,7 +87,7 @@ impl HuffmanOriginalEncoding {
         let mut codes_read: usize = 0;
 
         while codes_read < c_lengths_combined {
-            let w_next: u16 = fetch_next_char(bit_reader, &code_length_huff_code_tree)?;
+            let w_next: u16 = decode_symbol(bit_reader, &code_length_huff_code_tree)?;
 
             if w_next <= 15 {
                 //	0 - 15: Represent code lengths of 0 - 15
@@ -293,18 +293,12 @@ impl HuffmanReader {
         })
     }
 
-    pub fn fetch_next_literal_code<R: Read + Seek>(
-        &self,
-        bit_reader: &mut ZipBitReader<R>,
-    ) -> anyhow::Result<u16> {
-        fetch_next_char(bit_reader, &self.lit_huff_code_tree)
+    pub fn fetch_next_literal_code<R: ReadBits>(&self, bit_reader: &mut R) -> anyhow::Result<u16> {
+        decode_symbol(bit_reader, &self.lit_huff_code_tree)
     }
 
-    pub fn fetch_next_distance_char<R: Read + Seek>(
-        &self,
-        bit_reader: &mut ZipBitReader<R>,
-    ) -> anyhow::Result<u16> {
-        fetch_next_char(bit_reader, &self.dist_huff_code_tree)
+    pub fn fetch_next_distance_char<R: ReadBits>(&self, bit_reader: &mut R) -> anyhow::Result<u16> {
+        decode_symbol(bit_reader, &self.dist_huff_code_tree)
     }
 }
 
@@ -379,170 +373,9 @@ impl HuffmanWriter {
     }
 }
 
-/// Calculates Huffman code array given an array of Huffman Code Lengths using the RFC 1951 algorithm
-pub fn calc_huffman_codes(code_lengths: &[u8]) -> anyhow::Result<Vec<u16>> {
-    let mut result: Vec<u16> = vec![0; code_lengths.len()];
-
-    // The following algorithm generates the codes as integers, intended to be read
-    // from least- to most-significant bit.
-
-    // 1)  Count the number of codes for each code length.  Let
-    // bl_count[N] be the number of codes of length N, N >= 1.
-
-    let mut maxbits = 0;
-    let mut bl_count: [u16; 32] = [0; 32];
-    for cbit in code_lengths {
-        bl_count[*cbit as usize] += 1;
-        if *cbit > maxbits {
-            maxbits = *cbit;
-        }
-    }
-
-    //	2)  Find the numerical value of the smallest code for each code length:
-
-    let mut code: u16 = 0;
-    bl_count[0] = 0;
-    let mut next_code: [u16; 32] = [0; 32];
-    for bits in 1..=maxbits {
-        code = (code + bl_count[bits as usize - 1]) << 1;
-        next_code[bits as usize] = code;
-    }
-
-    // 3)  Assign numerical values to all codes, using consecutive
-    // values for all codes of the same length with the base
-    // values determined at step 2. Codes that are never used
-    // (which have a bit length of zero) must not be assigned a
-    // value.
-
-    for n in 0..code_lengths.len() {
-        let len = code_lengths[n];
-        if len != 0 {
-            let mut code = next_code[len as usize];
-
-            // code should be stored in reverse bit order
-            let mut rev_code = 0;
-            for _ in 0..len {
-                rev_code = (rev_code << 1) | (code & 1);
-                code >>= 1;
-            }
-
-            result[n] = rev_code;
-            next_code[len as usize] += 1;
-        }
-    }
-
-    Ok(result)
-}
-
-/// Calculates Huffman code array given an array of Huffman Code Lengths using the RFC 1951 algorithm
-/// Huffman tree will be returned in rgHuffNodes where:
-/// 1. when N is an even number rgHuffNodes[N] is the array index of the '0' child and
-///		rgHuffNodes[N+1] is the array index of the '1' child
-///	2. If rgHuffNodes[i] is less than zero then it is a leaf and the literal alphabet value is -rgHuffNodes[i] + 1
-///	3. The root node index 'N' is rgHuffNodes.Length - 2. Search should start at that node.
-fn calculate_huffman_code_tree(code_lengths: &[u8]) -> anyhow::Result<Vec<i32>> {
-    let mut c_codes: i32 = 0;
-    let mut c_bits_largest = 0;
-
-    // First calculate total number of leaf nodes in the Huffman Tree and the max huffman code length
-    for c_bits in code_lengths {
-        if *c_bits != 0 {
-            c_codes += 1;
-        }
-
-        if *c_bits > c_bits_largest {
-            c_bits_largest = *c_bits;
-        }
-    }
-
-    // Number of internal nodes in the tree will be the ((number of leaf nodes) - 1)
-    let mut rg_huff_nodes: Vec<i32> = vec![0; ((c_codes - 1) * 2) as usize]; // Allocation is double as each node has 2 links
-
-    let mut i_huff_nodes: i32 = 0;
-    let mut i_huff_nodes_previous_level: i32 = 0;
-
-    // Build the tree from the bottom starting with leafs of longs codes
-    for c_bits_cur in (1..=c_bits_largest).rev() {
-        let i_huff_nodes_start = i_huff_nodes;
-        // Create parent nodes for all leaf codes at current bit length
-        for j in 0..code_lengths.len() {
-            if code_lengths[j] == c_bits_cur {
-                rg_huff_nodes[i_huff_nodes as usize] = -1 - j as i32; // Leaf nodes links store the actual literal character negative biased by -1
-                i_huff_nodes += 1;
-            }
-        }
-
-        // Create parent node links for all remaining nodes from previous iteration
-        for j in (i_huff_nodes_previous_level..i_huff_nodes_start).step_by(2) {
-            rg_huff_nodes[i_huff_nodes as usize] = j as i32;
-            i_huff_nodes += 1;
-        }
-
-        i_huff_nodes_previous_level = i_huff_nodes_start;
-    }
-
-    Ok(rg_huff_nodes)
-}
-
-/// Reads the next Huffman encoded char from bitReader using the Huffman tree encoded in rgHuffCodeTree
-/// Huffman Nodes are encoded in the array of ints as follows:
-/// '0' child link of node 'N' is at rgHuffCodeTree[N], '1' child link is at rgHuffCodesTree[N + 1]
-/// Root of tree is at rgHuffCodeTree.Length - 2
-fn fetch_next_char<R: Read + Seek>(
-    bit_reader: &mut ZipBitReader<R>,
-    rg_huff_code_tree: &Vec<i32>,
-) -> anyhow::Result<u16> {
-    let mut i_node_cur: i32 = rg_huff_code_tree.len() as i32 - 2; // Start at the root of the Huffman tree
-
-    loop {
-        // Use next bit of input to decide next node
-        i_node_cur = rg_huff_code_tree[(bit_reader.get(1)? as i32 + i_node_cur) as usize];
-
-        // Negative indicates a leaf node, return alphabet char for this leaf
-        if i_node_cur < 0 {
-            return Ok((0 - (i_node_cur + 1)) as u16);
-        }
-    }
-}
-
-/// verify that the huffman codes generated can be decoded with the huffman code tree
-#[test]
-fn roundtrip_huffman_code() {
-    let code_lengths = [1, 0, 3, 3, 4, 4, 3, 0];
-
-    let codes = calc_huffman_codes(&code_lengths).unwrap();
-
-    let huffman_tree = calculate_huffman_code_tree(&code_lengths).unwrap();
-
-    for i in 0..code_lengths.len() {
-        // skip zero length codes
-        if code_lengths[i] != 0 {
-            // calculate the stream of bits for the code
-            let mut bitstream = Vec::new();
-            for j in 0..code_lengths[i] {
-                bitstream.push((codes[i] >> j) & 1);
-            }
-
-            // now decode the stream of bits and make sure we end up back with the same code
-            let mut i_node_cur: i32 = huffman_tree.len() as i32 - 2; // Start at the root of the Huffman tree
-
-            loop {
-                // Use next bit of input to decide next node
-                i_node_cur = huffman_tree[(bitstream.pop().unwrap() as i32 + i_node_cur) as usize];
-
-                // Negative indicates a leaf node, return alphabet char for this leaf
-                if i_node_cur < 0 {
-                    break;
-                }
-            }
-
-            assert_eq!(i, (0 - (i_node_cur + 1)) as usize);
-        }
-    }
-}
-
 #[test]
 fn roundtrip_huffman_bitreadwrite() {
+    use crate::zip_bit_reader::ZipBitReader;
     use std::io::Cursor;
 
     let code_lengths = [1, 0, 3, 3, 4, 4, 3, 0];
@@ -570,7 +403,7 @@ fn roundtrip_huffman_bitreadwrite() {
         if code_lengths[i] != 0 {
             assert_eq!(
                 i as u16,
-                fetch_next_char(&mut bit_reader, &huffman_tree).unwrap()
+                decode_symbol(&mut bit_reader, &huffman_tree).unwrap()
             );
         }
     }
@@ -584,10 +417,43 @@ fn roundtrip_huffman_bitreadwrite() {
 }
 
 #[test]
+fn roundtrip_complicated() {
+    #[rustfmt::skip]
+    let h = HuffmanOriginalEncoding { 
+        lengths: vec![(TreeCodeType::ZeroShort, 10), (TreeCodeType::Code, 11), (TreeCodeType::Code, 0), (TreeCodeType::Code, 0),
+            (TreeCodeType::Code, 11), (TreeCodeType::ZeroLong, 18), (TreeCodeType::Code, 6), (TreeCodeType::Code, 14), (TreeCodeType::ZeroShort, 5),
+            (TreeCodeType::Code, 11), (TreeCodeType::Code, 9), (TreeCodeType::Code, 10), (TreeCodeType::Code, 0), (TreeCodeType::Code, 0), (TreeCodeType::Code, 10),
+            (TreeCodeType::Code, 11), (TreeCodeType::Code, 8), (TreeCodeType::Code, 0), (TreeCodeType::Code, 7), (TreeCodeType::Code, 6), (TreeCodeType::Repeat, 6),
+            (TreeCodeType::Code, 6), (TreeCodeType::Code, 7), (TreeCodeType::Code, 10), (TreeCodeType::Code, 0), (TreeCodeType::Code, 0), (TreeCodeType::Code, 10),
+            (TreeCodeType::ZeroShort, 3), (TreeCodeType::Code, 8), (TreeCodeType::Repeat, 5), (TreeCodeType::Code, 11), (TreeCodeType::Code, 0), (TreeCodeType::Code, 9),
+            (TreeCodeType::Code, 0), (TreeCodeType::Code, 0), (TreeCodeType::Code, 10), (TreeCodeType::Code, 10), (TreeCodeType::Code, 11), (TreeCodeType::Code, 9),
+            (TreeCodeType::Code, 10), (TreeCodeType::Code, 12), (TreeCodeType::Code, 10), (TreeCodeType::Code, 9), (TreeCodeType::Code, 10),
+            (TreeCodeType::Code, 11), (TreeCodeType::Code, 0), (TreeCodeType::Code, 11), (TreeCodeType::ZeroShort, 3), (TreeCodeType::Code, 11), (TreeCodeType::Code, 9), (TreeCodeType::Code, 11),
+            (TreeCodeType::Code, 0), (TreeCodeType::Code, 11), (TreeCodeType::Code, 12), (TreeCodeType::Code, 7), (TreeCodeType::Code, 10), (TreeCodeType::Code, 8),
+            (TreeCodeType::Code, 8), (TreeCodeType::Code, 6), (TreeCodeType::Code, 9), (TreeCodeType::Code, 8), (TreeCodeType::Code, 8),
+            (TreeCodeType::Code, 8), (TreeCodeType::Code, 0), (TreeCodeType::Code, 10), (TreeCodeType::Code, 8), (TreeCodeType::Code, 9),
+            (TreeCodeType::Code, 7), (TreeCodeType::Code, 7), (TreeCodeType::Code, 8), (TreeCodeType::Code, 13), (TreeCodeType::Code, 7), (TreeCodeType::Code, 7), (TreeCodeType::Code, 7), (TreeCodeType::Code, 8), (TreeCodeType::Code, 11),
+            (TreeCodeType::Code, 10), (TreeCodeType::Code, 10), (TreeCodeType::Code, 8), (TreeCodeType::Code, 12), (TreeCodeType::ZeroLong, 133), (TreeCodeType::Code, 14), (TreeCodeType::Code, 5),
+            (TreeCodeType::Code, 6), (TreeCodeType::Code, 6), (TreeCodeType::Code, 4), (TreeCodeType::Code, 5), (TreeCodeType::Code, 5), (TreeCodeType::Code, 8), (TreeCodeType::Code, 5),
+            (TreeCodeType::Code, 5), (TreeCodeType::Code, 6), (TreeCodeType::Code, 4), (TreeCodeType::Code, 6), (TreeCodeType::Code, 5), (TreeCodeType::Code, 9), (TreeCodeType::Code, 5), (TreeCodeType::Code, 7), (TreeCodeType::Code, 4),
+            (TreeCodeType::Code, 5), (TreeCodeType::Code, 6), (TreeCodeType::Code, 7), (TreeCodeType::Code, 4), (TreeCodeType::Code, 6), (TreeCodeType::Code, 6), (TreeCodeType::Code, 6), (TreeCodeType::Code, 7), (TreeCodeType::Code, 7),
+            (TreeCodeType::Code, 8), (TreeCodeType::Code, 8), (TreeCodeType::Code, 6), (TreeCodeType::Code, 12), (TreeCodeType::Code, 0), (TreeCodeType::Code, 0), (TreeCodeType::Code, 13),
+            (TreeCodeType::Code, 13), (TreeCodeType::Code, 11), (TreeCodeType::Code, 9), (TreeCodeType::Code, 10), (TreeCodeType::Code, 9), (TreeCodeType::Code, 9), (TreeCodeType::Code, 5), (TreeCodeType::Code, 7), (TreeCodeType::Code, 6),
+            (TreeCodeType::Code, 5), (TreeCodeType::Code, 5), (TreeCodeType::Code, 6), (TreeCodeType::Code, 5), (TreeCodeType::Code, 5), (TreeCodeType::Code, 4), (TreeCodeType::Code, 4),
+            (TreeCodeType::Code, 3), (TreeCodeType::Code, 3), (TreeCodeType::Code, 4), (TreeCodeType::Repeat, 4), (TreeCodeType::Code, 5), (TreeCodeType::Code, 4), (TreeCodeType::Code, 6)],
+        code_lengths: [3, 0, 0, 6, 4, 3, 3, 4, 3, 4, 3, 4, 5, 6, 6, 0, 6, 6, 6],
+        num_literals: 286,
+        num_dist: 30,
+        num_code_lengths: 17
+    };
+
+    rountrip_test(h);
+}
+
+#[test]
 fn roundtrip_huffman_table() {
     // simple hardcoded encoding
 
-    use std::io::Cursor;
     let encoding = HuffmanOriginalEncoding {
         lengths: vec![
             (TreeCodeType::Code, 1),
@@ -606,29 +472,35 @@ fn roundtrip_huffman_table() {
         num_code_lengths: 19,
     };
 
+    rountrip_test(encoding);
+}
+
+#[cfg(test)]
+fn rountrip_test(encoding: HuffmanOriginalEncoding) {
+    use crate::zip_bit_reader::ZipBitReader;
+    use std::io::Cursor;
+
     let mut output_buffer = Vec::new();
-
     let mut bit_writer = BitWriter::default();
-
     encoding.write(&mut bit_writer, &mut output_buffer).unwrap();
 
     // write a sentinal to make sure that we read everything properly
     bit_writer.write(0x1234, 16, &mut output_buffer);
-    bit_writer.pad(0, &mut output_buffer);
 
+    // flush everything
+    bit_writer.pad(0, &mut output_buffer);
     bit_writer.flush_whole_bytes(&mut output_buffer);
 
+    // now re-read the encoding
     let mut reader = Cursor::new(&output_buffer);
     let mut bit_reader = ZipBitReader::new(&mut reader, output_buffer.len() as i64).unwrap();
-
     let encoding2 = HuffmanOriginalEncoding::read(&mut bit_reader).unwrap();
+    assert_eq!(encoding, encoding2);
 
-    // read sentinal to make sure we read everything correctly
+    // verify sentinal to make sure we didn't write anything extra or too little
     assert_eq!(
         bit_reader.get(16).unwrap(),
         0x1234,
         "sentinal value didn't match"
     );
-
-    assert_eq!(encoding, encoding2);
 }

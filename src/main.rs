@@ -169,7 +169,7 @@ fn main_with_result() -> anyhow::Result<()> {
     }
 
     // Zlib compression with different compression levels
-    for level in 0..10 {
+    for level in 1..10 {
         println!("zlib level: {}", level);
 
         let mut output = Vec::new();

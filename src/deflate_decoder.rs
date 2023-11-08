@@ -96,6 +96,8 @@ impl<'a, R: Read + Seek> DeflateDecoder<'a, R> {
 
                 blk.huffman_encoding = HuffmanOriginalEncoding::read(&mut self.input)?;
 
+                println!("Dynamic Huffman encoding: {:?}", blk.huffman_encoding);
+
                 let decoder = HuffmanReader::create_from_original_encoding(&blk.huffman_encoding)?;
 
                 self.decode_block(&decoder, &mut blk)
