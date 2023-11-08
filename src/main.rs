@@ -106,7 +106,7 @@ fn analyze_compressed_data(
             block.huffman_encoding = recreate_tree_for_block(&block.freq, &mut decoder)?;
         }
 
-        deflate_encoder.encode_block(&block)?;
+        deflate_encoder.encode_block(&block, token_predictor_out.input_eof())?;
 
         output_blocks.push(block);
     }
@@ -119,6 +119,8 @@ fn analyze_compressed_data(
         0
     };
     deflate_encoder.flush_with_padding(padding);
+
+    //assert_eq!(deflate_encoder.get_output().len(), compressed_data.len(), "re-compressed version should be same");
 
     assert_eq!(blocks.len(), output_blocks.len());
 
@@ -188,7 +190,7 @@ fn main_with_result() -> anyhow::Result<()> {
             println!("output size: {}, err = {}", output.len(), err);
         }
 
-        let minusheader = &output[2..output.len()];
+        let minusheader = &output[2..output.len() - 4];
 
         // write output to file
         {

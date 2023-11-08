@@ -38,7 +38,8 @@ impl<'a> DeflateEncoder<'a> {
         &self.output
     }
 
-    pub fn encode_block(&mut self, block: &PreflateTokenBlock) -> Result<()> {
+    pub fn encode_block(&mut self, block: &PreflateTokenBlock, last: bool) -> Result<()> {
+        self.bitwriter.write(last as u32, 1, &mut self.output);
         match block.block_type {
             BlockType::Stored => {
                 self.bitwriter.write(0, 2, &mut self.output);
@@ -46,9 +47,9 @@ impl<'a> DeflateEncoder<'a> {
                 self.bitwriter.flush_whole_bytes(&mut self.output);
 
                 self.output
-                    .extend_from_slice(&block.uncompressed_len.to_le_bytes());
+                    .extend_from_slice(&(block.uncompressed_len as u16).to_le_bytes());
                 self.output
-                    .extend_from_slice(&(!block.uncompressed_len).to_le_bytes());
+                    .extend_from_slice(&(!block.uncompressed_len as u16).to_le_bytes());
 
                 self.output.extend_from_slice(
                     &self.plain_text[self.plain_text_index
