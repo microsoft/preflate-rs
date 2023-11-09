@@ -6,7 +6,7 @@ use crate::{
         NONLEN_CODE_COUNT, TREE_CODE_ORDER_TABLE,
     },
     preflate_token::TokenFrequency,
-    statistical_codec::{AssertEmptyEncoder, EmptyDecoder, PredictionDecoder, PredictionEncoder},
+    statistical_codec::{PredictionDecoder, PredictionEncoder, PreflatePredictionDecoder},
 };
 
 pub fn predict_tree_for_block<D: PredictionEncoder>(
@@ -324,8 +324,6 @@ fn predict_code_data(sym_bit_len: &[u8], code_type: TreeCodeType) -> u8 {
 
 #[test]
 fn encode_roundtrip_perfect() {
-    use crate::statistical_codec::EmptyDecoder;
-
     let mut freq = TokenFrequency::default();
     freq.literal_codes[0] = 100;
     freq.literal_codes[1] = 50;
@@ -335,7 +333,7 @@ fn encode_roundtrip_perfect() {
     freq.distance_codes[1] = 50;
     freq.distance_codes[2] = 25;
 
-    let mut empty_decoder = EmptyDecoder {};
+    let mut empty_decoder = PreflatePredictionDecoder::default_decoder();
     let regenerated_header = recreate_tree_for_block(&freq, &mut empty_decoder).unwrap();
 
     println!("regenerated_header: {:?}", regenerated_header);
@@ -346,8 +344,9 @@ fn encode_roundtrip_perfect() {
     assert_eq!(regenerated_header.lengths[1], (TreeCodeType::Code, 2));
     assert_eq!(regenerated_header.lengths[2], (TreeCodeType::Code, 3));
 
-    let mut empty_encoder = crate::statistical_codec::AssertEmptyEncoder {};
+    let mut empty_encoder = crate::statistical_codec::PreflatePredictionEncoder::default();
     predict_tree_for_block(&regenerated_header, &freq, &mut empty_encoder).unwrap();
+    assert_eq!(empty_encoder.count_nondefault_actions(), 0);
 
     println!("regenerated_header: {:?}", regenerated_header);
 }
@@ -367,10 +366,12 @@ fn encode_perfect_encoding() {
     });
 
     // use the default encoder the says that everything is ok
-    let default_encoding = recreate_tree_for_block(&freq, &mut EmptyDecoder {}).unwrap();
+    let default_encoding = recreate_tree_for_block(&freq, &mut PreflatePredictionDecoder::default_decoder()).unwrap();
 
     // now predict the encoding using the default encoding and it should be perfect
-    predict_tree_for_block(&default_encoding, &freq, &mut AssertEmptyEncoder {}).unwrap();
+    let mut empty_encoder = crate::statistical_codec::PreflatePredictionEncoder::default();
+    predict_tree_for_block(&default_encoding, &freq, &mut empty_encoder).unwrap();
+    assert_eq!(empty_encoder.count_nondefault_actions(), 0);
 }
 
 #[test]

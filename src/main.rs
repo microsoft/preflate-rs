@@ -91,6 +91,8 @@ fn analyze_compressed_data(
         encoder.encode_value(eof_padding.into(), 8);
     }
 
+    encoder.print();
+
     let mut decoder = encoder.make_decoder();
 
     let mut token_predictor_out = TokenPredictor::new(block_decoder.get_plain_text(), params_e, 0);
