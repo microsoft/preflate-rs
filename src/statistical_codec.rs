@@ -1,4 +1,4 @@
-use std::cmp;
+use std::{cmp, default};
 
 use crate::{huffman_encoding::TreeCodeType, preflate_token::BlockType};
 
@@ -11,8 +11,6 @@ pub struct PreflatePredictionDecoder {
 #[derive(Default)]
 pub struct PreflatePredictionEncoder {
     actions: Vec<PreflateAction>,
-
-    current_default_count: u32,
 
     encode_eob_misprediction: u32,
     non_zero_padding: u32,
@@ -106,8 +104,7 @@ impl PreflatePredictionEncoder {
         }
     }
 
-    pub fn count_nondefault_actions(&self) -> usize
-    {
+    pub fn count_nondefault_actions(&self) -> usize {
         self.actions.len()
     }
 
@@ -118,20 +115,19 @@ impl PreflatePredictionEncoder {
         increment: fn(&mut PreflatePredictionEncoder),
     ) {
         if default_value {
-            self.current_default_count += 1;
-        } else {
-            if self.current_default_count != 0 {
-                self.actions
-                    .push(PreflateAction::Default(self.current_default_count));
-                self.current_default_count = 0;
+            if let Some(PreflateAction::Default(d)) = self.actions.last_mut() {
+                *d += 1;
+            } else {
+                self.actions.push(PreflateAction::Default(1));
             }
+        } else {
             self.actions.push(action);
             increment(self);
         }
     }
 
     pub fn print(&self) {
-        println!("nondefault actions: {}", self.actions.len());
+        println!("nondefault actions: {}", self.count_nondefault_actions());
         print_if_nz("encode_eob_misprediction", self.encode_eob_misprediction);
         print_if_nz("non_zero_padding", self.non_zero_padding);
 
@@ -204,8 +200,11 @@ impl PredictionEncoder for PreflatePredictionEncoder {
 
     // Block
     fn encode_block_type(&mut self, block_type: BlockType) {
-        self.actions
-            .push(PreflateAction::EncodeBlockType(block_type));
+        self.record_action(
+            block_type == BlockType::DynamicHuff,
+            PreflateAction::EncodeBlockType(block_type),
+            |_v| {},
+        );
     }
 
     fn encode_eob_misprediction(&mut self, misprediction: bool) {
@@ -253,7 +252,7 @@ impl PredictionEncoder for PreflatePredictionEncoder {
         self.record_action(
             pred_val == act_val,
             PreflateAction::EncodeTreeCodeBitLengthCorrection(pred_val, act_val),
-            |v| {},
+            |_v| {},
         );
 
         inc_pred(
@@ -267,7 +266,7 @@ impl PredictionEncoder for PreflatePredictionEncoder {
         self.record_action(
             pred_val == act_val,
             PreflateAction::EncodeLDTypeCorrection(pred_val, act_val),
-            |v| {},
+            |_v| {},
         );
 
         inc_pred(
@@ -281,7 +280,7 @@ impl PredictionEncoder for PreflatePredictionEncoder {
         self.record_action(
             pred_val == act_val,
             PreflateAction::EncodeRepeatCountCorrection(pred_val, act_val, ld_type),
-            |v| {},
+            |_v| {},
         );
 
         inc_pred(
@@ -295,7 +294,7 @@ impl PredictionEncoder for PreflatePredictionEncoder {
         self.record_action(
             pred_val == act_val,
             PreflateAction::EncodeLDBitLengthCorrection(pred_val, act_val),
-            |v| {},
+            |_v| {},
         );
 
         inc_pred(
@@ -326,7 +325,7 @@ impl PredictionEncoder for PreflatePredictionEncoder {
         self.record_action(
             pred_val == act_val,
             PreflateAction::EncodeLenCorrection(act_val.wrapping_sub(pred_val)),
-            |v| {},
+            |_v| {},
         );
 
         inc_pred(pred_val.into(), act_val.into(), &mut self.len_correction);
@@ -346,7 +345,7 @@ impl PredictionEncoder for PreflatePredictionEncoder {
         self.record_action(
             hops == 0,
             PreflateAction::EncodeDistAfterLenCorrection(hops),
-            |v| {},
+            |_v| {},
         );
 
         inc_pred(0, hops, &mut self.dist_after_len_correction);
@@ -382,8 +381,7 @@ pub trait PredictionDecoder {
 }
 
 impl PreflatePredictionDecoder {
-    pub fn default_decoder() -> Self
-    {
+    pub fn default_decoder() -> Self {
         Self {
             actions: Vec::new(),
             index: 0,
@@ -420,11 +418,13 @@ impl PredictionDecoder for PreflatePredictionDecoder {
     }
 
     fn decode_block_type(&mut self) -> BlockType {
-        let x = self.pop().unwrap();
-        if let PreflateAction::EncodeBlockType(block_type) = x {
-            return block_type;
+        if let Some(x) = self.pop() {
+            if let PreflateAction::EncodeBlockType(block_type) = x {
+                return block_type;
+            }
+            unreachable!("{:?}", x);
         }
-        unreachable!("{:?}", x);
+        BlockType::DynamicHuff
     }
 
     fn decode_eob_misprediction(&mut self) -> bool {
@@ -433,7 +433,7 @@ impl PredictionDecoder for PreflatePredictionDecoder {
                 return misprediction;
             }
             unreachable!("{:?}", x);
-        } 
+        }
         false
     }
 
@@ -453,7 +453,7 @@ impl PredictionDecoder for PreflatePredictionDecoder {
                 return misprediction;
             }
             unreachable!("{:?}", x);
-        } 
+        }
         false
     }
 

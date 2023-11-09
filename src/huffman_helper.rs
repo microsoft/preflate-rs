@@ -1,5 +1,5 @@
 use crate::zip_bit_reader::ReadBits;
-use std::{mem, vec};
+use std::vec;
 
 /// Calculates Huffman code array given an array of Huffman Code Lengths using the RFC 1951 algorithm
 pub fn calc_huffman_codes(code_lengths: &[u8]) -> anyhow::Result<Vec<u16>> {
@@ -188,190 +188,6 @@ pub fn count_symbols(
     }
 }
 
-#[derive(Copy, Clone)]
-struct SymFreq {
-    key: u16,
-    sym_index: u16,
-}
-
-fn radix_sort_symbols<'a>(
-    symbols0: &'a mut [SymFreq],
-    symbols1: &'a mut [SymFreq],
-) -> &'a mut [SymFreq] {
-    let mut hist = [[0; 256]; 2];
-
-    for freq in symbols0.iter() {
-        hist[0][(freq.key & 0xFF) as usize] += 1;
-        hist[1][((freq.key >> 8) & 0xFF) as usize] += 1;
-    }
-
-    let mut n_passes = 2;
-    if symbols0.len() == hist[1][0] {
-        n_passes -= 1;
-    }
-
-    let mut current_symbols = symbols0;
-    let mut new_symbols = symbols1;
-
-    for (pass, hist_item) in hist.iter().enumerate().take(n_passes) {
-        let mut offsets = [0; 256];
-        let mut offset = 0;
-        for i in 0..256 {
-            offsets[i] = offset;
-            offset += hist_item[i];
-        }
-
-        for sym in current_symbols.iter() {
-            let j = ((sym.key >> (pass * 8)) & 0xFF) as usize;
-            new_symbols[offsets[j]] = *sym;
-            offsets[j] += 1;
-        }
-
-        mem::swap(&mut current_symbols, &mut new_symbols);
-    }
-
-    current_symbols
-}
-
-fn calculate_minimum_redundancy(symbols: &mut [SymFreq]) {
-    match symbols.len() {
-        0 => (),
-        1 => symbols[0].key = 1,
-        n => {
-            symbols[0].key += symbols[1].key;
-            let mut root = 0;
-            let mut leaf = 2;
-            for next in 1..n - 1 {
-                if (leaf >= n) || (symbols[root].key < symbols[leaf].key) {
-                    symbols[next].key = symbols[root].key;
-                    symbols[root].key = next as u16;
-                    root += 1;
-                } else {
-                    symbols[next].key = symbols[leaf].key;
-                    leaf += 1;
-                }
-
-                if (leaf >= n) || (root < next && symbols[root].key < symbols[leaf].key) {
-                    symbols[next].key = symbols[next].key.wrapping_add(symbols[root].key);
-                    symbols[root].key = next as u16;
-                    root += 1;
-                } else {
-                    symbols[next].key = symbols[next].key.wrapping_add(symbols[leaf].key);
-                    leaf += 1;
-                }
-            }
-
-            symbols[n - 2].key = 0;
-            for next in (0..n - 2).rev() {
-                symbols[next].key = symbols[symbols[next].key as usize].key + 1;
-            }
-
-            let mut avbl = 1;
-            let mut used = 0;
-            let mut dpth = 0;
-            let mut root = (n - 2) as i32;
-            let mut next = (n - 1) as i32;
-            while avbl > 0 {
-                while (root >= 0) && (symbols[root as usize].key == dpth) {
-                    used += 1;
-                    root -= 1;
-                }
-                while avbl > used {
-                    symbols[next as usize].key = dpth;
-                    next -= 1;
-                    avbl -= 1;
-                }
-                avbl = 2 * used;
-                dpth += 1;
-                used = 0;
-            }
-        }
-    }
-}
-
-fn enforce_max_code_size(num_codes: &mut [i32], code_list_len: usize, max_code_size: usize) {
-    if code_list_len <= 1 {
-        return;
-    }
-
-    num_codes[max_code_size] += num_codes[max_code_size + 1..].iter().sum::<i32>();
-    let total = num_codes[1..=max_code_size]
-        .iter()
-        .rev()
-        .enumerate()
-        .fold(0u32, |total, (i, &x)| total + ((x as u32) << i));
-
-    for _ in (1 << max_code_size)..total {
-        num_codes[max_code_size] -= 1;
-        for i in (1..max_code_size).rev() {
-            if num_codes[i] != 0 {
-                num_codes[i] -= 1;
-                num_codes[i + 1] += 2;
-                break;
-            }
-        }
-    }
-}
-
-const MAX_SUPPORTED_HUFF_CODESIZE: usize = 32;
-
-/// calculates the bit lengths for a given distribution of symbols.
-/// Trailing zeros are removed and the maximum code size is enforced.
-pub fn calc_bit_lengths(sym_count: &[u16], code_size_limit: usize) -> Vec<u8> {
-    let mut symbols0 = Vec::new();
-    let mut max_used = 0;
-
-    for i in 0..sym_count.len() {
-        if sym_count[i] != 0 {
-            symbols0.push(SymFreq {
-                key: sym_count[i],
-                sym_index: i as u16,
-            });
-            max_used = i + 1;
-        }
-    }
-
-    let num_used_symbols = symbols0.len();
-
-    let mut symbols1 = Vec::new();
-    symbols1.resize(
-        num_used_symbols,
-        SymFreq {
-            key: 0,
-            sym_index: 0,
-        },
-    );
-
-    let symbols = radix_sort_symbols(&mut symbols0[..], &mut symbols1[..]);
-    calculate_minimum_redundancy(symbols);
-
-    let mut num_codes = [0i32; MAX_SUPPORTED_HUFF_CODESIZE + 1];
-    for symbol in symbols.iter() {
-        num_codes[symbol.key as usize] += 1;
-    }
-
-    enforce_max_code_size(&mut num_codes, num_used_symbols, code_size_limit);
-
-    let mut code_sizes = Vec::new();
-    code_sizes.resize(max_used, 0);
-
-    let mut last = num_used_symbols;
-    for (i, &num_item) in num_codes
-        .iter()
-        .enumerate()
-        .take(code_size_limit + 1)
-        .skip(1)
-    {
-        let first = last - num_item as usize;
-        for symbol in &symbols[first..last] {
-            code_sizes[symbol.sym_index as usize] = i as u8;
-        }
-        last = first;
-    }
-
-    code_sizes
-}
-
 #[cfg(test)]
 /// A ReadBits implementation that reads bits from a single u32 used for unit tests
 struct SingleCode {
@@ -393,7 +209,7 @@ impl ReadBits for SingleCode {
 fn roundtrip_huffman_code() {
     let frequencies = [1, 0, 2, 3, 5, 8, 13, 0];
 
-    let code_lengths = calc_bit_lengths(&frequencies, 7);
+    let code_lengths = crate::huffman_calc::calc_minzoxide::calc_bit_lengths(&frequencies, 7);
 
     let codes = calc_huffman_codes(&code_lengths).unwrap();
 

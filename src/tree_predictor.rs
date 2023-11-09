@@ -1,12 +1,9 @@
 use crate::{
+    huffman_calc::calc_minzoxide::calc_bit_lengths,
     huffman_encoding::{HuffmanOriginalEncoding, TreeCodeType},
-    huffman_helper::calc_bit_lengths,
-    preflate_constants::{
-        CODETREE_CODE_COUNT, DIST_CODE_COUNT, LITLENDIST_CODE_COUNT, LITLEN_CODE_COUNT,
-        NONLEN_CODE_COUNT, TREE_CODE_ORDER_TABLE,
-    },
+    preflate_constants::{CODETREE_CODE_COUNT, NONLEN_CODE_COUNT, TREE_CODE_ORDER_TABLE},
     preflate_token::TokenFrequency,
-    statistical_codec::{PredictionDecoder, PredictionEncoder, PreflatePredictionDecoder},
+    statistical_codec::{PredictionDecoder, PredictionEncoder},
 };
 
 pub fn predict_tree_for_block<D: PredictionEncoder>(
@@ -324,6 +321,8 @@ fn predict_code_data(sym_bit_len: &[u8], code_type: TreeCodeType) -> u8 {
 
 #[test]
 fn encode_roundtrip_perfect() {
+    use crate::statistical_codec::PreflatePredictionDecoder;
+
     let mut freq = TokenFrequency::default();
     freq.literal_codes[0] = 100;
     freq.literal_codes[1] = 50;
@@ -353,6 +352,8 @@ fn encode_roundtrip_perfect() {
 
 #[test]
 fn encode_perfect_encoding() {
+    use crate::statistical_codec::PreflatePredictionDecoder;
+
     let mut freq = TokenFrequency::default();
     // fill with random frequencies
     let mut v: u16 = 10;
@@ -366,7 +367,8 @@ fn encode_perfect_encoding() {
     });
 
     // use the default encoder the says that everything is ok
-    let default_encoding = recreate_tree_for_block(&freq, &mut PreflatePredictionDecoder::default_decoder()).unwrap();
+    let default_encoding =
+        recreate_tree_for_block(&freq, &mut PreflatePredictionDecoder::default_decoder()).unwrap();
 
     // now predict the encoding using the default encoding and it should be perfect
     let mut empty_encoder = crate::statistical_codec::PreflatePredictionEncoder::default();

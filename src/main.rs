@@ -4,6 +4,7 @@ mod complevel_estimator;
 mod deflate_decoder;
 pub mod deflate_encoder;
 mod hash_chain;
+mod huffman_calc;
 mod huffman_encoding;
 mod huffman_helper;
 mod predictor_state;
