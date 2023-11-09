@@ -9,7 +9,7 @@
             "type": "cppvsdbg",
             "request": "launch",
             "program": "${workspaceFolder}/target/debug/preflate_rs.exe",
-            "args": ["-x", "${workspaceFolder}/myzip.zip"],
+            "args": ["${workspaceFolder}/LICENSE"],
             "stopAtEntry": false,
             "cwd": "${fileDirname}",
             "environment": [],

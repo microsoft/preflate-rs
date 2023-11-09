@@ -1,5 +1,5 @@
 use crate::zip_bit_reader::ReadBits;
-use std::mem;
+use std::{mem, vec};
 
 /// Calculates Huffman code array given an array of Huffman Code Lengths using the RFC 1951 algorithm
 pub fn calc_huffman_codes(code_lengths: &[u8]) -> anyhow::Result<Vec<u16>> {
@@ -314,52 +314,46 @@ fn enforce_max_code_size(num_codes: &mut [i32], code_list_len: usize, max_code_s
 }
 
 const MAX_SUPPORTED_HUFF_CODESIZE: usize = 32;
-const MAX_HUFF_SYMBOLS: usize = 288;
 
-pub fn calc_bit_lengths(
-    code_sizes: &mut [u8],
-    sym_count: &[u16],
-    table_len: usize,
-    code_size_limit: usize,
-) -> usize {
-    let mut num_codes = [0i32; MAX_SUPPORTED_HUFF_CODESIZE + 1];
-
-    let mut symbols0 = [SymFreq {
-        key: 0,
-        sym_index: 0,
-    }; MAX_HUFF_SYMBOLS];
-    let mut symbols1 = [SymFreq {
-        key: 0,
-        sym_index: 0,
-    }; MAX_HUFF_SYMBOLS];
-
-    let mut num_used_symbols = 0;
+/// calculates the bit lengths for a given distribution of symbols.
+/// Trailing zeros are removed and the maximum code size is enforced.
+pub fn calc_bit_lengths(sym_count: &[u16], code_size_limit: usize) -> Vec<u8> {
+    let mut symbols0 = Vec::new();
     let mut max_used = 0;
 
-    for i in 0..table_len {
+    for i in 0..sym_count.len() {
         if sym_count[i] != 0 {
-            symbols0[num_used_symbols] = SymFreq {
+            symbols0.push(SymFreq {
                 key: sym_count[i],
                 sym_index: i as u16,
-            };
-            num_used_symbols += 1;
+            });
             max_used = i + 1;
         }
     }
 
-    let symbols = radix_sort_symbols(
-        &mut symbols0[..num_used_symbols],
-        &mut symbols1[..num_used_symbols],
+    let num_used_symbols = symbols0.len();
+
+    let mut symbols1 = Vec::new();
+    symbols1.resize(
+        num_used_symbols,
+        SymFreq {
+            key: 0,
+            sym_index: 0,
+        },
     );
+
+    let symbols = radix_sort_symbols(&mut symbols0[..], &mut symbols1[..]);
     calculate_minimum_redundancy(symbols);
 
+    let mut num_codes = [0i32; MAX_SUPPORTED_HUFF_CODESIZE + 1];
     for symbol in symbols.iter() {
         num_codes[symbol.key as usize] += 1;
     }
 
     enforce_max_code_size(&mut num_codes, num_used_symbols, code_size_limit);
 
-    code_sizes[..].fill(0);
+    let mut code_sizes = Vec::new();
+    code_sizes.resize(max_used, 0);
 
     let mut last = num_used_symbols;
     for (i, &num_item) in num_codes
@@ -375,7 +369,7 @@ pub fn calc_bit_lengths(
         last = first;
     }
 
-    max_used
+    code_sizes
 }
 
 #[cfg(test)]
@@ -397,7 +391,9 @@ impl ReadBits for SingleCode {
 /// verify that the huffman codes generated can be decoded with the huffman code tree
 #[test]
 fn roundtrip_huffman_code() {
-    let code_lengths = [1, 0, 3, 3, 4, 4, 3, 0];
+    let frequencies = [1, 0, 2, 3, 5, 8, 13, 0];
+
+    let code_lengths = calc_bit_lengths(&frequencies, 7);
 
     let codes = calc_huffman_codes(&code_lengths).unwrap();
 

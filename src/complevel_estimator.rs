@@ -1,5 +1,3 @@
-use std::io::LineWriter;
-
 use crate::hash_chain::HashChain;
 use crate::preflate_constants;
 use crate::preflate_parse_config::{

@@ -6,7 +6,7 @@ use crate::{
         NONLEN_CODE_COUNT, TREE_CODE_ORDER_TABLE,
     },
     preflate_token::TokenFrequency,
-    statistical_codec::{PredictionDecoder, PredictionEncoder},
+    statistical_codec::{AssertEmptyEncoder, EmptyDecoder, PredictionDecoder, PredictionEncoder},
 };
 
 pub fn predict_tree_for_block<D: PredictionEncoder>(
@@ -15,32 +15,33 @@ pub fn predict_tree_for_block<D: PredictionEncoder>(
     encoder: &mut D,
 ) -> anyhow::Result<()> {
     // bit_lengths is a vector of huffman code sizes for literals followed by length codes
-    let mut bit_lengths = vec![0; LITLENDIST_CODE_COUNT as usize];
-
     // first predict the size of the literal tree
-    let mut predicted_l_tree_size = build_l_bit_lengths(&mut bit_lengths, &freq.literal_codes);
+    let mut bit_lengths = calc_bit_lengths(&freq.literal_codes, 15);
 
-    encoder
-        .encode_literal_count_misprediction(predicted_l_tree_size != huffman_encoding.num_literals);
+    encoder.encode_literal_count_misprediction(bit_lengths.len() != huffman_encoding.num_literals);
 
     // if incorrect, include the actual size
-    if predicted_l_tree_size != huffman_encoding.num_literals {
+    if bit_lengths.len() != huffman_encoding.num_literals {
         encoder.encode_value(huffman_encoding.num_literals as u16 - 257, 5);
-        predicted_l_tree_size = huffman_encoding.num_literals;
+
+        bit_lengths.resize(huffman_encoding.num_literals as usize, 0);
     }
 
     // now predict the size of the distance tree
-    let predicted_d_tree_size = build_d_bit_lengths(
-        &mut bit_lengths[predicted_l_tree_size as usize..],
-        &freq.distance_codes,
+    let mut distance_code_lengths = calc_bit_lengths(&freq.distance_codes, 15);
+
+    encoder.encode_distance_count_misprediction(
+        distance_code_lengths.len() != huffman_encoding.num_dist,
     );
 
-    encoder.encode_distance_count_misprediction(predicted_d_tree_size != huffman_encoding.num_dist);
-
     // if incorrect, include the actual size
-    if predicted_d_tree_size != huffman_encoding.num_dist {
+    if distance_code_lengths.len() != huffman_encoding.num_dist {
         encoder.encode_value(huffman_encoding.num_dist as u16 - 1, 5);
+
+        distance_code_lengths.resize(huffman_encoding.num_dist as usize, 0);
     }
+
+    bit_lengths.append(&mut distance_code_lengths);
 
     // now predict each length code
     predict_ld_trees(encoder, &bit_lengths, huffman_encoding.lengths.as_slice())?;
@@ -49,15 +50,20 @@ pub fn predict_tree_for_block<D: PredictionEncoder>(
     // to store the bit lengths of the huffman tree we just created
     let codetree_freq = calc_codetree_freq(&huffman_encoding.lengths);
 
-    let mut tc_code_tree = [0u8; CODETREE_CODE_COUNT as usize];
-    let predicted_c_tree_size = build_tc_bit_lengths(&mut tc_code_tree, &codetree_freq);
+    let mut tc_code_tree = calc_bit_lengths(&codetree_freq, 7);
 
-    if predicted_c_tree_size != huffman_encoding.num_code_lengths {
+    let tc_code_tree_len = calc_tc_lengths_without_trailing_zeros(&tc_code_tree);
+
+    if tc_code_tree_len != huffman_encoding.num_code_lengths {
         encoder.encode_tree_code_count_misprediction(true);
         encoder.encode_value(huffman_encoding.num_code_lengths as u16 - 4, 4);
     } else {
         encoder.encode_tree_code_count_misprediction(false);
     }
+
+    // resize so that when we walk through in TREE_CODE_ORDER_TABLE order, we
+    // don't go out of range.
+    tc_code_tree.resize(CODETREE_CODE_COUNT, 0);
 
     for i in 0..huffman_encoding.num_code_lengths {
         let predicted_bl = tc_code_tree[TREE_CODE_ORDER_TABLE[i]];
@@ -76,81 +82,88 @@ pub fn recreate_tree_for_block<D: PredictionDecoder>(
 ) -> anyhow::Result<HuffmanOriginalEncoding> {
     let mut result: HuffmanOriginalEncoding = Default::default();
 
-    let mut bit_lengths = [0u8; LITLENDIST_CODE_COUNT as usize];
-    let mut predicted_l_tree_size = build_l_bit_lengths(&mut bit_lengths, &freq.literal_codes);
+    let mut bit_lengths = calc_bit_lengths(&freq.literal_codes, 15);
 
     if codec.decode_literal_count_misprediction() {
-        predicted_l_tree_size = codec.decode_value(5) as usize + NONLEN_CODE_COUNT;
+        let corrected_num_literals = codec.decode_value(5) as usize + NONLEN_CODE_COUNT;
+        bit_lengths.resize(corrected_num_literals, 0);
     }
 
-    result.num_literals = predicted_l_tree_size;
+    result.num_literals = bit_lengths.len();
 
-    let mut predicted_d_tree_size = build_d_bit_lengths(
-        &mut bit_lengths[predicted_l_tree_size as usize..],
-        &freq.distance_codes,
-    );
+    let mut distance_code_lengths = calc_bit_lengths(&freq.distance_codes, 15);
 
     if codec.decode_distance_count_misprediction() {
-        predicted_d_tree_size = codec.decode_value(5) as usize + 1;
+        let corrected_num_distance = codec.decode_value(5) as usize + 1;
+        bit_lengths.resize(corrected_num_distance, 0);
     }
 
-    result.num_dist = predicted_d_tree_size;
+    result.num_dist = distance_code_lengths.len();
+
+    // frequences are encoded as appended together as a single vector
+    bit_lengths.append(&mut distance_code_lengths);
 
     result.lengths = reconstruct_ld_trees(codec, &bit_lengths)?;
 
     let bl_freqs = calc_codetree_freq(&result.lengths);
 
-    let mut simple_code_tree = [0u8; CODETREE_CODE_COUNT as usize];
-    let mut predicted_c_tree_size = build_tc_bit_lengths(&mut simple_code_tree, &bl_freqs);
+    let mut tc_code_tree = calc_bit_lengths(&bl_freqs, 7);
+
+    let mut tc_code_tree_len = calc_tc_lengths_without_trailing_zeros(&tc_code_tree);
 
     if codec.decode_tree_code_count_misprediction() {
-        predicted_c_tree_size = codec.decode_value(4) as usize + 4;
+        tc_code_tree_len = codec.decode_value(4) as usize + 4;
     }
 
-    result.num_code_lengths = predicted_c_tree_size;
+    result.num_code_lengths = tc_code_tree_len;
 
-    for i in 0..predicted_c_tree_size {
-        result.code_lengths[TREE_CODE_ORDER_TABLE[i]] = codec
-            .decode_tree_code_bit_length_correction(simple_code_tree[TREE_CODE_ORDER_TABLE[i]]);
+    // resize so that when we walk through in TREE_CODE_ORDER_TABLE order, we
+    // don't go out of range.
+    tc_code_tree.resize(CODETREE_CODE_COUNT, 0);
+
+    for i in 0..tc_code_tree_len {
+        result.code_lengths[TREE_CODE_ORDER_TABLE[i]] =
+            codec.decode_tree_code_bit_length_correction(tc_code_tree[TREE_CODE_ORDER_TABLE[i]]);
     }
 
     Ok(result)
 }
 
-fn build_l_bit_lengths(bit_lengths: &mut [u8], lcodes: &[u16]) -> usize {
-    calc_bit_lengths(bit_lengths, lcodes, LITLEN_CODE_COUNT as usize, 15)
-}
-
-fn build_d_bit_lengths(bit_lengths: &mut [u8], dcodes: &[u16]) -> usize {
-    calc_bit_lengths(bit_lengths, dcodes, DIST_CODE_COUNT as usize, 15)
-}
-
-fn build_tc_bit_lengths(
-    bit_lengths: &mut [u8; CODETREE_CODE_COUNT],
-    bl_freqs: &[u16; CODETREE_CODE_COUNT],
-) -> usize {
-    let mut predicted_c_tree_size = CODETREE_CODE_COUNT;
-    calc_bit_lengths(bit_lengths, bl_freqs, CODETREE_CODE_COUNT, 7);
-
+/// since treecodes are encoded in a different order (see TREE_CODE_ORDER_TABLE) in
+/// order to optimize the chance of removing trailing zeros, we need to calculate
+/// the effective encoding size of the length codes
+fn calc_tc_lengths_without_trailing_zeros(bit_lengths: &[u8]) -> usize {
+    let mut len = bit_lengths.len();
     // remove trailing zeros
-    while predicted_c_tree_size > 4
-        && bit_lengths[TREE_CODE_ORDER_TABLE[predicted_c_tree_size - 1] as usize] == 0
-    {
-        predicted_c_tree_size -= 1;
+    while len > 4 && bit_lengths[TREE_CODE_ORDER_TABLE[len - 1] as usize] == 0 {
+        len -= 1;
     }
 
-    predicted_c_tree_size
+    len
 }
 
 fn predict_ld_trees<D: PredictionEncoder>(
     encoder: &mut D,
-    sym_bit_len: &[u8],
-    target_codes: &[(TreeCodeType, u8)],
+    predicted_bit_len: &[u8],
+    actual_target_codes: &[(TreeCodeType, u8)],
 ) -> anyhow::Result<()> {
-    let mut symbols = sym_bit_len;
+    let mut symbols = predicted_bit_len;
     let mut prev_code = None;
 
-    for (target_tree_code_type, target_tree_code_data) in target_codes.iter() {
+    assert_eq!(
+        actual_target_codes
+            .iter()
+            .map(|&(a, b)| if a == TreeCodeType::Code {
+                1
+            } else {
+                b as usize
+            })
+            .sum::<usize>(),
+        predicted_bit_len.len(),
+        "target_codes RLE encoding should sum to the same length as sym_bit_len"
+    );
+
+    for &(target_tree_code_type, target_tree_code_data) in actual_target_codes.iter() {
         if symbols.len() == 0 {
             return Err(anyhow::anyhow!("Reconstruction failed"));
         }
@@ -159,25 +172,25 @@ fn predict_ld_trees<D: PredictionEncoder>(
 
         prev_code = Some(symbols[0]);
 
-        encoder.encode_ld_type_correction(predicted_tree_code_type, *target_tree_code_type);
+        encoder.encode_ld_type_correction(predicted_tree_code_type, target_tree_code_type);
 
-        let predicted_tree_code_data = predict_code_data(symbols, *target_tree_code_type);
+        let predicted_tree_code_data = predict_code_data(symbols, target_tree_code_type);
 
-        if *target_tree_code_type != TreeCodeType::Code {
+        if target_tree_code_type != TreeCodeType::Code {
             encoder.encode_repeat_count_correction(
                 predicted_tree_code_data,
-                *target_tree_code_data,
-                *target_tree_code_type,
+                target_tree_code_data,
+                target_tree_code_type,
             );
         } else {
             encoder
-                .encode_ld_bit_length_correction(predicted_tree_code_data, *target_tree_code_data);
+                .encode_ld_bit_length_correction(predicted_tree_code_data, target_tree_code_data);
         }
 
-        if *target_tree_code_type == TreeCodeType::Code {
+        if target_tree_code_type == TreeCodeType::Code {
             symbols = &symbols[1..];
         } else {
-            symbols = &symbols[*target_tree_code_data as usize..];
+            symbols = &symbols[target_tree_code_data as usize..];
         }
     }
 
@@ -185,7 +198,7 @@ fn predict_ld_trees<D: PredictionEncoder>(
 }
 
 fn reconstruct_ld_trees<D: PredictionDecoder>(
-    codec: &mut D,
+    decoder: &mut D,
     sym_bit_len: &[u8],
 ) -> anyhow::Result<Vec<(TreeCodeType, u8)>> {
     let mut symbols = sym_bit_len;
@@ -196,16 +209,16 @@ fn reconstruct_ld_trees<D: PredictionDecoder>(
         let predicted_tree_code_type = predict_code_type(symbols, prev_code);
         prev_code = Some(symbols[0]);
 
-        let predicted_tree_code_type = codec.decode_ld_type_correction(predicted_tree_code_type);
+        let predicted_tree_code_type = decoder.decode_ld_type_correction(predicted_tree_code_type);
 
         let mut predicted_tree_code_data = predict_code_data(symbols, predicted_tree_code_type);
 
         if predicted_tree_code_type != TreeCodeType::Code {
-            predicted_tree_code_data = codec
+            predicted_tree_code_data = decoder
                 .decode_repeat_count_correction(predicted_tree_code_data, predicted_tree_code_type);
         } else {
             predicted_tree_code_data =
-                codec.decode_ld_bit_length_correction(predicted_tree_code_data);
+                decoder.decode_ld_bit_length_correction(predicted_tree_code_data);
         }
 
         result.push((predicted_tree_code_type, predicted_tree_code_data));
@@ -340,6 +353,27 @@ fn encode_roundtrip_perfect() {
 }
 
 #[test]
+fn encode_perfect_encoding() {
+    let mut freq = TokenFrequency::default();
+    // fill with random frequencies
+    let mut v: u16 = 10;
+    freq.literal_codes.fill_with(|| {
+        v = v.wrapping_add(997);
+        v
+    });
+    freq.distance_codes.fill_with(|| {
+        v = v.wrapping_add(997);
+        v
+    });
+
+    // use the default encoder the says that everything is ok
+    let default_encoding = recreate_tree_for_block(&freq, &mut EmptyDecoder {}).unwrap();
+
+    // now predict the encoding using the default encoding and it should be perfect
+    predict_tree_for_block(&default_encoding, &freq, &mut AssertEmptyEncoder {}).unwrap();
+}
+
+#[test]
 fn encode_tree_roundtrip() {
     use crate::statistical_codec::PreflatePredictionEncoder;
 
@@ -363,11 +397,10 @@ fn encode_tree_roundtrip() {
             (TreeCodeType::Code, 1),
             (TreeCodeType::Code, 2),
             (TreeCodeType::Code, 2),
-            (TreeCodeType::ZeroLong, 56),
         ],
         code_lengths: [0, 3, 2, 3, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
         num_literals: 257,
-        num_dist: 4,
+        num_dist: 3,
         num_code_lengths: 19,
     };
 

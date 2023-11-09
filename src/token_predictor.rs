@@ -385,7 +385,7 @@ impl<'a> TokenPredictor<'a> {
                     if m.len() > match_token.len() {
                         self.prev_len = match_token.len();
                         self.pending_reference = match_next;
-                        
+
                         if !self.params.zlib_compatible {
                             self.prev_len = 0;
                             self.pending_reference = None;
