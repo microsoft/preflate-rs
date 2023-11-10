@@ -8,7 +8,6 @@ use crate::{
 };
 
 #[derive(PartialEq, Eq, Clone, Copy, Debug)]
-#[repr(u16)]
 pub enum TreeCodeType {
     /// Code length 0 - 15
     Code = 0,

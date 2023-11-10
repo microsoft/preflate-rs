@@ -34,26 +34,26 @@ pub struct PreflatePredictionEncoder {
     irregular_len_258: u32,
 }
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum PreflateAction {
     Default(u32),
     EncodeValue { value: u16, max_bits: u8 },
     EncodeBlockType(BlockType),
-    EncodeEOBMisprediction(bool),
-    EncodeNonZeroPadding(bool),
-    EncodeLiteralPredictionWrong(bool),
-    EncodeReferencePredictionWrong(bool),
-    EncodeLenCorrection(u32),
-    EncodeDistOnlyCorrection(u32),
-    EncodeDistAfterLenCorrection(u32),
-    EncodeIrregularLen258(bool),
+    EncodeEOBMisprediction,
+    EncodeNonZeroPadding,
+    EncodeLiteralPredictionWrong,
+    EncodeReferencePredictionWrong,
+    EncodeLenCorrection(u8),
+    EncodeDistOnlyCorrection(u16),
+    EncodeDistAfterLenCorrection(u16),
+    EncodeIrregularLen258,
 
-    EncodeTreeCodeCountMisprediction(bool),
-    EncodeLiteralCountMisprediction(bool),
-    EncodeDistanceCountMisprediction(bool),
+    EncodeTreeCodeCountMisprediction,
+    EncodeLiteralCountMisprediction,
+    EncodeDistanceCountMisprediction,
     EncodeTreeCodeBitLengthCorrection(u8, u8),
     EncodeLDTypeCorrection(TreeCodeType, TreeCodeType),
-    EncodeRepeatCountCorrection(u8, u8, TreeCodeType),
+    EncodeRepeatCountCorrection(u8, u8),
     EncodeLDBitLengthCorrection(u8, u8),
 }
 
@@ -116,10 +116,12 @@ impl PreflatePredictionEncoder {
     ) {
         if default_value {
             if let Some(PreflateAction::Default(d)) = self.actions.last_mut() {
-                *d += 1;
-            } else {
-                self.actions.push(PreflateAction::Default(1));
+                if *d < 65535 {
+                    *d += 1;
+                    return;
+                }
             }
+            self.actions.push(PreflateAction::Default(1));
         } else {
             self.actions.push(action);
             increment(self);
@@ -210,7 +212,7 @@ impl PredictionEncoder for PreflatePredictionEncoder {
     fn encode_eob_misprediction(&mut self, misprediction: bool) {
         self.record_action(
             !misprediction,
-            PreflateAction::EncodeEOBMisprediction(misprediction),
+            PreflateAction::EncodeEOBMisprediction,
             |v| v.encode_eob_misprediction += 1,
         );
     }
@@ -218,7 +220,7 @@ impl PredictionEncoder for PreflatePredictionEncoder {
     fn encode_non_zero_padding(&mut self, non_zero_padding: bool) {
         self.record_action(
             !non_zero_padding,
-            PreflateAction::EncodeNonZeroPadding(non_zero_padding),
+            PreflateAction::EncodeNonZeroPadding,
             |v| v.non_zero_padding += 1,
         );
     }
@@ -227,7 +229,7 @@ impl PredictionEncoder for PreflatePredictionEncoder {
     fn encode_tree_code_count_misprediction(&mut self, misprediction: bool) {
         self.record_action(
             !misprediction,
-            PreflateAction::EncodeTreeCodeCountMisprediction(misprediction),
+            PreflateAction::EncodeTreeCodeCountMisprediction,
             |v| v.tree_code_count_misprediction += 1,
         );
     }
@@ -235,7 +237,7 @@ impl PredictionEncoder for PreflatePredictionEncoder {
     fn encode_literal_count_misprediction(&mut self, misprediction: bool) {
         self.record_action(
             !misprediction,
-            PreflateAction::EncodeLiteralCountMisprediction(misprediction),
+            PreflateAction::EncodeLiteralCountMisprediction,
             |v| v.literal_count_misprediction += 1,
         );
     }
@@ -243,7 +245,7 @@ impl PredictionEncoder for PreflatePredictionEncoder {
     fn encode_distance_count_misprediction(&mut self, misprediction: bool) {
         self.record_action(
             !misprediction,
-            PreflateAction::EncodeDistanceCountMisprediction(misprediction),
+            PreflateAction::EncodeDistanceCountMisprediction,
             |v| v.distance_count_misprediction += 1,
         );
     }
@@ -279,7 +281,7 @@ impl PredictionEncoder for PreflatePredictionEncoder {
     fn encode_repeat_count_correction(&mut self, pred_val: u8, act_val: u8, ld_type: TreeCodeType) {
         self.record_action(
             pred_val == act_val,
-            PreflateAction::EncodeRepeatCountCorrection(pred_val, act_val, ld_type),
+            PreflateAction::EncodeRepeatCountCorrection(pred_val, act_val),
             |_v| {},
         );
 
@@ -308,7 +310,7 @@ impl PredictionEncoder for PreflatePredictionEncoder {
     fn encode_literal_prediction_wrong(&mut self, misprediction: bool) {
         self.record_action(
             !misprediction,
-            PreflateAction::EncodeLiteralPredictionWrong(misprediction),
+            PreflateAction::EncodeLiteralPredictionWrong,
             |v| v.literal_prediction_wrong += 1,
         );
     }
@@ -316,7 +318,7 @@ impl PredictionEncoder for PreflatePredictionEncoder {
     fn encode_reference_prediction_wrong(&mut self, misprediction: bool) {
         self.record_action(
             !misprediction,
-            PreflateAction::EncodeReferencePredictionWrong(misprediction),
+            PreflateAction::EncodeReferencePredictionWrong,
             |v| v.reference_prediction_wrong += 1,
         );
     }
@@ -324,7 +326,9 @@ impl PredictionEncoder for PreflatePredictionEncoder {
     fn encode_len_correction(&mut self, pred_val: u32, act_val: u32) {
         self.record_action(
             pred_val == act_val,
-            PreflateAction::EncodeLenCorrection(act_val.wrapping_sub(pred_val)),
+            PreflateAction::EncodeLenCorrection(
+                ((act_val - 3) as u8).wrapping_sub((pred_val - 3) as u8),
+            ),
             |_v| {},
         );
 
@@ -334,7 +338,7 @@ impl PredictionEncoder for PreflatePredictionEncoder {
     fn encode_dist_only_correction(&mut self, hops: u32) {
         self.record_action(
             hops == 0,
-            PreflateAction::EncodeDistOnlyCorrection(hops),
+            PreflateAction::EncodeDistOnlyCorrection(hops as u16),
             |v| {},
         );
 
@@ -344,7 +348,7 @@ impl PredictionEncoder for PreflatePredictionEncoder {
     fn encode_dist_after_len_correction(&mut self, hops: u32) {
         self.record_action(
             hops == 0,
-            PreflateAction::EncodeDistAfterLenCorrection(hops),
+            PreflateAction::EncodeDistAfterLenCorrection(hops as u16),
             |_v| {},
         );
 
@@ -352,11 +356,9 @@ impl PredictionEncoder for PreflatePredictionEncoder {
     }
 
     fn encode_irregular_len_258(&mut self, irregular: bool) {
-        self.record_action(
-            !irregular,
-            PreflateAction::EncodeIrregularLen258(irregular),
-            |v| v.irregular_len_258 += 1,
-        );
+        self.record_action(!irregular, PreflateAction::EncodeIrregularLen258, |v| {
+            v.irregular_len_258 += 1
+        });
     }
 }
 
@@ -429,8 +431,8 @@ impl PredictionDecoder for PreflatePredictionDecoder {
 
     fn decode_eob_misprediction(&mut self) -> bool {
         if let Some(x) = self.pop() {
-            if let PreflateAction::EncodeEOBMisprediction(misprediction) = x {
-                return misprediction;
+            if PreflateAction::EncodeEOBMisprediction == x {
+                return true;
             }
             unreachable!("{:?}", x);
         }
@@ -439,40 +441,32 @@ impl PredictionDecoder for PreflatePredictionDecoder {
 
     fn decode_non_zero_padding(&mut self) -> bool {
         if let Some(x) = self.pop() {
-            if let PreflateAction::EncodeNonZeroPadding(non_zero_padding) = x {
-                return non_zero_padding;
-            }
-            unreachable!("{:?}", x);
+            assert_eq!(x, PreflateAction::EncodeNonZeroPadding);
+            return true;
         }
         false
     }
 
     fn decode_tree_code_count_misprediction(&mut self) -> bool {
         if let Some(x) = self.pop() {
-            if let PreflateAction::EncodeTreeCodeCountMisprediction(misprediction) = x {
-                return misprediction;
-            }
-            unreachable!("{:?}", x);
+            assert_eq!(x, PreflateAction::EncodeTreeCodeCountMisprediction);
+            return true;
         }
         false
     }
 
     fn decode_literal_count_misprediction(&mut self) -> bool {
         if let Some(x) = self.pop() {
-            if let PreflateAction::EncodeLiteralCountMisprediction(misprediction) = x {
-                return misprediction;
-            }
-            unreachable!("{:?}", x);
+            assert_eq!(x, PreflateAction::EncodeLiteralCountMisprediction);
+            return true;
         }
         false
     }
 
     fn decode_distance_count_misprediction(&mut self) -> bool {
         if let Some(x) = self.pop() {
-            if let PreflateAction::EncodeDistanceCountMisprediction(misprediction) = x {
-                return misprediction;
-            }
-            unreachable!("{:?}", x);
+            assert_eq!(x, PreflateAction::EncodeDistanceCountMisprediction);
+            return true;
         }
         false
     }
@@ -501,9 +495,8 @@ impl PredictionDecoder for PreflatePredictionDecoder {
 
     fn decode_repeat_count_correction(&mut self, predval: u8, _ldtype: TreeCodeType) -> u8 {
         if let Some(x) = self.pop() {
-            if let PreflateAction::EncodeRepeatCountCorrection(orig_predval, actval, ldtype) = x {
+            if let PreflateAction::EncodeRepeatCountCorrection(orig_predval, actval) = x {
                 assert_eq!(orig_predval, predval);
-                assert_eq!(ldtype, _ldtype);
                 return actval;
             }
             unreachable!("{:?}", x);
@@ -524,20 +517,16 @@ impl PredictionDecoder for PreflatePredictionDecoder {
 
     fn decode_literal_prediction_wrong(&mut self) -> bool {
         if let Some(x) = self.pop() {
-            if let PreflateAction::EncodeLiteralPredictionWrong(misprediction) = x {
-                return misprediction;
-            }
-            unreachable!("{:?}", x);
+            assert_eq!(x, PreflateAction::EncodeLiteralPredictionWrong);
+            return true;
         }
         false
     }
 
     fn decode_reference_prediction_wrong(&mut self) -> bool {
         if let Some(x) = self.pop() {
-            if let PreflateAction::EncodeReferencePredictionWrong(misprediction) = x {
-                return misprediction;
-            }
-            unreachable!("{:?}", x);
+            assert_eq!(x, PreflateAction::EncodeReferencePredictionWrong);
+            return true;
         }
         false
     }
@@ -545,7 +534,7 @@ impl PredictionDecoder for PreflatePredictionDecoder {
     fn decode_len_correction(&mut self, predval: u32) -> u32 {
         if let Some(x) = self.pop() {
             if let PreflateAction::EncodeLenCorrection(correction) = x {
-                return predval.wrapping_add(correction);
+                return ((predval - 3) as u8).wrapping_add(correction) as u32 + 3;
             }
             unreachable!("{:?}", x);
         }
@@ -555,7 +544,7 @@ impl PredictionDecoder for PreflatePredictionDecoder {
     fn decode_dist_only_correction(&mut self) -> u32 {
         if let Some(x) = self.pop() {
             if let PreflateAction::EncodeDistOnlyCorrection(hops) = x {
-                return hops as u32;
+                return hops.into();
             }
             unreachable!("{:?}", x);
         }
@@ -565,7 +554,7 @@ impl PredictionDecoder for PreflatePredictionDecoder {
     fn decode_dist_after_len_correction(&mut self) -> u32 {
         if let Some(x) = self.pop() {
             if let PreflateAction::EncodeDistAfterLenCorrection(hops) = x {
-                return hops as u32;
+                return hops.into();
             }
             unreachable!("{:?}", x);
         }
@@ -574,10 +563,7 @@ impl PredictionDecoder for PreflatePredictionDecoder {
 
     fn decode_irregular_len_258(&mut self) -> bool {
         if let Some(x) = self.pop() {
-            if let PreflateAction::EncodeIrregularLen258(is_irregular) = x {
-                return is_irregular;
-            }
-            unreachable!("{:?}", x);
+            assert_eq!(x, PreflateAction::EncodeIrregularLen258);
         }
         false
     }
