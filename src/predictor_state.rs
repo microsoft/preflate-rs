@@ -1,7 +1,8 @@
+use crate::bit_helper::DebugHash;
 use crate::hash_chain::{HashChain, HashIterator};
 use crate::preflate_constants::{self, MAX_MATCH, MIN_LOOKAHEAD, MIN_MATCH};
 use crate::preflate_parameter_estimator::PreflateParameters;
-use crate::preflate_token::{PreflateToken, PreflateTokenReference};
+use crate::preflate_token::PreflateTokenReference;
 use crate::seq_chain::SeqChain;
 use std::cmp;
 
@@ -19,13 +20,19 @@ pub struct PredictorState<'a> {
 }
 
 impl<'a> PredictorState<'a> {
-    pub fn new(uncompressed: &'a [u8], params: PreflateParameters) -> Self {
+    pub fn new(uncompressed: &'a [u8], params: &PreflateParameters) -> Self {
         Self {
             hash: HashChain::new(uncompressed, params.mem_level),
             seq: SeqChain::new(uncompressed),
             window_bytes: 1 << params.window_bits,
-            params: params,
+            params: *params,
         }
+    }
+
+    #[allow(dead_code)]
+    pub fn checksum(&self, checksum: &mut DebugHash) {
+        self.hash.checksum(checksum);
+        self.seq.checksum(checksum);
     }
 
     pub fn update_running_hash(&mut self, b: u8) {
@@ -207,9 +214,6 @@ impl<'a> PredictorState<'a> {
 
                 h.max_chain -= 1;
                 h.chain_explored += 1;
-                if h.chain_explored > 900 {
-                    println!("chain_explored: {}", h.chain_explored);
-                }
             }
             best_match
         } else {

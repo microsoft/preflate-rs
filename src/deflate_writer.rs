@@ -10,7 +10,7 @@ use crate::{
     preflate_token::{BlockType, PreflateToken, PreflateTokenBlock},
 };
 
-pub struct DeflateEncoder<'a> {
+pub struct DeflateWriter<'a> {
     /// original uncompressed plain text
     plain_text: &'a [u8],
 
@@ -24,7 +24,7 @@ pub struct DeflateEncoder<'a> {
     output: Vec<u8>,
 }
 
-impl<'a> DeflateEncoder<'a> {
+impl<'a> DeflateWriter<'a> {
     pub fn new(plain_text: &'a [u8]) -> Self {
         Self {
             output: Vec::new(),
@@ -34,8 +34,10 @@ impl<'a> DeflateEncoder<'a> {
         }
     }
 
-    pub fn get_output(&self) -> &[u8] {
-        &self.output
+    pub fn detach_output(&mut self) -> Vec<u8> {
+        let mut o = Vec::new();
+        o.append(&mut self.output);
+        o
     }
 
     pub fn encode_block(&mut self, block: &PreflateTokenBlock, last: bool) -> Result<()> {

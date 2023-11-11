@@ -1,6 +1,6 @@
 use std::cmp;
 
-use crate::{preflate_constants::MIN_MATCH, preflate_input::PreflateInput};
+use crate::{bit_helper::DebugHash, preflate_constants::MIN_MATCH, preflate_input::PreflateInput};
 
 #[derive(Clone, Copy, Default)]
 struct SeqChainEntry {
@@ -70,6 +70,18 @@ impl<'a> SeqChain<'a> {
         r.build(8, cmp::min((1 << 16) - 8, r.input.remaining()));
 
         r
+    }
+
+    #[allow(dead_code)]
+    pub fn checksum(&self, checksum: &mut DebugHash) {
+        self.prev.iter().for_each(|x| {
+            checksum.update(x.dist_to_next);
+            checksum.update(x.length);
+        });
+
+        checksum.update_slice(&self.heads);
+        checksum.update(self.total_shift);
+        checksum.update(self.cur_pos);
     }
 
     pub fn valid(&self, ref_pos: u32) -> bool {

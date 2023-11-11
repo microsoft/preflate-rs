@@ -1,5 +1,5 @@
 use crate::{
-    bit_helper::bit_length,
+    bit_helper::{bit_length, DebugHash},
     predictor_state::PredictorState,
     preflate_constants::{MAX_MATCH, MIN_MATCH, TOO_FAR},
     preflate_parameter_estimator::PreflateParameters,
@@ -17,12 +17,7 @@ pub struct TokenPredictor<'a> {
 }
 
 impl<'a> TokenPredictor<'a> {
-    pub fn new(
-        uncompressed: &'a [u8],
-        params: PreflateParameters,
-        //params: &'a PreflateParameters,
-        offset: u32,
-    ) -> Self {
+    pub fn new(uncompressed: &'a [u8], params: &PreflateParameters, offset: u32) -> Self {
         // Implement constructor logic for PreflateTokenPredictor
         // Initialize fields as necessary
         // Create and initialize PreflatePredictorState, PreflateHashChainExt, and PreflateSeqChain instances
@@ -30,7 +25,7 @@ impl<'a> TokenPredictor<'a> {
 
         let mut r = Self {
             state: PredictorState::<'a>::new(uncompressed, params),
-            params,
+            params: *params,
             prev_len: 0,
             pending_reference: None,
             current_token_count: 0,
@@ -51,10 +46,17 @@ impl<'a> TokenPredictor<'a> {
         r
     }
 
+    pub fn checksum(&self) -> DebugHash {
+        let mut c = DebugHash::default();
+        self.state.checksum(&mut c);
+        c
+    }
+
     pub fn predict_block<D: PredictionEncoder>(
         &mut self,
         block: &PreflateTokenBlock,
         codec: &mut D,
+        last_block: bool,
     ) -> anyhow::Result<()> {
         self.current_token_count = 0;
         self.prev_len = 0;
@@ -77,24 +79,22 @@ impl<'a> TokenPredictor<'a> {
         }
 
         // if the block ends at an unexpected point, we will need to encode the block size
-        if block.tokens.len() != self.max_token_count as usize
-            && block.uncompressed_len != self.state.available_input_size()
-        {
+        if !last_block && block.tokens.len() != self.max_token_count as usize {
             codec.encode_eob_misprediction(true);
 
-            let block_size_bits = bit_length(block.tokens.len() as u32);
-            codec.encode_value(block_size_bits as u16, 5);
-            if block_size_bits >= 2 {
-                codec.encode_value(block.tokens.len() as u16, block_size_bits as u8);
-            }
+            codec.encode_value(block.tokens.len() as u16, 16);
         } else {
             codec.encode_eob_misprediction(false);
         }
 
+        codec.encode_verify_state("start", self.checksum());
+
         for i in 0..block.tokens.len() {
             let target_token = &block.tokens[i];
 
-            let mut predicted_token = self.predict_token();
+            codec.encode_verify_state("token", DebugHash::default());
+
+            let predicted_token = self.predict_token();
 
             /*
             let hash = self.state.calculate_hash();
@@ -163,6 +163,8 @@ impl<'a> TokenPredictor<'a> {
             self.commit_token(&target_token, None);
         }
 
+        codec.encode_verify_state("done", self.checksum());
+
         Ok(())
     }
 
@@ -174,9 +176,6 @@ impl<'a> TokenPredictor<'a> {
         self.current_token_count = 0;
         self.prev_len = 0;
         self.pending_reference = None;
-
-        let mut blocksize = 0;
-        let mut check_eob = true;
 
         let bt = codec.decode_block_type();
         match bt {
@@ -199,22 +198,20 @@ impl<'a> TokenPredictor<'a> {
             }
         }
 
+        let blocksize: u32;
         if codec.decode_eob_misprediction() {
-            let blocksize_bits = codec.decode_value(5);
-            if blocksize_bits >= 2 {
-                blocksize = codec.decode_value(blocksize_bits as u8);
-            } else {
-                blocksize = blocksize_bits;
-            }
-            block.tokens.reserve(blocksize as usize);
-            check_eob = false;
+            blocksize = codec.decode_value(16).into();
         } else {
-            block.tokens.reserve(1 << (6 + self.params.mem_level));
+            blocksize = self.max_token_count;
         }
 
-        while (check_eob && !self.predict_eob())
-            || (!check_eob && self.current_token_count < blocksize as u32)
-        {
+        block.tokens.reserve(blocksize as usize);
+
+        codec.decode_verify_state("start", self.checksum());
+
+        while !self.input_eof() && self.current_token_count < blocksize as u32 {
+            codec.decode_verify_state("token", DebugHash::default());
+
             let mut predicted_ref: PreflateTokenReference;
             match self.predict_token() {
                 PreflateToken::Literal => {
@@ -264,16 +261,14 @@ impl<'a> TokenPredictor<'a> {
             self.commit_token(&PreflateToken::Reference(predicted_ref), Some(&mut block));
         }
 
+        codec.decode_verify_state("done", self.checksum());
+
         Ok(block)
     }
 
     pub fn input_eof(&self) -> bool {
         // Return a boolean indicating whether input has reached EOF
         self.state.available_input_size() == 0
-    }
-
-    fn predict_eob(&self) -> bool {
-        self.state.available_input_size() == 0 || self.current_token_count == self.max_token_count
     }
 
     fn predict_token(&mut self) -> PreflateToken {

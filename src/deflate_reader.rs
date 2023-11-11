@@ -11,14 +11,14 @@ use crate::{
 
 /// Used to read binary data in deflate format and convert it to plaintext and a list of tokenized blocks
 /// containing the literals and distance codes that were used to compress the file
-pub struct DeflateDecoder<'a, R> {
+pub struct DeflateReader<'a, R> {
     input: ZipBitReader<'a, R>,
     plain_text: Vec<u8>,
 }
 
-impl<'a, R: Read + Seek> DeflateDecoder<'a, R> {
+impl<'a, R: Read + Seek> DeflateReader<'a, R> {
     pub fn new(compressed_text: &'a mut R, max_readable_bytes: i64) -> anyhow::Result<Self> {
-        Ok(DeflateDecoder {
+        Ok(DeflateReader {
             input: ZipBitReader::new(compressed_text, max_readable_bytes)?,
             plain_text: Vec::new(),
         })
@@ -32,6 +32,11 @@ impl<'a, R: Read + Seek> DeflateDecoder<'a, R> {
 
     pub fn get_plain_text(&self) -> &[u8] {
         &self.plain_text
+    }
+
+    /// moves ownership out of block reader
+    pub fn move_plain_text(&mut self) -> Vec<u8> {
+        std::mem::replace(&mut self.plain_text, Vec::new())
     }
 
     fn read_bit(&mut self) -> anyhow::Result<bool> {
