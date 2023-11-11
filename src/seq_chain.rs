@@ -24,7 +24,7 @@ pub struct SeqChain<'a> {
 pub struct PreflateSeqIterator<'a> {
     chain: &'a [SeqChainEntry],
     ref_pos: u32,
-    cur_dist: u16,
+    cur_dist: u32,
 }
 
 impl<'a> PreflateSeqIterator<'a> {
@@ -33,12 +33,12 @@ impl<'a> PreflateSeqIterator<'a> {
         Self {
             chain,
             ref_pos,
-            cur_dist,
+            cur_dist: cur_dist.into(),
         }
     }
 
     pub fn valid(&self) -> bool {
-        self.cur_dist <= (self.ref_pos - 8) as u16
+        (self.ref_pos - 8) > self.cur_dist
     }
 
     pub fn dist(&self) -> u32 {
@@ -46,13 +46,14 @@ impl<'a> PreflateSeqIterator<'a> {
     }
 
     pub fn len(&self) -> u32 {
-        self.chain[(self.ref_pos - self.cur_dist as u32) as usize]
+        self.chain[(self.ref_pos - self.cur_dist) as usize]
             .length
             .into()
     }
 
     pub fn next(&mut self) -> bool {
-        self.cur_dist += self.chain[(self.ref_pos - self.cur_dist as u32) as usize].dist_to_next;
+        debug_assert!(self.valid());
+        self.cur_dist += self.chain[(self.ref_pos - self.cur_dist) as usize].dist_to_next as u32;
         self.valid()
     }
 }
