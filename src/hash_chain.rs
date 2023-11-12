@@ -105,11 +105,11 @@ impl<'a> HashChain<'a> {
         checksum.update(self.total_shift);
     }
 
-    pub fn next_hash(&self, b: u8) -> u32 {
+    fn next_hash(&self, b: u8) -> u32 {
         (self.running_hash << self.hash_shift) ^ u32::from(b)
     }
 
-    pub fn next_hash_double(&self, b1: u8, b2: u8) -> u32 {
+    fn next_hash_double(&self, b1: u8, b2: u8) -> u32 {
         (((self.running_hash << self.hash_shift) ^ u32::from(b1)) << self.hash_shift)
             ^ u32::from(b2)
     }
@@ -144,9 +144,9 @@ impl<'a> HashChain<'a> {
         self.chain_depth[node as usize]
     }
 
-    pub fn get_rel_pos_depth(&self, ref_pos: u32, head: u32) -> u32 {
-        self.chain_depth[head as usize]
-            - self.chain_depth[(ref_pos as i32 - self.total_shift) as usize]
+    pub fn get_rel_pos_depth(&self, ref_pos: u32, head: u32) -> i32 {
+        self.chain_depth[head as usize] as i32
+            - self.chain_depth[(ref_pos as i32 - self.total_shift) as usize] as i32
     }
 
     pub fn iterate_from_head(&self, hash: u32, ref_pos: u32, max_dist: u32) -> HashIterator {

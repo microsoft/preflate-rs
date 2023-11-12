@@ -134,7 +134,7 @@ impl<'a> PredictorState<'a> {
         len
     }
 
-    pub fn first_match(&mut self, len: u32) -> u32 {
+    pub fn first_match(&self, len: u32) -> u32 {
         let max_len = std::cmp::min(self.available_input_size(), MAX_MATCH);
         if max_len < std::cmp::max(len, MIN_MATCH) {
             return 0;
@@ -296,7 +296,8 @@ impl<'a> PredictorState<'a> {
 
                     let best_chain_depth = self
                         .hash
-                        .get_rel_pos_depth(h.start_pos - best_dist + error, hash_head);
+                        .get_rel_pos_depth(h.start_pos - best_dist + error, hash_head)
+                        as u32;
 
                     if best_chain_depth >= h.max_chain {
                         error += best_chain_depth - h.max_chain + 1;
@@ -414,11 +415,10 @@ impl<'a> PredictorState<'a> {
 
     /// Tries to find the match by continuing on the hash chain, returns how many hops we went
     /// or none if it wasn't found
-    pub fn calculate_hops(
-        &self,
-        hash_head: u32,
-        target_reference: &PreflateTokenReference,
-    ) -> anyhow::Result<u32> {
+    pub fn calculate_hops(&self, target_reference: &PreflateTokenReference) -> anyhow::Result<u32> {
+        let hash = self.hash.cur_hash();
+        let hash_head = self.hash.get_head(hash);
+
         let max_len = std::cmp::min(self.available_input_size(), MAX_MATCH);
 
         if max_len < target_reference.len() {
@@ -472,17 +472,17 @@ impl<'a> PredictorState<'a> {
     /// get the new distance based on the number of hops
     pub fn hop_match(
         &self,
-        target_reference: &PreflateTokenReference,
+        predicted_reference: &PreflateTokenReference,
         hops: u32,
     ) -> anyhow::Result<u32> {
         if hops == 0 {
-            return Ok(target_reference.dist());
+            return Ok(predicted_reference.dist());
         }
 
         let cur_pos = self.current_input_pos();
         let max_len = std::cmp::min(self.available_input_size(), MAX_MATCH);
 
-        if max_len < target_reference.len() {
+        if max_len < predicted_reference.len() {
             return Err(anyhow::anyhow!("max_len < target_reference.len()"));
         }
 
@@ -490,12 +490,12 @@ impl<'a> PredictorState<'a> {
         let cur_max_dist = std::cmp::min(cur_pos, max_dist);
 
         let mut chain_it: HashIterator<'_> =
-            self.iterate_from_dist(target_reference.dist(), cur_pos, cur_max_dist);
+            self.iterate_from_dist(predicted_reference.dist(), cur_pos, cur_max_dist);
         if !chain_it.valid() {
             return Err(anyhow::anyhow!("no valid chain_it"));
         }
 
-        let best_len = target_reference.len();
+        let best_len = predicted_reference.len();
 
         let mut todo = hops;
         while todo > 0 {
@@ -505,7 +505,7 @@ impl<'a> PredictorState<'a> {
 
             let match_length = Self::prefix_compare(
                 self.input_cursor_offset(-(chain_it.dist() as i32)),
-                self.input_cursor_offset(-(target_reference.dist() as i32)),
+                self.input_cursor_offset(-(predicted_reference.dist() as i32)),
                 best_len - 1,
                 best_len,
             );

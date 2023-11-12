@@ -1,11 +1,15 @@
+use anyhow::Context;
+
 use crate::{
-    bit_helper::{bit_length, DebugHash},
+    bit_helper::DebugHash,
     predictor_state::PredictorState,
     preflate_constants::{MAX_MATCH, MIN_MATCH, TOO_FAR},
     preflate_parameter_estimator::PreflateParameters,
     preflate_token::{BlockType, PreflateToken, PreflateTokenBlock, PreflateTokenReference},
     statistical_codec::{PredictionDecoder, PredictionEncoder},
 };
+
+const VERIFY: bool = false;
 
 pub struct TokenPredictor<'a> {
     state: PredictorState<'a>,
@@ -52,6 +56,8 @@ impl<'a> TokenPredictor<'a> {
         c
     }
 
+    const VERIFY: bool = true;
+
     pub fn predict_block<D: PredictionEncoder>(
         &mut self,
         block: &PreflateTokenBlock,
@@ -92,9 +98,23 @@ impl<'a> TokenPredictor<'a> {
         for i in 0..block.tokens.len() {
             let target_token = &block.tokens[i];
 
-            codec.encode_verify_state("token", DebugHash::default());
+            codec.encode_verify_state(
+                "token",
+                if VERIFY {
+                    self.checksum()
+                } else {
+                    DebugHash::default()
+                },
+            );
 
             let predicted_token = self.predict_token();
+
+            if i == 2221100 {
+                println!(
+                    "target = {:?} predicted = {:?}",
+                    target_token, predicted_token
+                )
+            }
 
             /*
             let hash = self.state.calculate_hash();
@@ -119,7 +139,7 @@ impl<'a> TokenPredictor<'a> {
                         PreflateToken::Literal => {
                             codec.encode_literal_prediction_wrong(false);
                         }
-                        PreflateToken::Reference(r) => {
+                        PreflateToken::Reference(..) => {
                             // target had a literal, so we were wrong if we predicted a reference
                             codec.encode_reference_prediction_wrong(true);
                         }
@@ -143,12 +163,13 @@ impl<'a> TokenPredictor<'a> {
                         .encode_len_correction(predicted_ref.len() as u32, target_ref.len() as u32);
 
                     if predicted_ref.len() != target_ref.len() {
-                        let rematch = self.repredict_match(&target_ref)?;
+                        let rematch = self.state.calculate_hops(&target_ref)?;
                         codec.encode_dist_after_len_correction(rematch - 1);
                     } else {
                         if target_ref.dist() != predicted_ref.dist() {
-                            let rematch = self.repredict_match(&target_ref)?;
+                            let rematch = self.state.calculate_hops(&target_ref)?;
                             codec.encode_dist_only_correction(rematch - 1);
+                            debug_assert!(rematch > 1);
                         } else {
                             codec.encode_dist_only_correction(0);
                         }
@@ -210,7 +231,14 @@ impl<'a> TokenPredictor<'a> {
         codec.decode_verify_state("start", self.checksum());
 
         while !self.input_eof() && self.current_token_count < blocksize as u32 {
-            codec.decode_verify_state("token", DebugHash::default());
+            codec.decode_verify_state(
+                "token",
+                if VERIFY {
+                    self.checksum()
+                } else {
+                    DebugHash::default()
+                },
+            );
 
             let mut predicted_ref: PreflateTokenReference;
             match self.predict_token() {
@@ -241,7 +269,8 @@ impl<'a> TokenPredictor<'a> {
                 predicted_ref.set_len(new_len);
                 predicted_ref.set_dist(self.state.first_match(predicted_ref.len()));
                 if hops != 0 {
-                    predicted_ref.set_dist(self.recalculate_distance(&predicted_ref, hops)?);
+                    let new_dist = self.state.hop_match(&predicted_ref, hops)?;
+                    predicted_ref.set_dist(new_dist);
                 }
 
                 if predicted_ref.len() < 3 || predicted_ref.len() > 258 {
@@ -250,7 +279,13 @@ impl<'a> TokenPredictor<'a> {
             } else {
                 let hops = codec.decode_dist_only_correction();
                 if hops != 0 {
-                    predicted_ref.set_dist(self.recalculate_distance(&predicted_ref, hops)?);
+                    let new_dist =
+                        self.state
+                            .hop_match(&predicted_ref, hops)
+                            .with_context(|| {
+                                format!("recalculate_distance token {}", self.current_token_count)
+                            })?;
+                    predicted_ref.set_dist(new_dist);
                 }
             }
 
@@ -420,21 +455,6 @@ impl<'a> TokenPredictor<'a> {
             }
         }
         return Err(anyhow::Error::msg("Didnt find a match"));
-    }
-
-    /// For a given target token to match and the current state, find how many hops it takes to get to the same match
-    fn repredict_match(&mut self, token: &PreflateTokenReference) -> anyhow::Result<u32> {
-        let hash = self.state.calculate_hash();
-        let head = self.state.get_current_hash_head(hash);
-        self.state.calculate_hops(head, token)
-    }
-
-    fn recalculate_distance(
-        &self,
-        token: &PreflateTokenReference,
-        hops: u32,
-    ) -> anyhow::Result<u32> {
-        self.state.hop_match(token, hops)
     }
 
     fn commit_token(&mut self, token: &PreflateToken, block: Option<&mut PreflateTokenBlock>) {

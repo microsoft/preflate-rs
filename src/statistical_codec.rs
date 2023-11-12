@@ -287,7 +287,12 @@ impl PredictionEncoder for PreflatePredictionEncoder {
         );
     }
 
-    fn encode_repeat_count_correction(&mut self, pred_val: u8, act_val: u8, ld_type: TreeCodeType) {
+    fn encode_repeat_count_correction(
+        &mut self,
+        pred_val: u8,
+        act_val: u8,
+        _ld_type: TreeCodeType,
+    ) {
         self.record_action(
             pred_val == act_val,
             PreflateAction::RepeatCountCorrection(pred_val, act_val),
@@ -346,7 +351,7 @@ impl PredictionEncoder for PreflatePredictionEncoder {
         self.record_action(
             /*hops == 0*/ false,
             PreflateAction::DistOnlyCorrection(hops as u16),
-            |v| {},
+            |_v| {},
         );
 
         inc_pred(0, hops, &mut self.dist_only_correction);

@@ -44,8 +44,8 @@ fn analyze_compressed_data(
 ) -> anyhow::Result<()> {
     let mut encoder = PreflatePredictionEncoder::default();
 
-    let (compressed_processed, params, plain_text) =
-        read_deflate(compressed_data, &mut encoder, 1)?;
+    let (compressed_processed, params, plain_text, original_blocks) =
+        read_deflate(compressed_data, &mut encoder, 1).with_context(|| "read_deflate")?;
 
     assert_eq!(compressed_processed, compressed_data.len());
 
@@ -53,31 +53,50 @@ fn analyze_compressed_data(
 
     let mut decoder = encoder.make_decoder();
 
-    let recompressed = write_deflate(&plain_text, &params, &mut decoder)?;
+    let (recompressed, recreated_blocks) =
+        write_deflate(&plain_text, &params, &mut decoder).with_context(|| "write_deflate")?;
 
-    /*
-        assert_eq!(blocks.len(), output_blocks.len());
-        blocks.iter().zip(output_blocks).all(|(a, b)| {
-            assert_eq!(a.block_type, b.block_type);
+    assert_eq!(original_blocks.len(), recreated_blocks.len());
+    original_blocks
+        .iter()
+        .zip(recreated_blocks)
+        .enumerate()
+        .for_each(|(index, (a, b))| {
+            assert_eq!(a.block_type, b.block_type, "block type differs {index}");
             //assert_eq!(a.uncompressed_len, b.uncompressed_len);
-            assert_eq!(a.padding_bits, b.padding_bits);
-            assert_eq!(a.tokens.len(), b.tokens.len());
-            assert_eq!(a.freq.literal_codes, b.freq.literal_codes);
-            assert_eq!(a.freq.distance_codes, b.freq.distance_codes);
-            assert_eq!(a.huffman_encoding, b.huffman_encoding);
-            assert_eq!(a.tokens, b.tokens);
-            true
+            assert_eq!(
+                a.padding_bits, b.padding_bits,
+                "padding bits differ {index}"
+            );
+            compare(&a.tokens, &b.tokens);
+            assert_eq!(
+                a.tokens.len(),
+                b.tokens.len(),
+                "token length differs {index}"
+            );
+            assert!(a.tokens == b.tokens, "tokens differ {index}");
+            assert_eq!(
+                a.freq.literal_codes, b.freq.literal_codes,
+                "literal code freq differ {index}"
+            );
+            assert_eq!(
+                a.freq.distance_codes, b.freq.distance_codes,
+                "distance code freq differ {index}"
+            );
+            assert_eq!(
+                a.huffman_encoding, b.huffman_encoding,
+                "huffman_encoding differs {index}"
+            );
         });
-    */
+
     assert_eq!(
         recompressed.len(),
         compressed_data.len(),
-        "re-compressed version should be same"
+        "re-compressed version should be same (length)"
     );
-    assert_eq!(
-        &recompressed[..],
-        compressed_data,
-        "re-compressed version should be same"
+    assert!(
+        &recompressed[..] == compressed_data,
+        "re-compressed version should be same (content)"
     );
 
     let result_crc = crc32fast::hash(&plain_text);
@@ -98,6 +117,18 @@ fn analyze_compressed_data(
     *uncompressed_size = plain_text.len() as u64;
 
     Ok(())
+}
+
+fn compare<T: PartialEq + std::fmt::Debug>(a: &[T], b: &[T]) {
+    if a.len() != b.len() {
+        panic!("lengths differ");
+    }
+
+    for i in 0..a.len() {
+        if a[i] != b[i] {
+            panic!("index {} differs ({:?},{:?})", i, a[i], b[i]);
+        }
+    }
 }
 
 fn main_with_result() -> anyhow::Result<()> {
@@ -147,8 +178,8 @@ fn main_with_result() -> anyhow::Result<()> {
     }
 
     // Zlib compression with different compression levels
-    for level in 3..10 {
-        println!("level: {}", level);
+    for level in 1..10 {
+        println!("Flate2 level: {}", level);
         let mut zlib_encoder: ZlibEncoder<Cursor<&Vec<u8>>> =
             ZlibEncoder::new(Cursor::new(&v), Compression::new(level));
         let mut output = Vec::new();
@@ -173,8 +204,7 @@ fn do_analyze(plain_text: &Vec<u8>, compressed_data: &[u8]) -> Result<(), anyhow
     let crc = crc32fast::hash(plain_text);
     let mut uncompressed_size = 0;
 
-    analyze_compressed_data(compressed_data, crc, 10, &mut uncompressed_size)
-        .with_context(|| "analyze_compressed_data")?;
+    analyze_compressed_data(compressed_data, crc, 10, &mut uncompressed_size)?;
     Ok(())
 }
 

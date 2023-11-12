@@ -6,7 +6,7 @@ use crate::{
     deflate_reader::DeflateReader,
     deflate_writer::DeflateWriter,
     preflate_parameter_estimator::{estimate_preflate_parameters, PreflateParameters},
-    preflate_token::BlockType,
+    preflate_token::{BlockType, PreflateTokenBlock},
     statistical_codec::{PredictionDecoder, PredictionEncoder},
     token_predictor::TokenPredictor,
     tree_predictor::{predict_tree_for_block, recreate_tree_for_block},
@@ -18,7 +18,7 @@ pub fn read_deflate<E: PredictionEncoder>(
     compressed_data: &[u8],
     encoder: &mut E,
     deflate_info_dump_level: u32,
-) -> Result<(usize, PreflateParameters, Vec<u8>)> {
+) -> Result<(usize, PreflateParameters, Vec<u8>, Vec<PreflateTokenBlock>)> {
     let mut input_stream = Cursor::new(compressed_data);
     let mut block_decoder = DeflateReader::new(&mut input_stream, compressed_data.len() as i64)?;
 
@@ -57,7 +57,8 @@ pub fn read_deflate<E: PredictionEncoder>(
             .with_context(|| format!("encode_block {}", i))?;
 
         if blocks[i].block_type == BlockType::DynamicHuff {
-            predict_tree_for_block(&blocks[i].huffman_encoding, &blocks[i].freq, encoder)?;
+            predict_tree_for_block(&blocks[i].huffman_encoding, &blocks[i].freq, encoder)
+                .with_context(|| format!("predict_tree_for_block {}", i))?;
         }
     }
 
@@ -73,14 +74,14 @@ pub fn read_deflate<E: PredictionEncoder>(
     let plain_text = block_decoder.move_plain_text();
     let amount_processed = input_stream.position() as usize;
 
-    Ok((amount_processed, params_e, plain_text))
+    Ok((amount_processed, params_e, plain_text, blocks))
 }
 
 pub fn write_deflate<D: PredictionDecoder>(
     plain_text: &[u8],
     params: &PreflateParameters,
     decoder: &mut D,
-) -> Result<Vec<u8>> {
+) -> Result<(Vec<u8>, Vec<PreflateTokenBlock>)> {
     let mut token_predictor = TokenPredictor::new(plain_text, params, 0);
 
     let mut output_blocks = Vec::new();
@@ -92,7 +93,9 @@ pub fn write_deflate<D: PredictionDecoder>(
             break;
         }
 
-        let mut block = token_predictor.recreate_block(decoder)?;
+        let mut block = token_predictor
+            .recreate_block(decoder)
+            .with_context(|| format!("recreate_block {}", output_blocks.len()))?;
 
         if block.block_type == BlockType::DynamicHuff {
             block.huffman_encoding = recreate_tree_for_block(&block.freq, decoder)?;
@@ -112,5 +115,5 @@ pub fn write_deflate<D: PredictionDecoder>(
     };
     deflate_encoder.flush_with_padding(padding);
 
-    Ok(deflate_encoder.detach_output())
+    Ok((deflate_encoder.detach_output(), output_blocks))
 }
