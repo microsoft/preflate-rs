@@ -140,45 +140,55 @@ fn main_with_result() -> anyhow::Result<()> {
         file.read_to_end(&mut v)?;
     }
 
-    if false {
-        // Zlib compression with different compression levels
-        for level in 1..10 {
-            println!("zlib level: {}", level);
+    let onlylevel : Option<u32> = None;
 
-            let mut output = Vec::new();
-            output.resize(v.len() + 1000, 0);
+    // Zlib compression with different compression levels
+    for level in 1..10 {
 
-            let mut output_size = output.len() as u32;
+        if onlylevel.is_some_and(|x| x == level)  {
+            continue;
+        }
 
-            unsafe {
-                let err = libz_sys::compress2(
-                    output.as_mut_ptr(),
-                    &mut output_size,
-                    v.as_ptr(),
-                    v.len() as u32,
-                    level,
-                );
+        println!("zlib level: {}", level);
 
-                output.set_len(output_size as usize);
-                println!("output size: {}, err = {}", output.len(), err);
-            }
+        let mut output = Vec::new();
+        output.resize(v.len() + 1000, 0);
 
-            let minusheader = &output[2..output.len() - 4];
+        let mut output_size = output.len() as u32;
 
-            // write output to file
-            {
-                let mut file = File::create(format!("zlib_level_{}.bin", level))?;
-                file.write_all(minusheader)?;
-            }
+        unsafe {
+            let err = libz_sys::compress2(
+                output.as_mut_ptr(),
+                &mut output_size,
+                v.as_ptr(),
+                v.len() as u32,
+                level as i32,
+            );
 
-            if output.len() != 0 {
-                do_analyze(&v, minusheader)?;
-            }
+            output.set_len(output_size as usize);
+            println!("output size: {}, err = {}", output.len(), err);
+        }
+
+        let minusheader = &output[2..output.len() - 4];
+
+        // write output to file
+        {
+            let mut file = File::create(format!("zlib_level_{}.bin", level))?;
+            file.write_all(minusheader)?;
+        }
+
+        if output.len() != 0 {
+            do_analyze(&v, minusheader)?;
         }
     }
 
     // Zlib compression with different compression levels
     for level in 1..10 {
+
+        if onlylevel.is_some_and(|x| x == level + 100)  {
+            continue;
+        }
+
         println!("Flate2 level: {}", level);
         let mut zlib_encoder: ZlibEncoder<Cursor<&Vec<u8>>> =
             ZlibEncoder::new(Cursor::new(&v), Compression::new(level));
@@ -188,7 +198,7 @@ fn main_with_result() -> anyhow::Result<()> {
         // skip header and final crc
         do_analyze(&v, &output[2..output.len() - 4])?;
     }
-
+/*
     // Gzip compression with different compression levels
     for level in 3..10 {
         let mut gz_encoder = GzEncoder::new(Cursor::new(&v), Compression::new(level));
@@ -196,7 +206,7 @@ fn main_with_result() -> anyhow::Result<()> {
         let mut output = Vec::new();
         gz_encoder.read_to_end(&mut output).unwrap();
     }
-
+*/
     Ok(())
 }
 
