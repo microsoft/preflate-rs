@@ -375,7 +375,7 @@ impl<'a> TokenPredictor<'a> {
                     },
                 );
 
-                if (hash_next ^ hash) & self.state.hash_mask() == 0 {
+                if self.state.hash_equal(hash_next, hash) {
                     let max_size = std::cmp::min(self.state.available_input_size() - 1, MAX_MATCH);
                     let mut rle = 0;
                     let c = self.state.input_cursor();

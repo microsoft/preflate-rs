@@ -1,5 +1,5 @@
 use crate::bit_helper::DebugHash;
-use crate::hash_chain::HashChain;
+use crate::hash_chain::{HashChain, RotatingHash};
 use crate::preflate_constants::{self, MAX_MATCH, MIN_LOOKAHEAD, MIN_MATCH};
 use crate::preflate_parameter_estimator::PreflateParameters;
 use crate::preflate_token::PreflateTokenReference;
@@ -57,10 +57,6 @@ impl<'a> PredictorState<'a> {
         self.hash.skip_hash(pos);
     }
 
-    pub fn hash_mask(&self) -> u32 {
-        self.hash.hash_mask()
-    }
-
     pub fn update_seq(&mut self, pos: u32) {
         self.seq.update_seq(pos);
     }
@@ -93,15 +89,19 @@ impl<'a> PredictorState<'a> {
         self.hash.input().remaining()
     }
 
-    pub fn calculate_hash(&self) -> u32 {
+    pub fn hash_equal(&self, a: RotatingHash, b: RotatingHash) -> bool {
+        self.hash.hash_equal(a, b)
+    }
+
+    pub fn calculate_hash(&self) -> RotatingHash {
         self.hash.cur_hash()
     }
 
-    pub fn calculate_hash_next(&self) -> u32 {
+    pub fn calculate_hash_next(&self) -> RotatingHash {
         self.hash.cur_plus_1_hash()
     }
 
-    pub fn get_current_hash_head(&self, hash_next: u32) -> u32 {
+    pub fn get_current_hash_head(&self, hash_next: RotatingHash) -> u32 {
         self.hash.get_head(hash_next)
     }
 
@@ -141,7 +141,7 @@ impl<'a> PredictorState<'a> {
 
     pub fn match_token(
         &self,
-        hash: u32,
+        hash: RotatingHash,
         prev_len: u32,
         offset: u32,
         max_depth: u32,

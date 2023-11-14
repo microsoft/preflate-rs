@@ -1,4 +1,4 @@
-use crate::hash_chain::HashChain;
+use crate::hash_chain::{HashChain, RotatingHash};
 use crate::preflate_constants;
 use crate::preflate_parse_config::{
     PreflateParserConfig, FAST_PREFLATE_PARSER_SETTINGS, SLOW_PREFLATE_PARSER_SETTINGS,
@@ -250,7 +250,7 @@ impl<'a> CompLevelEstimatorState<'a> {
         token: &PreflateTokenReference,
         hash: &HashChain,
         config: &PreflateParserConfig,
-        hash_head: u32,
+        hash_head: RotatingHash,
         window_size: u32,
     ) -> bool {
         let mdepth = Self::match_depth(hash.get_head(hash_head), token, hash, window_size, true);

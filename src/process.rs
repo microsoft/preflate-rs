@@ -88,11 +88,9 @@ pub fn write_deflate<D: PredictionDecoder>(
 
     let mut deflate_encoder = DeflateWriter::new(&plain_text);
 
-    loop {
-        if token_predictor.input_eof() && !decoder.decode_eof_misprediction() {
-            break;
-        }
+    let mut is_eof = token_predictor.input_eof() && !decoder.decode_eof_misprediction();
 
+    while !is_eof {
         let mut block = token_predictor
             .recreate_block(decoder)
             .with_context(|| format!("recreate_block {}", output_blocks.len()))?;
@@ -101,7 +99,9 @@ pub fn write_deflate<D: PredictionDecoder>(
             block.huffman_encoding = recreate_tree_for_block(&block.freq, decoder)?;
         }
 
-        deflate_encoder.encode_block(&block, token_predictor.input_eof())?;
+        is_eof = token_predictor.input_eof() && !decoder.decode_eof_misprediction();
+
+        deflate_encoder.encode_block(&block, is_eof)?;
 
         output_blocks.push(block);
     }

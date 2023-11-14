@@ -65,9 +65,26 @@ pub struct HashChain<'a> {
     chain_depth: Vec<u32>,
     prev: Vec<u16>,
     hash_shift: u32,
-    running_hash: u32,
+    running_hash: RotatingHash,
     hash_mask: u32,
     total_shift: i32,
+}
+
+#[derive(Default, Debug, Copy, Clone)]
+pub struct RotatingHash {
+    hash: u16,
+}
+
+impl RotatingHash {
+    pub fn hash(&self, mask: u32) -> u32 {
+        self.hash as u32 & mask
+    }
+
+    pub fn append(&self, c: u8, hash_shift: u32) -> RotatingHash {
+        RotatingHash {
+            hash: (self.hash << hash_shift) ^ u16::from(c),
+        }
+    }
 }
 
 impl<'a> HashChain<'a> {
@@ -83,7 +100,7 @@ impl<'a> HashChain<'a> {
             head: vec![0; hash_mask as usize + 1],
             prev: vec![0; 1 << 16],
             chain_depth: vec![0; 1 << 16],
-            running_hash: 0,
+            running_hash: RotatingHash::default(),
         };
 
         if i.len() > 2 {
@@ -100,22 +117,22 @@ impl<'a> HashChain<'a> {
         checksum.update_slice(&self.head);
         checksum.update_slice(&self.prev);
         checksum.update(self.hash_shift);
-        checksum.update(self.running_hash);
-        checksum.update(self.hash_mask);
+        checksum.update(self.running_hash.hash(self.hash_mask));
         checksum.update(self.total_shift);
     }
 
-    fn next_hash(&self, b: u8) -> u32 {
-        (self.running_hash << self.hash_shift) ^ u32::from(b)
+    fn next_hash(&self, b: u8) -> RotatingHash {
+        self.running_hash.append(b, self.hash_shift)
     }
 
-    fn next_hash_double(&self, b1: u8, b2: u8) -> u32 {
-        (((self.running_hash << self.hash_shift) ^ u32::from(b1)) << self.hash_shift)
-            ^ u32::from(b2)
+    fn next_hash_double(&self, b1: u8, b2: u8) -> RotatingHash {
+        self.running_hash
+            .append(b1, self.hash_shift)
+            .append(b2, self.hash_shift)
     }
 
     pub fn update_running_hash(&mut self, b: u8) {
-        self.running_hash = ((self.running_hash << self.hash_shift) ^ u32::from(b)) & 0xffff;
+        self.running_hash = self.running_hash.append(b, self.hash_shift);
     }
 
     fn reshift(&mut self) {
@@ -132,12 +149,8 @@ impl<'a> HashChain<'a> {
         self.total_shift += DELTA as i32;
     }
 
-    pub fn hash_mask(&self) -> u32 {
-        self.hash_mask
-    }
-
-    pub fn get_head(&self, hash: u32) -> u32 {
-        self.head[(hash & self.hash_mask as u32) as usize].into()
+    pub fn get_head(&self, hash: RotatingHash) -> u32 {
+        self.head[hash.hash(self.hash_mask) as usize].into()
     }
 
     pub fn get_node_depth(&self, node: u32) -> u32 {
@@ -149,7 +162,12 @@ impl<'a> HashChain<'a> {
             - self.chain_depth[(ref_pos as i32 - self.total_shift) as usize] as i32
     }
 
-    pub fn iterate_from_head(&self, hash: u32, ref_pos: u32, max_dist: u32) -> HashIterator {
+    pub fn iterate_from_head(
+        &self,
+        hash: RotatingHash,
+        ref_pos: u32,
+        max_dist: u32,
+    ) -> HashIterator {
         let head = self.get_head(hash);
         HashIterator::new(
             &self.prev,
@@ -174,12 +192,16 @@ impl<'a> HashChain<'a> {
         &self.input
     }
 
-    pub fn cur_hash(&self) -> u32 {
+    pub fn cur_hash(&self) -> RotatingHash {
         self.next_hash(self.input.cur_char(2))
     }
 
-    pub fn cur_plus_1_hash(&self) -> u32 {
+    pub fn cur_plus_1_hash(&self) -> RotatingHash {
         self.next_hash_double(self.input.cur_char(2), self.input.cur_char(3))
+    }
+
+    pub fn hash_equal(&self, a: RotatingHash, b: RotatingHash) -> bool {
+        a.hash(self.hash_mask) == b.hash(self.hash_mask)
     }
 
     pub fn update_hash(&mut self, mut length: u32) {
@@ -201,7 +223,7 @@ impl<'a> HashChain<'a> {
 
         for i in 2u32..limit {
             self.update_running_hash(self.input.cur_char(i as i32));
-            let h = self.running_hash & self.hash_mask;
+            let h = self.running_hash.hash(self.hash_mask);
             let p = (pos + i - 2) as i32 - self.total_shift;
             self.chain_depth[p as usize] = self.chain_depth[self.head[h as usize] as usize] + 1;
             self.prev[p as usize] = self.head[h as usize];
@@ -223,7 +245,7 @@ impl<'a> HashChain<'a> {
         let remaining = self.input.remaining();
         if remaining > 2 {
             self.update_running_hash(self.input.cur_char(2));
-            let h = self.running_hash & self.hash_mask;
+            let h = self.running_hash.hash(self.hash_mask);
             let p = pos as i32 - self.total_shift;
             self.chain_depth[p as usize] = self.chain_depth[self.head[h as usize] as usize] + 1;
             self.prev[p as usize] = self.head[h as usize];
