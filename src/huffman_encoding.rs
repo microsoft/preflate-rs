@@ -196,7 +196,7 @@ impl HuffmanOriginalEncoding {
     }
 
     /// returns the combined literal and distance lengths
-    fn get_literal_distance_lengths(&self) -> (Vec<u8>, Vec<u8>) {
+    pub fn get_literal_distance_lengths(&self) -> (Vec<u8>, Vec<u8>) {
         let mut lengths = Vec::new();
         let mut prevcode = 0;
 

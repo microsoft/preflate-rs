@@ -18,6 +18,14 @@ pub fn predict_tree_for_block<D: PredictionEncoder>(
     // first predict the size of the literal tree
     let mut bit_lengths = calc_bit_lengths(&freq.literal_codes, 15);
 
+    let (ao, bo) = huffman_encoding.get_literal_distance_lengths();
+    /*
+     bit_lengths.iter().zip(ao.iter()).enumerate().for_each(|(i, (&a, &b))| {
+         assert_eq!(a, b, "i{i} bit_lengths: {:?} ao: {:?}", bit_lengths, ao);
+     });
+     assert_eq!(bit_lengths[..], ao[..]);
+
+    */
     encoder.encode_literal_count_misprediction(bit_lengths.len() != huffman_encoding.num_literals);
 
     // if incorrect, include the actual size
@@ -29,6 +37,7 @@ pub fn predict_tree_for_block<D: PredictionEncoder>(
 
     // now predict the size of the distance tree
     let mut distance_code_lengths = calc_bit_lengths(&freq.distance_codes, 15);
+    //assert_eq!(distance_code_lengths[..], bo[..]);
 
     encoder.encode_distance_count_misprediction(
         distance_code_lengths.len() != huffman_encoding.num_dist,
