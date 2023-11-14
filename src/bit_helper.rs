@@ -15,4 +15,8 @@ impl DebugHash {
     pub fn update_slice<T: Into<i64> + Copy>(&mut self, v: &[T]) {
         v.iter().for_each(|x| self.update(*x));
     }
+
+    pub fn hash(&self) -> u64 {
+        self.hash
+    }
 }

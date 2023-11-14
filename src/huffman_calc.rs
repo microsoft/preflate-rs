@@ -184,69 +184,221 @@ pub mod calc_minzoxide {
             }
         }
     }
+
+    /// verify that the huffman codes generated can be decoded with the huffman code tree
+    #[test]
+    fn roundtrip_huffman_code() {
+        // requires overflow treatment
+        let frequencies = [
+            1, 0, 1, 0, 9, 9, 8, 19, 36, 70, 73, 34, 5, 6, 0, 0, 11, 1, 0,
+        ];
+        let code_lengths = calc_bit_lengths(&frequencies, 7);
+        assert_eq!(
+            code_lengths[..],
+            [7, 0, 7, 0, 5, 5, 5, 4, 3, 2, 2, 3, 7, 5, 0, 0, 5, 7]
+        );
+
+        let frequencies = [2, 0, 0, 0, 8, 7, 4, 5, 54, 32, 4, 6, 3, 1, 2, 0, 34, 0, 0];
+        let code_lengths = calc_bit_lengths(&frequencies, 7);
+        assert_eq!(
+            code_lengths[..],
+            [7, 0, 0, 0, 4, 5, 6, 5, 2, 2, 5, 5, 6, 7, 6, 0, 2]
+        );
+    }
 }
 
-mod calc_zlib {
-    /*
-    struct FreqIdxPair {
+pub mod calc_zlib {
+    use std::collections::BinaryHeap;
+
+    enum HuffTree {
+        Leaf(usize),
+        Node { left: usize, right: usize },
+    }
+
+    struct HuffTreeNode {
         freq: u32,
-        idx: u32,
+        depth: u32,
+        tree: HuffTree,
     }
 
-    struct TreeNode {
-        parent: u32,
-        idx: u32,
+    impl Eq for HuffTreeNode {}
+
+    impl PartialEq for HuffTreeNode {
+        fn eq(&self, other: &Self) -> bool {
+            self.freq == other.freq
+        }
     }
 
-    fn pq_smaller(p1: &FreqIdxPair, p2: &FreqIdxPair, nodedepth: &[u8]) -> bool {
-        p1.freq < p2.freq || (p1.freq == p2.freq && nodedepth[p1.idx as usize] <= nodedepth[p2.idx as usize])
+    impl Ord for HuffTreeNode {
+        fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+            other
+                .freq
+                .cmp(&self.freq)
+                .then(other.depth.cmp(&self.depth))
+        }
     }
 
-    fn pq_downheap(ptr: &mut Vec<FreqIdxPair>, index: usize, len: usize, depth: &[u8]) {
-        let mut k = index;
-        let v = ptr[k];
-        let mut j = k * 2 + 1; // left son of k
-        while j < len {
-            // Set j to the smallest of the two sons:
-            if j + 1 < len && pq_smaller(&ptr[j + 1], &ptr[j], depth) {
-                j += 1;
+    impl PartialOrd for HuffTreeNode {
+        fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+            Some(self.cmp(other))
+        }
+    }
+
+    pub fn calc_bit_lengths(sym_freq: &[u16], max_bits: usize) -> Vec<u8> {
+        // construct binary heap so that we can get out the frequencies in ascending order
+        let mut heap = BinaryHeap::new();
+        let mut max_code = 0;
+
+        for (index, &freq) in sym_freq.iter().enumerate() {
+            if freq > 0 {
+                heap.push(HuffTreeNode {
+                    freq: freq as u32,
+                    depth: 0,
+                    tree: HuffTree::Leaf(index),
+                });
+                max_code = index;
             }
-            // Exit if v is smaller than both sons
-            if pq_smaller(&v, &ptr[j], depth) {
+        }
+
+        let mut node_bit_len = vec![0u8; max_code + 1];
+
+        if heap.len() <= 1 {
+            // only one symbol, so give it a bit length of 1, plus some other random symbol
+            // in order to ensure we have a valid tree
+            node_bit_len[max_code] = 1;
+
+            if max_code != 0 {
+                node_bit_len[0] = 1;
+            } else {
+                node_bit_len.push(1);
+            }
+
+            return node_bit_len;
+        }
+
+        let mut nodes = Vec::new();
+
+        loop {
+            // get the two smallest frequencies and combine them into one new node
+            let least1 = heap.pop().unwrap();
+            let least2 = heap.pop().unwrap();
+
+            let sum_freq = least1.freq + least2.freq;
+            let sum_depth = std::cmp::max(least1.depth, least2.depth) + 1;
+
+            nodes.push(least1);
+            nodes.push(least2);
+
+            let node = HuffTreeNode {
+                freq: sum_freq,
+                depth: sum_depth,
+                tree: HuffTree::Node {
+                    left: nodes.len() - 2,
+                    right: nodes.len() - 1,
+                },
+            };
+
+            if heap.is_empty() {
+                // last node goes at the end
+                nodes.push(node);
                 break;
+            } else {
+                heap.push(node);
             }
-            // Exchange v with the smallest son
-            ptr[k] = ptr[j];
-            k = j;
-            // Continue down the tree, setting j to the left son of k
-            j = k * 2 + 1;
         }
-        ptr[k] = v;
-    }
 
-    fn pq_makeheap(ptr: &mut Vec<FreqIdxPair>, len: usize, depth: &[u8]) {
-        for n in (len - 1) / 2 + 1..=1 {
-            pq_downheap(ptr, n - 1, len, depth);
+        fn count_recursive(
+            n: &[HuffTreeNode],
+            index: usize,
+            node_bit_len: &mut Vec<u8>,
+            depth: u8,
+        ) {
+            match n[index].tree {
+                HuffTree::Leaf(symbol) => node_bit_len[symbol as usize] = depth,
+                HuffTree::Node { left, right } => {
+                    count_recursive(n, left, node_bit_len, depth + 1);
+                    count_recursive(n, right, node_bit_len, depth + 1);
+                }
+            }
         }
+
+        // assign the bit lengths for each symbol by walking down the tree
+        // and counting the depth of each leaf node
+        count_recursive(&nodes, nodes.len() - 1, &mut node_bit_len, 0);
+
+        // enforce the maximum bit length by counting the number of symbols that
+        // have a bit length greater than the maximum and then redistributing
+        let mut bl_count = vec![0; max_bits as usize + 1];
+        let mut overflow = 0;
+        for &bit_len in &node_bit_len {
+            let mut new_len: usize = bit_len.into();
+
+            if new_len > max_bits {
+                new_len = max_bits;
+                overflow += 1;
+            }
+
+            bl_count[new_len as usize] += 1;
+        }
+
+        if overflow > 0 {
+            // redistribute the bit lengths to remove the overflow
+            let mut bits = max_bits;
+
+            while overflow > 0 {
+                bits -= 1;
+
+                while bl_count[bits] == 0 {
+                    bits -= 1;
+                }
+
+                bl_count[bits] -= 1;
+                bl_count[bits + 1] += 2;
+                bl_count[max_bits] -= 1;
+
+                overflow -= 2;
+            }
+
+            // now reassign the bitlengths to the nodes (since we already have them in the right order)
+            bits = max_bits;
+            for node in nodes.iter() {
+                if let HuffTree::Leaf(idx) = node.tree {
+                    while bl_count[bits as usize] == 0 {
+                        bits -= 1;
+                    }
+
+                    node_bit_len[idx] = bits as u8;
+                    bl_count[bits as usize] -= 1;
+                }
+            }
+        }
+
+        node_bit_len
     }
 
-    fn pq_remove(ptr: &mut Vec<FreqIdxPair>, len: &mut usize, depth: &[u8]) -> FreqIdxPair {
-        let result = ptr[0];
-        ptr[0] = ptr[*len - 1];
-        *len -= 1;
-        pq_downheap(ptr, 0, *len, depth);
-        result
+    #[cfg(test)]
+    fn test_result(sym_freq: &[u16], max_bits: usize, expected: &[u8]) {
+        let result = calc_bit_lengths(sym_freq, max_bits);
+        assert_eq!(result[..], expected[..]);
     }
 
-    fn calc_bit_lengths(
-        symbitlen: &mut [u8],
-        symfreq: &[u32],
-        symcount: u32,
-        maxbits: u32,
-        minmaxcode: u32,
-    ) -> u32 {
-        // Implementation of calc_bit_lengths...
-        // (Your original C++ code translated to Rust)
+    #[test]
+    fn roundtrip_huffman_code() {
+        test_result(
+            &[
+                1, 0, 1, 1, 5, 10, 9, 18, 29, 59, 91, 28, 11, 1, 2, 0, 12, 1, 0,
+            ],
+            7,
+            &[7, 0, 7, 7, 6, 5, 5, 4, 3, 2, 2, 3, 5, 7, 7, 0, 5, 7],
+        );
+
+        // requires overflow treatment
+        test_result(
+            &[
+                1, 0, 1, 0, 9, 9, 8, 19, 36, 70, 73, 34, 5, 6, 0, 0, 11, 1, 0,
+            ],
+            7,
+            &[7, 0, 7, 0, 5, 5, 5, 4, 3, 2, 2, 3, 7, 5, 0, 0, 5, 7],
+        );
     }
-    */
 }

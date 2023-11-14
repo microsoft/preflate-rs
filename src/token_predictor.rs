@@ -2,7 +2,7 @@ use anyhow::Context;
 
 use crate::{
     bit_helper::DebugHash,
-    predictor_state::PredictorState,
+    predictor_state::{MatchResult, PredictorState},
     preflate_constants::{MAX_MATCH, MIN_MATCH, TOO_FAR},
     preflate_parameter_estimator::PreflateParameters,
     preflate_token::{BlockType, PreflateToken, PreflateTokenBlock, PreflateTokenReference},
@@ -56,8 +56,6 @@ impl<'a> TokenPredictor<'a> {
         c
     }
 
-    const VERIFY: bool = true;
-
     pub fn predict_block<D: PredictionEncoder>(
         &mut self,
         block: &PreflateTokenBlock,
@@ -84,8 +82,11 @@ impl<'a> TokenPredictor<'a> {
             return Ok(());
         }
 
-        // if the block ends at an unexpected point, we will need to encode the block size
-        if !last_block && block.tokens.len() != self.max_token_count as usize {
+        // if the block ends at an unexpected point, or it contains more tokens
+        // than expected, we will need to encode the block size
+        if (!last_block && block.tokens.len() != self.max_token_count as usize)
+            || block.tokens.len() > self.max_token_count as usize
+        {
             codec.encode_eob_misprediction(true);
 
             codec.encode_value(block.tokens.len() as u16, 16);
@@ -93,28 +94,26 @@ impl<'a> TokenPredictor<'a> {
             codec.encode_eob_misprediction(false);
         }
 
-        codec.encode_verify_state("start", self.checksum());
+        codec.encode_verify_state("start", || self.checksum().hash());
 
         for i in 0..block.tokens.len() {
             let target_token = &block.tokens[i];
 
-            codec.encode_verify_state(
-                "token",
+            codec.encode_verify_state("token", || {
                 if VERIFY {
-                    self.checksum()
+                    self.checksum().hash()
                 } else {
-                    DebugHash::default()
-                },
-            );
+                    i as u64
+                }
+            });
+
+            /*if i == 18 {
+                println!(
+                    "target = {:?}", target_token
+                )
+            }*/
 
             let predicted_token = self.predict_token();
-
-            if i == 2221100 {
-                println!(
-                    "target = {:?} predicted = {:?}",
-                    target_token, predicted_token
-                )
-            }
 
             /*
             let hash = self.state.calculate_hash();
@@ -149,11 +148,14 @@ impl<'a> TokenPredictor<'a> {
                     let predicted_ref;
                     match predicted_token {
                         PreflateToken::Literal => {
+                            // target had a reference, so we were wrong if we predicted a literal
                             codec.encode_literal_prediction_wrong(true);
-                            predicted_ref = self.repredict_reference()?;
+                            predicted_ref = self.repredict_reference().with_context(|| {
+                                format!("repredict_reference target={:?} index={}", target_ref, i)
+                            })?;
                         }
                         PreflateToken::Reference(r) => {
-                            // target had a reference, so we were wrong if we predicted a literal
+                            // we predicted a reference correctly, so verify that the length/dist was correct
                             codec.encode_reference_prediction_wrong(false);
                             predicted_ref = r;
                         }
@@ -163,13 +165,21 @@ impl<'a> TokenPredictor<'a> {
                         .encode_len_correction(predicted_ref.len() as u32, target_ref.len() as u32);
 
                     if predicted_ref.len() != target_ref.len() {
-                        let rematch = self.state.calculate_hops(&target_ref)?;
-                        codec.encode_dist_after_len_correction(rematch - 1);
+                        let rematch =
+                            self.state.calculate_hops(&target_ref).with_context(|| {
+                                format!("calculate_hops p={:?}, t={:?}", predicted_ref, target_ref)
+                            })?;
+                        codec.encode_dist_after_len_correction(rematch);
                     } else {
                         if target_ref.dist() != predicted_ref.dist() {
-                            let rematch = self.state.calculate_hops(&target_ref)?;
-                            codec.encode_dist_only_correction(rematch - 1);
-                            debug_assert!(rematch > 1);
+                            let rematch =
+                                self.state.calculate_hops(&target_ref).with_context(|| {
+                                    format!(
+                                        "calculate_hops p={:?}, t={:?}",
+                                        predicted_ref, target_ref
+                                    )
+                                })?;
+                            codec.encode_dist_only_correction(rematch);
                         } else {
                             codec.encode_dist_only_correction(0);
                         }
@@ -184,7 +194,7 @@ impl<'a> TokenPredictor<'a> {
             self.commit_token(&target_token, None);
         }
 
-        codec.encode_verify_state("done", self.checksum());
+        codec.encode_verify_state("done", || self.checksum().hash());
 
         Ok(())
     }
@@ -228,17 +238,16 @@ impl<'a> TokenPredictor<'a> {
 
         block.tokens.reserve(blocksize as usize);
 
-        codec.decode_verify_state("start", self.checksum());
+        codec.decode_verify_state("start", || self.checksum().hash());
 
         while !self.input_eof() && self.current_token_count < blocksize as u32 {
-            codec.decode_verify_state(
-                "token",
+            codec.decode_verify_state("token", || {
                 if VERIFY {
-                    self.checksum()
+                    self.checksum().hash()
                 } else {
-                    DebugHash::default()
-                },
-            );
+                    self.current_token_count as u64
+                }
+            });
 
             let mut predicted_ref: PreflateTokenReference;
             match self.predict_token() {
@@ -249,7 +258,12 @@ impl<'a> TokenPredictor<'a> {
                         continue;
                     }
 
-                    predicted_ref = self.repredict_reference()?;
+                    predicted_ref = self.repredict_reference().with_context(|| {
+                        format!(
+                            "repredict_reference token_count={:?}",
+                            self.current_token_count
+                        )
+                    })?;
                 }
                 PreflateToken::Reference(r) => {
                     let not_ok = codec.decode_reference_prediction_wrong();
@@ -266,26 +280,23 @@ impl<'a> TokenPredictor<'a> {
             if new_len != predicted_ref.len() {
                 let hops = codec.decode_dist_after_len_correction();
 
-                predicted_ref.set_len(new_len);
-                predicted_ref.set_dist(self.state.first_match(predicted_ref.len()));
-                if hops != 0 {
-                    let new_dist = self.state.hop_match(&predicted_ref, hops)?;
-                    predicted_ref.set_dist(new_dist);
-                }
-
-                if predicted_ref.len() < 3 || predicted_ref.len() > 258 {
-                    return Err(anyhow::Error::msg("Prediction failure"));
-                }
+                predicted_ref = PreflateTokenReference::new(
+                    new_len,
+                    self.state
+                        .hop_match(new_len, hops)
+                        .with_context(|| format!("hop_match l={} {:?}", new_len, predicted_ref))?,
+                    false,
+                );
             } else {
                 let hops = codec.decode_dist_only_correction();
                 if hops != 0 {
-                    let new_dist =
-                        self.state
-                            .hop_match(&predicted_ref, hops)
-                            .with_context(|| {
-                                format!("recalculate_distance token {}", self.current_token_count)
-                            })?;
-                    predicted_ref.set_dist(new_dist);
+                    let new_dist = self
+                        .state
+                        .hop_match(predicted_ref.len(), hops)
+                        .with_context(|| {
+                            format!("recalculate_distance token {}", self.current_token_count)
+                        })?;
+                    predicted_ref = PreflateTokenReference::new(new_len, new_dist, false);
                 }
             }
 
@@ -296,7 +307,7 @@ impl<'a> TokenPredictor<'a> {
             self.commit_token(&PreflateToken::Reference(predicted_ref), Some(&mut block));
         }
 
-        codec.decode_verify_state("done", self.checksum());
+        codec.decode_verify_state("done", || self.checksum().hash());
 
         Ok(block)
     }
@@ -313,42 +324,25 @@ impl<'a> TokenPredictor<'a> {
 
         let hash = self.state.calculate_hash();
 
-        let m = if self.pending_reference.is_some() {
-            self.pending_reference
+        let m = if let Some(pending) = self.pending_reference {
+            MatchResult::Success(pending)
         } else {
-            let head = self.state.get_current_hash_head(hash);
-
-            if !self.params.is_fast_compressor
-                && self.state.seq_valid(self.state.current_input_pos())
-            {
-                self.state.seq_match(
-                    self.state.current_input_pos(),
-                    head,
-                    self.prev_len,
-                    if self.params.zlib_compatible {
-                        0
-                    } else {
-                        1 << self.params.log2_of_max_chain_depth_m1
-                    },
-                )
-            } else {
-                self.state.match_token(
-                    head,
-                    self.prev_len,
-                    0,
-                    if self.params.zlib_compatible {
-                        0
-                    } else {
-                        1 << self.params.log2_of_max_chain_depth_m1
-                    },
-                )
-            }
+            self.state.match_token(
+                hash,
+                self.prev_len,
+                0,
+                if self.params.zlib_compatible {
+                    0
+                } else {
+                    1 << self.params.log2_of_max_chain_depth_m1
+                },
+            )
         };
 
         self.prev_len = 0;
         self.pending_reference = None;
 
-        if let Some(match_token) = m {
+        if let MatchResult::Success(match_token) = m {
             if match_token.len() < MIN_MATCH {
                 return PreflateToken::Literal;
             }
@@ -369,52 +363,41 @@ impl<'a> TokenPredictor<'a> {
             {
                 let mut match_next;
                 let hash_next = self.state.calculate_hash_next();
-                let head_next = self.state.get_current_hash_head(hash_next);
 
-                if !self.params.is_fast_compressor
-                    && self.state.seq_valid(self.state.current_input_pos() + 1)
-                {
-                    match_next = self.state.seq_match(
-                        self.state.current_input_pos() + 1,
-                        head_next,
-                        match_token.len(),
-                        if self.params.zlib_compatible {
-                            0
-                        } else {
-                            2 << self.params.log2_of_max_chain_depth_m1
-                        },
-                    );
-                } else {
-                    match_next = self.state.match_token(
-                        head_next,
-                        match_token.len(),
-                        1,
-                        if self.params.zlib_compatible {
-                            0
-                        } else {
-                            2 << self.params.log2_of_max_chain_depth_m1
-                        },
-                    );
+                match_next = self.state.match_token(
+                    hash_next,
+                    match_token.len(),
+                    1,
+                    if self.params.zlib_compatible {
+                        0
+                    } else {
+                        2 << self.params.log2_of_max_chain_depth_m1
+                    },
+                );
 
-                    if (hash_next ^ hash) & self.state.hash_mask() == 0 {
-                        let max_size =
-                            std::cmp::min(self.state.available_input_size() - 1, MAX_MATCH);
-                        let mut rle = 0;
-                        let c = self.state.input_cursor();
-                        let b = c[0];
-                        while rle < max_size && c[1 + rle as usize] == b {
-                            rle += 1;
-                        }
-                        if rle > match_token.len() && match_next.is_some_and(|x| rle >= x.len()) {
-                            match_next = Some(PreflateTokenReference::new(rle, 1, false));
+                if (hash_next ^ hash) & self.state.hash_mask() == 0 {
+                    let max_size = std::cmp::min(self.state.available_input_size() - 1, MAX_MATCH);
+                    let mut rle = 0;
+                    let c = self.state.input_cursor();
+                    let b = c[0];
+                    while rle < max_size && c[1 + rle as usize] == b {
+                        rle += 1;
+                    }
+                    if rle > match_token.len() {
+                        if let MatchResult::Success(s) = match_next {
+                            if rle >= s.len() {
+                                match_next = MatchResult::Success(PreflateTokenReference::new(
+                                    rle, 1, false,
+                                ));
+                            }
                         }
                     }
                 }
 
-                if let Some(m) = match_next {
+                if let MatchResult::Success(m) = match_next {
                     if m.len() > match_token.len() {
                         self.prev_len = match_token.len();
-                        self.pending_reference = match_next;
+                        self.pending_reference = Some(m);
 
                         if !self.params.zlib_compatible {
                             self.prev_len = 0;
@@ -441,20 +424,22 @@ impl<'a> TokenPredictor<'a> {
         }
 
         let hash = self.state.calculate_hash();
-        let head = self.state.get_current_hash_head(hash);
         let match_token =
             self.state
-                .match_token(head, 0, 0, 2 << self.params.log2_of_max_chain_depth_m1);
+                .match_token(hash, 0, 0, 2 << self.params.log2_of_max_chain_depth_m1);
 
         self.prev_len = 0;
         self.pending_reference = None;
 
-        if let Some(m) = match_token {
+        if let MatchResult::Success(m) = match_token {
             if m.len() >= MIN_MATCH {
                 return Ok(m);
             }
         }
-        return Err(anyhow::Error::msg("Didnt find a match"));
+        return Err(anyhow::Error::msg(format!(
+            "Didnt find a match {:?}",
+            match_token
+        )));
     }
 
     fn commit_token(&mut self, token: &PreflateToken, block: Option<&mut PreflateTokenBlock>) {

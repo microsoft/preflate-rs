@@ -1,10 +1,20 @@
 use crate::bit_helper::DebugHash;
-use crate::hash_chain::{HashChain, HashIterator};
+use crate::hash_chain::HashChain;
 use crate::preflate_constants::{self, MAX_MATCH, MIN_LOOKAHEAD, MIN_MATCH};
 use crate::preflate_parameter_estimator::PreflateParameters;
 use crate::preflate_token::PreflateTokenReference;
 use crate::seq_chain::SeqChain;
 use std::cmp;
+
+#[derive(Debug, Copy, Clone)]
+pub enum MatchResult {
+    Success(PreflateTokenReference),
+    DistanceLargerThanHop0(u32, u32),
+    NoInput,
+    NoInitialMatchesFound,
+    NoMoreMatchesFound(u32),
+    MaxChainExceeded,
+}
 
 #[derive(Default)]
 pub struct PreflateRematchInfo {
@@ -95,11 +105,6 @@ impl<'a> PredictorState<'a> {
         self.hash.get_head(hash_next)
     }
 
-    fn iterate_from_dist(&self, dist_: u32, ref_pos: u32, max_dist: u32) -> HashIterator {
-        self.hash
-            .iterate_from_pos(ref_pos - dist_, ref_pos, max_dist)
-    }
-
     fn prefix_compare(s1: &[u8], s2: &[u8], best_len: u32, max_len: u32) -> u32 {
         assert!(max_len >= 3 && s1.len() >= max_len as usize && s2.len() >= max_len as usize);
 
@@ -134,56 +139,24 @@ impl<'a> PredictorState<'a> {
         len
     }
 
-    pub fn first_match(&self, len: u32) -> u32 {
-        let max_len = std::cmp::min(self.available_input_size(), MAX_MATCH);
-        if max_len < std::cmp::max(len, MIN_MATCH) {
-            return 0;
-        }
-
-        let cur_pos = self.current_input_pos();
-        let cur_max_dist = std::cmp::min(cur_pos, self.window_size());
-
-        let hash = self.calculate_hash();
-
-        let mut chain_it = self.hash.iterate_from_head(hash, cur_pos, cur_max_dist);
-        if !chain_it.valid() {
-            return 0;
-        }
-
-        loop {
-            let match_length = Self::prefix_compare(
-                self.input_cursor_offset(-(chain_it.dist() as i32)),
-                self.input_cursor(),
-                len - 1,
-                len,
-            );
-            if match_length >= len {
-                return chain_it.dist();
-            }
-
-            if !chain_it.next() {
-                return 0;
-            }
-        }
-    }
-
     pub fn match_token(
         &self,
-        hash_head: u32,
+        hash: u32,
         prev_len: u32,
         offset: u32,
         max_depth: u32,
-    ) -> Option<PreflateTokenReference> {
+    ) -> MatchResult {
         if let Some(mut h) =
             self.create_match_helper(prev_len, self.current_input_pos() + offset, max_depth)
         {
             let mut chain_it =
                 self.hash
-                    .iterate_from_node(hash_head, h.start_pos, h.cur_max_dist_hop1_plus);
+                    .iterate_from_head(hash, h.start_pos, h.cur_max_dist_hop1_plus);
             // Handle ZLIB quirk: the very first entry in the hash chain can have a larger
             // distance than all following entries
             if chain_it.dist() > h.cur_max_dist_hop0 {
-                return None;
+                let d = chain_it.dist();
+                return MatchResult::DistanceLargerThanHop0(chain_it.dist(), h.cur_max_dist_hop0);
             }
 
             let mut best_len = prev_len;
@@ -197,27 +170,37 @@ impl<'a> PredictorState<'a> {
 
                 let match_length = Self::prefix_compare(match_start, input, best_len, h.max_len);
                 if match_length > best_len {
-                    best_len = match_length;
-                    best_match = Some(PreflateTokenReference::new(
-                        match_length,
-                        chain_it.dist(),
-                        false,
-                    ));
-                    if best_len >= h.nice_len {
-                        break;
+                    let r = PreflateTokenReference::new(match_length, chain_it.dist(), false);
+
+                    if match_length >= h.nice_len {
+                        return MatchResult::Success(r);
                     }
+
+                    best_len = match_length;
+                    best_match = Some(r);
                 }
 
-                if !(chain_it.next() && h.max_chain > 1) {
-                    break;
+                if !chain_it.next() {
+                    if let Some(r) = best_match {
+                        return MatchResult::Success(r);
+                    } else {
+                        return MatchResult::NoMoreMatchesFound(match_length);
+                    }
                 }
 
                 h.max_chain -= 1;
                 h.chain_explored += 1;
+
+                if h.max_chain == 0 {
+                    if let Some(r) = best_match {
+                        return MatchResult::Success(r);
+                    } else {
+                        return MatchResult::MaxChainExceeded;
+                    }
+                }
             }
-            best_match
         } else {
-            None
+            MatchResult::NoInput
         }
     }
 
@@ -227,24 +210,25 @@ impl<'a> PredictorState<'a> {
         hash_head: u32,
         prev_len: u32,
         max_depth: u32,
-    ) -> Option<PreflateTokenReference> {
+    ) -> MatchResult {
         if let Some(h) = self.create_match_helper(prev_len, start_pos, max_depth) {
             let mut chain_it = self.seq.iterate_from_pos(start_pos);
             if !chain_it.valid() {
-                return None;
+                return MatchResult::NoInitialMatchesFound;
             }
 
             let mut cur_seq_len = std::cmp::min(self.seq.len(start_pos) as u32, h.max_len);
             let mut cur_max_dist = h.cur_max_dist_hop1_plus;
             let mut best_len = prev_len;
-            let mut best_match = None;
+            let mut best_match = MatchResult::NoInitialMatchesFound;
 
             if cur_seq_len < preflate_constants::MIN_MATCH as u32 {
                 cur_seq_len = std::cmp::min(chain_it.len() - chain_it.dist(), h.max_len);
 
                 if cur_seq_len > prev_len && 1 <= h.cur_max_dist_hop0 {
                     best_len = cur_seq_len;
-                    best_match = Some(PreflateTokenReference::new(cur_seq_len, 1, false));
+                    best_match =
+                        MatchResult::Success(PreflateTokenReference::new(cur_seq_len, 1, false));
                 }
 
                 if best_len >= h.nice_len || !chain_it.next() {
@@ -311,7 +295,7 @@ impl<'a> PredictorState<'a> {
                         if best_seq_len
                             > cmp::max(old_best_seq_len, preflate_constants::MIN_MATCH - 1) + error
                         {
-                            best_match = Some(PreflateTokenReference::new(
+                            best_match = MatchResult::Success(PreflateTokenReference::new(
                                 best_seq_len - error,
                                 best_dist - error,
                                 false,
@@ -321,8 +305,11 @@ impl<'a> PredictorState<'a> {
                     }
 
                     if best_seq_len == h.max_len {
-                        best_match =
-                            Some(PreflateTokenReference::new(best_seq_len, best_dist, false));
+                        best_match = MatchResult::Success(PreflateTokenReference::new(
+                            best_seq_len,
+                            best_dist,
+                            false,
+                        ));
                         break;
                     } else {
                         let diff = start_pos as i32 - self.current_input_pos() as i32;
@@ -339,8 +326,11 @@ impl<'a> PredictorState<'a> {
 
                         if match_length > best_len {
                             best_len = match_length;
-                            best_match =
-                                Some(PreflateTokenReference::new(match_length, best_dist, false));
+                            best_match = MatchResult::Success(PreflateTokenReference::new(
+                                match_length,
+                                best_dist,
+                                false,
+                            ));
                             if best_len >= h.nice_len {
                                 break;
                             }
@@ -357,7 +347,7 @@ impl<'a> PredictorState<'a> {
 
             best_match
         } else {
-            None
+            MatchResult::NoInput
         }
     }
 
@@ -417,7 +407,6 @@ impl<'a> PredictorState<'a> {
     /// or none if it wasn't found
     pub fn calculate_hops(&self, target_reference: &PreflateTokenReference) -> anyhow::Result<u32> {
         let hash = self.hash.cur_hash();
-        let hash_head = self.hash.get_head(hash);
 
         let max_len = std::cmp::min(self.available_input_size(), MAX_MATCH);
 
@@ -429,9 +418,7 @@ impl<'a> PredictorState<'a> {
         let cur_pos = self.current_input_pos();
         let cur_max_dist = std::cmp::min(cur_pos, max_dist);
 
-        let mut chain_it = self
-            .hash
-            .iterate_from_node(hash_head, cur_pos, cur_max_dist);
+        let mut chain_it = self.hash.iterate_from_head(hash, cur_pos, cur_max_dist);
         if !chain_it.valid() {
             return Err(anyhow::anyhow!("no valid chain_it"));
         }
@@ -470,55 +457,43 @@ impl<'a> PredictorState<'a> {
 
     /// Does the inverse of calculate_hops, where we start from the predicted token and
     /// get the new distance based on the number of hops
-    pub fn hop_match(
-        &self,
-        predicted_reference: &PreflateTokenReference,
-        hops: u32,
-    ) -> anyhow::Result<u32> {
-        if hops == 0 {
-            return Ok(predicted_reference.dist());
+    pub fn hop_match(&self, len: u32, hops: u32) -> anyhow::Result<u32> {
+        let max_len = std::cmp::min(self.available_input_size(), MAX_MATCH);
+        if max_len < len {
+            return Err(anyhow::anyhow!("not enough data left to match"));
         }
 
         let cur_pos = self.current_input_pos();
-        let max_len = std::cmp::min(self.available_input_size(), MAX_MATCH);
+        let cur_max_dist = std::cmp::min(cur_pos, self.window_size());
 
-        if max_len < predicted_reference.len() {
-            return Err(anyhow::anyhow!("max_len < target_reference.len()"));
-        }
+        let hash = self.calculate_hash();
 
-        let max_dist = self.window_size();
-        let cur_max_dist = std::cmp::min(cur_pos, max_dist);
-
-        let mut chain_it: HashIterator<'_> =
-            self.iterate_from_dist(predicted_reference.dist(), cur_pos, cur_max_dist);
+        let mut chain_it = self.hash.iterate_from_head(hash, cur_pos, cur_max_dist);
         if !chain_it.valid() {
-            return Err(anyhow::anyhow!("no valid chain_it"));
+            return Err(anyhow::anyhow!("no match found"));
         }
 
-        let best_len = predicted_reference.len();
+        let mut current_hop = 0;
 
-        let mut todo = hops;
-        while todo > 0 {
-            if !chain_it.next() {
-                break;
-            }
-
+        loop {
             let match_length = Self::prefix_compare(
                 self.input_cursor_offset(-(chain_it.dist() as i32)),
-                self.input_cursor_offset(-(predicted_reference.dist() as i32)),
-                best_len - 1,
-                best_len,
+                self.input_cursor(),
+                len - 1,
+                len,
             );
 
-            if match_length >= best_len {
-                todo -= 1;
-                if todo == 0 {
+            if match_length >= len {
+                current_hop += 1;
+                if current_hop == hops {
                     return Ok(chain_it.dist());
                 }
             }
-        }
 
-        Err(anyhow::anyhow!("no match found"))
+            if !chain_it.next() {
+                return Err(anyhow::anyhow!("no match found"));
+            }
+        }
     }
 }
 

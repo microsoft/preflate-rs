@@ -140,13 +140,14 @@ fn main_with_result() -> anyhow::Result<()> {
         file.read_to_end(&mut v)?;
     }
 
-    let onlylevel : Option<u32> = None;
+    let onlylevel: Option<u32> = None;
 
     // Zlib compression with different compression levels
     for level in 1..10 {
-
-        if onlylevel.is_some_and(|x| x == level)  {
-            continue;
+        if let Some(x) = onlylevel {
+            if x != level {
+                continue;
+            }
         }
 
         println!("zlib level: {}", level);
@@ -184,9 +185,10 @@ fn main_with_result() -> anyhow::Result<()> {
 
     // Zlib compression with different compression levels
     for level in 1..10 {
-
-        if onlylevel.is_some_and(|x| x == level + 100)  {
-            continue;
+        if let Some(x) = onlylevel {
+            if x != level + 100 {
+                continue;
+            }
         }
 
         println!("Flate2 level: {}", level);
@@ -198,15 +200,15 @@ fn main_with_result() -> anyhow::Result<()> {
         // skip header and final crc
         do_analyze(&v, &output[2..output.len() - 4])?;
     }
-/*
-    // Gzip compression with different compression levels
-    for level in 3..10 {
-        let mut gz_encoder = GzEncoder::new(Cursor::new(&v), Compression::new(level));
+    /*
+        // Gzip compression with different compression levels
+        for level in 3..10 {
+            let mut gz_encoder = GzEncoder::new(Cursor::new(&v), Compression::new(level));
 
-        let mut output = Vec::new();
-        gz_encoder.read_to_end(&mut output).unwrap();
-    }
-*/
+            let mut output = Vec::new();
+            gz_encoder.read_to_end(&mut output).unwrap();
+        }
+    */
     Ok(())
 }
 

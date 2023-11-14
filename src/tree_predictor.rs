@@ -1,6 +1,6 @@
 use crate::{
     bit_helper::DebugHash,
-    huffman_calc::calc_minzoxide::calc_bit_lengths,
+    huffman_calc::calc_zlib::calc_bit_lengths,
     huffman_encoding::{HuffmanOriginalEncoding, TreeCodeType},
     preflate_constants::{CODETREE_CODE_COUNT, NONLEN_CODE_COUNT, TREE_CODE_ORDER_TABLE},
     preflate_token::TokenFrequency,
@@ -12,7 +12,7 @@ pub fn predict_tree_for_block<D: PredictionEncoder>(
     freq: &TokenFrequency,
     encoder: &mut D,
 ) -> anyhow::Result<()> {
-    encoder.encode_verify_state("tree", DebugHash::default());
+    encoder.encode_verify_state("tree", || 0);
 
     // bit_lengths is a vector of huffman code sizes for literals followed by length codes
     // first predict the size of the literal tree
@@ -80,7 +80,7 @@ pub fn recreate_tree_for_block<D: PredictionDecoder>(
     freq: &TokenFrequency,
     codec: &mut D,
 ) -> anyhow::Result<HuffmanOriginalEncoding> {
-    codec.decode_verify_state("tree", DebugHash::default());
+    codec.decode_verify_state("tree", || 0);
 
     let mut result: HuffmanOriginalEncoding = Default::default();
 

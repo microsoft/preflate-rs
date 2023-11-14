@@ -46,14 +46,6 @@ impl PreflateTokenReference {
         self.irregular258
     }
 
-    pub fn set_len(&mut self, len: u32) {
-        self.len = len as u16;
-    }
-
-    pub fn set_dist(&mut self, dist: u32) {
-        self.dist = dist as u16;
-    }
-
     pub fn set_irregular258(&mut self, irregular258: bool) {
         self.irregular258 = irregular258;
     }

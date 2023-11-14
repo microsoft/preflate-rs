@@ -160,16 +160,6 @@ impl<'a> HashChain<'a> {
         )
     }
 
-    pub fn iterate_from_node(&self, hash_head: u32, ref_pos: u32, max_dist: u32) -> HashIterator {
-        HashIterator::new(
-            &self.prev,
-            &self.chain_depth,
-            (ref_pos as i32 - self.total_shift) as u32,
-            max_dist,
-            hash_head.into(),
-        )
-    }
-
     pub fn iterate_from_pos(&self, pos: u32, ref_pos: u32, max_dist: u32) -> HashIterator {
         HashIterator::new(
             &self.prev,

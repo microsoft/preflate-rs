@@ -6,11 +6,13 @@ pub struct PreflatePredictionDecoder {
     actions: Vec<PreflateAction>,
     index: usize,
     default_actions_left: u32,
+    verify: bool,
 }
 
 #[derive(Default)]
 pub struct PreflatePredictionEncoder {
     actions: Vec<PreflateAction>,
+    verify: bool,
 
     encode_eob_misprediction: u32,
     encode_eof_misprediction: u32,
@@ -57,7 +59,7 @@ pub enum PreflateAction {
     LDTypeCorrection(TreeCodeType, TreeCodeType),
     RepeatCountCorrection(u8, u8),
     LDBitLengthCorrection(u8, u8),
-    VerifyState(&'static str, DebugHash),
+    VerifyState(&'static str, u64),
 }
 
 pub trait PredictionEncoder {
@@ -99,7 +101,7 @@ pub trait PredictionEncoder {
 
     fn encode_irregular_len_258(&mut self, irregular: bool);
 
-    fn encode_verify_state(&mut self, message: &'static str, checksum: DebugHash);
+    fn encode_verify_state<C: FnOnce() -> u64>(&mut self, message: &'static str, checksum: C);
 }
 
 impl PreflatePredictionEncoder {
@@ -108,6 +110,7 @@ impl PreflatePredictionEncoder {
             actions: self.actions.clone(),
             index: 0,
             default_actions_left: 0,
+            verify: self.verify,
         }
     }
 
@@ -122,12 +125,10 @@ impl PreflatePredictionEncoder {
         increment: fn(&mut PreflatePredictionEncoder),
     ) {
         if default_value {
-            /*if let Some(PreflateAction::Default(d)) = self.actions.last_mut() {
-                if *d < 65535 {
-                    *d += 1;
-                    return;
-                }
-            }*/
+            if let Some(PreflateAction::Default(d)) = self.actions.last_mut() {
+                *d += 1;
+                return;
+            }
             self.actions.push(PreflateAction::Default(1));
         } else {
             self.actions.push(action);
@@ -339,7 +340,7 @@ impl PredictionEncoder for PreflatePredictionEncoder {
 
     fn encode_len_correction(&mut self, pred_val: u32, act_val: u32) {
         self.record_action(
-            /*pred_val == act_val*/ false,
+            pred_val == act_val,
             PreflateAction::LenCorrection(((act_val - 3) as u8).wrapping_sub((pred_val - 3) as u8)),
             |_v| {},
         );
@@ -349,7 +350,7 @@ impl PredictionEncoder for PreflatePredictionEncoder {
 
     fn encode_dist_only_correction(&mut self, hops: u32) {
         self.record_action(
-            /*hops == 0*/ false,
+            hops == 0,
             PreflateAction::DistOnlyCorrection(hops as u16),
             |_v| {},
         );
@@ -373,9 +374,11 @@ impl PredictionEncoder for PreflatePredictionEncoder {
         });
     }
 
-    fn encode_verify_state(&mut self, message: &'static str, checksum: DebugHash) {
-        self.actions
-            .push(PreflateAction::VerifyState(message, checksum))
+    fn encode_verify_state<C: FnOnce() -> u64>(&mut self, message: &'static str, checksum: C) {
+        if self.verify {
+            self.actions
+                .push(PreflateAction::VerifyState(message, checksum()))
+        }
     }
 }
 
@@ -398,15 +401,17 @@ pub trait PredictionDecoder {
     fn decode_dist_only_correction(&mut self) -> u32;
     fn decode_dist_after_len_correction(&mut self) -> u32;
     fn decode_irregular_len_258(&mut self) -> bool;
-    fn decode_verify_state(&mut self, message: &'static str, checksum: DebugHash);
+    fn decode_verify_state<C: FnOnce() -> u64>(&mut self, message: &'static str, checksum: C);
 }
 
 impl PreflatePredictionDecoder {
+    #[allow(dead_code)]
     pub fn default_decoder() -> Self {
         Self {
             actions: Vec::new(),
             index: 0,
             default_actions_left: 0,
+            verify: false,
         }
     }
 
@@ -607,14 +612,16 @@ impl PredictionDecoder for PreflatePredictionDecoder {
         false
     }
 
-    fn decode_verify_state(&mut self, message: &'static str, checksum: DebugHash) {
-        if let Some(x) = self.pop() {
-            assert_eq!(
-                x,
-                PreflateAction::VerifyState(message, checksum),
-                "mismatch {} (left encode, right decode)",
-                self.index
-            );
+    fn decode_verify_state<C: FnOnce() -> u64>(&mut self, message: &'static str, checksum: C) {
+        if self.verify {
+            if let Some(x) = self.pop() {
+                assert_eq!(
+                    x,
+                    PreflateAction::VerifyState(message, checksum()),
+                    "mismatch {} (left encode, right decode)",
+                    self.index
+                );
+            }
         }
     }
 }

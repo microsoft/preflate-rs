@@ -204,12 +204,9 @@ impl ReadBits for SingleCode {
     }
 }
 
-/// verify that the huffman codes generated can be decoded with the huffman code tree
-#[test]
-fn roundtrip_huffman_code() {
-    let frequencies = [1, 0, 2, 3, 5, 8, 13, 0];
-
-    let code_lengths = crate::huffman_calc::calc_minzoxide::calc_bit_lengths(&frequencies, 7);
+#[cfg(test)]
+fn roundtrip(frequencies: &[u16], calc_bit: fn(&[u16], usize) -> Vec<u8>) {
+    let code_lengths = calc_bit(&frequencies, 7);
 
     let codes = calc_huffman_codes(&code_lengths).unwrap();
 
@@ -228,4 +225,21 @@ fn roundtrip_huffman_code() {
             assert_eq!(i, symbol as usize);
         }
     }
+}
+/// verify that the huffman codes generated can be decoded with the huffman code tree
+#[test]
+fn roundtrip_huffman_code() {
+    roundtrip(
+        &[1, 0, 2, 3, 5, 8, 13, 0],
+        crate::huffman_calc::calc_minzoxide::calc_bit_lengths,
+    );
+    roundtrip(
+        &[1, 0, 2, 3, 5, 8, 13, 0],
+        crate::huffman_calc::calc_zlib::calc_bit_lengths,
+    );
+
+    roundtrip(
+        &[1, 0, 2, 3, 5, 1008, 113, 1, 1, 1, 100, 10000],
+        crate::huffman_calc::calc_zlib::calc_bit_lengths,
+    );
 }
