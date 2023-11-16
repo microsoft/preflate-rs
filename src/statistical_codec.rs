@@ -1,11 +1,3 @@
-use std::{cmp, collections::btree_map::Values};
-
-use crate::{
-    bit_helper::{bit_length, DebugHash},
-    huffman_encoding::TreeCodeType,
-    preflate_token::BlockType,
-};
-
 /// boolean misprediction indictions
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum CodecMisprediction {
@@ -41,14 +33,16 @@ pub trait PredictionEncoder {
     fn encode_misprediction(&mut self, action: CodecMisprediction, value: bool);
     fn encode_value(&mut self, value: u16, max_bits: u8);
 
-    fn encode_verify_state<C: FnOnce() -> u64>(&mut self, message: &'static str, checksum: C);
+    fn encode_verify_state(&mut self, message: &'static str, checksum: u64);
+
+    fn finish(&mut self);
 }
 
 pub trait PredictionDecoder {
     fn decode_value(&mut self, max_bits_orig: u8) -> u16;
     fn decode_correction(&mut self, correction: CodecCorrection) -> u32;
     fn decode_misprediction(&mut self, misprediction: CodecMisprediction) -> bool;
-    fn decode_verify_state<C: FnOnce() -> u64>(&mut self, message: &'static str, checksum: C);
+    fn decode_verify_state(&mut self, message: &'static str, checksum: u64);
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -119,27 +113,30 @@ impl CountNonDefaultActions {
     }
 }
 
-pub struct PreflatePredictionDecoder {
+pub struct VerifyPredictionDecoder {
     actions: Vec<CodecAction>,
     index: usize,
     verify: bool,
 }
 
 #[derive(Default)]
-pub struct PreflatePredictionEncoder {
+pub struct VerifyPredictionEncoder {
     actions: Vec<CodecAction>,
     verify: bool,
-
     count: CountNonDefaultActions,
 }
 
-impl PreflatePredictionEncoder {
-    pub fn make_decoder(&self) -> PreflatePredictionDecoder {
-        PreflatePredictionDecoder {
-            actions: self.actions.clone(),
-            index: 0,
-            verify: self.verify,
+impl VerifyPredictionEncoder {
+    pub fn new(verify: bool) -> Self {
+        Self {
+            actions: Vec::new(),
+            verify,
+            count: CountNonDefaultActions::default(),
         }
+    }
+
+    pub fn actions(&self) -> Vec<CodecAction> {
+        self.actions.clone()
     }
 
     pub fn print(&self) {
@@ -151,15 +148,15 @@ impl PreflatePredictionEncoder {
     }
 }
 
-impl PredictionEncoder for PreflatePredictionEncoder {
+impl PredictionEncoder for VerifyPredictionEncoder {
     fn encode_value(&mut self, value: u16, max_bits: u8) {
         self.actions.push(CodecAction::Value(value, max_bits));
     }
 
-    fn encode_verify_state<C: FnOnce() -> u64>(&mut self, message: &'static str, checksum: C) {
+    fn encode_verify_state(&mut self, message: &'static str, checksum: u64) {
         if self.verify {
             self.actions
-                .push(CodecAction::VerifyState(message, checksum()))
+                .push(CodecAction::VerifyState(message, checksum));
         }
     }
 
@@ -170,11 +167,21 @@ impl PredictionEncoder for PreflatePredictionEncoder {
 
     fn encode_misprediction(&mut self, action: CodecMisprediction, value: bool) {
         self.actions.push(CodecAction::Misprediction(action, value));
-        self.count.record_misprediction(action, value)
+        self.count.record_misprediction(action, value);
     }
+
+    fn finish(&mut self) {}
 }
 
-impl PreflatePredictionDecoder {
+impl VerifyPredictionDecoder {
+    pub fn new(actions: Vec<CodecAction>, verify: bool) -> Self {
+        Self {
+            actions,
+            index: 0,
+            verify,
+        }
+    }
+
     fn pop(&mut self) -> Option<CodecAction> {
         if self.index >= self.actions.len() {
             None
@@ -185,7 +192,7 @@ impl PreflatePredictionDecoder {
     }
 }
 
-impl PredictionDecoder for PreflatePredictionDecoder {
+impl PredictionDecoder for VerifyPredictionDecoder {
     fn decode_value(&mut self, max_bits_orig: u8) -> u16 {
         let x = self.pop().unwrap();
         if let CodecAction::Value(value, max_bits) = x {
@@ -195,12 +202,12 @@ impl PredictionDecoder for PreflatePredictionDecoder {
         unreachable!("{:?}", x);
     }
 
-    fn decode_verify_state<C: FnOnce() -> u64>(&mut self, message: &'static str, checksum: C) {
+    fn decode_verify_state(&mut self, message: &'static str, checksum: u64) {
         if self.verify {
             if let Some(x) = self.pop() {
                 assert_eq!(
                     x,
-                    CodecAction::VerifyState(message, checksum()),
+                    CodecAction::VerifyState(message, checksum),
                     "mismatch {} (left encode, right decode)",
                     self.index
                 );
@@ -241,12 +248,13 @@ pub fn drive_encoder<T: PredictionEncoder>(encoder: &mut T, actions: &[CodecActi
                 encoder.encode_misprediction(misprediction, value);
             }
             &CodecAction::VerifyState(message, checksum) => {
-                encoder.encode_verify_state(message, || checksum);
+                encoder.encode_verify_state(message, checksum);
             }
         }
     }
 }
 
+#[cfg(test)]
 pub fn verify_decoder<T: PredictionDecoder>(decoder: &mut T, actions: &[CodecAction]) {
     for action in actions {
         match action {
@@ -263,7 +271,7 @@ pub fn verify_decoder<T: PredictionDecoder>(decoder: &mut T, actions: &[CodecAct
                 assert_eq!(x, value);
             }
             &CodecAction::VerifyState(message, checksum) => {
-                decoder.decode_verify_state(message, || checksum);
+                decoder.decode_verify_state(message, checksum);
             }
         }
     }
@@ -274,19 +282,86 @@ pub struct DefaultOnlyDecoder {}
 
 #[cfg(test)]
 impl PredictionDecoder for DefaultOnlyDecoder {
-    fn decode_value(&mut self, max_bits_orig: u8) -> u16 {
+    fn decode_value(&mut self, _max_bits_orig: u8) -> u16 {
         unimplemented!()
     }
 
-    fn decode_correction(&mut self, correction: CodecCorrection) -> u32 {
+    fn decode_correction(&mut self, _correction: CodecCorrection) -> u32 {
         0
     }
 
-    fn decode_misprediction(&mut self, misprediction: CodecMisprediction) -> bool {
+    fn decode_misprediction(&mut self, _misprediction: CodecMisprediction) -> bool {
         false
     }
 
-    fn decode_verify_state<C: FnOnce() -> u64>(&mut self, message: &'static str, checksum: C) {}
+    fn decode_verify_state(&mut self, _message: &'static str, _checksum: u64) {}
+}
+
+/// This implements a prediction encoder that tees the input to two different
+/// encoders. This allows us to verify that the behavior of two encoders is the same
+impl<A, B> PredictionEncoder for (A, B)
+where
+    A: PredictionEncoder,
+    B: PredictionEncoder,
+{
+    fn encode_value(&mut self, value: u16, max_bits: u8) {
+        self.0.encode_value(value, max_bits);
+        self.1.encode_value(value, max_bits);
+    }
+
+    fn encode_verify_state(&mut self, message: &'static str, checksum: u64) {
+        self.0.encode_verify_state(message, checksum);
+        self.1.encode_verify_state(message, checksum);
+    }
+
+    fn encode_correction(&mut self, action: CodecCorrection, value: u32) {
+        self.0.encode_correction(action, value);
+        self.1.encode_correction(action, value);
+    }
+
+    fn encode_misprediction(&mut self, action: CodecMisprediction, value: bool) {
+        self.0.encode_misprediction(action, value);
+        self.1.encode_misprediction(action, value);
+    }
+
+    fn finish(&mut self) {
+        self.0.finish();
+        self.1.finish();
+    }
+}
+
+/// Implement the same for decoders, where we verify that the output
+/// is identical for both decoders
+impl<A, B> PredictionDecoder for (A, B)
+where
+    A: PredictionDecoder,
+    B: PredictionDecoder,
+{
+    fn decode_value(&mut self, max_bits_orig: u8) -> u16 {
+        let a = self.0.decode_value(max_bits_orig);
+        let b = self.1.decode_value(max_bits_orig);
+        assert_eq!(a, b);
+        a
+    }
+
+    fn decode_correction(&mut self, correction: CodecCorrection) -> u32 {
+        let a = self.0.decode_correction(correction);
+        let b = self.1.decode_correction(correction);
+        assert_eq!(a, b);
+        a
+    }
+
+    fn decode_misprediction(&mut self, misprediction: CodecMisprediction) -> bool {
+        let a = self.0.decode_misprediction(misprediction);
+        let b = self.1.decode_misprediction(misprediction);
+        assert_eq!(a, b);
+        a
+    }
+
+    fn decode_verify_state(&mut self, message: &'static str, checksum: u64) {
+        self.0.decode_verify_state(message, checksum);
+        self.1.decode_verify_state(message, checksum);
+    }
 }
 
 #[test]

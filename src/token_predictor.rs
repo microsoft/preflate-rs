@@ -99,18 +99,19 @@ impl<'a> TokenPredictor<'a> {
             codec.encode_misprediction(CodecMisprediction::EOBMisprediction, false);
         }
 
-        codec.encode_verify_state("start", || self.checksum().hash());
+        codec.encode_verify_state("start", self.checksum().hash());
 
         for i in 0..block.tokens.len() {
             let target_token = &block.tokens[i];
 
-            codec.encode_verify_state("token", || {
+            codec.encode_verify_state(
+                "token",
                 if VERIFY {
                     self.checksum().hash()
                 } else {
                     i as u64
-                }
-            });
+                },
+            );
 
             /*if i == 18 {
                 println!(
@@ -216,7 +217,7 @@ impl<'a> TokenPredictor<'a> {
             self.commit_token(&target_token, None);
         }
 
-        codec.encode_verify_state("done", || self.checksum().hash());
+        codec.encode_verify_state("done", self.checksum().hash());
 
         Ok(())
     }
@@ -270,16 +271,17 @@ impl<'a> TokenPredictor<'a> {
 
         block.tokens.reserve(blocksize as usize);
 
-        codec.decode_verify_state("start", || self.checksum().hash());
+        codec.decode_verify_state("start", self.checksum().hash());
 
         while !self.input_eof() && self.current_token_count < blocksize as u32 {
-            codec.decode_verify_state("token", || {
+            codec.decode_verify_state(
+                "token",
                 if VERIFY {
                     self.checksum().hash()
                 } else {
                     self.current_token_count as u64
-                }
-            });
+                },
+            );
 
             let mut predicted_ref: PreflateTokenReference;
             match self.predict_token() {
@@ -346,7 +348,7 @@ impl<'a> TokenPredictor<'a> {
             self.commit_token(&PreflateToken::Reference(predicted_ref), Some(&mut block));
         }
 
-        codec.decode_verify_state("done", || self.checksum().hash());
+        codec.decode_verify_state("done", self.checksum().hash());
 
         Ok(block)
     }

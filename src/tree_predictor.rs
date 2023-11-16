@@ -7,6 +7,7 @@ use crate::{
     preflate_token::TokenFrequency,
     statistical_codec::{
         CodecCorrection, CodecMisprediction, PredictionDecoder, PredictionEncoder,
+        VerifyPredictionDecoder, VerifyPredictionEncoder,
     },
 };
 
@@ -15,7 +16,7 @@ pub fn predict_tree_for_block<D: PredictionEncoder>(
     freq: &TokenFrequency,
     encoder: &mut D,
 ) -> anyhow::Result<()> {
-    encoder.encode_verify_state("tree", || 0);
+    encoder.encode_verify_state("tree", 0);
 
     // bit_lengths is a vector of huffman code sizes for literals followed by length codes
     // first predict the size of the literal tree
@@ -99,7 +100,7 @@ pub fn recreate_tree_for_block<D: PredictionDecoder>(
     freq: &TokenFrequency,
     codec: &mut D,
 ) -> anyhow::Result<HuffmanOriginalEncoding> {
-    codec.decode_verify_state("tree", || 0);
+    codec.decode_verify_state("tree", 0);
 
     let mut result: HuffmanOriginalEncoding = Default::default();
 
@@ -402,7 +403,7 @@ fn encode_roundtrip_perfect() {
     assert_eq!(regenerated_header.lengths[1], (TreeCodeType::Code, 2));
     assert_eq!(regenerated_header.lengths[2], (TreeCodeType::Code, 3));
 
-    let mut empty_encoder = crate::statistical_codec::PreflatePredictionEncoder::default();
+    let mut empty_encoder = VerifyPredictionEncoder::default();
     predict_tree_for_block(&regenerated_header, &freq, &mut empty_encoder).unwrap();
     assert_eq!(empty_encoder.count_nondefault_actions(), 0);
 
@@ -430,14 +431,14 @@ fn encode_perfect_encoding() {
     let default_encoding = recreate_tree_for_block(&freq, &mut default_only_decoder).unwrap();
 
     // now predict the encoding using the default encoding and it should be perfect
-    let mut empty_encoder = crate::statistical_codec::PreflatePredictionEncoder::default();
+    let mut empty_encoder = VerifyPredictionEncoder::default();
     predict_tree_for_block(&default_encoding, &freq, &mut empty_encoder).unwrap();
     assert_eq!(empty_encoder.count_nondefault_actions(), 0);
 }
 
 #[test]
 fn encode_tree_roundtrip() {
-    use crate::statistical_codec::PreflatePredictionEncoder;
+    use crate::statistical_codec::VerifyPredictionEncoder;
 
     let mut freq = TokenFrequency::default();
     freq.literal_codes[0] = 100;
@@ -466,11 +467,11 @@ fn encode_tree_roundtrip() {
         num_code_lengths: 19,
     };
 
-    let mut encoder = PreflatePredictionEncoder::default();
+    let mut encoder = VerifyPredictionEncoder::default();
 
     predict_tree_for_block(&huff_origin, &freq, &mut encoder).unwrap();
 
-    let mut decoder = encoder.make_decoder();
+    let mut decoder = VerifyPredictionDecoder::new(encoder.actions(), false);
 
     let regenerated_header = recreate_tree_for_block(&freq, &mut decoder).unwrap();
 

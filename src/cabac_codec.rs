@@ -7,8 +7,6 @@ use cabac::{
 
 use crate::{
     bit_helper::bit_length,
-    huffman_encoding::TreeCodeType,
-    preflate_token::BlockType,
     statistical_codec::{
         CodecCorrection, CodecMisprediction, CountNonDefaultActions, PredictionDecoder,
         PredictionEncoder,
@@ -52,7 +50,6 @@ struct PredictionCabacContext {
 
     default_encoding: [VP8Context; 4],
     correction: [[VP8Context; 8]; CodecCorrection::MAX as usize],
-    misprediction: [[VP8Context; 8]; CodecMisprediction::MAX as usize],
 
     non_default_ops_corr: [u32; CodecCorrection::MAX as usize],
     non_default_ops_mis: [u32; CodecMisprediction::MAX as usize],
@@ -97,7 +94,7 @@ impl PredictionCabacContext {
 
     pub fn read_value_bypass<R: Read>(max_bits: u8, reader: &mut VP8Reader<R>) -> u32 {
         let mut retval = 0;
-        for i in 0..max_bits {
+        for _i in 0..max_bits {
             retval <<= 1;
             retval |= reader.get_bypass().unwrap() as u32;
         }
@@ -164,7 +161,7 @@ impl PredictionCabacContext {
 
     pub fn decode_misprediction<R: Read>(
         &mut self,
-        context: CodecMisprediction,
+        _context: CodecMisprediction,
         reader: &mut VP8Reader<R>,
     ) -> bool {
         self.ensure_default_read(reader);
@@ -211,12 +208,6 @@ impl<W: Write> PredictionEncoderCabac<W> {
         }
     }
 
-    /// flush the last bits out
-    pub fn finish(&mut self) {
-        self.context.flush_default(&mut self.writer);
-        self.writer.finish().unwrap();
-    }
-
     pub fn print(&self) {
         self.count.print();
     }
@@ -230,7 +221,7 @@ impl<W: Write> PredictionEncoder for PredictionEncoderCabac<W> {
         PredictionCabacContext::write_value_bypass(value.into(), max_bits, &mut self.writer);
     }
 
-    fn encode_verify_state<C: FnOnce() -> u64>(&mut self, _message: &'static str, _checksum: C) {}
+    fn encode_verify_state(&mut self, _message: &'static str, _checksum: u64) {}
 
     fn encode_correction(&mut self, action: CodecCorrection, value: u32) {
         self.context
@@ -240,6 +231,11 @@ impl<W: Write> PredictionEncoder for PredictionEncoderCabac<W> {
     fn encode_misprediction(&mut self, action: CodecMisprediction, value: bool) {
         self.context
             .encode_misprediction(value, action, &mut self.writer);
+    }
+
+    fn finish(&mut self) {
+        self.context.flush_default(&mut self.writer);
+        self.writer.finish().unwrap();
     }
 }
 
@@ -261,7 +257,7 @@ impl<R: Read> PredictionDecoder for PredictionDecoderCabac<R> {
     fn decode_value(&mut self, max_bits_orig: u8) -> u16 {
         PredictionCabacContext::read_value_bypass(max_bits_orig, &mut self.reader) as u16
     }
-    fn decode_verify_state<C: FnOnce() -> u64>(&mut self, _message: &'static str, _checksum: C) {}
+    fn decode_verify_state(&mut self, _message: &'static str, _checksum: u64) {}
 
     fn decode_correction(&mut self, correction: CodecCorrection) -> u32 {
         self.context.decode_correction(correction, &mut self.reader)

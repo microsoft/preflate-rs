@@ -35,7 +35,9 @@ mod zip_structs;
 use crate::{
     cabac_codec::{PredictionDecoderCabac, PredictionEncoderCabac},
     process::{read_deflate, write_deflate},
-    statistical_codec::PreflatePredictionEncoder,
+    statistical_codec::{
+        PredictionDecoder, PredictionEncoder, VerifyPredictionDecoder, VerifyPredictionEncoder,
+    },
 };
 
 fn analyze_compressed_data_old(
@@ -44,7 +46,7 @@ fn analyze_compressed_data_old(
     deflate_info_dump_level: i32,
     uncompressed_size: &mut u64,
 ) -> anyhow::Result<()> {
-    let mut encoder = PreflatePredictionEncoder::default();
+    let mut encoder = VerifyPredictionEncoder::default();
 
     let (compressed_processed, params, plain_text, original_blocks) =
         read_deflate(compressed_data, &mut encoder, 1).with_context(|| "read_deflate")?;
@@ -53,7 +55,7 @@ fn analyze_compressed_data_old(
 
     encoder.print();
 
-    let mut decoder = encoder.make_decoder();
+    let mut decoder = VerifyPredictionDecoder::new(encoder.actions(), false);
 
     let (recompressed, recreated_blocks) =
         write_deflate(&plain_text, &params, &mut decoder).with_context(|| "write_deflate")?;
@@ -129,23 +131,30 @@ fn analyze_compressed_data(
 ) -> anyhow::Result<()> {
     let mut buffer = Vec::new();
 
-    let mut encoder = PredictionEncoderCabac::new(&mut buffer);
+    let cabac_encoder = PredictionEncoderCabac::new(&mut buffer);
+    let debug_encoder = VerifyPredictionEncoder::new(false);
+
+    let mut combined_encoder = (cabac_encoder, debug_encoder);
 
     let (compressed_processed, params, plain_text, original_blocks) =
-        read_deflate(compressed_data, &mut encoder, 1).with_context(|| "read_deflate")?;
+        read_deflate(compressed_data, &mut combined_encoder, 1).with_context(|| "read_deflate")?;
 
     assert_eq!(compressed_processed, compressed_data.len());
 
-    encoder.finish();
+    combined_encoder.finish();
 
-    encoder.print();
+    combined_encoder.0.print();
+
+    let actions = combined_encoder.1.actions();
 
     println!("buffer size: {}", buffer.len());
 
-    let mut decoder = PredictionDecoderCabac::new(Cursor::new(&buffer));
+    let debug_encoder = VerifyPredictionDecoder::new(actions, false);
+    let cabac_decoder = PredictionDecoderCabac::new(Cursor::new(&buffer));
 
     let (recompressed, recreated_blocks) =
-        write_deflate(&plain_text, &params, &mut decoder).with_context(|| "write_deflate")?;
+        write_deflate(&plain_text, &params, &mut (cabac_decoder, debug_encoder))
+            .with_context(|| "write_deflate")?;
 
     assert_eq!(original_blocks.len(), recreated_blocks.len());
     original_blocks
@@ -307,7 +316,7 @@ fn do_analyze(plain_text: &Vec<u8>, compressed_data: &[u8]) -> Result<(), anyhow
     let crc = crc32fast::hash(plain_text);
     let mut uncompressed_size = 0;
 
-    analyze_compressed_data_old(compressed_data, crc, 10, &mut uncompressed_size)?;
+    analyze_compressed_data(compressed_data, crc, 10, &mut uncompressed_size)?;
     Ok(())
 }
 
