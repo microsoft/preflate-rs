@@ -160,7 +160,7 @@ impl<'a> PredictorState<'a> {
             }
 
             let mut best_len = prev_len;
-            let mut best_match = None;
+            let mut best_match: Option<PreflateTokenReference> = None;
             let input = self.hash.input().cur_chars(offset as i32);
             loop {
                 let match_start = self

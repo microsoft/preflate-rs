@@ -17,7 +17,6 @@ const VERIFY: bool = false;
 pub struct TokenPredictor<'a> {
     state: PredictorState<'a>,
     params: PreflateParameters,
-    prev_len: u32,
     pending_reference: Option<PreflateTokenReference>,
     current_token_count: u32,
     max_token_count: u32,
@@ -33,7 +32,6 @@ impl<'a> TokenPredictor<'a> {
         let mut r = Self {
             state: PredictorState::<'a>::new(uncompressed, params),
             params: *params,
-            prev_len: 0,
             pending_reference: None,
             current_token_count: 0,
             max_token_count: ((1 << (6 + params.mem_level)) - 1),
@@ -66,7 +64,6 @@ impl<'a> TokenPredictor<'a> {
         last_block: bool,
     ) -> anyhow::Result<()> {
         self.current_token_count = 0;
-        self.prev_len = 0;
         self.pending_reference = None;
 
         codec.encode_correction(
@@ -228,7 +225,6 @@ impl<'a> TokenPredictor<'a> {
     ) -> anyhow::Result<PreflateTokenBlock> {
         let mut block;
         self.current_token_count = 0;
-        self.prev_len = 0;
         self.pending_reference = None;
 
         const BT_STORED: u32 = BlockType::Stored as u32;
@@ -370,7 +366,7 @@ impl<'a> TokenPredictor<'a> {
         } else {
             self.state.match_token(
                 hash,
-                self.prev_len,
+                0,
                 0,
                 if self.params.zlib_compatible {
                     0
@@ -380,7 +376,6 @@ impl<'a> TokenPredictor<'a> {
             )
         };
 
-        self.prev_len = 0;
         self.pending_reference = None;
 
         if let MatchResult::Success(match_token) = m {
@@ -437,11 +432,9 @@ impl<'a> TokenPredictor<'a> {
 
                 if let MatchResult::Success(m) = match_next {
                     if m.len() > match_token.len() {
-                        self.prev_len = match_token.len();
                         self.pending_reference = Some(m);
 
                         if !self.params.zlib_compatible {
-                            self.prev_len = 0;
                             self.pending_reference = None;
                         }
                         return PreflateToken::Literal;
@@ -469,7 +462,6 @@ impl<'a> TokenPredictor<'a> {
             self.state
                 .match_token(hash, 0, 0, 2 << self.params.log2_of_max_chain_depth_m1);
 
-        self.prev_len = 0;
         self.pending_reference = None;
 
         if let MatchResult::Success(m) = match_token {

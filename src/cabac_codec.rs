@@ -79,14 +79,20 @@ impl PredictionCabacContext {
         debug_assert!(bl <= max_bits as usize);
 
         for i in 0..bl {
-            writer
-                .put(true, &mut context[std::cmp::min(N - 1, i)])
-                .unwrap();
+            /*writer
+            .put(true, &mut context[std::cmp::min(N - 1, i)])
+            .unwrap();*/
+            writer.put(true, &mut context[0]).unwrap();
+            //writer.put_bypass(true).unwrap();
         }
         if bl < max_bits as usize {
-            writer
-                .put(false, &mut context[std::cmp::min(N - 1, bl)])
-                .unwrap();
+            /*writer
+            .put(false, &mut context[std::cmp::min(N - 1, bl)])
+            .unwrap();*/
+
+            writer.put(false, &mut context[0]).unwrap();
+
+            //writer.put_bypass(false).unwrap();
         }
 
         Self::write_value_bypass(value, bl as u8, writer);
@@ -109,9 +115,14 @@ impl PredictionCabacContext {
     ) -> u32 {
         let mut bits_found = 0;
         while bits_found < max_bits as usize {
-            let bit = reader
-                .get(&mut context[std::cmp::min(N - 1, bits_found)])
-                .unwrap();
+            /*let bit = reader
+            .get(&mut context[std::cmp::min(N - 1, bits_found)])
+            .unwrap();*/
+
+            let bit = reader.get(&mut context[0]).unwrap();
+
+            //let bit = reader.get_bypass().unwrap();
+
             if !bit {
                 break;
             }
@@ -226,11 +237,13 @@ impl<W: Write> PredictionEncoder for PredictionEncoderCabac<W> {
     fn encode_correction(&mut self, action: CodecCorrection, value: u32) {
         self.context
             .encode_correction(value, action, &mut self.writer);
+        self.count.record_correction(action, value);
     }
 
     fn encode_misprediction(&mut self, action: CodecMisprediction, value: bool) {
         self.context
             .encode_misprediction(value, action, &mut self.writer);
+        self.count.record_misprediction(action, value);
     }
 
     fn finish(&mut self) {
