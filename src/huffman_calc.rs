@@ -208,8 +208,6 @@ pub mod calc_minzoxide {
 }
 
 pub mod calc_zlib {
-    use std::collections::BinaryHeap;
-
     #[derive(Copy, Clone, Debug)]
     enum HuffTree {
         Leaf(usize),

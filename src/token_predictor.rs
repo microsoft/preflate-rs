@@ -2,11 +2,14 @@ use anyhow::Context;
 
 use crate::{
     bit_helper::DebugHash,
+    cabac_codec::{decode_difference, encode_difference},
     predictor_state::{MatchResult, PredictorState},
     preflate_constants::{MAX_MATCH, MIN_MATCH, TOO_FAR},
     preflate_parameter_estimator::PreflateParameters,
     preflate_token::{BlockType, PreflateToken, PreflateTokenBlock, PreflateTokenReference},
-    statistical_codec::{PredictionDecoder, PredictionEncoder},
+    statistical_codec::{
+        CodecCorrection, CodecMisprediction, PredictionDecoder, PredictionEncoder,
+    },
 };
 
 const VERIFY: bool = false;
@@ -66,13 +69,16 @@ impl<'a> TokenPredictor<'a> {
         self.prev_len = 0;
         self.pending_reference = None;
 
-        codec.encode_block_type(block.block_type);
+        codec.encode_correction(
+            CodecCorrection::BlockTypeCorrection,
+            encode_difference(BlockType::DynamicHuff as u32, block.block_type as u32),
+        );
 
         if block.block_type == BlockType::Stored {
             codec.encode_value(block.uncompressed_len as u16, 16);
 
             let pad = block.padding_bits != 0;
-            codec.encode_non_zero_padding(pad);
+            codec.encode_misprediction(CodecMisprediction::NonZeroPadding, pad);
             if pad {
                 codec.encode_value(block.padding_bits.into(), 8);
             }
@@ -87,11 +93,10 @@ impl<'a> TokenPredictor<'a> {
         if (!last_block && block.tokens.len() != self.max_token_count as usize)
             || block.tokens.len() > self.max_token_count as usize
         {
-            codec.encode_eob_misprediction(true);
-
+            codec.encode_misprediction(CodecMisprediction::EOBMisprediction, true);
             codec.encode_value(block.tokens.len() as u16, 16);
         } else {
-            codec.encode_eob_misprediction(false);
+            codec.encode_misprediction(CodecMisprediction::EOBMisprediction, false);
         }
 
         codec.encode_verify_state("start", || self.checksum().hash());
@@ -136,11 +141,17 @@ impl<'a> TokenPredictor<'a> {
                 PreflateToken::Literal => {
                     match predicted_token {
                         PreflateToken::Literal => {
-                            codec.encode_literal_prediction_wrong(false);
+                            codec.encode_misprediction(
+                                CodecMisprediction::LiteralPredictionWrong,
+                                false,
+                            );
                         }
                         PreflateToken::Reference(..) => {
                             // target had a literal, so we were wrong if we predicted a reference
-                            codec.encode_reference_prediction_wrong(true);
+                            codec.encode_misprediction(
+                                CodecMisprediction::ReferencePredictionWrong,
+                                true,
+                            );
                         }
                     }
                 }
@@ -149,27 +160,35 @@ impl<'a> TokenPredictor<'a> {
                     match predicted_token {
                         PreflateToken::Literal => {
                             // target had a reference, so we were wrong if we predicted a literal
-                            codec.encode_literal_prediction_wrong(true);
+                            codec.encode_misprediction(
+                                CodecMisprediction::LiteralPredictionWrong,
+                                true,
+                            );
                             predicted_ref = self.repredict_reference().with_context(|| {
                                 format!("repredict_reference target={:?} index={}", target_ref, i)
                             })?;
                         }
                         PreflateToken::Reference(r) => {
                             // we predicted a reference correctly, so verify that the length/dist was correct
-                            codec.encode_reference_prediction_wrong(false);
+                            codec.encode_misprediction(
+                                CodecMisprediction::ReferencePredictionWrong,
+                                false,
+                            );
                             predicted_ref = r;
                         }
                     }
 
-                    codec
-                        .encode_len_correction(predicted_ref.len() as u32, target_ref.len() as u32);
+                    codec.encode_correction(
+                        CodecCorrection::LenCorrection,
+                        encode_difference(predicted_ref.len().into(), target_ref.len().into()),
+                    );
 
                     if predicted_ref.len() != target_ref.len() {
                         let rematch =
                             self.state.calculate_hops(&target_ref).with_context(|| {
                                 format!("calculate_hops p={:?}, t={:?}", predicted_ref, target_ref)
                             })?;
-                        codec.encode_dist_after_len_correction(rematch);
+                        codec.encode_correction(CodecCorrection::DistAfterLenCorrection, rematch);
                     } else {
                         if target_ref.dist() != predicted_ref.dist() {
                             let rematch =
@@ -179,14 +198,17 @@ impl<'a> TokenPredictor<'a> {
                                         predicted_ref, target_ref
                                     )
                                 })?;
-                            codec.encode_dist_only_correction(rematch);
+                            codec.encode_correction(CodecCorrection::DistOnlyCorrection, rematch);
                         } else {
-                            codec.encode_dist_only_correction(0);
+                            codec.encode_correction(CodecCorrection::DistOnlyCorrection, 0);
                         }
                     }
 
                     if target_ref.len() == 258 {
-                        codec.encode_irregular_len_258(target_ref.get_irregular258());
+                        codec.encode_misprediction(
+                            CodecMisprediction::IrregularLen258,
+                            target_ref.get_irregular258(),
+                        );
                     }
                 }
             }
@@ -208,29 +230,39 @@ impl<'a> TokenPredictor<'a> {
         self.prev_len = 0;
         self.pending_reference = None;
 
-        let bt = codec.decode_block_type();
+        const BT_STORED: u32 = BlockType::Stored as u32;
+        const BT_DYNAMICHUFF: u32 = BlockType::DynamicHuff as u32;
+        const BT_STATICHUFF: u32 = BlockType::StaticHuff as u32;
+
+        let bt = decode_difference(
+            BlockType::DynamicHuff as u32,
+            codec.decode_correction(CodecCorrection::BlockTypeCorrection),
+        );
         match bt {
-            BlockType::Stored => {
+            BT_STORED => {
                 block = PreflateTokenBlock::new(BlockType::Stored);
                 block.uncompressed_len = codec.decode_value(16).into();
                 block.padding_bits = 0;
-                if codec.decode_non_zero_padding() {
+                if codec.decode_misprediction(CodecMisprediction::NonZeroPadding) {
                     block.padding_bits = codec.decode_value(8) as u8;
                 }
                 self.state.update_hash(block.uncompressed_len);
                 self.state.update_seq(block.uncompressed_len);
                 return Ok(block);
             }
-            BlockType::StaticHuff => {
+            BT_STATICHUFF => {
                 block = PreflateTokenBlock::new(BlockType::StaticHuff);
             }
-            BlockType::DynamicHuff => {
+            BT_DYNAMICHUFF => {
                 block = PreflateTokenBlock::new(BlockType::DynamicHuff);
+            }
+            _ => {
+                return Err(anyhow::Error::msg(format!("Invalid block type {}", bt)));
             }
         }
 
         let blocksize: u32;
-        if codec.decode_eob_misprediction() {
+        if codec.decode_misprediction(CodecMisprediction::EOBMisprediction) {
             blocksize = codec.decode_value(16).into();
         } else {
             blocksize = self.max_token_count;
@@ -252,7 +284,8 @@ impl<'a> TokenPredictor<'a> {
             let mut predicted_ref: PreflateTokenReference;
             match self.predict_token() {
                 PreflateToken::Literal => {
-                    let not_ok = codec.decode_literal_prediction_wrong();
+                    let not_ok =
+                        codec.decode_misprediction(CodecMisprediction::LiteralPredictionWrong);
                     if !not_ok {
                         self.commit_token(&PreflateToken::Literal, Some(&mut block));
                         continue;
@@ -266,7 +299,8 @@ impl<'a> TokenPredictor<'a> {
                     })?;
                 }
                 PreflateToken::Reference(r) => {
-                    let not_ok = codec.decode_reference_prediction_wrong();
+                    let not_ok =
+                        codec.decode_misprediction(CodecMisprediction::ReferencePredictionWrong);
                     if not_ok {
                         self.commit_token(&PreflateToken::Literal, Some(&mut block));
                         continue;
@@ -276,9 +310,12 @@ impl<'a> TokenPredictor<'a> {
                 }
             }
 
-            let new_len = codec.decode_len_correction(predicted_ref.len());
+            let new_len = decode_difference(
+                predicted_ref.len(),
+                codec.decode_correction(CodecCorrection::LenCorrection),
+            );
             if new_len != predicted_ref.len() {
-                let hops = codec.decode_dist_after_len_correction();
+                let hops = codec.decode_correction(CodecCorrection::DistAfterLenCorrection);
 
                 predicted_ref = PreflateTokenReference::new(
                     new_len,
@@ -288,7 +325,7 @@ impl<'a> TokenPredictor<'a> {
                     false,
                 );
             } else {
-                let hops = codec.decode_dist_only_correction();
+                let hops = codec.decode_correction(CodecCorrection::DistOnlyCorrection);
                 if hops != 0 {
                     let new_dist = self
                         .state
@@ -300,7 +337,9 @@ impl<'a> TokenPredictor<'a> {
                 }
             }
 
-            if predicted_ref.len() == 258 && codec.decode_irregular_len_258() {
+            if predicted_ref.len() == 258
+                && codec.decode_misprediction(CodecMisprediction::IrregularLen258)
+            {
                 predicted_ref.set_irregular258(true);
             }
 

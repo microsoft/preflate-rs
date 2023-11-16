@@ -1,5 +1,6 @@
 mod bit_helper;
 mod bit_writer;
+mod cabac_codec;
 mod complevel_estimator;
 mod deflate_reader;
 mod deflate_writer;
@@ -32,11 +33,12 @@ use std::{
 mod zip_structs;
 
 use crate::{
+    cabac_codec::{PredictionDecoderCabac, PredictionEncoderCabac},
     process::{read_deflate, write_deflate},
     statistical_codec::PreflatePredictionEncoder,
 };
 
-fn analyze_compressed_data(
+fn analyze_compressed_data_old(
     compressed_data: &[u8],
     header_crc32: u32,
     deflate_info_dump_level: i32,
@@ -52,6 +54,95 @@ fn analyze_compressed_data(
     encoder.print();
 
     let mut decoder = encoder.make_decoder();
+
+    let (recompressed, recreated_blocks) =
+        write_deflate(&plain_text, &params, &mut decoder).with_context(|| "write_deflate")?;
+
+    assert_eq!(original_blocks.len(), recreated_blocks.len());
+    original_blocks
+        .iter()
+        .zip(recreated_blocks)
+        .enumerate()
+        .for_each(|(index, (a, b))| {
+            assert_eq!(a.block_type, b.block_type, "block type differs {index}");
+            //assert_eq!(a.uncompressed_len, b.uncompressed_len);
+            assert_eq!(
+                a.padding_bits, b.padding_bits,
+                "padding bits differ {index}"
+            );
+            compare(&a.tokens, &b.tokens);
+            assert_eq!(
+                a.tokens.len(),
+                b.tokens.len(),
+                "token length differs {index}"
+            );
+            assert!(a.tokens == b.tokens, "tokens differ {index}");
+            assert_eq!(
+                a.freq.literal_codes, b.freq.literal_codes,
+                "literal code freq differ {index}"
+            );
+            assert_eq!(
+                a.freq.distance_codes, b.freq.distance_codes,
+                "distance code freq differ {index}"
+            );
+            assert_eq!(
+                a.huffman_encoding, b.huffman_encoding,
+                "huffman_encoding differs {index}"
+            );
+        });
+
+    assert_eq!(
+        recompressed.len(),
+        compressed_data.len(),
+        "re-compressed version should be same (length)"
+    );
+    assert!(
+        &recompressed[..] == compressed_data,
+        "re-compressed version should be same (content)"
+    );
+
+    let result_crc = crc32fast::hash(&plain_text);
+
+    if header_crc32 == 0 {
+        if deflate_info_dump_level > 0 {
+            println!("CRC: {:8X}", result_crc);
+        }
+    } else if result_crc != header_crc32 {
+        println!(
+            "Header CRC: {:8X} != Data CRC: {:8X}...Possible CORRUPT FILE.",
+            header_crc32, result_crc
+        );
+    } else if deflate_info_dump_level > 0 {
+        println!("Header CRC: {0:8X} == Data CRC: {:8X}", result_crc);
+    }
+
+    *uncompressed_size = plain_text.len() as u64;
+
+    Ok(())
+}
+
+fn analyze_compressed_data(
+    compressed_data: &[u8],
+    header_crc32: u32,
+    deflate_info_dump_level: i32,
+    uncompressed_size: &mut u64,
+) -> anyhow::Result<()> {
+    let mut buffer = Vec::new();
+
+    let mut encoder = PredictionEncoderCabac::new(&mut buffer);
+
+    let (compressed_processed, params, plain_text, original_blocks) =
+        read_deflate(compressed_data, &mut encoder, 1).with_context(|| "read_deflate")?;
+
+    assert_eq!(compressed_processed, compressed_data.len());
+
+    encoder.finish();
+
+    encoder.print();
+
+    println!("buffer size: {}", buffer.len());
+
+    let mut decoder = PredictionDecoderCabac::new(Cursor::new(&buffer));
 
     let (recompressed, recreated_blocks) =
         write_deflate(&plain_text, &params, &mut decoder).with_context(|| "write_deflate")?;
@@ -216,7 +307,7 @@ fn do_analyze(plain_text: &Vec<u8>, compressed_data: &[u8]) -> Result<(), anyhow
     let crc = crc32fast::hash(plain_text);
     let mut uncompressed_size = 0;
 
-    analyze_compressed_data(compressed_data, crc, 10, &mut uncompressed_size)?;
+    analyze_compressed_data_old(compressed_data, crc, 10, &mut uncompressed_size)?;
     Ok(())
 }
 

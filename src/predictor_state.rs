@@ -156,7 +156,7 @@ impl<'a> PredictorState<'a> {
             // distance than all following entries
             if chain_it.dist() > h.cur_max_dist_hop0 {
                 let d = chain_it.dist();
-                return MatchResult::DistanceLargerThanHop0(chain_it.dist(), h.cur_max_dist_hop0);
+                return MatchResult::DistanceLargerThanHop0(d, h.cur_max_dist_hop0);
             }
 
             let mut best_len = prev_len;

@@ -7,7 +7,9 @@ use crate::{
     deflate_writer::DeflateWriter,
     preflate_parameter_estimator::{estimate_preflate_parameters, PreflateParameters},
     preflate_token::{BlockType, PreflateTokenBlock},
-    statistical_codec::{PredictionDecoder, PredictionEncoder},
+    statistical_codec::{
+        CodecCorrection, CodecMisprediction, PredictionDecoder, PredictionEncoder,
+    },
     token_predictor::TokenPredictor,
     tree_predictor::{predict_tree_for_block, recreate_tree_for_block},
 };
@@ -49,7 +51,7 @@ pub fn read_deflate<E: PredictionEncoder>(
 
     for i in 0..blocks.len() {
         if token_predictor_in.input_eof() {
-            encoder.encode_eof_misprediction(true);
+            encoder.encode_misprediction(CodecMisprediction::EOFMisprediction, true);
         }
 
         token_predictor_in
@@ -64,9 +66,9 @@ pub fn read_deflate<E: PredictionEncoder>(
 
     assert!(token_predictor_in.input_eof());
 
-    encoder.encode_eof_misprediction(false);
+    encoder.encode_misprediction(CodecMisprediction::EOFMisprediction, false);
 
-    encoder.encode_non_zero_padding(eof_padding != 0);
+    encoder.encode_misprediction(CodecMisprediction::NonZeroPadding, eof_padding != 0);
     if eof_padding != 0 {
         encoder.encode_value(eof_padding.into(), 8);
     }
@@ -88,7 +90,8 @@ pub fn write_deflate<D: PredictionDecoder>(
 
     let mut deflate_encoder = DeflateWriter::new(&plain_text);
 
-    let mut is_eof = token_predictor.input_eof() && !decoder.decode_eof_misprediction();
+    let mut is_eof = token_predictor.input_eof()
+        && !decoder.decode_misprediction(CodecMisprediction::EOFMisprediction);
 
     while !is_eof {
         let mut block = token_predictor
@@ -99,7 +102,8 @@ pub fn write_deflate<D: PredictionDecoder>(
             block.huffman_encoding = recreate_tree_for_block(&block.freq, decoder)?;
         }
 
-        is_eof = token_predictor.input_eof() && !decoder.decode_eof_misprediction();
+        is_eof = token_predictor.input_eof()
+            && !decoder.decode_misprediction(CodecMisprediction::EOFMisprediction);
 
         deflate_encoder.encode_block(&block, is_eof)?;
 
@@ -108,7 +112,7 @@ pub fn write_deflate<D: PredictionDecoder>(
 
     // flush the last byte, which may be incomplete and normally
     // padded with zeros, but maybe not
-    let padding = if decoder.decode_non_zero_padding() {
+    let padding = if decoder.decode_misprediction(CodecMisprediction::NonZeroPadding) {
         decoder.decode_value(8) as u8
     } else {
         0

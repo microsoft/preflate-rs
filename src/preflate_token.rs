@@ -52,10 +52,11 @@ impl PreflateTokenReference {
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
+#[repr(u8)]
 pub enum BlockType {
-    Stored,
-    DynamicHuff,
-    StaticHuff,
+    DynamicHuff = 0,
+    Stored = 1,
+    StaticHuff = 2,
 }
 
 #[derive(Debug)]
