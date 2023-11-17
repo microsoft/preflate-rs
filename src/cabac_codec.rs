@@ -79,18 +79,18 @@ impl<CTX> PredictionCabacContext<CTX> {
         debug_assert!(bl <= max_bits as usize);
 
         for i in 0..bl {
-            /*writer
-            .put(true, &mut context[std::cmp::min(N - 1, i)])
-            .unwrap();*/
-            writer.put(true, &mut context[0]).unwrap();
+            writer
+                .put(true, &mut context[std::cmp::min(N - 1, i)])
+                .unwrap();
+            //writer.put(true, &mut context[0]).unwrap();
             //writer.put_bypass(true).unwrap();
         }
         if bl < max_bits as usize {
-            /*writer
-            .put(false, &mut context[std::cmp::min(N - 1, bl)])
-            .unwrap();*/
+            writer
+                .put(false, &mut context[std::cmp::min(N - 1, bl)])
+                .unwrap();
 
-            writer.put(false, &mut context[0]).unwrap();
+            //writer.put(false, &mut context[0]).unwrap();
 
             //writer.put_bypass(false).unwrap();
         }
@@ -115,12 +115,11 @@ impl<CTX> PredictionCabacContext<CTX> {
     ) -> u32 {
         let mut bits_found = 0;
         while bits_found < max_bits as usize {
-            /*let bit = reader
-            .get(&mut context[std::cmp::min(N - 1, bits_found)])
-            .unwrap();*/
+            let bit = reader
+                .get(&mut context[std::cmp::min(N - 1, bits_found)])
+                .unwrap();
 
-            let bit = reader.get(&mut context[0]).unwrap();
-
+            //let bit = reader.get(&mut context[0]).unwrap();
             //let bit = reader.get_bypass().unwrap();
 
             if !bit {

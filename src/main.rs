@@ -25,6 +25,7 @@ mod zip_bit_reader;
 use anyhow::{self, Context};
 use cabac::{
     debug::{DebugReader, DebugWriter},
+    h265::{H265Reader, H265Writer},
     vp8::{VP8Reader, VP8Writer},
 };
 use flate2::{read::GzEncoder, read::ZlibEncoder, Compression};
@@ -275,7 +276,7 @@ fn do_analyze(plain_text: &Vec<u8>, compressed_data: &[u8]) -> Result<(), anyhow
     let crc = crc32fast::hash(plain_text);
     let mut uncompressed_size = 0;
 
-    analyze_compressed_data_verify(compressed_data, crc, 10, &mut uncompressed_size)?;
+    analyze_compressed_data_old(compressed_data, crc, 10, &mut uncompressed_size)?;
     Ok(())
 }
 
