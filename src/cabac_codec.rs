@@ -42,38 +42,38 @@ fn test_encode_decode_difference() {
 }
 
 #[derive(Default)]
-struct PredictionCabacContext {
+struct PredictionCabacContext<CTX> {
     default_count: u32,
 
     /// on the reading side, whether we read the #of defaults or not
     default_read: bool,
 
-    default_encoding: [VP8Context; 4],
-    correction: [[VP8Context; 8]; CodecCorrection::MAX as usize],
+    default_encoding: [CTX; 4],
+    correction: [[CTX; 8]; CodecCorrection::MAX as usize],
 
     non_default_ops_corr: [u32; CodecCorrection::MAX as usize],
     non_default_ops_mis: [u32; CodecMisprediction::MAX as usize],
 }
 
-impl PredictionCabacContext {
-    pub fn flush_default<W: Write>(&mut self, writer: &mut VP8Writer<W>) {
+impl<CTX> PredictionCabacContext<CTX> {
+    pub fn flush_default<W: CabacWriter<CTX>>(&mut self, writer: &mut W) {
         if self.default_count > 0 {
             Self::write_value(self.default_count, 32, &mut self.default_encoding, writer);
             self.default_count = 0;
         }
     }
 
-    pub fn write_value_bypass<W: Write>(value: u32, max_bits: u8, writer: &mut VP8Writer<W>) {
+    pub fn write_value_bypass<W: CabacWriter<CTX>>(value: u32, max_bits: u8, writer: &mut W) {
         for i in (0..max_bits).rev() {
             writer.put_bypass((value >> i) & 1 == 1).unwrap();
         }
     }
 
-    pub fn write_value<const N: usize, W: Write>(
+    pub fn write_value<const N: usize, W: CabacWriter<CTX>>(
         value: u32,
         max_bits: u8,
-        context: &mut [VP8Context; N],
-        writer: &mut VP8Writer<W>,
+        context: &mut [CTX; N],
+        writer: &mut W,
     ) {
         let bl = bit_length(value) as usize;
         debug_assert!(bl <= max_bits as usize);
@@ -98,7 +98,7 @@ impl PredictionCabacContext {
         Self::write_value_bypass(value, bl as u8, writer);
     }
 
-    pub fn read_value_bypass<R: Read>(max_bits: u8, reader: &mut VP8Reader<R>) -> u32 {
+    pub fn read_value_bypass<R: CabacReader<CTX>>(max_bits: u8, reader: &mut R) -> u32 {
         let mut retval = 0;
         for _i in 0..max_bits {
             retval <<= 1;
@@ -108,10 +108,10 @@ impl PredictionCabacContext {
         retval
     }
 
-    pub fn read_value<R: Read, const N: usize>(
+    pub fn read_value<R: CabacReader<CTX>, const N: usize>(
         max_bits: u8,
-        context: &mut [VP8Context; N],
-        reader: &mut VP8Reader<R>,
+        context: &mut [CTX; N],
+        reader: &mut R,
     ) -> u32 {
         let mut bits_found = 0;
         while bits_found < max_bits as usize {
@@ -132,11 +132,11 @@ impl PredictionCabacContext {
         Self::read_value_bypass(bits_found as u8, reader)
     }
 
-    pub fn encode_misprediction<W: Write>(
+    pub fn encode_misprediction<W: CabacWriter<CTX>>(
         &mut self,
         misprediction: bool,
         context: CodecMisprediction,
-        writer: &mut VP8Writer<W>,
+        writer: &mut W,
     ) {
         if misprediction {
             Self::write_value(self.default_count, 32, &mut self.default_encoding, writer);
@@ -147,11 +147,11 @@ impl PredictionCabacContext {
         }
     }
 
-    pub fn encode_correction<W: Write>(
+    pub fn encode_correction<W: CabacWriter<CTX>>(
         &mut self,
         val: u32,
         context: CodecCorrection,
-        writer: &mut VP8Writer<W>,
+        writer: &mut W,
     ) {
         if val != 0 {
             Self::write_value(self.default_count, 32, &mut self.default_encoding, writer);
@@ -163,17 +163,17 @@ impl PredictionCabacContext {
         }
     }
 
-    fn ensure_default_read<R: Read>(&mut self, reader: &mut VP8Reader<R>) {
+    fn ensure_default_read<R: CabacReader<CTX>>(&mut self, reader: &mut R) {
         if !self.default_read {
             self.default_count = Self::read_value(32, &mut self.default_encoding, reader);
             self.default_read = true;
         }
     }
 
-    pub fn decode_misprediction<R: Read>(
+    pub fn decode_misprediction<R: CabacReader<CTX>>(
         &mut self,
         _context: CodecMisprediction,
-        reader: &mut VP8Reader<R>,
+        reader: &mut R,
     ) -> bool {
         self.ensure_default_read(reader);
 
@@ -186,10 +186,10 @@ impl PredictionCabacContext {
         }
     }
 
-    fn decode_correction<R: Read>(
+    fn decode_correction<R: CabacReader<CTX>>(
         &mut self,
         context: CodecCorrection,
-        reader: &mut VP8Reader<R>,
+        reader: &mut R,
     ) -> u32 {
         self.ensure_default_read(reader);
 
@@ -204,17 +204,17 @@ impl PredictionCabacContext {
     }
 }
 
-pub struct PredictionEncoderCabac<W> {
-    context: PredictionCabacContext,
+pub struct PredictionEncoderCabac<W, CTX> {
+    context: PredictionCabacContext<CTX>,
     count: CountNonDefaultActions,
-    writer: VP8Writer<W>,
+    writer: W,
 }
 
-impl<W: Write> PredictionEncoderCabac<W> {
+impl<W: CabacWriter<CTX>, CTX: Default> PredictionEncoderCabac<W, CTX> {
     pub fn new(writer: W) -> Self {
         Self {
-            context: PredictionCabacContext::default(),
-            writer: VP8Writer::new(writer).unwrap(),
+            context: PredictionCabacContext::<CTX>::default(),
+            writer: writer,
             count: CountNonDefaultActions::default(),
         }
     }
@@ -224,7 +224,7 @@ impl<W: Write> PredictionEncoderCabac<W> {
     }
 }
 
-impl<W: Write> PredictionEncoder for PredictionEncoderCabac<W> {
+impl<W: CabacWriter<CTX>, CTX> PredictionEncoder for PredictionEncoderCabac<W, CTX> {
     fn encode_value(&mut self, value: u16, max_bits: u8) {
         // flush any defaults that are pending before the value is written, otherwise
         // we won't know how many defaults to skip when reading
@@ -252,21 +252,21 @@ impl<W: Write> PredictionEncoder for PredictionEncoderCabac<W> {
     }
 }
 
-pub struct PredictionDecoderCabac<R> {
-    context: PredictionCabacContext,
-    reader: VP8Reader<R>,
+pub struct PredictionDecoderCabac<R, CTX> {
+    context: PredictionCabacContext<CTX>,
+    reader: R,
 }
 
-impl<R: Read> PredictionDecoderCabac<R> {
+impl<R: CabacReader<CTX>, CTX: Default> PredictionDecoderCabac<R, CTX> {
     pub fn new(reader: R) -> Self {
         Self {
-            context: PredictionCabacContext::default(),
-            reader: VP8Reader::new(reader).unwrap(),
+            context: PredictionCabacContext::<CTX>::default(),
+            reader: reader,
         }
     }
 }
 
-impl<R: Read> PredictionDecoder for PredictionDecoderCabac<R> {
+impl<R: CabacReader<CTX>, CTX> PredictionDecoder for PredictionDecoderCabac<R, CTX> {
     fn decode_value(&mut self, max_bits_orig: u8) -> u16 {
         PredictionCabacContext::read_value_bypass(max_bits_orig, &mut self.reader) as u16
     }
@@ -297,13 +297,13 @@ fn roundtree_cabac_decoding() {
         CodecAction::Correction(CodecCorrection::DistAfterLenCorrection, 0),
     ];
 
-    let mut encoder = PredictionEncoderCabac::new(&mut buffer);
+    let mut encoder = PredictionEncoderCabac::new(VP8Writer::new(&mut buffer).unwrap());
 
     drive_encoder(&mut encoder, &test_codec_actions);
 
     encoder.finish();
 
-    let mut decoder = PredictionDecoderCabac::new(Cursor::new(&buffer));
+    let mut decoder = PredictionDecoderCabac::new(VP8Reader::new(Cursor::new(&buffer)).unwrap());
 
     verify_decoder(&mut decoder, &test_codec_actions);
 }

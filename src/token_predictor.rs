@@ -110,7 +110,7 @@ impl<'a> TokenPredictor<'a> {
                 },
             );
 
-            /*if i == 18 {
+            /*if i == 15 {
                 println!(
                     "target = {:?}", target_token
                 )
@@ -419,14 +419,16 @@ impl<'a> TokenPredictor<'a> {
                     while rle < max_size && c[1 + rle as usize] == b {
                         rle += 1;
                     }
-                    if rle > match_token.len() {
-                        if let MatchResult::Success(s) = match_next {
-                            if rle >= s.len() {
-                                match_next = MatchResult::Success(PreflateTokenReference::new(
-                                    rle, 1, false,
-                                ));
-                            }
-                        }
+
+                    let match_next_len = if let MatchResult::Success(s) = match_next {
+                        s.len()
+                    } else {
+                        0
+                    };
+
+                    if rle > match_token.len() && rle > match_next_len {
+                        match_next =
+                            MatchResult::Success(PreflateTokenReference::new(rle, 1, false));
                     }
                 }
 

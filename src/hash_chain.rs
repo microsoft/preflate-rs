@@ -1,6 +1,9 @@
 use default_boxed::DefaultBoxed;
 
-use crate::{bit_helper::DebugHash, preflate_constants::MIN_MATCH, preflate_input::PreflateInput};
+use crate::{
+    bit_helper::DebugHash, preflate_constants::MIN_MATCH, preflate_input::PreflateInput,
+    preflate_token::PreflateTokenReference,
+};
 
 pub struct HashIterator<'a> {
     chain: &'a [u16],
@@ -74,7 +77,7 @@ pub struct HashChain<'a> {
     hash_shift: u32,
     running_hash: RotatingHash,
     hash_mask: u16,
-    total_shift: i32,
+    total_shift: u32,
 }
 
 #[derive(Default, Debug, Copy, Clone)]
@@ -101,7 +104,7 @@ impl<'a> HashChain<'a> {
 
         let mut hash_chain_ext = HashChain {
             input: PreflateInput::new(i),
-            total_shift: -8,
+            total_shift: 0,
             hash_shift: (hash_bits + MIN_MATCH - 1) / MIN_MATCH,
             hash_mask: hash_mask,
             hash_table: HashTable::default_boxed(),
@@ -141,19 +144,19 @@ impl<'a> HashChain<'a> {
     }
 
     fn reshift_if_necessary(&mut self) {
-        if self.input.pos() as i32 - self.total_shift >= 0xfe08 {
+        if self.input.pos() - self.total_shift >= 0xfd00 {
             const DELTA: usize = 0x7e00;
             for i in 0..=self.hash_mask as usize {
                 self.hash_table.head[i] = self.hash_table.head[i].saturating_sub(DELTA as u16);
             }
 
-            for i in (DELTA + 8)..(1 << 16) {
+            for i in DELTA..(1 << 16) {
                 self.hash_table.prev[i - DELTA] =
                     self.hash_table.prev[i].saturating_sub(DELTA as u16);
             }
 
-            self.hash_table.chain_depth.copy_within(8 + DELTA..65536, 8);
-            self.total_shift += DELTA as i32;
+            self.hash_table.chain_depth.copy_within(DELTA..65536, 0);
+            self.total_shift += DELTA as u32;
         }
     }
 
@@ -163,11 +166,6 @@ impl<'a> HashChain<'a> {
 
     pub fn get_node_depth(&self, node: u32) -> u32 {
         self.hash_table.chain_depth[node as usize]
-    }
-
-    pub fn get_rel_pos_depth(&self, ref_pos: u32, head: u32) -> i32 {
-        self.hash_table.chain_depth[head as usize] as i32
-            - self.hash_table.chain_depth[(ref_pos as i32 - self.total_shift) as usize] as i32
     }
 
     pub fn iterate_from_head(
@@ -180,7 +178,7 @@ impl<'a> HashChain<'a> {
         HashIterator::new(
             &self.hash_table.prev,
             &self.hash_table.chain_depth,
-            (ref_pos as i32 - self.total_shift) as u32,
+            (ref_pos - self.total_shift) as u32,
             max_dist,
             head.into(),
         )
@@ -190,9 +188,9 @@ impl<'a> HashChain<'a> {
         HashIterator::new(
             &self.hash_table.prev,
             &self.hash_table.chain_depth,
-            (ref_pos as i32 - self.total_shift) as u32,
+            (ref_pos - self.total_shift) as u32,
             max_dist,
-            (pos as i32 - self.total_shift) as u32,
+            (pos - self.total_shift) as u32,
         )
     }
 
@@ -224,7 +222,7 @@ impl<'a> HashChain<'a> {
 
         self.reshift_if_necessary();
 
-        let pos = (self.input.pos() as i32 - self.total_shift) as u16;
+        let pos = (self.input.pos() - self.total_shift) as u16;
 
         let limit = std::cmp::min(length + 2, self.input.remaining()) as u16;
 
@@ -253,7 +251,7 @@ impl<'a> HashChain<'a> {
         if remaining > 2 {
             self.update_running_hash(self.input.cur_char(2));
             let h = self.running_hash.hash(self.hash_mask);
-            let p = pos as i32 - self.total_shift;
+            let p = pos - self.total_shift;
             self.hash_table.chain_depth[p as usize] =
                 self.hash_table.chain_depth[self.hash_table.head[h as usize] as usize] + 1;
             self.hash_table.prev[p as usize] = self.hash_table.head[h as usize];
@@ -264,7 +262,7 @@ impl<'a> HashChain<'a> {
             // bad analysis results
             // --------------------
             for i in 1..l {
-                let p = (pos + i) as i32 - self.total_shift;
+                let p = (pos + i) - self.total_shift;
                 self.hash_table.chain_depth[p as usize] = 0xffff8000;
             }
 
@@ -280,5 +278,29 @@ impl<'a> HashChain<'a> {
 
         //let c = self.checksum_whole_struct();
         //println!("s {} = {}", l, c);
+    }
+
+    pub fn match_depth(
+        &self,
+        hash: RotatingHash,
+        target_reference: &PreflateTokenReference,
+        window_size: u32,
+    ) -> u32 {
+        let cur_pos = self.input().pos();
+        let cur_max_dist = std::cmp::min(cur_pos, window_size);
+
+        let start_depth = self.get_node_depth(self.get_head(hash));
+        let chain_it =
+            self.iterate_from_pos(cur_pos - target_reference.dist(), cur_pos, cur_max_dist);
+        if chain_it.pos() == 0 || target_reference.dist() > cur_max_dist {
+            return 0xffff;
+        }
+        let end_depth = chain_it.depth();
+
+        if start_depth < end_depth {
+            return 0xffff;
+        }
+
+        std::cmp::min(start_depth.wrapping_sub(end_depth), 0xffff)
     }
 }

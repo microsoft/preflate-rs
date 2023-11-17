@@ -91,6 +91,7 @@ impl<'a> CompLevelEstimatorState<'a> {
 
     fn check_match(&mut self, token: &PreflateTokenReference) {
         let hash_head = self.slow_hash.cur_hash();
+
         if self.slow_hash.input().pos() >= token.dist() as u32 {
             if self.info.possible_compression_levels & (1 << 1) != 0 {
                 if !Self::check_match_single_fast_hash(
@@ -130,13 +131,9 @@ impl<'a> CompLevelEstimatorState<'a> {
         if self.slow_hash.input().pos() >= token.dist() {
             self.info.reference_count += 1;
 
-            let mdepth = Self::match_depth(
-                self.slow_hash.get_head(hash_head),
-                token,
-                &self.slow_hash,
-                self.window_size(),
-                false,
-            );
+            let mdepth = self
+                .slow_hash
+                .match_depth(hash_head, token, self.window_size());
             if mdepth >= 0x8001 {
                 self.info.unfound_references += 1;
             } else {
@@ -253,37 +250,11 @@ impl<'a> CompLevelEstimatorState<'a> {
         hash_head: RotatingHash,
         window_size: u32,
     ) -> bool {
-        let mdepth = Self::match_depth(hash.get_head(hash_head), token, hash, window_size, true);
+        let mdepth = hash.match_depth(hash_head, token, window_size);
         if mdepth > config.max_chain {
             return false;
         }
         return true;
-    }
-
-    pub fn match_depth(
-        hash_head: u32,
-        target_reference: &PreflateTokenReference,
-        hash: &HashChain,
-        window_size: u32,
-        allow_nonmatch: bool,
-    ) -> u32 {
-        let cur_pos = hash.input().pos();
-        let cur_max_dist = std::cmp::min(cur_pos, window_size);
-
-        let start_depth = hash.get_node_depth(hash_head);
-        let chain_it =
-            hash.iterate_from_pos(cur_pos - target_reference.dist(), cur_pos, cur_max_dist);
-        if chain_it.pos() == 0 || target_reference.dist() > cur_max_dist {
-            return 0xffff;
-        }
-        let end_depth = chain_it.depth();
-
-        if start_depth < end_depth {
-            assert!(allow_nonmatch);
-            return 0xffff;
-        }
-
-        std::cmp::min(start_depth.wrapping_sub(end_depth), 0xffff)
     }
 
     fn window_size(&self) -> u32 {

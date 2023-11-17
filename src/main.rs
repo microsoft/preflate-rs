@@ -23,6 +23,10 @@ mod tree_predictor;
 mod zip_bit_reader;
 
 use anyhow::{self, Context};
+use cabac::{
+    debug::{DebugReader, DebugWriter},
+    vp8::{VP8Reader, VP8Writer},
+};
 use flate2::{read::GzEncoder, read::ZlibEncoder, Compression};
 use std::{
     env,
@@ -48,7 +52,7 @@ fn analyze_compressed_data_old(
 ) -> anyhow::Result<()> {
     let mut buffer = Vec::new();
 
-    let mut cabac_encoder = PredictionEncoderCabac::new(&mut buffer);
+    let mut cabac_encoder = PredictionEncoderCabac::new(VP8Writer::new(&mut buffer)?);
 
     let (compressed_processed, params, plain_text, original_blocks) =
         read_deflate(compressed_data, &mut cabac_encoder, 1).with_context(|| "read_deflate")?;
@@ -61,7 +65,7 @@ fn analyze_compressed_data_old(
 
     println!("buffer size: {}", buffer.len());
 
-    let mut cabac_decoder = PredictionDecoderCabac::new(Cursor::new(&buffer));
+    let mut cabac_decoder = PredictionDecoderCabac::new(VP8Reader::new(Cursor::new(&buffer))?);
 
     let (recompressed, recreated_blocks) =
         write_deflate(&plain_text, &params, &mut cabac_decoder).with_context(|| "write_deflate")?;
@@ -81,7 +85,7 @@ fn analyze_compressed_data_verify(
 ) -> anyhow::Result<()> {
     let mut buffer = Vec::new();
 
-    let cabac_encoder = PredictionEncoderCabac::new(&mut buffer);
+    let cabac_encoder = PredictionEncoderCabac::new(DebugWriter::new(&mut buffer)?);
     let debug_encoder = VerifyPredictionEncoder::new(false);
 
     let mut combined_encoder = (cabac_encoder, debug_encoder);
@@ -100,7 +104,7 @@ fn analyze_compressed_data_verify(
     println!("buffer size: {}", buffer.len());
 
     let debug_encoder = VerifyPredictionDecoder::new(actions, false);
-    let cabac_decoder = PredictionDecoderCabac::new(Cursor::new(&buffer));
+    let cabac_decoder = PredictionDecoderCabac::new(DebugReader::new(Cursor::new(&buffer))?);
 
     let (recompressed, recreated_blocks) =
         write_deflate(&plain_text, &params, &mut (cabac_decoder, debug_encoder))
@@ -190,7 +194,12 @@ fn main_with_result() -> anyhow::Result<()> {
         file.read_to_end(&mut v)?;
     }
 
-    let onlylevel: Option<u32> = None;
+    let onlylevel: Option<u32>;
+    if args.len() == 3 {
+        onlylevel = args[2].parse().ok();
+    } else {
+        onlylevel = None;
+    }
 
     // Zlib compression with different compression levels
     for level in 1..10 {
@@ -266,7 +275,7 @@ fn do_analyze(plain_text: &Vec<u8>, compressed_data: &[u8]) -> Result<(), anyhow
     let crc = crc32fast::hash(plain_text);
     let mut uncompressed_size = 0;
 
-    analyze_compressed_data_old(compressed_data, crc, 10, &mut uncompressed_size)?;
+    analyze_compressed_data_verify(compressed_data, crc, 10, &mut uncompressed_size)?;
     Ok(())
 }
 
