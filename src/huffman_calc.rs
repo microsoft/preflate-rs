@@ -1,4 +1,22 @@
-pub mod calc_minzoxide {
+#[allow(dead_code)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum HufftreeBitCalc {
+    Zlib,
+    Miniz,
+}
+
+pub fn calc_bit_lengths(
+    bit_calc: HufftreeBitCalc,
+    sym_count: &[u16],
+    code_size_limit: usize,
+) -> Vec<u8> {
+    match bit_calc {
+        HufftreeBitCalc::Zlib => calc_zlib::calc_bit_lengths(sym_count, code_size_limit),
+        HufftreeBitCalc::Miniz => calc_minzoxide::calc_bit_lengths(sym_count, code_size_limit),
+    }
+}
+
+mod calc_minzoxide {
     use std::mem;
 
     const MAX_SUPPORTED_HUFF_CODESIZE: usize = 32;
@@ -207,7 +225,7 @@ pub mod calc_minzoxide {
     }
 }
 
-pub mod calc_zlib {
+mod calc_zlib {
     #[derive(Copy, Clone, Debug)]
     enum HuffTree {
         Leaf(usize),

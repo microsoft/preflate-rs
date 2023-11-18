@@ -10,13 +10,13 @@ mod huffman_encoding;
 mod huffman_helper;
 mod predictor_state;
 mod preflate_constants;
+mod preflate_error;
 mod preflate_input;
 mod preflate_parameter_estimator;
 mod preflate_parse_config;
 mod preflate_stream_info;
 mod preflate_token;
 mod process;
-mod seq_chain;
 mod statistical_codec;
 mod token_predictor;
 mod tree_predictor;
@@ -25,7 +25,6 @@ mod zip_bit_reader;
 use anyhow::{self, Context};
 use cabac::{
     debug::{DebugReader, DebugWriter},
-    h265::{H265Reader, H265Writer},
     vp8::{VP8Reader, VP8Writer},
 };
 use flate2::{read::GzEncoder, read::ZlibEncoder, Compression};
@@ -35,28 +34,28 @@ use std::{
     io::{Cursor, Read, Write},
 };
 
-mod zip_structs;
-
 use crate::{
     cabac_codec::{PredictionDecoderCabac, PredictionEncoderCabac},
     process::{read_deflate, write_deflate},
-    statistical_codec::{
-        PredictionDecoder, PredictionEncoder, VerifyPredictionDecoder, VerifyPredictionEncoder,
-    },
+    statistical_codec::{PredictionEncoder, VerifyPredictionDecoder, VerifyPredictionEncoder},
 };
 
-fn analyze_compressed_data_old(
+fn analyze_compressed_data_fast(
     compressed_data: &[u8],
-    header_crc32: u32,
-    deflate_info_dump_level: i32,
+    header_crc32: Option<u32>,
     uncompressed_size: &mut u64,
 ) -> anyhow::Result<()> {
     let mut buffer = Vec::new();
 
     let mut cabac_encoder = PredictionEncoderCabac::new(VP8Writer::new(&mut buffer)?);
 
-    let (compressed_processed, params, plain_text, original_blocks) =
-        read_deflate(compressed_data, &mut cabac_encoder, 1).with_context(|| "read_deflate")?;
+    let (compressed_processed, _params, plain_text, _original_blocks) =
+        read_deflate(compressed_data, &mut cabac_encoder, 1)?;
+
+    if let Some(crc) = header_crc32 {
+        let result_crc = crc32fast::hash(&plain_text);
+        assert_eq!(result_crc, crc);
+    }
 
     assert_eq!(compressed_processed, compressed_data.len());
 
@@ -68,8 +67,8 @@ fn analyze_compressed_data_old(
 
     let mut cabac_decoder = PredictionDecoderCabac::new(VP8Reader::new(Cursor::new(&buffer))?);
 
-    let (recompressed, recreated_blocks) =
-        write_deflate(&plain_text, &params, &mut cabac_decoder).with_context(|| "write_deflate")?;
+    let (recompressed, _recreated_blocks) =
+        write_deflate(&plain_text, &mut cabac_decoder).with_context(|| "write_deflate")?;
 
     assert!(recompressed[..] == compressed_data[..]);
 
@@ -91,7 +90,7 @@ fn analyze_compressed_data_verify(
 
     let mut combined_encoder = (cabac_encoder, debug_encoder);
 
-    let (compressed_processed, params, plain_text, original_blocks) =
+    let (compressed_processed, _params, plain_text, original_blocks) =
         read_deflate(compressed_data, &mut combined_encoder, 1).with_context(|| "read_deflate")?;
 
     assert_eq!(compressed_processed, compressed_data.len());
@@ -108,7 +107,7 @@ fn analyze_compressed_data_verify(
     let cabac_decoder = PredictionDecoderCabac::new(DebugReader::new(Cursor::new(&buffer))?);
 
     let (recompressed, recreated_blocks) =
-        write_deflate(&plain_text, &params, &mut (cabac_decoder, debug_encoder))
+        write_deflate(&plain_text, &mut (cabac_decoder, debug_encoder))
             .with_context(|| "write_deflate")?;
 
     assert_eq!(original_blocks.len(), recreated_blocks.len());
@@ -202,6 +201,8 @@ fn main_with_result() -> anyhow::Result<()> {
         onlylevel = None;
     }
 
+    let verify = true;
+
     // Zlib compression with different compression levels
     for level in 1..10 {
         if let Some(x) = onlylevel {
@@ -239,7 +240,7 @@ fn main_with_result() -> anyhow::Result<()> {
         }
 
         if output.len() != 0 {
-            do_analyze(&v, minusheader)?;
+            do_analyze(&v, minusheader, verify)?;
         }
     }
 
@@ -258,7 +259,7 @@ fn main_with_result() -> anyhow::Result<()> {
         zlib_encoder.read_to_end(&mut output).unwrap();
 
         // skip header and final crc
-        do_analyze(&v, &output[2..output.len() - 4])?;
+        do_analyze(&v, &output[2..output.len() - 4], verify)?;
     }
     /*
         // Gzip compression with different compression levels
@@ -272,11 +273,19 @@ fn main_with_result() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn do_analyze(plain_text: &Vec<u8>, compressed_data: &[u8]) -> Result<(), anyhow::Error> {
+fn do_analyze(
+    plain_text: &Vec<u8>,
+    compressed_data: &[u8],
+    verify: bool,
+) -> Result<(), anyhow::Error> {
     let crc = crc32fast::hash(plain_text);
     let mut uncompressed_size = 0;
 
-    analyze_compressed_data_old(compressed_data, crc, 10, &mut uncompressed_size)?;
+    if verify {
+        analyze_compressed_data_fast(compressed_data, Some(crc), &mut uncompressed_size)?;
+    } else {
+        analyze_compressed_data_verify(compressed_data, crc, 1, &mut uncompressed_size)?;
+    }
     Ok(())
 }
 

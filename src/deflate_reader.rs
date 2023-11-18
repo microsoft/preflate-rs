@@ -17,11 +17,11 @@ pub struct DeflateReader<'a, R> {
 }
 
 impl<'a, R: Read + Seek> DeflateReader<'a, R> {
-    pub fn new(compressed_text: &'a mut R, max_readable_bytes: i64) -> anyhow::Result<Self> {
-        Ok(DeflateReader {
-            input: ZipBitReader::new(compressed_text, max_readable_bytes)?,
+    pub fn new(compressed_text: &'a mut R, max_readable_bytes: i64) -> Self {
+        DeflateReader {
+            input: ZipBitReader::new(compressed_text, max_readable_bytes),
             plain_text: Vec::new(),
-        })
+        }
     }
 
     /// reads the padding at the end of the file

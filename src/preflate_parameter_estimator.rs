@@ -5,6 +5,7 @@ use crate::{
     preflate_parse_config::*,
     preflate_stream_info::{extract_preflate_info, PreflateStreamInfo},
     preflate_token::PreflateTokenBlock,
+    statistical_codec::{PredictionDecoder, PredictionEncoder},
 };
 
 #[derive(Debug, Copy, Clone)]
@@ -38,6 +39,70 @@ pub struct PreflateParameters {
     pub max_lazy: u32,
     pub nice_length: u32,
     pub max_chain: u32,
+}
+
+impl PreflateParameters {
+    pub fn read<D: PredictionDecoder>(decoder: &mut D) -> Self {
+        let strategy = decoder.decode_value(4);
+        let huff_strategy = decoder.decode_value(4);
+        let zlib_compatible = decoder.decode_value(1) != 0;
+        let window_bits = decoder.decode_value(8);
+        let mem_level = decoder.decode_value(8);
+        let far_len3_matches_detected = decoder.decode_value(1) != 0;
+        let very_far_matches_detected = decoder.decode_value(1) != 0;
+        let matches_to_start_detected = decoder.decode_value(1) != 0;
+        let log2_of_max_chain_depth_m1 = decoder.decode_value(16);
+        let is_fast_compressor = decoder.decode_value(1) != 0;
+        let good_length = decoder.decode_value(16);
+        let max_lazy = decoder.decode_value(16);
+        let nice_length = decoder.decode_value(16);
+        let max_chain = decoder.decode_value(16);
+
+        PreflateParameters {
+            strategy: match strategy {
+                0 => PreflateStrategy::PreflateDefault,
+                1 => PreflateStrategy::PreflateRleOnly,
+                2 => PreflateStrategy::PreflateHuffOnly,
+                3 => PreflateStrategy::PreflateStore,
+                _ => panic!("invalid strategy"),
+            },
+            huff_strategy: match huff_strategy {
+                0 => PreflateHuffStrategy::PreflateHuffDynamic,
+                1 => PreflateHuffStrategy::PreflateHuffMixed,
+                2 => PreflateHuffStrategy::PreflateHuffStatic,
+                _ => panic!("invalid huff strategy"),
+            },
+            zlib_compatible,
+            window_bits: window_bits.into(),
+            mem_level: mem_level.into(),
+            far_len3_matches_detected,
+            very_far_matches_detected,
+            matches_to_start_detected,
+            log2_of_max_chain_depth_m1: log2_of_max_chain_depth_m1.into(),
+            is_fast_compressor,
+            good_length: good_length.into(),
+            max_lazy: max_lazy.into(),
+            nice_length: nice_length.into(),
+            max_chain: max_chain.into(),
+        }
+    }
+
+    pub fn write<E: PredictionEncoder>(&self, encoder: &mut E) {
+        encoder.encode_value(self.strategy as u16, 4);
+        encoder.encode_value(self.huff_strategy as u16, 4);
+        encoder.encode_value(self.zlib_compatible as u16, 1);
+        encoder.encode_value(self.window_bits as u16, 8);
+        encoder.encode_value(self.mem_level as u16, 8);
+        encoder.encode_value(self.far_len3_matches_detected as u16, 1);
+        encoder.encode_value(self.very_far_matches_detected as u16, 1);
+        encoder.encode_value(self.matches_to_start_detected as u16, 1);
+        encoder.encode_value(self.log2_of_max_chain_depth_m1 as u16, 16);
+        encoder.encode_value(self.is_fast_compressor as u16, 1);
+        encoder.encode_value(self.good_length as u16, 16);
+        encoder.encode_value(self.max_lazy as u16, 16);
+        encoder.encode_value(self.nice_length as u16, 16);
+        encoder.encode_value(self.max_chain as u16, 16);
+    }
 }
 
 fn estimate_preflate_mem_level(max_block_size_: u32) -> u32 {

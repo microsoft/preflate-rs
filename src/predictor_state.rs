@@ -3,7 +3,6 @@ use crate::hash_chain::{HashChain, RotatingHash};
 use crate::preflate_constants::{MAX_MATCH, MIN_LOOKAHEAD, MIN_MATCH};
 use crate::preflate_parameter_estimator::PreflateParameters;
 use crate::preflate_token::PreflateTokenReference;
-use crate::seq_chain::SeqChain;
 use std::cmp;
 
 #[derive(Debug, Copy, Clone)]
@@ -23,7 +22,6 @@ pub struct PreflateRematchInfo {
 
 pub struct PredictorState<'a> {
     hash: HashChain<'a>,
-    seq: SeqChain<'a>,
     params: PreflateParameters,
     window_bytes: u32,
 }
@@ -32,7 +30,6 @@ impl<'a> PredictorState<'a> {
     pub fn new(uncompressed: &'a [u8], params: &PreflateParameters) -> Self {
         Self {
             hash: HashChain::new(uncompressed, params.mem_level),
-            seq: SeqChain::new(uncompressed),
             window_bytes: 1 << params.window_bits,
             params: *params,
         }
@@ -41,7 +38,6 @@ impl<'a> PredictorState<'a> {
     #[allow(dead_code)]
     pub fn checksum(&self, checksum: &mut DebugHash) {
         self.hash.checksum(checksum);
-        self.seq.checksum(checksum);
     }
 
     pub fn update_running_hash(&mut self, b: u8) {
@@ -54,10 +50,6 @@ impl<'a> PredictorState<'a> {
 
     pub fn skip_hash(&mut self, pos: u32) {
         self.hash.skip_hash(pos);
-    }
-
-    pub fn update_seq(&mut self, pos: u32) {
-        self.seq.update_seq(pos);
     }
 
     pub fn current_input_pos(&self) -> u32 {

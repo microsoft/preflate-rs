@@ -1,15 +1,13 @@
 use std::io::Cursor;
 
-use anyhow::{Context, Result};
-
 use crate::{
     deflate_reader::DeflateReader,
     deflate_writer::DeflateWriter,
+    huffman_calc::HufftreeBitCalc,
+    preflate_error::PreflateError,
     preflate_parameter_estimator::{estimate_preflate_parameters, PreflateParameters},
     preflate_token::{BlockType, PreflateTokenBlock},
-    statistical_codec::{
-        CodecCorrection, CodecMisprediction, PredictionDecoder, PredictionEncoder,
-    },
+    statistical_codec::{CodecMisprediction, PredictionDecoder, PredictionEncoder},
     token_predictor::TokenPredictor,
     tree_predictor::{predict_tree_for_block, recreate_tree_for_block},
 };
@@ -20,16 +18,16 @@ pub fn read_deflate<E: PredictionEncoder>(
     compressed_data: &[u8],
     encoder: &mut E,
     deflate_info_dump_level: u32,
-) -> Result<(usize, PreflateParameters, Vec<u8>, Vec<PreflateTokenBlock>)> {
+) -> Result<(usize, PreflateParameters, Vec<u8>, Vec<PreflateTokenBlock>), PreflateError> {
     let mut input_stream = Cursor::new(compressed_data);
-    let mut block_decoder = DeflateReader::new(&mut input_stream, compressed_data.len() as i64)?;
+    let mut block_decoder = DeflateReader::new(&mut input_stream, compressed_data.len() as i64);
 
     let mut blocks = Vec::new();
     let mut last = false;
     while !last {
         let block = block_decoder
             .read_block(&mut last)
-            .with_context(|| "read block")?;
+            .map_err(|e| PreflateError::ReadBlock(blocks.len(), e))?;
 
         if deflate_info_dump_level > 0 {
             // Log information about this deflate compressed block
@@ -42,6 +40,8 @@ pub fn read_deflate<E: PredictionEncoder>(
     let eof_padding = block_decoder.read_eof_padding();
 
     let params_e = estimate_preflate_parameters(block_decoder.get_plain_text(), &blocks);
+
+    params_e.write(encoder);
 
     if deflate_info_dump_level > 0 {
         println!("prediction parameters: {:?}", params_e);
@@ -56,11 +56,16 @@ pub fn read_deflate<E: PredictionEncoder>(
 
         token_predictor_in
             .predict_block(&blocks[i], encoder, i == blocks.len() - 1)
-            .with_context(|| format!("encode_block {}", i))?;
+            .map_err(|e| PreflateError::PredictBlock(i, e))?;
 
         if blocks[i].block_type == BlockType::DynamicHuff {
-            predict_tree_for_block(&blocks[i].huffman_encoding, &blocks[i].freq, encoder)
-                .with_context(|| format!("predict_tree_for_block {}", i))?;
+            predict_tree_for_block(
+                &blocks[i].huffman_encoding,
+                &blocks[i].freq,
+                encoder,
+                HufftreeBitCalc::Zlib,
+            )
+            .map_err(|e| PreflateError::PredictTree(i, e))?;
         }
     }
 
@@ -81,10 +86,10 @@ pub fn read_deflate<E: PredictionEncoder>(
 
 pub fn write_deflate<D: PredictionDecoder>(
     plain_text: &[u8],
-    params: &PreflateParameters,
     decoder: &mut D,
-) -> Result<(Vec<u8>, Vec<PreflateTokenBlock>)> {
-    let mut token_predictor = TokenPredictor::new(plain_text, params, 0);
+) -> Result<(Vec<u8>, Vec<PreflateTokenBlock>), PreflateError> {
+    let params = PreflateParameters::read(decoder);
+    let mut token_predictor = TokenPredictor::new(plain_text, &params, 0);
 
     let mut output_blocks = Vec::new();
 
@@ -96,16 +101,20 @@ pub fn write_deflate<D: PredictionDecoder>(
     while !is_eof {
         let mut block = token_predictor
             .recreate_block(decoder)
-            .with_context(|| format!("recreate_block {}", output_blocks.len()))?;
+            .map_err(|e| PreflateError::RecreateBlock(output_blocks.len(), e))?;
 
         if block.block_type == BlockType::DynamicHuff {
-            block.huffman_encoding = recreate_tree_for_block(&block.freq, decoder)?;
+            block.huffman_encoding =
+                recreate_tree_for_block(&block.freq, decoder, HufftreeBitCalc::Zlib)
+                    .map_err(|e| PreflateError::RecreateTree(output_blocks.len(), e))?;
         }
 
         is_eof = token_predictor.input_eof()
             && !decoder.decode_misprediction(CodecMisprediction::EOFMisprediction);
 
-        deflate_encoder.encode_block(&block, is_eof)?;
+        deflate_encoder
+            .encode_block(&block, is_eof)
+            .map_err(|e| PreflateError::EncodeBlock(output_blocks.len(), e))?;
 
         output_blocks.push(block);
     }

@@ -86,7 +86,7 @@ fn write_roundtrip() {
 
     let len = data_buffer.len() as i64;
     let mut cursor = std::io::Cursor::new(data_buffer);
-    let mut reader = ZipBitReader::new(&mut cursor, len).unwrap();
+    let mut reader = ZipBitReader::new(&mut cursor, len);
 
     for &(bits, len) in pattern.iter() {
         assert_eq!(reader.get(len).unwrap(), bits);

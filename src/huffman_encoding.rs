@@ -380,7 +380,7 @@ fn roundtrip_huffman_bitreadwrite() {
 
     let data_buffer_size = data_buffer.len();
     let mut reader = Cursor::new(&data_buffer);
-    let mut bit_reader = ZipBitReader::new(&mut reader, data_buffer_size as i64).unwrap();
+    let mut bit_reader = ZipBitReader::new(&mut reader, data_buffer_size as i64);
 
     let huffman_tree = calculate_huffman_code_tree(&code_lengths).unwrap();
 
@@ -478,7 +478,7 @@ fn rountrip_test(encoding: HuffmanOriginalEncoding) {
 
     // now re-read the encoding
     let mut reader = Cursor::new(&output_buffer);
-    let mut bit_reader = ZipBitReader::new(&mut reader, output_buffer.len() as i64).unwrap();
+    let mut bit_reader = ZipBitReader::new(&mut reader, output_buffer.len() as i64);
     let encoding2 = HuffmanOriginalEncoding::read(&mut bit_reader).unwrap();
     assert_eq!(encoding, encoding2);
 

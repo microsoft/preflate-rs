@@ -1,13 +1,11 @@
 use crate::{
-    bit_helper::DebugHash,
     cabac_codec::{decode_difference, encode_difference},
-    huffman_calc::calc_zlib::calc_bit_lengths,
+    huffman_calc::{calc_bit_lengths, HufftreeBitCalc},
     huffman_encoding::{HuffmanOriginalEncoding, TreeCodeType},
     preflate_constants::{CODETREE_CODE_COUNT, NONLEN_CODE_COUNT, TREE_CODE_ORDER_TABLE},
     preflate_token::TokenFrequency,
     statistical_codec::{
         CodecCorrection, CodecMisprediction, PredictionDecoder, PredictionEncoder,
-        VerifyPredictionDecoder, VerifyPredictionEncoder,
     },
 };
 
@@ -15,21 +13,22 @@ pub fn predict_tree_for_block<D: PredictionEncoder>(
     huffman_encoding: &HuffmanOriginalEncoding,
     freq: &TokenFrequency,
     encoder: &mut D,
+    huffcalc: HufftreeBitCalc,
 ) -> anyhow::Result<()> {
     encoder.encode_verify_state("tree", 0);
 
     // bit_lengths is a vector of huffman code sizes for literals followed by length codes
     // first predict the size of the literal tree
-    let mut bit_lengths = calc_bit_lengths(&freq.literal_codes, 15);
+    let mut bit_lengths = calc_bit_lengths(huffcalc, &freq.literal_codes, 15);
 
-    let (ao, bo) = huffman_encoding.get_literal_distance_lengths();
     /*
+    let (ao, bo) = huffman_encoding.get_literal_distance_lengths();
      bit_lengths.iter().zip(ao.iter()).enumerate().for_each(|(i, (&a, &b))| {
          assert_eq!(a, b, "i{i} bit_lengths: {:?} ao: {:?}", bit_lengths, ao);
      });
      assert_eq!(bit_lengths[..], ao[..]);
-
     */
+
     encoder.encode_misprediction(
         CodecMisprediction::LiteralCountMisprediction,
         bit_lengths.len() != huffman_encoding.num_literals,
@@ -43,7 +42,7 @@ pub fn predict_tree_for_block<D: PredictionEncoder>(
     }
 
     // now predict the size of the distance tree
-    let mut distance_code_lengths = calc_bit_lengths(&freq.distance_codes, 15);
+    let mut distance_code_lengths = calc_bit_lengths(huffcalc, &freq.distance_codes, 15);
     //assert_eq!(distance_code_lengths[..], bo[..]);
 
     encoder.encode_misprediction(
@@ -67,7 +66,7 @@ pub fn predict_tree_for_block<D: PredictionEncoder>(
     // to store the bit lengths of the huffman tree we just created
     let codetree_freq = calc_codetree_freq(&huffman_encoding.lengths);
 
-    let mut tc_code_tree = calc_bit_lengths(&codetree_freq, 7);
+    let mut tc_code_tree = calc_bit_lengths(huffcalc, &codetree_freq, 7);
 
     let tc_code_tree_len = calc_tc_lengths_without_trailing_zeros(&tc_code_tree);
 
@@ -99,12 +98,13 @@ pub fn predict_tree_for_block<D: PredictionEncoder>(
 pub fn recreate_tree_for_block<D: PredictionDecoder>(
     freq: &TokenFrequency,
     codec: &mut D,
+    huffcalc: HufftreeBitCalc,
 ) -> anyhow::Result<HuffmanOriginalEncoding> {
     codec.decode_verify_state("tree", 0);
 
     let mut result: HuffmanOriginalEncoding = Default::default();
 
-    let mut bit_lengths = calc_bit_lengths(&freq.literal_codes, 15);
+    let mut bit_lengths = calc_bit_lengths(huffcalc, &freq.literal_codes, 15);
 
     if codec.decode_misprediction(CodecMisprediction::LiteralCountMisprediction) {
         let corrected_num_literals = codec.decode_value(5) as usize + NONLEN_CODE_COUNT;
@@ -113,7 +113,7 @@ pub fn recreate_tree_for_block<D: PredictionDecoder>(
 
     result.num_literals = bit_lengths.len();
 
-    let mut distance_code_lengths = calc_bit_lengths(&freq.distance_codes, 15);
+    let mut distance_code_lengths = calc_bit_lengths(huffcalc, &freq.distance_codes, 15);
 
     if codec.decode_misprediction(CodecMisprediction::DistanceCountMisprediction) {
         let corrected_num_distance = codec.decode_value(5) as usize + 1;
@@ -129,7 +129,7 @@ pub fn recreate_tree_for_block<D: PredictionDecoder>(
 
     let bl_freqs = calc_codetree_freq(&result.lengths);
 
-    let mut tc_code_tree = calc_bit_lengths(&bl_freqs, 7);
+    let mut tc_code_tree = calc_bit_lengths(huffcalc, &bl_freqs, 7);
 
     let mut tc_code_tree_len = calc_tc_lengths_without_trailing_zeros(&tc_code_tree);
 
@@ -382,6 +382,7 @@ fn predict_code_data(sym_bit_len: &[u8], code_type: TreeCodeType) -> u8 {
 #[test]
 fn encode_roundtrip_perfect() {
     use crate::statistical_codec::DefaultOnlyDecoder;
+    use crate::statistical_codec::VerifyPredictionEncoder;
 
     let mut freq = TokenFrequency::default();
     freq.literal_codes[0] = 100;
@@ -393,7 +394,8 @@ fn encode_roundtrip_perfect() {
     freq.distance_codes[2] = 25;
 
     let mut empty_decoder = DefaultOnlyDecoder {};
-    let regenerated_header = recreate_tree_for_block(&freq, &mut empty_decoder).unwrap();
+    let regenerated_header =
+        recreate_tree_for_block(&freq, &mut empty_decoder, HufftreeBitCalc::Zlib).unwrap();
 
     println!("regenerated_header: {:?}", regenerated_header);
 
@@ -404,7 +406,13 @@ fn encode_roundtrip_perfect() {
     assert_eq!(regenerated_header.lengths[2], (TreeCodeType::Code, 3));
 
     let mut empty_encoder = VerifyPredictionEncoder::default();
-    predict_tree_for_block(&regenerated_header, &freq, &mut empty_encoder).unwrap();
+    predict_tree_for_block(
+        &regenerated_header,
+        &freq,
+        &mut empty_encoder,
+        HufftreeBitCalc::Zlib,
+    )
+    .unwrap();
     assert_eq!(empty_encoder.count_nondefault_actions(), 0);
 
     println!("regenerated_header: {:?}", regenerated_header);
@@ -412,7 +420,7 @@ fn encode_roundtrip_perfect() {
 
 #[test]
 fn encode_perfect_encoding() {
-    use crate::statistical_codec::DefaultOnlyDecoder;
+    use crate::statistical_codec::{DefaultOnlyDecoder, VerifyPredictionEncoder};
 
     let mut freq = TokenFrequency::default();
     // fill with random frequencies
@@ -428,17 +436,24 @@ fn encode_perfect_encoding() {
 
     // use the default encoder the says that everything is ok
     let mut default_only_decoder = DefaultOnlyDecoder {};
-    let default_encoding = recreate_tree_for_block(&freq, &mut default_only_decoder).unwrap();
+    let default_encoding =
+        recreate_tree_for_block(&freq, &mut default_only_decoder, HufftreeBitCalc::Zlib).unwrap();
 
     // now predict the encoding using the default encoding and it should be perfect
     let mut empty_encoder = VerifyPredictionEncoder::default();
-    predict_tree_for_block(&default_encoding, &freq, &mut empty_encoder).unwrap();
+    predict_tree_for_block(
+        &default_encoding,
+        &freq,
+        &mut empty_encoder,
+        HufftreeBitCalc::Zlib,
+    )
+    .unwrap();
     assert_eq!(empty_encoder.count_nondefault_actions(), 0);
 }
 
 #[test]
 fn encode_tree_roundtrip() {
-    use crate::statistical_codec::VerifyPredictionEncoder;
+    use crate::statistical_codec::{VerifyPredictionDecoder, VerifyPredictionEncoder};
 
     let mut freq = TokenFrequency::default();
     freq.literal_codes[0] = 100;
@@ -469,11 +484,12 @@ fn encode_tree_roundtrip() {
 
     let mut encoder = VerifyPredictionEncoder::default();
 
-    predict_tree_for_block(&huff_origin, &freq, &mut encoder).unwrap();
+    predict_tree_for_block(&huff_origin, &freq, &mut encoder, HufftreeBitCalc::Zlib).unwrap();
 
     let mut decoder = VerifyPredictionDecoder::new(encoder.actions(), false);
 
-    let regenerated_header = recreate_tree_for_block(&freq, &mut decoder).unwrap();
+    let regenerated_header =
+        recreate_tree_for_block(&freq, &mut decoder, HufftreeBitCalc::Zlib).unwrap();
 
     assert_eq!(huff_origin, regenerated_header);
 }

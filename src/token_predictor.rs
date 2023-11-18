@@ -43,10 +43,8 @@ impl<'a> TokenPredictor<'a> {
 
             r.state.update_running_hash(b0);
             r.state.update_running_hash(b1);
-            r.state.update_seq(2);
         }
         r.state.update_hash(offset);
-        r.state.update_seq(offset);
 
         r
     }
@@ -80,7 +78,6 @@ impl<'a> TokenPredictor<'a> {
                 codec.encode_value(block.padding_bits.into(), 8);
             }
             self.state.update_hash(block.uncompressed_len as u32);
-            self.state.update_seq(block.uncompressed_len as u32);
 
             return Ok(());
         }
@@ -244,7 +241,6 @@ impl<'a> TokenPredictor<'a> {
                     block.padding_bits = codec.decode_value(8) as u8;
                 }
                 self.state.update_hash(block.uncompressed_len);
-                self.state.update_seq(block.uncompressed_len);
                 return Ok(block);
             }
             BT_STATICHUFF => {
@@ -485,7 +481,6 @@ impl<'a> TokenPredictor<'a> {
                 }
 
                 self.state.update_hash(1);
-                self.state.update_seq(1);
             }
             PreflateToken::Reference(t) => {
                 if let Some(block) = block {
@@ -499,7 +494,6 @@ impl<'a> TokenPredictor<'a> {
                 } else {
                     self.state.update_hash(t.len());
                 }
-                self.state.update_seq(t.len());
             }
         }
 

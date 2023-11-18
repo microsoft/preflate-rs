@@ -231,6 +231,8 @@ impl<W: CabacWriter<CTX>, CTX: Default> PredictionEncoderCabac<W, CTX> {
         }
     }
 
+    /// for debugging
+    #[allow(dead_code)]
     pub fn print(&self) {
         self.count.print();
         println!("bypass bits: {} bytes", self.context.bypass_bits / 8)
@@ -332,7 +334,8 @@ enum Operation {
 
 #[test]
 fn roundtree_cabac_correction() {
-    use cabac::vp8::{VP8Reader, VP8Writer};
+    // use the debug version of the cabac writer/reader to make sure that the we don't mix up contexts anywhere
+    use cabac::debug::{DebugReader, DebugWriter};
     use std::io::Cursor;
 
     // generate a random set of operations
@@ -353,7 +356,7 @@ fn roundtree_cabac_correction() {
     let mut buffer = Vec::new();
 
     let mut context = PredictionCabacContext::default();
-    let mut writer = VP8Writer::new(&mut buffer).unwrap();
+    let mut writer = DebugWriter::new(&mut buffer).unwrap();
 
     for &o in operations.iter() {
         match o {
@@ -371,7 +374,7 @@ fn roundtree_cabac_correction() {
     writer.finish().unwrap();
 
     context = PredictionCabacContext::default();
-    let mut reader = VP8Reader::new(Cursor::new(&buffer)).unwrap();
+    let mut reader = DebugReader::new(Cursor::new(&buffer)).unwrap();
 
     for &o in operations.iter() {
         match o {
@@ -409,12 +412,7 @@ fn roundtrip_cabac_write_value() {
     ];
 
     for i in 0..10 {
-        PredictionCabacContext::write_value(
-            i * 13,
-            &mut context,
-            &mut context_bits,
-            &mut writer,
-        );
+        PredictionCabacContext::write_value(i * 13, &mut context, &mut context_bits, &mut writer);
     }
 
     writer.finish().unwrap();

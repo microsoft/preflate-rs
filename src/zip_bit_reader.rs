@@ -11,7 +11,6 @@ pub struct ZipBitReader<'a, R> {
     max_readable_bytes: i64, // Data can be read up to and including this position. Use to detect corruption. If negative no checking is done
     count_of_bits_in_buffer: u32, // Number of bits in m_returnValueBuffer
     return_value_buffer: u64, // Buffer used to assemble bits for the caller
-    initial_position_in_binary_reader: i64, // Initial byte offset into underlying stream
 }
 
 impl<'a, R: Read + Seek> ReadBits for ZipBitReader<'_, R> {
@@ -21,15 +20,13 @@ impl<'a, R: Read + Seek> ReadBits for ZipBitReader<'_, R> {
 }
 
 impl<'a, R: Read + Seek> ZipBitReader<'a, R> {
-    pub fn new(binary_reader: &'a mut R, max_readable_bytes: i64) -> anyhow::Result<Self> {
-        let initial_position = binary_reader.stream_position()?;
-        Ok(ZipBitReader {
+    pub fn new(binary_reader: &'a mut R, max_readable_bytes: i64) -> Self {
+        ZipBitReader {
             binary_reader,
             max_readable_bytes,
             count_of_bits_in_buffer: 0,
             return_value_buffer: 0,
-            initial_position_in_binary_reader: initial_position as i64,
-        })
+        }
     }
 
     /// Call to Ensure the buffer populated with at least 1 bit from the current
@@ -90,29 +87,6 @@ impl<'a, R: Read + Seek> ZipBitReader<'a, R> {
         self.count_of_bits_in_buffer = 0;
 
         Ok(())
-    }
-
-    /// <summary>
-    /// returns the current position in the BaseStream that next ReadBit call would return data from.
-    /// </summary>
-    pub fn position(&mut self) -> anyhow::Result<i64> {
-        let result = self.binary_reader.stream_position()?
-            - (match self.count_of_bits_in_buffer == 0 {
-                true => 0,
-                false => 1 + ((self.count_of_bits_in_buffer - 1) / 8),
-            }) as u64;
-
-        Ok(result as i64)
-    }
-
-    pub fn bit_position(&mut self) -> anyhow::Result<i64> {
-        let result = self.position()? * 8 + self.bit_position_in_current_byte() as i64;
-        Ok(result)
-    }
-
-    pub fn relative_position(&mut self) -> anyhow::Result<i64> {
-        let result = self.position()? - self.initial_position_in_binary_reader;
-        Ok(result)
     }
 
     pub fn bit_position_in_current_byte(&self) -> u32 {

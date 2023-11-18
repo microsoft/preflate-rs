@@ -1,0 +1,33 @@
+use std::fmt::Display;
+
+#[allow(dead_code)]
+#[derive(Debug)]
+pub enum PreflateError {
+    ReadDeflate(anyhow::Error),
+    RecompressFailed(anyhow::Error),
+    Mismatch(anyhow::Error),
+    ReadBlock(usize, anyhow::Error),
+    PredictBlock(usize, anyhow::Error),
+    PredictTree(usize, anyhow::Error),
+    RecreateBlock(usize, anyhow::Error),
+    RecreateTree(usize, anyhow::Error),
+    EncodeBlock(usize, anyhow::Error),
+}
+
+impl Display for PreflateError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PreflateError::ReadDeflate(e) => write!(f, "ReadDeflate: {}", e),
+            PreflateError::Mismatch(e) => write!(f, "Mismatch: {}", e),
+            PreflateError::ReadBlock(i, e) => write!(f, "ReadBlock[{}]: {}", i, e),
+            PreflateError::PredictBlock(i, e) => write!(f, "PredictBlock[{}]: {}", i, e),
+            PreflateError::PredictTree(i, e) => write!(f, "PredictTree[{}]: {}", i, e),
+            PreflateError::RecreateBlock(i, e) => write!(f, "RecreateBlock[{}]: {}", i, e),
+            PreflateError::RecreateTree(i, e) => write!(f, "RecreateTree[{}]: {}", i, e),
+            PreflateError::EncodeBlock(i, e) => write!(f, "EncodeBlock[{}]: {}", i, e),
+            PreflateError::RecompressFailed(e) => write!(f, "RecompressFailed: {}", e),
+        }
+    }
+}
+
+impl std::error::Error for PreflateError {}

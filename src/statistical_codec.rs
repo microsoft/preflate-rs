@@ -126,6 +126,8 @@ pub struct VerifyPredictionEncoder {
     count: CountNonDefaultActions,
 }
 
+// used for testing mostly
+#[allow(dead_code)]
 impl VerifyPredictionEncoder {
     pub fn new(verify: bool) -> Self {
         Self {
@@ -173,6 +175,8 @@ impl PredictionEncoder for VerifyPredictionEncoder {
     fn finish(&mut self) {}
 }
 
+// used for testing mostly
+#[allow(dead_code)]
 impl VerifyPredictionDecoder {
     pub fn new(actions: Vec<CodecAction>, verify: bool) -> Self {
         Self {
