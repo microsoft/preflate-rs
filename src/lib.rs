@@ -33,12 +33,18 @@ use crate::{
     statistical_codec::PredictionEncoder,
 };
 
+/// result of decompress_deflate_stream
 pub struct DecompressResult {
+    /// the plaintext that was decompressed from the stream
     pub plain_text: Vec<u8>,
+    /// the extra data that is needed to reconstruct the deflate stream exactly as it was written
     pub cabac_encoded: Vec<u8>,
+    /// the number of bytes that were processed from the compressed stream (this will be exactly the
+    /// data that will be recreated using the cabac_encoded data)
     pub compressed_processed: usize,
 }
 
+/// decompresses a deflate stream and returns the plaintext and cabac_encoded data that can be used to reconstruct it
 pub fn decompress_deflate_stream(
     compressed_data: &[u8],
     verify: bool,
@@ -72,6 +78,7 @@ pub fn decompress_deflate_stream(
     })
 }
 
+/// recompresses a deflate stream using the cabac_encoded data that was returned from decompress_deflate_stream
 pub fn recompress_deflate_stream(
     plain_text: &[u8],
     cabac_encoded: &[u8],
