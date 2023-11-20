@@ -9,7 +9,7 @@
             "type": "cppvsdbg",
             "request": "launch",
             "program": "${workspaceFolder}/target/debug/preflate_rs.exe",
-            "args": ["${workspaceFolder}/LICENSE"],
+            "args": ["${workspaceFolder}/wrong"],
             "stopAtEntry": false,
             "cwd": "${fileDirname}",
             "environment": [],

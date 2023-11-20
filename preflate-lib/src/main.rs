@@ -86,7 +86,7 @@ fn analyze_compressed_data_verify(
     let mut buffer = Vec::new();
 
     let cabac_encoder = PredictionEncoderCabac::new(DebugWriter::new(&mut buffer)?);
-    let debug_encoder = VerifyPredictionEncoder::new(false);
+    let debug_encoder = VerifyPredictionEncoder::new();
 
     let mut combined_encoder = (cabac_encoder, debug_encoder);
 

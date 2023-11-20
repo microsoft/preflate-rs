@@ -3,7 +3,6 @@
 pub enum CodecMisprediction {
     EOBMisprediction,
     EOFMisprediction,
-    NonZeroPadding,
     LiteralPredictionWrong,
     ReferencePredictionWrong,
     IrregularLen258,
@@ -17,6 +16,7 @@ pub enum CodecMisprediction {
 /// correction indictions, which are followed by a 16 bit value
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum CodecCorrection {
+    NonZeroPadding,
     BlockTypeCorrection,
     LenCorrection,
     DistOnlyCorrection,
@@ -55,6 +55,7 @@ pub enum CodecAction {
 
 #[derive(Default)]
 pub struct CountNonDefaultActions {
+    pub total_non_default: u32,
     pub mispredictions_count: [u32; CodecMisprediction::MAX as usize],
     pub corrections_count: [u32; CodecCorrection::MAX as usize],
 }
@@ -63,12 +64,14 @@ impl CountNonDefaultActions {
     pub fn record_correction(&mut self, correction: CodecCorrection, value: u32) {
         if value != 0 {
             self.corrections_count[correction as usize] += 1;
+            self.total_non_default += 1;
         }
     }
 
     pub fn record_misprediction(&mut self, misprediction: CodecMisprediction, value: bool) {
         if value {
             self.mispredictions_count[misprediction as usize] += 1;
+            self.total_non_default += 1;
         }
     }
 
@@ -85,12 +88,12 @@ impl CountNonDefaultActions {
             LDTypeCorrection,
             RepeatCountCorrection,
             LDBitLengthCorrection,
+            NonZeroPadding,
         ];
 
         let mispred = [
             EOBMisprediction,
             EOFMisprediction,
-            NonZeroPadding,
             LiteralPredictionWrong,
             ReferencePredictionWrong,
             IrregularLen258,
@@ -116,23 +119,20 @@ impl CountNonDefaultActions {
 pub struct VerifyPredictionDecoder {
     actions: Vec<CodecAction>,
     index: usize,
-    verify: bool,
 }
 
 #[derive(Default)]
 pub struct VerifyPredictionEncoder {
     actions: Vec<CodecAction>,
-    verify: bool,
     count: CountNonDefaultActions,
 }
 
 // used for testing mostly
 #[allow(dead_code)]
 impl VerifyPredictionEncoder {
-    pub fn new(verify: bool) -> Self {
+    pub fn new() -> Self {
         Self {
             actions: Vec::new(),
-            verify,
             count: CountNonDefaultActions::default(),
         }
     }
@@ -146,7 +146,7 @@ impl VerifyPredictionEncoder {
     }
 
     pub fn count_nondefault_actions(&self) -> usize {
-        self.actions.len()
+        self.count.total_non_default as usize
     }
 }
 
@@ -156,10 +156,8 @@ impl PredictionEncoder for VerifyPredictionEncoder {
     }
 
     fn encode_verify_state(&mut self, message: &'static str, checksum: u64) {
-        if self.verify {
-            self.actions
-                .push(CodecAction::VerifyState(message, checksum));
-        }
+        self.actions
+            .push(CodecAction::VerifyState(message, checksum));
     }
 
     fn encode_correction(&mut self, action: CodecCorrection, value: u32) {
@@ -179,11 +177,7 @@ impl PredictionEncoder for VerifyPredictionEncoder {
 #[allow(dead_code)]
 impl VerifyPredictionDecoder {
     pub fn new(actions: Vec<CodecAction>, verify: bool) -> Self {
-        Self {
-            actions,
-            index: 0,
-            verify,
-        }
+        Self { actions, index: 0 }
     }
 
     fn pop(&mut self) -> Option<CodecAction> {
@@ -207,15 +201,13 @@ impl PredictionDecoder for VerifyPredictionDecoder {
     }
 
     fn decode_verify_state(&mut self, message: &'static str, checksum: u64) {
-        if self.verify {
-            if let Some(x) = self.pop() {
-                assert_eq!(
-                    x,
-                    CodecAction::VerifyState(message, checksum),
-                    "mismatch {} (left encode, right decode)",
-                    self.index
-                );
-            }
+        if let Some(x) = self.pop() {
+            assert_eq!(
+                x,
+                CodecAction::VerifyState(message, checksum),
+                "mismatch {} (left encode, right decode)",
+                self.index
+            );
         }
     }
 
@@ -367,6 +359,3 @@ where
         self.1.decode_verify_state(message, checksum);
     }
 }
-
-#[test]
-fn test_encode_decode() {}

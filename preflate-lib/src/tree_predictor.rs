@@ -384,38 +384,30 @@ fn encode_roundtrip_perfect() {
     use crate::statistical_codec::DefaultOnlyDecoder;
     use crate::statistical_codec::VerifyPredictionEncoder;
 
-    let mut freq = TokenFrequency::default();
-    freq.literal_codes[0] = 100;
-    freq.literal_codes[1] = 50;
-    freq.literal_codes[2] = 25;
+    for huffcalc in [HufftreeBitCalc::Miniz, HufftreeBitCalc::Zlib] {
+        let mut freq = TokenFrequency::default();
+        freq.literal_codes[0] = 100;
+        freq.literal_codes[1] = 50;
+        freq.literal_codes[2] = 25;
 
-    freq.distance_codes[0] = 100;
-    freq.distance_codes[1] = 50;
-    freq.distance_codes[2] = 25;
+        freq.distance_codes[0] = 100;
+        freq.distance_codes[1] = 50;
+        freq.distance_codes[2] = 25;
 
-    let mut empty_decoder = DefaultOnlyDecoder {};
-    let regenerated_header =
-        recreate_tree_for_block(&freq, &mut empty_decoder, HufftreeBitCalc::Zlib).unwrap();
+        let mut empty_decoder = DefaultOnlyDecoder {};
+        let regenerated_header =
+            recreate_tree_for_block(&freq, &mut empty_decoder, huffcalc).unwrap();
 
-    println!("regenerated_header: {:?}", regenerated_header);
+        assert_eq!(regenerated_header.num_literals, 257);
+        assert_eq!(regenerated_header.num_dist, 3);
+        assert_eq!(regenerated_header.lengths[0], (TreeCodeType::Code, 1));
+        assert_eq!(regenerated_header.lengths[1], (TreeCodeType::Code, 2));
+        assert_eq!(regenerated_header.lengths[2], (TreeCodeType::Code, 3));
 
-    assert_eq!(regenerated_header.num_literals, 257);
-    assert_eq!(regenerated_header.num_dist, 3);
-    assert_eq!(regenerated_header.lengths[0], (TreeCodeType::Code, 1));
-    assert_eq!(regenerated_header.lengths[1], (TreeCodeType::Code, 2));
-    assert_eq!(regenerated_header.lengths[2], (TreeCodeType::Code, 3));
-
-    let mut empty_encoder = VerifyPredictionEncoder::default();
-    predict_tree_for_block(
-        &regenerated_header,
-        &freq,
-        &mut empty_encoder,
-        HufftreeBitCalc::Zlib,
-    )
-    .unwrap();
-    assert_eq!(empty_encoder.count_nondefault_actions(), 0);
-
-    println!("regenerated_header: {:?}", regenerated_header);
+        let mut empty_encoder = VerifyPredictionEncoder::default();
+        predict_tree_for_block(&regenerated_header, &freq, &mut empty_encoder, huffcalc).unwrap();
+        assert_eq!(empty_encoder.count_nondefault_actions(), 0);
+    }
 }
 
 #[test]

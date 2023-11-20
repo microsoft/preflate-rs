@@ -64,6 +64,8 @@ impl<'a> TokenPredictor<'a> {
         self.current_token_count = 0;
         self.pending_reference = None;
 
+        codec.encode_verify_state("blocktypestart", 0);
+
         codec.encode_correction(
             CodecCorrection::BlockTypeCorrection,
             encode_difference(BlockType::DynamicHuff as u32, block.block_type as u32),
@@ -72,11 +74,7 @@ impl<'a> TokenPredictor<'a> {
         if block.block_type == BlockType::Stored {
             codec.encode_value(block.uncompressed_len as u16, 16);
 
-            let pad = block.padding_bits != 0;
-            codec.encode_misprediction(CodecMisprediction::NonZeroPadding, pad);
-            if pad {
-                codec.encode_value(block.padding_bits.into(), 8);
-            }
+            codec.encode_correction(CodecCorrection::NonZeroPadding, block.padding_bits.into());
             self.state.update_hash(block.uncompressed_len as u32);
 
             return Ok(());
@@ -228,18 +226,18 @@ impl<'a> TokenPredictor<'a> {
         const BT_DYNAMICHUFF: u32 = BlockType::DynamicHuff as u32;
         const BT_STATICHUFF: u32 = BlockType::StaticHuff as u32;
 
+        codec.decode_verify_state("blocktypestart", 0);
+
         let bt = decode_difference(
-            BlockType::DynamicHuff as u32,
+            BT_DYNAMICHUFF,
             codec.decode_correction(CodecCorrection::BlockTypeCorrection),
         );
         match bt {
             BT_STORED => {
                 block = PreflateTokenBlock::new(BlockType::Stored);
                 block.uncompressed_len = codec.decode_value(16).into();
-                block.padding_bits = 0;
-                if codec.decode_misprediction(CodecMisprediction::NonZeroPadding) {
-                    block.padding_bits = codec.decode_value(8) as u8;
-                }
+                block.padding_bits = codec.decode_correction(CodecCorrection::NonZeroPadding) as u8;
+
                 self.state.update_hash(block.uncompressed_len);
                 return Ok(block);
             }

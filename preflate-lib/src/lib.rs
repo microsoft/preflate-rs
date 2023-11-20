@@ -23,7 +23,10 @@ mod tree_predictor;
 mod zip_bit_reader;
 
 use anyhow::{self};
-use cabac::vp8::{VP8Reader, VP8Writer};
+use cabac::{
+    debug::{DebugReader, DebugWriter},
+    vp8::{VP8Reader, VP8Writer},
+};
 use preflate_error::PreflateError;
 use std::io::Cursor;
 
@@ -85,6 +88,53 @@ pub fn recompress_deflate_stream(
 ) -> Result<Vec<u8>, PreflateError> {
     let mut cabac_decoder =
         PredictionDecoderCabac::new(VP8Reader::new(Cursor::new(&cabac_encoded)).unwrap());
+    let (recompressed, _recreated_blocks) = write_deflate(&plain_text, &mut cabac_decoder)?;
+    Ok(recompressed)
+}
+
+/// decompresses a deflate stream and returns the plaintext and cabac_encoded data that can be used to reconstruct it
+/// This version uses DebugWriter and DebugReader, which are slower but can be used to debug the cabac encoding errors.
+pub fn decompress_deflate_stream_assert(
+    compressed_data: &[u8],
+    verify: bool,
+) -> Result<DecompressResult, PreflateError> {
+    let mut cabac_encoded = Vec::new();
+
+    let mut cabac_encoder =
+        PredictionEncoderCabac::new(DebugWriter::new(&mut cabac_encoded).unwrap());
+    let (compressed_processed, _params, plain_text, _original_blocks) =
+        read_deflate(compressed_data, &mut cabac_encoder, 0)?;
+
+    assert_eq!(compressed_processed, compressed_data.len());
+    cabac_encoder.finish();
+
+    if verify {
+        let mut cabac_decoder =
+            PredictionDecoderCabac::new(DebugReader::new(Cursor::new(&cabac_encoded)).unwrap());
+        let (recompressed, _recreated_blocks) = write_deflate(&plain_text, &mut cabac_decoder)?;
+
+        if recompressed[..] != compressed_data[..] {
+            return Err(PreflateError::Mismatch(anyhow::anyhow!(
+                "recompressed data does not match original"
+            )));
+        }
+    }
+
+    Ok(DecompressResult {
+        plain_text,
+        cabac_encoded,
+        compressed_processed,
+    })
+}
+
+/// recompresses a deflate stream using the cabac_encoded data that was returned from decompress_deflate_stream
+/// This version uses DebugWriter and DebugReader, which are slower and don't compress but can be used to debug the cabac encoding errors.
+pub fn recompress_deflate_stream_assert(
+    plain_text: &[u8],
+    cabac_encoded: &[u8],
+) -> Result<Vec<u8>, PreflateError> {
+    let mut cabac_decoder =
+        PredictionDecoderCabac::new(DebugReader::new(Cursor::new(&cabac_encoded)).unwrap());
     let (recompressed, _recreated_blocks) = write_deflate(&plain_text, &mut cabac_decoder)?;
     Ok(recompressed)
 }
