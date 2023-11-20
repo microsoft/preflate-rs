@@ -155,17 +155,16 @@ impl<'a> TokenPredictor<'a> {
                     }
                 }
                 PreflateToken::Reference(target_ref) => {
-                    let predicted_ref;
-                    match predicted_token {
+                    let predicted_ref = match predicted_token {
                         PreflateToken::Literal => {
                             // target had a reference, so we were wrong if we predicted a literal
                             codec.encode_misprediction(
                                 CodecMisprediction::LiteralPredictionWrong,
                                 true,
                             );
-                            predicted_ref = self.repredict_reference().with_context(|| {
+                            self.repredict_reference().with_context(|| {
                                 format!("repredict_reference target={:?} index={}", target_ref, i)
-                            })?;
+                            })?
                         }
                         PreflateToken::Reference(r) => {
                             // we predicted a reference correctly, so verify that the length/dist was correct
@@ -173,9 +172,9 @@ impl<'a> TokenPredictor<'a> {
                                 CodecMisprediction::ReferencePredictionWrong,
                                 false,
                             );
-                            predicted_ref = r;
+                            r
                         }
-                    }
+                    };
 
                     codec.encode_correction(
                         CodecCorrection::LenCorrection,
@@ -251,12 +250,11 @@ impl<'a> TokenPredictor<'a> {
             }
         }
 
-        let blocksize: u32;
-        if codec.decode_misprediction(CodecMisprediction::EOBMisprediction) {
-            blocksize = codec.decode_value(16).into();
+        let blocksize = if codec.decode_misprediction(CodecMisprediction::EOBMisprediction) {
+            codec.decode_value(16).into()
         } else {
-            blocksize = self.max_token_count;
-        }
+            self.max_token_count
+        };
 
         block.tokens.reserve(blocksize as usize);
 

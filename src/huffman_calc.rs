@@ -64,8 +64,7 @@ mod calc_minzoxide {
 
         enforce_max_code_size(&mut num_codes, num_used_symbols, code_size_limit);
 
-        let mut code_sizes = Vec::new();
-        code_sizes.resize(max_used, 0);
+        let mut code_sizes = vec![0; max_used];
 
         let mut last = num_used_symbols;
         for (i, &num_item) in num_codes

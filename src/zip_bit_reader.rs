@@ -19,7 +19,7 @@ pub struct ZipBitReader<'a, R> {
     return_value_buffer: u64, // Buffer used to assemble bits for the caller
 }
 
-impl<'a, R: Read + Seek> ReadBits for ZipBitReader<'_, R> {
+impl<'a, R: Read + Seek> ReadBits for ZipBitReader<'a, R> {
     fn get(&mut self, cbit: u32) -> anyhow::Result<u32> {
         ZipBitReader::get(self, cbit)
     }
