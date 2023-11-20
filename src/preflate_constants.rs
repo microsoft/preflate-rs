@@ -1,3 +1,9 @@
+/*---------------------------------------------------------------------------------------------
+ *  Copyright (c) Microsoft Corporation. All rights reserved.
+ *  Licensed under the Apache License, Version 2.0. See LICENSE.txt in the project root for license information.
+ *  This software incorporates material from third parties. See NOTICE.txt for details.
+ *--------------------------------------------------------------------------------------------*/
+
 pub const LITERAL_COUNT: usize = 256;
 pub const NONLEN_CODE_COUNT: usize = LITERAL_COUNT + 1; // EOB
 pub const LEN_CODE_COUNT: usize = 29;

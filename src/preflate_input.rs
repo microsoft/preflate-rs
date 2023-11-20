@@ -1,3 +1,8 @@
+/*---------------------------------------------------------------------------------------------
+ *  Copyright (c) Microsoft Corporation. All rights reserved.
+ *  Licensed under the Apache License, Version 2.0. See LICENSE.txt in the project root for license information.
+ *  This software incorporates material from third parties. See NOTICE.txt for details.
+ *--------------------------------------------------------------------------------------------*/
 pub struct PreflateInput<'a> {
     data: &'a [u8],
     pos: i32,

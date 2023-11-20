@@ -1,3 +1,9 @@
+/*---------------------------------------------------------------------------------------------
+ *  Copyright (c) Microsoft Corporation. All rights reserved.
+ *  Licensed under the Apache License, Version 2.0. See LICENSE.txt in the project root for license information.
+ *  This software incorporates material from third parties. See NOTICE.txt for details.
+ *--------------------------------------------------------------------------------------------*/
+
 use crate::bit_helper::DebugHash;
 use crate::hash_chain::{HashChain, RotatingHash};
 use crate::preflate_constants::{MAX_MATCH, MIN_LOOKAHEAD, MIN_MATCH};

@@ -1,3 +1,9 @@
+/*---------------------------------------------------------------------------------------------
+ *  Copyright (c) Microsoft Corporation. All rights reserved.
+ *  Licensed under the Apache License, Version 2.0. See LICENSE.txt in the project root for license information.
+ *  This software incorporates material from third parties. See NOTICE.txt for details.
+ *--------------------------------------------------------------------------------------------*/
+
 use anyhow::Result;
 
 use crate::{
@@ -404,7 +410,7 @@ fn roundtrip_huffman_bitreadwrite() {
 #[test]
 fn roundtrip_complicated() {
     #[rustfmt::skip]
-    let h = HuffmanOriginalEncoding { 
+    let h = HuffmanOriginalEncoding {
         lengths: vec![(TreeCodeType::ZeroShort, 10), (TreeCodeType::Code, 11), (TreeCodeType::Code, 0), (TreeCodeType::Code, 0),
             (TreeCodeType::Code, 11), (TreeCodeType::ZeroLong, 18), (TreeCodeType::Code, 6), (TreeCodeType::Code, 14), (TreeCodeType::ZeroShort, 5),
             (TreeCodeType::Code, 11), (TreeCodeType::Code, 9), (TreeCodeType::Code, 10), (TreeCodeType::Code, 0), (TreeCodeType::Code, 0), (TreeCodeType::Code, 10),
