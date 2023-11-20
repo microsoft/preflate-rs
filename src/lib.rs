@@ -138,5 +138,3 @@ pub fn recompress_deflate_stream_assert(
     let (recompressed, _recreated_blocks) = write_deflate(&plain_text, &mut cabac_decoder)?;
     Ok(recompressed)
 }
-
-

@@ -1,14 +1,12 @@
+use std::fs::File;
 use std::io::{Cursor, Read};
+use std::path::Path;
 
 use flate2::{read::ZlibEncoder, Compression};
-use preflate_lib::{decompress_deflate_stream, recompress_deflate_stream};
+use preflate_rs::{decompress_deflate_stream, recompress_deflate_stream};
 
 #[cfg(test)]
 pub fn read_file(filename: &str) -> Vec<u8> {
-    use std::fs::File;
-    use std::io::Read;
-    use std::path::Path;
-
     let filename = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("samples")
         .join(filename.to_owned());
@@ -31,20 +29,17 @@ fn end_to_end_compressed() {
 }
 
 #[test]
-fn test_wrong()
-{
-    test_file("sample1.bin"); 
+fn test_wrong() {
+    test_file("sample1.bin");
 }
 
-fn verifyresult(compressed_data : &[u8])
-{
+fn verifyresult(compressed_data: &[u8]) {
     let result = decompress_deflate_stream(&compressed_data, true).unwrap();
     let recomp = recompress_deflate_stream(&result.plain_text, &result.cabac_encoded).unwrap();
     assert_eq!(compressed_data, recomp);
 }
 
 fn test_file(filename: &str) {
-
     let v = read_file(filename);
 
     // Zlib compression with different compression levels
@@ -76,7 +71,6 @@ fn test_file(filename: &str) {
 
     // Zlib compression with different compression levels
     for level in 0..10 {
-
         println!("Flate2 level: {}", level);
         let mut zlib_encoder: ZlibEncoder<Cursor<&Vec<u8>>> =
             ZlibEncoder::new(Cursor::new(&v), Compression::new(level));
@@ -89,4 +83,3 @@ fn test_file(filename: &str) {
         verifyresult(minusheader);
     }
 }
-
