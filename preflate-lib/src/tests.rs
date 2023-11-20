@@ -1,26 +1,5 @@
-mod bit_helper;
-mod bit_writer;
-mod cabac_codec;
-mod complevel_estimator;
-mod deflate_reader;
-mod deflate_writer;
-mod hash_chain;
-mod huffman_calc;
-mod huffman_encoding;
-mod huffman_helper;
-mod predictor_state;
-mod preflate_constants;
-mod preflate_error;
-mod preflate_input;
-mod preflate_parameter_estimator;
-mod preflate_parse_config;
-mod preflate_stream_info;
-mod preflate_token;
-mod process;
-mod statistical_codec;
-mod token_predictor;
-mod tree_predictor;
-mod zip_bit_reader;
+
+
 
 use anyhow::{self, Context};
 use cabac::{
@@ -31,7 +10,7 @@ use flate2::{read::GzEncoder, read::ZlibEncoder, Compression};
 use std::{
     env,
     fs::File,
-    io::{Cursor, Read, Write},
+    io::{Cursor, Read, Write}, path::Path,
 };
 
 use crate::{
@@ -40,17 +19,18 @@ use crate::{
     statistical_codec::{PredictionEncoder, VerifyPredictionDecoder, VerifyPredictionEncoder},
 };
 
+#[cfg(test)]
 fn analyze_compressed_data_fast(
     compressed_data: &[u8],
     header_crc32: Option<u32>,
     uncompressed_size: &mut u64,
-) -> anyhow::Result<()> {
+)  {
     let mut buffer = Vec::new();
 
-    let mut cabac_encoder = PredictionEncoderCabac::new(VP8Writer::new(&mut buffer)?);
+    let mut cabac_encoder = PredictionEncoderCabac::new(VP8Writer::new(&mut buffer).unwrap());
 
     let (compressed_processed, _params, plain_text, _original_blocks) =
-        read_deflate(compressed_data, &mut cabac_encoder, 1)?;
+        read_deflate(compressed_data, &mut cabac_encoder, 1).unwrap();
 
     if let Some(crc) = header_crc32 {
         let result_crc = crc32fast::hash(&plain_text);
@@ -65,33 +45,33 @@ fn analyze_compressed_data_fast(
 
     println!("buffer size: {}", buffer.len());
 
-    let mut cabac_decoder = PredictionDecoderCabac::new(VP8Reader::new(Cursor::new(&buffer))?);
+    let mut cabac_decoder = PredictionDecoderCabac::new(VP8Reader::new(Cursor::new(&buffer)).unwrap());
 
     let (recompressed, _recreated_blocks) =
-        write_deflate(&plain_text, &mut cabac_decoder).with_context(|| "write_deflate")?;
+        write_deflate(&plain_text, &mut cabac_decoder).with_context(|| "write_deflate").unwrap();
 
     assert!(recompressed[..] == compressed_data[..]);
 
     *uncompressed_size = plain_text.len() as u64;
 
-    Ok(())
 }
 
+#[cfg(test)]
 fn analyze_compressed_data_verify(
     compressed_data: &[u8],
     header_crc32: u32,
     deflate_info_dump_level: i32,
     uncompressed_size: &mut u64,
-) -> anyhow::Result<()> {
+) {
     let mut buffer = Vec::new();
 
-    let cabac_encoder = PredictionEncoderCabac::new(DebugWriter::new(&mut buffer)?);
-    let debug_encoder = VerifyPredictionEncoder::new();
+    let cabac_encoder = PredictionEncoderCabac::new(DebugWriter::new(&mut buffer).unwrap());
+    let debug_encoder = VerifyPredictionEncoder::new(false);
 
     let mut combined_encoder = (cabac_encoder, debug_encoder);
 
     let (compressed_processed, _params, plain_text, original_blocks) =
-        read_deflate(compressed_data, &mut combined_encoder, 1).with_context(|| "read_deflate")?;
+        read_deflate(compressed_data, &mut combined_encoder, 1).with_context(|| "read_deflate").unwrap();
 
     assert_eq!(compressed_processed, compressed_data.len());
 
@@ -104,11 +84,11 @@ fn analyze_compressed_data_verify(
     println!("buffer size: {}", buffer.len());
 
     let debug_encoder = VerifyPredictionDecoder::new(actions, false);
-    let cabac_decoder = PredictionDecoderCabac::new(DebugReader::new(Cursor::new(&buffer))?);
+    let cabac_decoder = PredictionDecoderCabac::new(DebugReader::new(Cursor::new(&buffer)).unwrap());
 
     let (recompressed, recreated_blocks) =
         write_deflate(&plain_text, &mut (cabac_decoder, debug_encoder))
-            .with_context(|| "write_deflate")?;
+            .with_context(|| "write_deflate").unwrap();
 
     assert_eq!(original_blocks.len(), recreated_blocks.len());
     original_blocks
@@ -169,8 +149,6 @@ fn analyze_compressed_data_verify(
     }
 
     *uncompressed_size = plain_text.len() as u64;
-
-    Ok(())
 }
 
 fn compare<T: PartialEq + std::fmt::Debug>(a: &[T], b: &[T]) {
@@ -185,115 +163,85 @@ fn compare<T: PartialEq + std::fmt::Debug>(a: &[T], b: &[T]) {
     }
 }
 
-fn main_with_result() -> anyhow::Result<()> {
-    let args: Vec<String> = env::args().collect();
-
-    let mut v = Vec::new();
-    {
-        let mut file = File::open(&args[1])?;
-        file.read_to_end(&mut v)?;
-    }
-
-    let onlylevel: Option<u32>;
-    if args.len() == 3 {
-        onlylevel = args[2].parse().ok();
-    } else {
-        onlylevel = None;
-    }
-
-    let verify = true;
-
-    // Zlib compression with different compression levels
-    for level in 1..10 {
-        if let Some(x) = onlylevel {
-            if x != level {
-                continue;
-            }
-        }
-
-        println!("zlib level: {}", level);
-
-        let mut output = Vec::new();
-        output.resize(v.len() + 1000, 0);
-
-        let mut output_size = output.len() as u32;
-
-        unsafe {
-            let err = libz_sys::compress2(
-                output.as_mut_ptr(),
-                &mut output_size,
-                v.as_ptr(),
-                v.len() as u32,
-                level as i32,
-            );
-
-            output.set_len(output_size as usize);
-            println!("output size: {}, err = {}", output.len(), err);
-        }
-
-        let minusheader = &output[2..output.len() - 4];
-
-        // write output to file
-        {
-            let mut file = File::create(format!("zlib_level_{}.bin", level))?;
-            file.write_all(minusheader)?;
-        }
-
-        if output.len() != 0 {
-            do_analyze(&v, minusheader, verify)?;
-        }
-    }
-
-    // Zlib compression with different compression levels
-    for level in 1..10 {
-        if let Some(x) = onlylevel {
-            if x != level + 100 {
-                continue;
-            }
-        }
-
-        println!("Flate2 level: {}", level);
-        let mut zlib_encoder: ZlibEncoder<Cursor<&Vec<u8>>> =
-            ZlibEncoder::new(Cursor::new(&v), Compression::new(level));
-        let mut output = Vec::new();
-        zlib_encoder.read_to_end(&mut output).unwrap();
-
-        // skip header and final crc
-        do_analyze(&v, &output[2..output.len() - 4], verify)?;
-    }
-    /*
-        // Gzip compression with different compression levels
-        for level in 3..10 {
-            let mut gz_encoder = GzEncoder::new(Cursor::new(&v), Compression::new(level));
-
-            let mut output = Vec::new();
-            gz_encoder.read_to_end(&mut output).unwrap();
-        }
-    */
-    Ok(())
-}
-
+#[cfg(test)]
 fn do_analyze(
     plain_text: &Vec<u8>,
     compressed_data: &[u8],
     verify: bool,
-) -> Result<(), anyhow::Error> {
+)  {
     let crc = crc32fast::hash(plain_text);
     let mut uncompressed_size = 0;
 
     if verify {
-        analyze_compressed_data_fast(compressed_data, Some(crc), &mut uncompressed_size)?;
+        analyze_compressed_data_fast(compressed_data, Some(crc), &mut uncompressed_size);
     } else {
-        analyze_compressed_data_verify(compressed_data, crc, 1, &mut uncompressed_size)?;
+        analyze_compressed_data_verify(compressed_data, crc, 1, &mut uncompressed_size);
     }
-    Ok(())
 }
 
-fn main() {
-    match main_with_result() {
-        Ok(_) => {}
-        Err(e) => {
-            eprintln!("Error: {0:?}", e);
-        }
+#[cfg(test)]
+fn read_file(filename: &str) -> Vec<u8> {
+    let filename = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("samples")
+        .join(filename.to_owned());
+    println!("reading {0}", filename.to_str().unwrap());
+    let mut f = File::open(filename).unwrap();
+
+    let mut content = Vec::new();
+    f.read_to_end(&mut content).unwrap();
+
+    content
+}
+
+#[cfg(test)]
+fn verify_zlib(level : usize, v : &Vec<u8>, verify : bool)
+{
+    println!("zlib level: {}", level);
+
+    let mut output = Vec::new();
+    output.resize(v.len() + 1000, 0);
+
+    let mut output_size = output.len() as u32;
+
+    unsafe {
+        let err = libz_sys::compress2(
+            output.as_mut_ptr(),
+            &mut output_size,
+            v.as_ptr(),
+            v.len() as u32,
+            level as i32,
+        );
+
+        output.set_len(output_size as usize);
+        println!("output size: {}, err = {}", output.len(), err);
+    }
+
+    let minusheader = &output[2..output.len() - 4];
+
+    do_analyze(&v, minusheader, verify);
+}
+
+#[cfg(test)]
+fn verfify_minzoxide(level : usize, v : &Vec<u8>, verify : bool)
+{
+    println!("Flate2 level: {}", level);
+    let mut zlib_encoder: ZlibEncoder<Cursor<&Vec<u8>>> =
+        ZlibEncoder::new(Cursor::new(&v), Compression::new(level as u32));
+    let mut output = Vec::new();
+    zlib_encoder.read_to_end(&mut output).unwrap();
+
+    let minusheader = &output[2..output.len() - 4];
+    do_analyze(&v, minusheader, verify);
+}
+
+#[test]
+fn test_zlib()
+{
+    let v = read_file("wrong", ".bin");
+
+    // Zlib compression with different compression levels
+    for level in 1..10 {
+        verify_zlib(level, &v, true);
+        verfify_minzoxide(level, &v, false);
     }
 }

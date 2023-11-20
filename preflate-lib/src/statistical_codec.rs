@@ -176,7 +176,7 @@ impl PredictionEncoder for VerifyPredictionEncoder {
 // used for testing mostly
 #[allow(dead_code)]
 impl VerifyPredictionDecoder {
-    pub fn new(actions: Vec<CodecAction>, verify: bool) -> Self {
+    pub fn new(actions: Vec<CodecAction>) -> Self {
         Self { actions, index: 0 }
     }
 

@@ -478,7 +478,7 @@ fn encode_tree_roundtrip() {
 
     predict_tree_for_block(&huff_origin, &freq, &mut encoder, HufftreeBitCalc::Zlib).unwrap();
 
-    let mut decoder = VerifyPredictionDecoder::new(encoder.actions(), false);
+    let mut decoder = VerifyPredictionDecoder::new(encoder.actions());
 
     let regenerated_header =
         recreate_tree_for_block(&freq, &mut decoder, HufftreeBitCalc::Zlib).unwrap();

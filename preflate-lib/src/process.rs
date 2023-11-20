@@ -127,7 +127,7 @@ pub fn write_deflate<D: PredictionDecoder>(
 }
 
 #[cfg(test)]
-fn read_file(filename: &str) -> Vec<u8> {
+pub fn read_file(filename: &str) -> Vec<u8> {
     use std::fs::File;
     use std::io::Read;
     use std::path::Path;
@@ -187,7 +187,7 @@ fn analyze_compressed_data_fast(
 fn analyze_compressed_data_verify(
     compressed_data: &[u8],
     header_crc32: Option<u32>,
-    deflate_info_dump_level: i32,
+    _deflate_info_dump_level: i32,
     uncompressed_size: &mut u64,
 ) {
     use crate::{
@@ -228,7 +228,7 @@ fn analyze_compressed_data_verify(
 
     println!("buffer size: {}", buffer.len());
 
-    let debug_encoder = VerifyPredictionDecoder::new(actions, false);
+    let debug_encoder = VerifyPredictionDecoder::new(actions);
     let cabac_decoder =
         PredictionDecoderCabac::new(DebugReader::new(Cursor::new(&buffer)).unwrap());
 

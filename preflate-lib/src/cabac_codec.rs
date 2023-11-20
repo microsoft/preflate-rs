@@ -1,5 +1,3 @@
-use std::collections::VecDeque;
-
 use cabac::traits::{CabacReader, CabacWriter};
 
 use crate::{
@@ -38,25 +36,15 @@ fn test_encode_decode_difference() {
     }
 }
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-enum DebugOps {
-    Default(u32),
-    Bypass(u16, u8),
-    Correction(u32, CodecCorrection),
-    Misprediction(CodecMisprediction),
-}
-
 #[derive(Default)]
 struct PredictionCabacContext<CTX> {
     default_count: u32,
-    default_valid: bool,
 
     default_encoding: [CTX; 16],
     default_encoding_nbits: [CTX; 16],
     correction: [[CTX; 8]; CodecCorrection::MAX as usize],
     correction_bits: [[CTX; 8]; CodecCorrection::MAX as usize],
 
-    non_default_ops_corr: [u32; CodecCorrection::MAX as usize],
     non_default_ops_mis: [u32; CodecMisprediction::MAX as usize],
 
     bypass_bits: u32,
