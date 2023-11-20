@@ -18,18 +18,18 @@ use crate::{
 /// of the sign as the lowest bit so that the difference is never negative
 pub fn encode_difference(pred_val: u32, act_val: u32) -> u32 {
     if pred_val >= act_val {
-        return (pred_val - act_val) << 1;
+        (pred_val - act_val) << 1
     } else {
-        return ((act_val - pred_val) << 1) | 1;
+        ((act_val - pred_val) << 1) | 1
     }
 }
 
 /// decodes the result of the previous calculation
 pub fn decode_difference(pred_val: u32, encoded_val: u32) -> u32 {
     if encoded_val & 1 == 0 {
-        return pred_val - (encoded_val >> 1);
+        pred_val - (encoded_val >> 1)
     } else {
-        return pred_val + (encoded_val >> 1);
+        pred_val + (encoded_val >> 1)
     }
 }
 
@@ -220,9 +220,9 @@ impl<CTX> PredictionCabacContext<CTX> {
 
         if self.default_count > 0 {
             self.default_count -= 1;
-            return false;
+            false
         } else {
-            return true;
+            true
         }
     }
 
@@ -237,19 +237,17 @@ impl<CTX> PredictionCabacContext<CTX> {
 
         if self.default_count > 0 {
             self.default_count -= 1;
-            return 0;
+            0
         } else {
-            let r = Self::read_exp_value(
-                &mut self.correction[context as usize],
-                &mut self.correction_bits[context as usize],
-                reader,
-            );
-
             /*assert_eq!(
                 DebugOps::Correction(r, context),
                 self.debug_ops.pop_front().unwrap()
             );*/
-            return r;
+            Self::read_exp_value(
+                &mut self.correction[context as usize],
+                &mut self.correction_bits[context as usize],
+                reader,
+            )
         }
     }
 }
@@ -264,7 +262,7 @@ impl<W: CabacWriter<CTX>, CTX: Default> PredictionEncoderCabac<W, CTX> {
     pub fn new(writer: W) -> Self {
         Self {
             context: PredictionCabacContext::<CTX>::default(),
-            writer: writer,
+            writer,
             count: CountNonDefaultActions::default(),
         }
     }
@@ -311,7 +309,7 @@ impl<R: CabacReader<CTX>, CTX: Default> PredictionDecoderCabac<R, CTX> {
     pub fn new(reader: R) -> Self {
         Self {
             context: PredictionCabacContext::<CTX>::default(),
-            reader: reader,
+            reader,
         }
     }
 }

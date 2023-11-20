@@ -25,7 +25,7 @@ pub enum TreeCodeType {
     ZeroLong = 18,
 }
 
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq, Default)]
 pub struct HuffmanOriginalEncoding {
     /// Huffman literal/distance lengths as RLE encoded in the file
     pub lengths: Vec<(TreeCodeType, u8)>,
@@ -42,18 +42,6 @@ pub struct HuffmanOriginalEncoding {
 
     /// # of Code Length codes      (4 - 19)
     pub num_code_lengths: usize,
-}
-
-impl Default for HuffmanOriginalEncoding {
-    fn default() -> Self {
-        HuffmanOriginalEncoding {
-            lengths: Vec::new(),
-            code_lengths: [0; 19],
-            num_literals: 0,
-            num_dist: 0,
-            num_code_lengths: 0,
-        }
-    }
 }
 
 impl HuffmanOriginalEncoding {
@@ -189,9 +177,9 @@ impl HuffmanOriginalEncoding {
         // 280 - 287     8
         for i in 0..288 {
             let mut wbits: u8 = 8;
-            if i >= 144 && i <= 255 {
+            if (144..=255).contains(&i) {
                 wbits = 9;
-            } else if i >= 256 && i <= 279 {
+            } else if (256..=279).contains(&i) {
                 wbits = 7;
             }
 

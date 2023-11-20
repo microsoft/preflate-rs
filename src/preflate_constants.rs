@@ -56,11 +56,11 @@ const LENGTH_CODE_TABLE: [u8; (MAX_MATCH - MIN_MATCH) as usize + 1] = [
     26, 26, 26, 26, 26, 27, 27, 27, 27, 27, 27, 27, 27, 27, 27, 27, 27, 27, 27, 27, 27, 27, 27, 27,
     27, 27, 27, 27, 27, 27, 27, 27, 27, 27, 27, 27, 28,
 ];
-pub const LENGTH_BASE_TABLE: [u8; LEN_CODE_COUNT as usize] = [
+pub const LENGTH_BASE_TABLE: [u8; LEN_CODE_COUNT] = [
     0, 1, 2, 3, 4, 5, 6, 7, 8, 10, 12, 14, 16, 20, 24, 28, 32, 40, 48, 56, 64, 80, 96, 112, 128,
     160, 192, 224, 255,
 ];
-pub const DIST_BASE_TABLE: [u16; DIST_CODE_COUNT as usize] = [
+pub const DIST_BASE_TABLE: [u16; DIST_CODE_COUNT] = [
     0, 1, 2, 3, 4, 6, 8, 12, 16, 24, 32, 48, 64, 96, 128, 192, 256, 384, 512, 768, 1024, 1536,
     2048, 3072, 4096, 6144, 8192, 12288, 16384, 24576,
 ];

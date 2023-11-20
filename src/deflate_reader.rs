@@ -42,7 +42,7 @@ impl<'a, R: Read + Seek> DeflateReader<'a, R> {
 
     /// moves ownership out of block reader
     pub fn move_plain_text(&mut self) -> Vec<u8> {
-        std::mem::replace(&mut self.plain_text, Vec::new())
+        std::mem::take(&mut self.plain_text)
     }
 
     fn read_bit(&mut self) -> anyhow::Result<bool> {
@@ -83,7 +83,7 @@ impl<'a, R: Read + Seek> DeflateReader<'a, R> {
                 if (len ^ ilen) != 0xffff {
                     return Err(anyhow::Error::msg("Blocllength mismatch"));
                 }
-                blk.uncompressed_len = len.into();
+                blk.uncompressed_len = len;
                 blk.context_len = 0;
 
                 self.input.flush_buffer_to_byte_boundary()?;
@@ -99,7 +99,7 @@ impl<'a, R: Read + Seek> DeflateReader<'a, R> {
                 blk = PreflateTokenBlock::new(BlockType::StaticHuff);
                 let decoder = HuffmanReader::create_fixed()?;
                 self.decode_block(&decoder, &mut blk)?;
-                return Ok(blk);
+                Ok(blk)
             }
 
             2 => {
@@ -111,12 +111,10 @@ impl<'a, R: Read + Seek> DeflateReader<'a, R> {
 
                 self.decode_block(&decoder, &mut blk)
                     .with_context(|| "decode_block dyn")?;
-                return Ok(blk);
+                Ok(blk)
             }
 
-            _ => {
-                return Err(anyhow::Error::msg("Invalid block type"));
-            }
+            _ => Err(anyhow::Error::msg("Invalid block type")),
         }
     }
 
@@ -128,7 +126,7 @@ impl<'a, R: Read + Seek> DeflateReader<'a, R> {
         let mut earliest_reference = i32::MAX;
         let mut cur_pos = 0;
 
-        Ok(loop {
+        loop {
             let lit_len: u32 = decoder.fetch_next_literal_code(&mut self.input)?.into();
             if lit_len < 256 {
                 self.write_literal(lit_len as u8);
@@ -143,7 +141,7 @@ impl<'a, R: Read + Seek> DeflateReader<'a, R> {
                 if lcode >= preflate_constants::LEN_CODE_COUNT as u32 {
                     return Err(anyhow::Error::msg("Invalid length code"));
                 }
-                let len: u32 = preflate_constants::MIN_MATCH as u32
+                let len: u32 = preflate_constants::MIN_MATCH
                     + preflate_constants::LENGTH_BASE_TABLE[lcode as usize] as u32
                     + self
                         .read_bits(preflate_constants::LENGTH_EXTRA_TABLE[lcode as usize].into())?;
@@ -163,12 +161,13 @@ impl<'a, R: Read + Seek> DeflateReader<'a, R> {
                 if dist as usize > self.plain_text.len() {
                     return Err(anyhow::Error::msg("Invalid distance"));
                 }
-                self.write_reference(dist as u32, len as u32);
+                self.write_reference(dist, len);
                 blk.add_reference(len, dist, irregular_258);
 
                 earliest_reference = std::cmp::min(earliest_reference, cur_pos - (dist as i32));
                 cur_pos += len as i32;
             }
-        })
+        }
+        Ok(())
     }
 }

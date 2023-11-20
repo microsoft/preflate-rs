@@ -71,7 +71,7 @@ impl<'a> PredictorState<'a> {
     }
 
     pub fn window_size(&self) -> u32 {
-        self.window_bytes.into()
+        self.window_bytes
     }
 
     fn total_input_size(&self) -> u32 {
@@ -123,8 +123,8 @@ impl<'a> PredictorState<'a> {
         max_depth: u32,
     ) -> MatchResult {
         let start_pos = self.current_input_pos() + offset;
-        let max_len = std::cmp::min(self.total_input_size() - start_pos, MAX_MATCH as u32);
-        if max_len < std::cmp::max(prev_len + 1, MIN_MATCH as u32) {
+        let max_len = std::cmp::min(self.total_input_size() - start_pos, MAX_MATCH);
+        if max_len < std::cmp::max(prev_len + 1, MIN_MATCH) {
             return MatchResult::NoInput;
         }
 
@@ -141,7 +141,7 @@ impl<'a> PredictorState<'a> {
             cur_max_dist_hop0 = cmp::min(max_dist_to_start, self.window_size());
             cur_max_dist_hop1_plus = cur_max_dist_hop0;
         } else {
-            let max_dist: u32 = (self.window_size() - MIN_LOOKAHEAD).into();
+            let max_dist: u32 = self.window_size() - MIN_LOOKAHEAD;
             cur_max_dist_hop0 = cmp::min(max_dist_to_start, max_dist);
             cur_max_dist_hop1_plus = cmp::min(max_dist_to_start, max_dist - 1);
         }

@@ -53,7 +53,7 @@ pub fn extract_preflate_info(blocks: &Vec<PreflateTokenBlock>) -> PreflateStream
                 }
                 PreflateToken::Reference(t) => {
                     result.reference_count += 1;
-                    block_max_dist = std::cmp::max(block_max_dist, t.dist().into());
+                    block_max_dist = std::cmp::max(block_max_dist, t.dist());
                 }
             }
         }

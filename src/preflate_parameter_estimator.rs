@@ -124,7 +124,7 @@ fn estimate_preflate_mem_level(max_block_size_: u32) -> u32 {
 
 pub fn estimate_preflate_window_bits(max_dist_: u32) -> u32 {
     let mut max_dist = max_dist_;
-    max_dist += preflate_constants::MIN_LOOKAHEAD as u32;
+    max_dist += preflate_constants::MIN_LOOKAHEAD;
     let wbits = bit_length(max_dist - 1);
     std::cmp::min(std::cmp::max(wbits, 9), 15)
 }
@@ -139,7 +139,7 @@ pub fn estimate_preflate_strategy(info: &PreflateStreamInfo) -> PreflateStrategy
     if info.count_rle_blocks == info.count_blocks {
         return PreflateStrategy::PreflateRleOnly;
     }
-    return PreflateStrategy::PreflateDefault;
+    PreflateStrategy::PreflateDefault
 }
 
 pub fn estimate_preflate_huff_strategy(info: &PreflateStreamInfo) -> PreflateHuffStrategy {
@@ -149,7 +149,7 @@ pub fn estimate_preflate_huff_strategy(info: &PreflateStreamInfo) -> PreflateHuf
     if info.count_static_huff_tree_blocks == 0 {
         return PreflateHuffStrategy::PreflateHuffDynamic;
     }
-    return PreflateHuffStrategy::PreflateHuffMixed;
+    PreflateHuffStrategy::PreflateHuffMixed
 }
 
 pub fn estimate_preflate_parameters(
@@ -161,24 +161,18 @@ pub fn estimate_preflate_parameters(
     let window_bits = estimate_preflate_window_bits(info.max_dist);
     let mem_level = estimate_preflate_mem_level(info.max_tokens_per_block);
 
-    let cl = estimate_preflate_comp_level(
-        window_bits.into(),
-        mem_level.into(),
-        unpacked_output,
-        blocks,
-        false,
-    );
+    let cl = estimate_preflate_comp_level(window_bits, mem_level, unpacked_output, blocks, false);
 
     let config;
     let comp_level = cl.recommended_compression_level;
     let is_fast_compressor;
 
-    if comp_level >= 1 && comp_level <= 3 {
+    if (1..=3).contains(&comp_level) {
         is_fast_compressor = true;
         config = &FAST_PREFLATE_PARSER_SETTINGS[(comp_level - 1) as usize]
     } else {
         is_fast_compressor = false;
-        config = &SLOW_PREFLATE_PARSER_SETTINGS[if comp_level >= 4 && comp_level <= 9 {
+        config = &SLOW_PREFLATE_PARSER_SETTINGS[if (4..=9).contains(&comp_level) {
             (comp_level - 4) as usize
         } else {
             5

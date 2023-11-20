@@ -44,7 +44,7 @@ pub fn predict_tree_for_block<D: PredictionEncoder>(
     if bit_lengths.len() != huffman_encoding.num_literals {
         encoder.encode_value(huffman_encoding.num_literals as u16 - 257, 5);
 
-        bit_lengths.resize(huffman_encoding.num_literals as usize, 0);
+        bit_lengths.resize(huffman_encoding.num_literals, 0);
     }
 
     // now predict the size of the distance tree
@@ -60,7 +60,7 @@ pub fn predict_tree_for_block<D: PredictionEncoder>(
     if distance_code_lengths.len() != huffman_encoding.num_dist {
         encoder.encode_value(huffman_encoding.num_dist as u16 - 1, 5);
 
-        distance_code_lengths.resize(huffman_encoding.num_dist as usize, 0);
+        distance_code_lengths.resize(huffman_encoding.num_dist, 0);
     }
 
     bit_lengths.append(&mut distance_code_lengths);
@@ -165,7 +165,7 @@ pub fn recreate_tree_for_block<D: PredictionDecoder>(
 fn calc_tc_lengths_without_trailing_zeros(bit_lengths: &[u8]) -> usize {
     let mut len = bit_lengths.len();
     // remove trailing zeros
-    while len > 4 && bit_lengths[TREE_CODE_ORDER_TABLE[len - 1] as usize] == 0 {
+    while len > 4 && bit_lengths[TREE_CODE_ORDER_TABLE[len - 1]] == 0 {
         len -= 1;
     }
 
@@ -194,7 +194,7 @@ fn predict_ld_trees<D: PredictionEncoder>(
     );
 
     for &(target_tree_code_type, target_tree_code_data) in actual_target_codes.iter() {
-        if symbols.len() == 0 {
+        if symbols.is_empty() {
             return Err(anyhow::anyhow!("Reconstruction failed"));
         }
 
@@ -248,7 +248,7 @@ fn reconstruct_ld_trees<D: PredictionDecoder>(
     let mut prev_code = None;
     let mut result: Vec<(TreeCodeType, u8)> = Vec::new();
 
-    while symbols.len() > 0 {
+    while !symbols.is_empty() {
         let predicted_tree_code_type = predict_code_type(symbols, prev_code);
         prev_code = Some(symbols[0]);
 
@@ -326,7 +326,7 @@ fn predict_code_type(sym_bit_len: &[u8], previous_code: Option<u8>) -> TreeCodeT
     if code == 0 {
         let mut curlen = 1;
         let max_cur_len = std::cmp::min(sym_bit_len.len(), 11);
-        while curlen < max_cur_len && sym_bit_len[curlen as usize] == 0 {
+        while curlen < max_cur_len && sym_bit_len[curlen] == 0 {
             curlen += 1;
         }
         if curlen >= 11 {
@@ -358,7 +358,7 @@ fn predict_code_data(sym_bit_len: &[u8], code_type: TreeCodeType) -> u8 {
         TreeCodeType::Repeat => {
             let mut curlen = 3;
             let max_cur_len = std::cmp::min(sym_bit_len.len(), 6);
-            while curlen < max_cur_len && sym_bit_len[curlen as usize] == code {
+            while curlen < max_cur_len && sym_bit_len[curlen] == code {
                 curlen += 1;
             }
             curlen as u8
@@ -377,7 +377,7 @@ fn predict_code_data(sym_bit_len: &[u8], code_type: TreeCodeType) -> u8 {
                     138
                 },
             );
-            while curlen < max_cur_len && sym_bit_len[curlen as usize] == 0 {
+            while curlen < max_cur_len && sym_bit_len[curlen] == 0 {
                 curlen += 1;
             }
             curlen as u8

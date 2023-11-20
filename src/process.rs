@@ -55,7 +55,7 @@ pub fn read_deflate<E: PredictionEncoder>(
         println!("prediction parameters: {:?}", params_e);
     }
 
-    let mut token_predictor_in = TokenPredictor::new(&block_decoder.get_plain_text(), &params_e, 0);
+    let mut token_predictor_in = TokenPredictor::new(block_decoder.get_plain_text(), &params_e, 0);
 
     for i in 0..blocks.len() {
         if token_predictor_in.input_eof() {
@@ -98,7 +98,7 @@ pub fn write_deflate<D: PredictionDecoder>(
 
     let mut output_blocks = Vec::new();
 
-    let mut deflate_encoder = DeflateWriter::new(&plain_text);
+    let mut deflate_encoder = DeflateWriter::new(plain_text);
 
     let mut is_eof = token_predictor.input_eof()
         && !decoder.decode_misprediction(CodecMisprediction::EOFMisprediction);
@@ -140,7 +140,7 @@ pub fn read_file(filename: &str) -> Vec<u8> {
 
     let filename = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("samples")
-        .join(filename.to_owned());
+        .join(filename);
     println!("reading {0}", filename.to_str().unwrap());
     let mut f = File::open(filename).unwrap();
 

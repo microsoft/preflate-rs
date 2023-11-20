@@ -98,39 +98,39 @@ impl<'a> CompLevelEstimatorState<'a> {
     fn check_match(&mut self, token: &PreflateTokenReference) {
         let hash_head = self.slow_hash.cur_hash();
 
-        if self.slow_hash.input().pos() >= token.dist() as u32 {
-            if self.info.possible_compression_levels & (1 << 1) != 0 {
-                if !Self::check_match_single_fast_hash(
+        if self.slow_hash.input().pos() >= token.dist() {
+            if self.info.possible_compression_levels & (1 << 1) != 0
+                && !Self::check_match_single_fast_hash(
                     token,
                     &self.fast_l1_hash,
                     &FAST_PREFLATE_PARSER_SETTINGS[0],
                     hash_head,
-                    self.window_size().into(),
-                ) {
-                    self.info.possible_compression_levels &= !(1 << 1);
-                }
+                    self.window_size(),
+                )
+            {
+                self.info.possible_compression_levels &= !(1 << 1);
             }
-            if self.info.possible_compression_levels & (1 << 2) != 0 {
-                if !Self::check_match_single_fast_hash(
+            if self.info.possible_compression_levels & (1 << 2) != 0
+                && !Self::check_match_single_fast_hash(
                     token,
                     &self.fast_l2_hash,
                     &FAST_PREFLATE_PARSER_SETTINGS[1],
                     hash_head,
-                    self.window_size().into(),
-                ) {
-                    self.info.possible_compression_levels &= !(1 << 2);
-                }
+                    self.window_size(),
+                )
+            {
+                self.info.possible_compression_levels &= !(1 << 2);
             }
-            if self.info.possible_compression_levels & (1 << 3) != 0 {
-                if !Self::check_match_single_fast_hash(
+            if self.info.possible_compression_levels & (1 << 3) != 0
+                && !Self::check_match_single_fast_hash(
                     token,
                     &self.fast_l3_hash,
                     &FAST_PREFLATE_PARSER_SETTINGS[2],
                     hash_head,
-                    self.window_size().into(),
-                ) {
-                    self.info.possible_compression_levels &= !(1 << 3);
-                }
+                    self.window_size(),
+                )
+            {
+                self.info.possible_compression_levels &= !(1 << 3);
             }
         }
 
@@ -146,7 +146,7 @@ impl<'a> CompLevelEstimatorState<'a> {
                 self.info.max_chain_depth = std::cmp::max(self.info.max_chain_depth, mdepth);
             }
 
-            if token.dist() as u32 == self.slow_hash.input().pos() {
+            if token.dist() == self.slow_hash.input().pos() {
                 self.info.match_to_start = true;
             }
 
@@ -179,7 +179,7 @@ impl<'a> CompLevelEstimatorState<'a> {
     fn check_dump(&mut self, early_out: bool) {
         for (_i, b) in self.blocks.iter().enumerate() {
             if b.block_type == BlockType::Stored {
-                self.update_hash(b.uncompressed_len as u32);
+                self.update_hash(b.uncompressed_len);
                 continue;
             }
             for (_j, t) in b.tokens.iter().enumerate() {
@@ -189,7 +189,7 @@ impl<'a> CompLevelEstimatorState<'a> {
                     }
                     PreflateToken::Reference(r) => {
                         self.check_match(r);
-                        self.update_or_skip_hash(r.len().into());
+                        self.update_or_skip_hash(r.len());
                     }
                 }
                 if early_out
@@ -205,8 +205,8 @@ impl<'a> CompLevelEstimatorState<'a> {
 
     fn recommend(&mut self) {
         self.info.recommended_compression_level = 9;
-        self.info.very_far_matches = !(self.info.longest_dist_at_hop_0
-            <= self.window_size() - preflate_constants::MIN_LOOKAHEAD)
+        self.info.very_far_matches = self.info.longest_dist_at_hop_0
+            > self.window_size() - preflate_constants::MIN_LOOKAHEAD
             && self.info.longest_dist_at_hop_1_plus
                 < self.window_size() - preflate_constants::MIN_LOOKAHEAD;
         self.info.far_len_3_matches = self.info.longest_len_3_dist > 4096;
@@ -242,7 +242,7 @@ impl<'a> CompLevelEstimatorState<'a> {
         len: u32,
         config: &PreflateParserConfig,
     ) {
-        if len <= config.max_lazy.into() {
+        if len <= config.max_lazy {
             hash.update_hash(len);
         } else {
             hash.skip_hash(len);
@@ -260,7 +260,7 @@ impl<'a> CompLevelEstimatorState<'a> {
         if mdepth > config.max_chain {
             return false;
         }
-        return true;
+        true
     }
 
     fn window_size(&self) -> u32 {
@@ -275,8 +275,8 @@ pub fn estimate_preflate_comp_level(
     blocks: &Vec<PreflateTokenBlock>,
     early_out: bool,
 ) -> CompLevelInfo {
-    let mut state = CompLevelEstimatorState::new(wbits, mbits, plain_text, &blocks);
+    let mut state = CompLevelEstimatorState::new(wbits, mbits, plain_text, blocks);
     state.check_dump(early_out);
     state.recommend();
-    return state.info;
+    state.info
 }

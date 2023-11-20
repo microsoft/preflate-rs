@@ -386,7 +386,7 @@ mod calc_zlib {
             depth: u8,
         ) {
             match n[index].tree {
-                HuffTree::Leaf(symbol) => node_bit_len[symbol as usize] = depth,
+                HuffTree::Leaf(symbol) => node_bit_len[symbol] = depth,
                 HuffTree::Node { left, right } => {
                     count_recursive(n, left, node_bit_len, depth + 1);
                     count_recursive(n, right, node_bit_len, depth + 1);
@@ -400,7 +400,7 @@ mod calc_zlib {
 
         // enforce the maximum bit length by counting the number of symbols that
         // have a bit length greater than the maximum and then redistributing
-        let mut bl_count = vec![0; max_bits as usize + 1];
+        let mut bl_count = vec![0; max_bits + 1];
         let mut overflow = 0;
         for &bit_len in &node_bit_len {
             let mut new_len: usize = bit_len.into();
@@ -410,7 +410,7 @@ mod calc_zlib {
                 overflow += 1;
             }
 
-            bl_count[new_len as usize] += 1;
+            bl_count[new_len] += 1;
         }
 
         if overflow > 0 {
@@ -435,12 +435,12 @@ mod calc_zlib {
             bits = max_bits;
             for node in nodes.iter() {
                 if let HuffTree::Leaf(idx) = node.tree {
-                    while bl_count[bits as usize] == 0 {
+                    while bl_count[bits] == 0 {
                         bits -= 1;
                     }
 
                     node_bit_len[idx] = bits as u8;
-                    bl_count[bits as usize] -= 1;
+                    bl_count[bits] -= 1;
                 }
             }
         }

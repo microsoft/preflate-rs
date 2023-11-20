@@ -112,7 +112,7 @@ impl<'a> HashChain<'a> {
             input: PreflateInput::new(i),
             total_shift: 0,
             hash_shift: (hash_bits + MIN_MATCH - 1) / MIN_MATCH,
-            hash_mask: hash_mask,
+            hash_mask,
             hash_table: HashTable::default_boxed(),
             running_hash: RotatingHash::default(),
         };
@@ -184,9 +184,9 @@ impl<'a> HashChain<'a> {
         HashIterator::new(
             &self.hash_table.prev,
             &self.hash_table.chain_depth,
-            (ref_pos - self.total_shift) as u32,
+            ref_pos - self.total_shift,
             max_dist,
-            head.into(),
+            head,
         )
     }
 
@@ -194,9 +194,9 @@ impl<'a> HashChain<'a> {
         HashIterator::new(
             &self.hash_table.prev,
             &self.hash_table.chain_depth,
-            (ref_pos - self.total_shift) as u32,
+            ref_pos - self.total_shift,
             max_dist,
-            (pos - self.total_shift) as u32,
+            pos - self.total_shift,
         )
     }
 

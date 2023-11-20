@@ -102,7 +102,7 @@ pub fn calculate_huffman_code_tree(code_lengths: &[u8]) -> anyhow::Result<Vec<i3
 
         // Create parent node links for all remaining nodes from previous iteration
         for j in (i_huff_nodes_previous_level..i_huff_nodes_start).step_by(2) {
-            rg_huff_nodes[i_huff_nodes as usize] = j as i32;
+            rg_huff_nodes[i_huff_nodes as usize] = j;
             i_huff_nodes += 1;
         }
 
@@ -153,7 +153,7 @@ impl ReadBits for SingleCode {
 fn roundtrip(frequencies: &[u16], huffcalc: crate::huffman_calc::HufftreeBitCalc) {
     use crate::huffman_calc::calc_bit_lengths;
 
-    let code_lengths = calc_bit_lengths(huffcalc, &frequencies, 7);
+    let code_lengths = calc_bit_lengths(huffcalc, frequencies, 7);
 
     let codes = calc_huffman_codes(&code_lengths).unwrap();
 

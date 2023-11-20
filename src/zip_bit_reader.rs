@@ -137,9 +137,8 @@ impl<'a, R: Read + Seek> ZipBitReader<'a, R> {
             let cbits_from_buffer = std::cmp::min(cbits_needed, self.count_of_bits_in_buffer);
 
             // make room in return buffer for bits and insert them in the buffer
-            wret = wret
-                | ((self.return_value_buffer & !(u64::MAX << cbits_from_buffer)) << cbits_added)
-                    as u32;
+            wret |= ((self.return_value_buffer & !(u64::MAX << cbits_from_buffer)) << cbits_added)
+                as u32;
             // Update the buffer state to reflect the bits that have been read
             self.return_value_buffer >>= cbits_from_buffer;
             self.count_of_bits_in_buffer -= cbits_from_buffer;

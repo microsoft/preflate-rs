@@ -15,7 +15,7 @@ use preflate_rs::{decompress_deflate_stream, recompress_deflate_stream};
 pub fn read_file(filename: &str) -> Vec<u8> {
     let filename = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("samples")
-        .join(filename.to_owned());
+        .join(filename);
     println!("reading {0}", filename.to_str().unwrap());
     let mut f = File::open(filename).unwrap();
 
@@ -40,7 +40,7 @@ fn test_wrong() {
 }
 
 fn verifyresult(compressed_data: &[u8]) {
-    let result = decompress_deflate_stream(&compressed_data, true).unwrap();
+    let result = decompress_deflate_stream(compressed_data, true).unwrap();
     let recomp = recompress_deflate_stream(&result.plain_text, &result.cabac_encoded).unwrap();
     assert_eq!(compressed_data, recomp);
 }
@@ -63,7 +63,7 @@ fn test_file(filename: &str) {
                 &mut output_size,
                 v.as_ptr(),
                 v.len() as u32,
-                level as i32,
+                level,
             );
 
             output.set_len(output_size as usize);

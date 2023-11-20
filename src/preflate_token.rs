@@ -99,7 +99,7 @@ impl Default for TokenFrequency {
 impl PreflateTokenBlock {
     pub fn new(block_type: BlockType) -> PreflateTokenBlock {
         PreflateTokenBlock {
-            block_type: block_type,
+            block_type,
             uncompressed_len: 0,
             context_len: 0,
             padding_bits: 0,
@@ -117,7 +117,7 @@ impl PreflateTokenBlock {
     pub fn add_reference(&mut self, len: u32, dist: u32, irregular258: bool) {
         self.tokens
             .push(PreflateToken::new_reference(len, dist, irregular258));
-        self.freq.literal_codes[NONLEN_CODE_COUNT as usize + quantize_length(len)] += 1;
+        self.freq.literal_codes[NONLEN_CODE_COUNT + quantize_length(len)] += 1;
         self.freq.distance_codes[quantize_distance(dist)] += 1;
     }
 }

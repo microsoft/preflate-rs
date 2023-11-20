@@ -81,7 +81,7 @@ impl<'a> TokenPredictor<'a> {
             codec.encode_value(block.uncompressed_len as u16, 16);
 
             codec.encode_correction(CodecCorrection::NonZeroPadding, block.padding_bits.into());
-            self.state.update_hash(block.uncompressed_len as u32);
+            self.state.update_hash(block.uncompressed_len);
 
             return Ok(());
         }
@@ -179,28 +179,21 @@ impl<'a> TokenPredictor<'a> {
 
                     codec.encode_correction(
                         CodecCorrection::LenCorrection,
-                        encode_difference(predicted_ref.len().into(), target_ref.len().into()),
+                        encode_difference(predicted_ref.len(), target_ref.len()),
                     );
 
                     if predicted_ref.len() != target_ref.len() {
-                        let rematch =
-                            self.state.calculate_hops(&target_ref).with_context(|| {
-                                format!("calculate_hops p={:?}, t={:?}", predicted_ref, target_ref)
-                            })?;
+                        let rematch = self.state.calculate_hops(target_ref).with_context(|| {
+                            format!("calculate_hops p={:?}, t={:?}", predicted_ref, target_ref)
+                        })?;
                         codec.encode_correction(CodecCorrection::DistAfterLenCorrection, rematch);
+                    } else if target_ref.dist() != predicted_ref.dist() {
+                        let rematch = self.state.calculate_hops(target_ref).with_context(|| {
+                            format!("calculate_hops p={:?}, t={:?}", predicted_ref, target_ref)
+                        })?;
+                        codec.encode_correction(CodecCorrection::DistOnlyCorrection, rematch);
                     } else {
-                        if target_ref.dist() != predicted_ref.dist() {
-                            let rematch =
-                                self.state.calculate_hops(&target_ref).with_context(|| {
-                                    format!(
-                                        "calculate_hops p={:?}, t={:?}",
-                                        predicted_ref, target_ref
-                                    )
-                                })?;
-                            codec.encode_correction(CodecCorrection::DistOnlyCorrection, rematch);
-                        } else {
-                            codec.encode_correction(CodecCorrection::DistOnlyCorrection, 0);
-                        }
+                        codec.encode_correction(CodecCorrection::DistOnlyCorrection, 0);
                     }
 
                     if target_ref.len() == 258 {
@@ -212,7 +205,7 @@ impl<'a> TokenPredictor<'a> {
                 }
             }
 
-            self.commit_token(&target_token, None);
+            self.commit_token(target_token, None);
         }
 
         codec.encode_verify_state("done", self.checksum().hash());
@@ -269,7 +262,7 @@ impl<'a> TokenPredictor<'a> {
 
         codec.decode_verify_state("start", self.checksum().hash());
 
-        while !self.input_eof() && self.current_token_count < blocksize as u32 {
+        while !self.input_eof() && self.current_token_count < blocksize {
             codec.decode_verify_state(
                 "token",
                 if VERIFY {
@@ -471,10 +464,10 @@ impl<'a> TokenPredictor<'a> {
                 return Ok(m);
             }
         }
-        return Err(anyhow::Error::msg(format!(
+        Err(anyhow::Error::msg(format!(
             "Didnt find a match {:?}",
             match_token
-        )));
+        )))
     }
 
     fn commit_token(&mut self, token: &PreflateToken, block: Option<&mut PreflateTokenBlock>) {

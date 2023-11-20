@@ -94,7 +94,7 @@ pub fn recompress_deflate_stream(
 ) -> Result<Vec<u8>, PreflateError> {
     let mut cabac_decoder =
         PredictionDecoderCabac::new(VP8Reader::new(Cursor::new(&cabac_encoded)).unwrap());
-    let (recompressed, _recreated_blocks) = write_deflate(&plain_text, &mut cabac_decoder)?;
+    let (recompressed, _recreated_blocks) = write_deflate(plain_text, &mut cabac_decoder)?;
     Ok(recompressed)
 }
 
@@ -141,6 +141,6 @@ pub fn recompress_deflate_stream_assert(
 ) -> Result<Vec<u8>, PreflateError> {
     let mut cabac_decoder =
         PredictionDecoderCabac::new(DebugReader::new(Cursor::new(&cabac_encoded)).unwrap());
-    let (recompressed, _recreated_blocks) = write_deflate(&plain_text, &mut cabac_decoder)?;
+    let (recompressed, _recreated_blocks) = write_deflate(plain_text, &mut cabac_decoder)?;
     Ok(recompressed)
 }
