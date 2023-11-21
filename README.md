@@ -1,11 +1,16 @@
 # preflate-rs
 preflate-rs is a port of the C++ [preflate library](https://github.com/deus-libri/preflate/) to split deflate streams into uncompressed data and reconstruction information, or reconstruct the original deflate stream from those two.
 
+IMPORTANT: This library is still in initial development, so there are probably breaking changes being done fairly frequently.
+
 The resulting uncompressed content can then be recompressed by a more modern compression technique such as Zstd, lzma, etc. This library is designed to be used as part of a cloud
 storage system that requires exact binary storage of content, so the libary needs to make
 sure that the Deflate content is recreated exactly as it was written. This is not trivial, since
 Default has a large degree of freedom in choosing both how the distance/length pairs are chose
 and how the Huffman trees are created.
+
+Note that the data formats of the recompression information are different and incompatible to the original preflate implemenation, as this library uses a different arithmetic encoder (shared from the lepton JPEG compression library).
+
 
 ## How to Use This Library
 
