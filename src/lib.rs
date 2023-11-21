@@ -65,7 +65,6 @@ pub fn decompress_deflate_stream(
     let (compressed_processed, _params, plain_text, _original_blocks) =
         read_deflate(compressed_data, &mut cabac_encoder, 0)?;
 
-    assert_eq!(compressed_processed, compressed_data.len());
     cabac_encoder.finish();
 
     if verify {
@@ -73,7 +72,7 @@ pub fn decompress_deflate_stream(
             PredictionDecoderCabac::new(VP8Reader::new(Cursor::new(&cabac_encoded)).unwrap());
         let (recompressed, _recreated_blocks) = write_deflate(&plain_text, &mut cabac_decoder)?;
 
-        if recompressed[..] != compressed_data[..] {
+        if recompressed[..] != compressed_data[..compressed_processed] {
             return Err(PreflateError::Mismatch(anyhow::anyhow!(
                 "recompressed data does not match original"
             )));

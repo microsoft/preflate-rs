@@ -5,7 +5,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 use crate::zip_bit_reader::ReadBits;
-use std::vec;
+use std::{collections::HashSet, vec};
 
 /// Calculates Huffman code array given an array of Huffman Code Lengths using the RFC 1951 algorithm
 pub fn calc_huffman_codes(code_lengths: &[u8]) -> anyhow::Result<Vec<u16>> {
@@ -62,6 +62,47 @@ pub fn calc_huffman_codes(code_lengths: &[u8]) -> anyhow::Result<Vec<u16>> {
     Ok(result)
 }
 
+fn is_valid_huffman_code_lengths(code_lengths: &[u8]) -> bool {
+    // Ensure that the array is not empty
+    if code_lengths.is_empty() {
+        return false;
+    }
+
+    // Count the number of codes for each code length using an array
+    const MAX_CODE_LENGTH: usize = 16;
+    let mut length_count = [0; MAX_CODE_LENGTH];
+    for &length in code_lengths.iter() {
+        if length as usize >= MAX_CODE_LENGTH {
+            return false;
+        }
+        length_count[length as usize] += 1;
+    }
+
+    let h = HashSet::<_>::from_iter(
+        code_lengths
+            .iter()
+            .map(|&x| usize::from(x))
+            .filter(|&x| x != 0),
+    );
+
+    // Validate the code lengths
+    for length in h {
+        if length_count[length] > 0 {
+            length_count[length] -= 1;
+            for i in 1..length {
+                if length_count[i] < length_count[length] {
+                    return false;
+                }
+                length_count[i] -= length_count[length];
+            }
+        } else {
+            return false;
+        }
+    }
+
+    true
+}
+
 /// Calculates Huffman code array given an array of Huffman Code Lengths using the RFC 1951 algorithm
 /// Huffman tree will be returned in rgHuffNodes where:
 /// 1. when N is an even number rgHuffNodes[N] is the array index of the '0' child and
@@ -69,17 +110,21 @@ pub fn calc_huffman_codes(code_lengths: &[u8]) -> anyhow::Result<Vec<u16>> {
 ///	2. If rgHuffNodes[i] is less than zero then it is a leaf and the literal alphabet value is -rgHuffNodes[i] + 1
 ///	3. The root node index 'N' is rgHuffNodes.Length - 2. Search should start at that node.
 pub fn calculate_huffman_code_tree(code_lengths: &[u8]) -> anyhow::Result<Vec<i32>> {
+    if !is_valid_huffman_code_lengths(code_lengths) {
+        return Err(anyhow::anyhow!("Invalid Huffman code lengths"));
+    }
+
     let mut c_codes: i32 = 0;
     let mut c_bits_largest = 0;
 
     // First calculate total number of leaf nodes in the Huffman Tree and the max huffman code length
-    for c_bits in code_lengths {
-        if *c_bits != 0 {
+    for &c_bits in code_lengths {
+        if c_bits != 0 {
             c_codes += 1;
         }
 
-        if *c_bits > c_bits_largest {
-            c_bits_largest = *c_bits;
+        if c_bits > c_bits_largest {
+            c_bits_largest = c_bits;
         }
     }
 
