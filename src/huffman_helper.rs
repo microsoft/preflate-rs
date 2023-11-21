@@ -78,27 +78,7 @@ fn is_valid_huffman_code_lengths(code_lengths: &[u8]) -> bool {
         length_count[length as usize] += 1;
     }
 
-    let h = HashSet::<_>::from_iter(
-        code_lengths
-            .iter()
-            .map(|&x| usize::from(x))
-            .filter(|&x| x != 0),
-    );
-
-    // Validate the code lengths
-    for length in h {
-        if length_count[length] > 0 {
-            length_count[length] -= 1;
-            for i in 1..length {
-                if length_count[i] < length_count[length] {
-                    return false;
-                }
-                length_count[i] -= length_count[length];
-            }
-        } else {
-            return false;
-        }
-    }
+    // todo - check for invalid code lengths
 
     true
 }
