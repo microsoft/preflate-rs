@@ -55,14 +55,14 @@ fn test_file(filename: &str) {
         let mut output = Vec::new();
         output.resize(v.len() + 1000, 0);
 
-        let mut output_size = output.len() as libz_sys::uInt;
+        let mut output_size = output.len() as libz_sys::uLongf;
 
         unsafe {
             let err = libz_sys::compress2(
                 output.as_mut_ptr(),
                 &mut output_size,
                 v.as_ptr(),
-                v.len() as libz_sys::uInt,
+                v.len() as libz_sys::uLongf,
                 level,
             );
 
