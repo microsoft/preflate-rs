@@ -5,12 +5,11 @@ IMPORTANT: This library is still in initial development, so there are probably b
 
 The resulting uncompressed content can then be recompressed by a more modern compression technique such as Zstd, lzma, etc. This library is designed to be used as part of a cloud
 storage system that requires exact binary storage of content, so the libary needs to make
-sure that the Deflate content is recreated exactly as it was written. This is not trivial, since
-Default has a large degree of freedom in choosing both how the distance/length pairs are chose
+sure that the DEFLATE content is recreated exactly as it was written. This is not trivial, since
+DEFLATE has a large degree of freedom in choosing both how the distance/length pairs are chose
 and how the Huffman trees are created.
 
-Note that the data formats of the recompression information are different and incompatible to the original preflate implemenation, as this library uses a different arithmetic encoder (shared from the lepton JPEG compression library).
-
+Note that the data formats of the recompression information are different and incompatible to the original preflate implemenation, as this library uses a different arithmetic encoder (shared from the Lepton JPEG compression library).
 
 ## How to Use This Library
 
