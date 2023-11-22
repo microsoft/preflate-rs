@@ -414,11 +414,8 @@ mod calc_zlib {
 
         if overflow > 0 {
             // redistribute the bit lengths to remove the overflow
-            let mut bits = max_bits;
-
             while overflow > 0 {
-                bits -= 1;
-
+                let mut bits = max_bits - 1;
                 while bl_count[bits] == 0 {
                     bits -= 1;
                 }
@@ -431,7 +428,7 @@ mod calc_zlib {
             }
 
             // now reassign the bitlengths to the nodes (since we already have them in the right order)
-            bits = max_bits;
+            let mut bits = max_bits;
             for node in nodes.iter() {
                 if let HuffTree::Leaf(idx) = node.tree {
                     while bl_count[bits] == 0 {
@@ -488,18 +485,24 @@ mod calc_zlib {
     }
 
     #[test]
-    fn roundtrip_huffman_code() {
+    fn roundtrip_huffman_code_simple() {
         test_result(&[0, 1, 2, 4, 8, 16, 32], 7, &[0, 5, 5, 4, 3, 2, 1]);
+    }
 
+    // requires overflow treatment
+    #[test]
+    fn roundtrip_huffman_code_overflow() {
         test_result(
             &[
                 1, 0, 1, 1, 5, 10, 9, 18, 29, 59, 91, 28, 11, 1, 2, 0, 12, 1, 0,
             ],
             7,
-            &[7, 0, 7, 7, 5, 5, 5, 5, 3, 2, 2, 3, 5, 7, 6, 0, 5, 6],
+            &[7, 0, 7, 7, 6, 5, 5, 4, 3, 2, 2, 3, 5, 7, 7, 0, 5, 7],
         );
+    }
 
-        // requires overflow treatment
+    #[test]
+    fn roundtrip_huffman_code_normal() {
         test_result(
             &[
                 1, 0, 1, 0, 9, 9, 8, 19, 36, 70, 73, 34, 5, 6, 0, 0, 11, 1, 0,

@@ -372,7 +372,6 @@ fn roundtrip_huffman_bitreadwrite() {
     bit_writer.write(0x1234, 16, &mut data_buffer);
     bit_writer.pad(0, &mut data_buffer);
 
-    let data_buffer_size = data_buffer.len();
     let mut reader = Cursor::new(&data_buffer);
     let mut bit_reader = BitReader::new(&mut reader);
 

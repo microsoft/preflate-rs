@@ -2,16 +2,7 @@ use byteorder::{LittleEndian, ReadBytesExt};
 use std::io::{Read, Seek, SeekFrom};
 
 pub const ZIP_LOCAL_FILE_HEADER_SIGNATURE: u32 = 0x04034b50;
-pub const ZIP_CENTRAL_DIRECTORY_SIGNATURE: u32 = 0x02014b50;
-pub const ZIP_LOCAL_FILE_HEADER_SIZE_IN_BYTES: u32 = 30;
-pub const GENERAL_BIT_HAS_DATA_DESCRIPTOR: u16 = 0x0008;
 pub const ZIP64_EXTENDED_INFORMATION_TYPE_TAG: u16 = 0x0001;
-//pub const ZIP64_EXTENDED_INFORMATION_SIZE_IN_BYTES: u32 = 28;
-pub const ZIP_CENTRAL_DIRECTORY_FILE_HEADER_SIGNATURE: u32 = 0x02014b50;
-pub const ZIP_CENTRAL_DIRECTORY_FILE_HEADER_SIZE_IN_BYTES: u32 = 46;
-pub const ZIP_END_OF_CENTRAL_DIRECTORY_RECORD_SIGNATURE: u32 = 0x06054b50;
-//pub const ZIP_END_OF_CENTRAL_DIRECTORY_RECORD_SIZE_IN_BYTES: u32 = 22;
-pub const ZIP64_END_OF_CENTRAL_DIRECTORY_RECORD_SIGNATURE: u32 = 0x06064b50;
 
 #[derive(Clone)]
 pub struct ZipLocalFileHeader {
@@ -64,10 +55,6 @@ impl ZipLocalFileHeader {
         self.file_name_length = binary_reader.read_u16::<LittleEndian>()?;
         self.extra_field_length = binary_reader.read_u16::<LittleEndian>()?;
         Ok(())
-    }
-
-    pub fn fhas_data_descriptor(&self) -> bool {
-        (self.general_purpose_bit_flag & GENERAL_BIT_HAS_DATA_DESCRIPTOR) != 0
     }
 }
 
@@ -244,129 +231,6 @@ impl Zip64ExtendedInformation {
             self.disk_start_number = binary_reader.read_u32::<LittleEndian>()?;
             *unprocessed_extended_info_size_in_bytes -= 4;
         }
-
-        Ok(())
-    }
-}
-
-#[derive(Clone)]
-pub struct ZipCentralDirectoryFileHeader {
-    pub central_file_header_signature: u32,
-    pub version_made_by: u16,
-    pub version_needed_to_extract: u16,
-    pub general_purpose_bit_flag: u16,
-    pub compression_method: u16,
-    pub last_mod_file_time: u16,
-    pub last_mod_file_date: u16,
-    pub crc32: u32,
-    pub compressed_size: u64, // 4 bytes (may be set to 64bit value in Zip64 case)
-    pub uncompressed_size: u64, // 4 bytes (may be set to 64bit value in Zip64 case)
-    pub file_name_length: u16,
-    pub extra_field_length: u16,
-    pub file_comment_length: u16,
-    pub disk_number_start: u32, // 2 bytes (may be set to 32bit value in Zip64 case)
-    pub internal_file_attributes: u16,
-    pub external_file_attributes: u32,
-    pub relative_offset_of_local_header: u64, // 4 bytes (may be set to 64bit value in Zip64 case)
-}
-
-impl ZipCentralDirectoryFileHeader {
-    pub fn create_and_load<R: Read>(binary_reader: &mut R) -> anyhow::Result<Self> {
-        let mut zip_ext_info_header = Self::new();
-        zip_ext_info_header.load(binary_reader)?;
-        Ok(zip_ext_info_header)
-    }
-
-    fn new() -> Self {
-        ZipCentralDirectoryFileHeader {
-            central_file_header_signature: 0,
-            version_made_by: 0,
-            version_needed_to_extract: 0,
-            general_purpose_bit_flag: 0,
-            compression_method: 0,
-            last_mod_file_time: 0,
-            last_mod_file_date: 0,
-            crc32: 0,
-            compressed_size: 0,
-            uncompressed_size: 0,
-            file_name_length: 0,
-            extra_field_length: 0,
-            file_comment_length: 0,
-            disk_number_start: 0,
-            internal_file_attributes: 0,
-            external_file_attributes: 0,
-            relative_offset_of_local_header: 0,
-        }
-    }
-
-    fn load<R: Read>(&mut self, binary_reader: &mut R) -> anyhow::Result<()> {
-        self.central_file_header_signature = binary_reader.read_u32::<LittleEndian>()?;
-        self.version_made_by = binary_reader.read_u16::<LittleEndian>()?;
-        self.version_needed_to_extract = binary_reader.read_u16::<LittleEndian>()?;
-        self.general_purpose_bit_flag = binary_reader.read_u16::<LittleEndian>()?;
-        self.compression_method = binary_reader.read_u16::<LittleEndian>()?;
-        self.last_mod_file_time = binary_reader.read_u16::<LittleEndian>()?;
-        self.last_mod_file_date = binary_reader.read_u16::<LittleEndian>()?;
-        self.crc32 = binary_reader.read_u32::<LittleEndian>()?;
-        self.compressed_size = binary_reader.read_u32::<LittleEndian>()? as u64;
-        self.uncompressed_size = binary_reader.read_u32::<LittleEndian>()? as u64;
-        self.file_name_length = binary_reader.read_u16::<LittleEndian>()?;
-        self.extra_field_length = binary_reader.read_u16::<LittleEndian>()?;
-        self.file_comment_length = binary_reader.read_u16::<LittleEndian>()?;
-        self.disk_number_start = binary_reader.read_u16::<LittleEndian>()? as u32;
-        self.internal_file_attributes = binary_reader.read_u16::<LittleEndian>()?;
-        self.external_file_attributes = binary_reader.read_u32::<LittleEndian>()?;
-        self.relative_offset_of_local_header = binary_reader.read_u32::<LittleEndian>()? as u64;
-
-        Ok(())
-    }
-}
-
-pub struct ZipEndOfCentralDirectoryRecord {
-    pub end_of_central_dir_signature: u32,
-    pub number_of_this_disk: u16,
-    pub number_of_the_disk_with_the_start_of_the_central_directory: u16,
-    pub total_number_of_entries_in_the_central_directory_on_this_disk: u16,
-    pub total_number_of_entries_in_the_central_directory: u16,
-    pub size_of_the_central_directory: u32,
-    pub offset_of_start_of_central_directory_with_respect_to_the_starting_disk_number: u32,
-    // 2 bytes .ZIP file comment (variable size)
-    pub zipfile_comment_length: u16,
-}
-
-impl ZipEndOfCentralDirectoryRecord {
-    pub fn create_and_load<R: Read>(binary_reader: &mut R) -> anyhow::Result<Self> {
-        let mut zip_ext_info_header = Self::new();
-        zip_ext_info_header.load(binary_reader)?;
-        Ok(zip_ext_info_header)
-    }
-
-    fn new() -> Self {
-        ZipEndOfCentralDirectoryRecord {
-            end_of_central_dir_signature: 0,
-            number_of_this_disk: 0,
-            number_of_the_disk_with_the_start_of_the_central_directory: 0,
-            total_number_of_entries_in_the_central_directory_on_this_disk: 0,
-            total_number_of_entries_in_the_central_directory: 0,
-            size_of_the_central_directory: 0,
-            offset_of_start_of_central_directory_with_respect_to_the_starting_disk_number: 0,
-            zipfile_comment_length: 0,
-        }
-    }
-
-    fn load<R: Read>(&mut self, binary_reader: &mut R) -> anyhow::Result<()> {
-        self.end_of_central_dir_signature = binary_reader.read_u32::<LittleEndian>()?;
-        self.number_of_this_disk = binary_reader.read_u16::<LittleEndian>()?;
-        self.number_of_the_disk_with_the_start_of_the_central_directory =
-            binary_reader.read_u16::<LittleEndian>()?;
-        self.total_number_of_entries_in_the_central_directory_on_this_disk =
-            binary_reader.read_u16::<LittleEndian>()?;
-        self.total_number_of_entries_in_the_central_directory =
-            binary_reader.read_u16::<LittleEndian>()?;
-        self.size_of_the_central_directory = binary_reader.read_u32::<LittleEndian>()?;
-        self.offset_of_start_of_central_directory_with_respect_to_the_starting_disk_number =
-            binary_reader.read_u32::<LittleEndian>()?;
-        self.zipfile_comment_length = binary_reader.read_u16::<LittleEndian>()?;
 
         Ok(())
     }

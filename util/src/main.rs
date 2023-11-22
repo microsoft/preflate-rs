@@ -32,7 +32,7 @@ fn main() {
             if results.len() > 0 {
                 for result in results {
                     totalzstd -= result.compressed_size as u64;
-                    totalzstd += result.zstd as u64;
+                    totalzstd += result.zstd + result.cabac_length as u64;
                     println!(
                         "  Found compressed data {:?} s={} c={} zstd={} cabac={}",
                         result.signature,
@@ -43,8 +43,7 @@ fn main() {
                     );
                 }
             }
-
-            println!("total seen ratio {}", totalzstd as f64 / totalseen as f64);
         }
     }
+    println!("total seen ratio {}", totalzstd as f64 / totalseen as f64);
 }

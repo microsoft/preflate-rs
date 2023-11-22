@@ -90,7 +90,6 @@ fn write_roundtrip() {
     b.pad(0, &mut data_buffer);
     b.flush_whole_bytes(&mut data_buffer);
 
-    let len = data_buffer.len() as i64;
     let mut cursor = std::io::Cursor::new(data_buffer);
     let mut reader = BitReader::new(&mut cursor);
 

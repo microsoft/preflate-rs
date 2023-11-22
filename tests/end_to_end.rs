@@ -52,6 +52,12 @@ fn test_sample1() {
 fn verifyresult(compressed_data: &[u8]) {
     let result = decompress_deflate_stream(compressed_data, true).unwrap();
     let recomp = recompress_deflate_stream(&result.plain_text, &result.cabac_encoded).unwrap();
+
+    println!(
+        "compressed size: {}, cabac: {}",
+        compressed_data.len(),
+        result.cabac_encoded.len()
+    );
     assert_eq!(compressed_data, recomp);
 }
 
@@ -76,8 +82,9 @@ fn test_file(filename: &str) {
                 level,
             );
 
+            assert_eq!(err, 0, "shouldn't fail zlib compression");
+
             output.set_len(output_size as usize);
-            println!("output size: {}, err = {}", output.len(), err);
         }
 
         let minusheader = &output[2..output.len() - 4];

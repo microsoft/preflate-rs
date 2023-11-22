@@ -1,12 +1,9 @@
 use std::{
     collections::HashMap,
-    io::{BufReader, Cursor, Read, Seek, SeekFrom, Write},
+    io::{Cursor, Read, Seek, SeekFrom, Write},
 };
 
-use byteorder::{LittleEndian, ReadBytesExt};
-
 use anyhow;
-use flate2::read::DeflateDecoder;
 use preflate_rs::decompress_deflate_stream;
 
 use crate::zip_structs::{
@@ -37,7 +34,7 @@ pub fn add_location(
     compressed: &[u8],
 ) {
     let ret = decompress_deflate_stream(compressed, true);
-    if let Err(e) = ret
+    if let Err(_e) = ret
     {
         //println!("Error decompressing {:?} {:?} at {}", signature, e, start);
         return;
