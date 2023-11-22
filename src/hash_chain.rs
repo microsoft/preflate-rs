@@ -13,7 +13,6 @@ use crate::{
 
 pub struct HashIterator<'a> {
     chain: &'a [u16],
-    chain_depth: &'a [u32],
     ref_pos: u32,
     max_dist: u32,
     cur_pos: u32,
@@ -22,18 +21,11 @@ pub struct HashIterator<'a> {
 }
 
 impl<'a> HashIterator<'a> {
-    fn new(
-        chain: &'a [u16],
-        chain_depth: &'a [u32],
-        ref_pos: u32,
-        max_dist: u32,
-        start_pos: u32,
-    ) -> Self {
+    fn new(chain: &'a [u16], ref_pos: u32, max_dist: u32, start_pos: u32) -> Self {
         let cur_dist = Self::calc_dist(ref_pos, start_pos);
         let is_valid = cur_dist <= max_dist;
         Self {
             chain,
-            chain_depth,
             ref_pos,
             max_dist,
             cur_pos: start_pos,
@@ -52,14 +44,6 @@ impl<'a> HashIterator<'a> {
 
     pub fn dist(&self) -> u32 {
         self.cur_dist
-    }
-
-    pub fn pos(&self) -> u32 {
-        self.cur_pos
-    }
-
-    pub fn depth(&self) -> u32 {
-        self.chain_depth[self.cur_pos as usize]
     }
 
     pub fn next(&mut self) -> bool {
@@ -252,20 +236,9 @@ impl<'a> HashChain<'a> {
         let head = self.get_head(hash);
         HashIterator::new(
             &self.hash_table.prev,
-            &self.hash_table.chain_depth,
             (ref_pos as i32 - self.total_shift) as u32,
             max_dist,
             head,
-        )
-    }
-
-    pub fn iterate_from_pos(&self, pos: u32, ref_pos: u32, max_dist: u32) -> HashIterator {
-        HashIterator::new(
-            &self.hash_table.prev,
-            &self.hash_table.chain_depth,
-            (ref_pos as i32 - self.total_shift) as u32,
-            max_dist,
-            (pos as i32 - self.total_shift) as u32,
         )
     }
 
@@ -365,12 +338,14 @@ impl<'a> HashChain<'a> {
         let cur_max_dist = std::cmp::min(cur_pos, window_size);
 
         let start_depth = self.get_node_depth(self.get_head(hash));
-        let chain_it =
-            self.iterate_from_pos(cur_pos - target_reference.dist(), cur_pos, cur_max_dist);
-        if chain_it.pos() == 0 || target_reference.dist() > cur_max_dist {
+
+        if target_reference.dist() > cur_max_dist {
             return 0xffff;
         }
-        let end_depth = chain_it.depth();
+
+        let end_depth = self.get_node_depth(
+            (cur_pos as i32 - target_reference.dist() as i32 - self.total_shift) as u32,
+        );
 
         if start_depth < end_depth {
             return 0xffff;

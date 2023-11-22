@@ -34,8 +34,7 @@ pub fn add_location(
     compressed: &[u8],
 ) {
     let ret = decompress_deflate_stream(compressed, true);
-    if let Err(_e) = ret
-    {
+    if let Err(_e) = ret {
         //println!("Error decompressing {:?} {:?} at {}", signature, e, start);
         return;
     }
@@ -165,6 +164,14 @@ fn test_zip_stream(
     // Handle the compressed DATA. Currently only Deflate (8) and uncompressed (0) are supported.
     if zip_local_file_header.compression_method == 8 {
         let deflate_start_position = binary_reader.stream_position()?;
+
+        // dump to file
+        let mut f =
+            std::fs::File::create(format!("dump{}", *index as u64 + deflate_start_position))?;
+        f.write_all(
+            &contents[deflate_start_position as usize
+                ..zip_local_file_header.compressed_size as usize + deflate_start_position as usize],
+        )?;
 
         add_location(
             locations_found,

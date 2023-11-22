@@ -123,7 +123,7 @@ pub fn recreate_tree_for_block<D: PredictionDecoder>(
 
     if codec.decode_misprediction(CodecMisprediction::DistanceCountMisprediction) {
         let corrected_num_distance = codec.decode_value(5) as usize + 1;
-        bit_lengths.resize(corrected_num_distance, 0);
+        distance_code_lengths.resize(corrected_num_distance, 0);
     }
 
     result.num_dist = distance_code_lengths.len();
@@ -490,4 +490,63 @@ fn encode_tree_roundtrip() {
         recreate_tree_for_block(&freq, &mut decoder, HufftreeBitCalc::Zlib).unwrap();
 
     assert_eq!(huff_origin, regenerated_header);
+}
+
+/// test that we can reconstruct the tree from the predicted bit lengths where
+/// the predicted lengths are totally wrong
+#[test]
+fn encode_totally_different_tree() {
+    use crate::statistical_codec::{VerifyPredictionDecoder, VerifyPredictionEncoder};
+    use TreeCodeType::*;
+
+    #[rustfmt::skip]
+    let predicted_bit_len = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6, 0, 5, 0, 0, 0, 0, 0, 0, 0, 0, 8, 0, 6, 6, 5, 7, 7, 8,
+        0, 0, 0, 8, 0, 8, 0, 8, 0, 7, 6, 7, 7, 0, 0, 0, 8, 8, 7, 0, 0, 0, 0, 0, 0, 0, 0, 8, 8, 7, 0,
+        0, 8, 7, 0, 0, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5, 7, 5, 6, 4, 6, 7, 7, 5, 8, 8, 6, 5, 5, 5, 5,
+        0, 5, 5, 4, 7, 7, 7, 7, 7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 8, 0, 0, 0, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 8, 4, 6, 6, 6, 7, 8, 6, 0, 8, 0, 7,
+        0, 7, 7, 7, 6, 6, 7, 8, 8, 7, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 7, 0, 0, 7, 7, 4, 4, 3, 3,
+        2, 3, 3, 7, 6, 6, 0, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+
+    #[rustfmt::skip]
+    let actual_target_codes  =
+        [(Code, 14), (Repeat, 6), (Code, 14), (Code, 14), (Code, 12), (Code, 6), (Code, 14),
+        (Repeat, 6), (Repeat, 6), (Repeat, 6), (Code, 13), (Code, 14), (Code, 6), (Code, 14),
+        (Code, 10), (Code, 12), (Code, 14), (Code, 14), (Code, 13), (Code, 10), (Code, 8), (Code, 9),
+        (Code, 11), (Code, 10), (Code, 7), (Code, 8), (Code, 7), (Code, 9), (Code, 8), (Code, 8),
+        (Code, 8), (Code, 9), (Code, 8), (Code, 9), (Code, 10), (Code, 9), (Code, 8), (Code, 9),
+        (Code, 9), (Code, 8), (Code, 9), (Code, 10), (Code, 8), (Code, 14), (Code, 14), (Code, 8),
+        (Code, 9), (Code, 8), (Code, 9), (Code, 8), (Code, 9), (Code, 10), (Code, 11), (Code, 8),
+        (Code, 11), (Code, 14), (Code, 9), (Code, 10), (Code, 9), (Code, 10), (Code, 9), (Code, 12),
+        (Code, 9), (Code, 9), (Code, 9), (Code, 10), (Code, 12), (Code, 11), (Code, 14), (Code, 14),
+        (Code, 12), (Code, 11), (Code, 14), (Code, 11), (Code, 14), (Code, 14), (Code, 14), (Code, 6),
+        (Code, 7), (Code, 7), (Code, 7), (Code, 6), (Code, 8), (Code, 8), (Code, 7), (Code, 6),
+        (Code, 12), (Code, 9), (Code, 6), (Code, 7), (Code, 7), (Code, 6), (Code, 7), (Code, 13),
+        (Code, 6), (Code, 6), (Code, 6), (Code, 7), (Code, 8), (Code, 8), (Code, 9), (Code, 8),
+        (Code, 11), (Code, 13), (Code, 12), (Code, 13), (Code, 13), (Code, 14), (Repeat, 6),
+        (Repeat, 6), (Repeat, 6), (Repeat, 6), (Repeat, 6), (Repeat, 6), (Repeat, 6), (Repeat, 6),
+        (Repeat, 6), (Repeat, 6), (Repeat, 6), (Repeat, 6), (Repeat, 6), (Repeat, 6), (Repeat, 6),
+        (Repeat, 6), (Repeat, 6), (Repeat, 6), (Repeat, 6), (Code, 14), (Code, 13), (Code, 13),
+        (Code, 13), (Code, 14), (Code, 13), (Code, 14), (Code, 13), (Code, 14), (Code, 13),
+        (Code, 14), (Repeat, 4), (Code, 4), (Code, 3), (Code, 4), (Code, 4), (Code, 4), (Code, 5),
+        (Repeat, 4), (Code, 6), (Code, 6), (Code, 5), (Code, 6), (Code, 7), (Code, 8), (Code, 8),
+        (Code, 9), (Code, 10), (Code, 9), (Code, 10), (Code, 12), (Code, 11), (Code, 12), (Code, 14),
+        (Code, 14), (Code, 14), (Code, 12), (Code, 11), (Code, 6), (Code, 10), (Code, 11), (Code, 11),
+        (Code, 9), (Code, 8), (Code, 8), (Code, 8), (Code, 7), (Code, 7), (Code, 5), (Code, 6),
+        (Code, 4), (Code, 5), (Code, 4), (Code, 5), (Code, 4), (Code, 5), (Code, 4), (Repeat, 6),
+        (Code, 5), (Code, 4), (Code, 5), (Code, 5), (Code, 5)];
+
+    let mut encoder = VerifyPredictionEncoder::default();
+
+    predict_ld_trees(&mut encoder, &predicted_bit_len, &actual_target_codes).unwrap();
+
+    let mut decoder = VerifyPredictionDecoder::new(encoder.actions());
+
+    let regenerated_header = reconstruct_ld_trees(&mut decoder, &predicted_bit_len).unwrap();
+
+    assert_eq!(actual_target_codes, regenerated_header.as_slice());
 }

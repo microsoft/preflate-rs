@@ -34,16 +34,16 @@ fn main() {
                     totalzstd -= result.compressed_size as u64;
                     totalzstd += result.zstd + result.cabac_length as u64;
                     println!(
-                        "  Found compressed data {:?} s={} c={} zstd={} cabac={}",
+                        "  Found compressed data s={:?} c={} u={} zstd={} cabac={}",
                         result.signature,
                         result.compressed_size,
                         result.uncompressed_size,
-                        result.zstd as i64 - result.compressed_size as i64,
+                        result.zstd,
                         result.cabac_length,
                     );
                 }
             }
         }
+        println!("total seen ratio {}", totalzstd as f64 / totalseen as f64);
     }
-    println!("total seen ratio {}", totalzstd as f64 / totalseen as f64);
 }
