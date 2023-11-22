@@ -28,7 +28,7 @@ Note that the data formats of the recompression information are different and in
 
 #### Building From Source
 
-- [Rust 1.65 or Above](https://www.rust-lang.org/tools/install)
+- [Rust 1.70 or Above](https://www.rust-lang.org/tools/install)
 
 ```
 git clone https://github.com/microsoft/preflate-rs
