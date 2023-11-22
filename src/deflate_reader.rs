@@ -6,26 +6,26 @@
 
 use anyhow::Context;
 
-use std::io::{Read, Seek};
+use std::io::Read;
 
 use crate::{
+    bit_reader::BitReader,
     huffman_encoding::{HuffmanOriginalEncoding, HuffmanReader},
     preflate_constants,
     preflate_token::{BlockType, PreflateTokenBlock},
-    zip_bit_reader::ZipBitReader,
 };
 
 /// Used to read binary data in deflate format and convert it to plaintext and a list of tokenized blocks
 /// containing the literals and distance codes that were used to compress the file
-pub struct DeflateReader<'a, R> {
-    input: ZipBitReader<'a, R>,
+pub struct DeflateReader<R> {
+    input: BitReader<R>,
     plain_text: Vec<u8>,
 }
 
-impl<'a, R: Read + Seek> DeflateReader<'a, R> {
-    pub fn new(compressed_text: &'a mut R, max_readable_bytes: i64) -> Self {
+impl<R: Read> DeflateReader<R> {
+    pub fn new(compressed_text: R) -> Self {
         DeflateReader {
-            input: ZipBitReader::new(compressed_text, max_readable_bytes),
+            input: BitReader::new(compressed_text),
             plain_text: Vec::new(),
         }
     }
@@ -86,7 +86,7 @@ impl<'a, R: Read + Seek> DeflateReader<'a, R> {
                 blk.uncompressed_len = len;
                 blk.context_len = 0;
 
-                self.input.flush_buffer_to_byte_boundary()?;
+                self.input.flush_buffer_to_byte_boundary();
 
                 for _i in 0..len {
                     let b = self.input.read_byte()?;

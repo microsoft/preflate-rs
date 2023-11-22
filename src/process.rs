@@ -28,7 +28,7 @@ pub fn read_deflate<E: PredictionEncoder>(
     deflate_info_dump_level: u32,
 ) -> Result<(usize, PreflateParameters, Vec<u8>, Vec<PreflateTokenBlock>), PreflateError> {
     let mut input_stream = Cursor::new(compressed_data);
-    let mut block_decoder = DeflateReader::new(&mut input_stream, compressed_data.len() as i64);
+    let mut block_decoder = DeflateReader::new(&mut input_stream);
 
     let mut blocks = Vec::new();
     let mut last = false;

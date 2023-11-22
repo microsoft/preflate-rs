@@ -7,10 +7,10 @@
 use anyhow::Result;
 
 use crate::{
+    bit_reader::ReadBits,
     bit_writer::BitWriter,
     huffman_helper::{calc_huffman_codes, calculate_huffman_code_tree, decode_symbol},
     preflate_constants::TREE_CODE_ORDER_TABLE,
-    zip_bit_reader::ReadBits,
 };
 
 #[derive(PartialEq, Eq, Clone, Copy, Debug)]
@@ -354,7 +354,7 @@ impl HuffmanWriter {
 
 #[test]
 fn roundtrip_huffman_bitreadwrite() {
-    use crate::zip_bit_reader::ZipBitReader;
+    use crate::bit_reader::BitReader;
     use std::io::Cursor;
 
     let code_lengths = [1, 0, 3, 3, 4, 4, 3, 0];
@@ -374,7 +374,7 @@ fn roundtrip_huffman_bitreadwrite() {
 
     let data_buffer_size = data_buffer.len();
     let mut reader = Cursor::new(&data_buffer);
-    let mut bit_reader = ZipBitReader::new(&mut reader, data_buffer_size as i64);
+    let mut bit_reader = BitReader::new(&mut reader);
 
     let huffman_tree = calculate_huffman_code_tree(&code_lengths).unwrap();
 
@@ -456,7 +456,7 @@ fn roundtrip_huffman_table() {
 
 #[cfg(test)]
 fn rountrip_test(encoding: HuffmanOriginalEncoding) {
-    use crate::zip_bit_reader::ZipBitReader;
+    use crate::bit_reader::BitReader;
     use std::io::Cursor;
 
     let mut output_buffer = Vec::new();
@@ -472,7 +472,7 @@ fn rountrip_test(encoding: HuffmanOriginalEncoding) {
 
     // now re-read the encoding
     let mut reader = Cursor::new(&output_buffer);
-    let mut bit_reader = ZipBitReader::new(&mut reader, output_buffer.len() as i64);
+    let mut bit_reader = BitReader::new(&mut reader);
     let encoding2 = HuffmanOriginalEncoding::read(&mut bit_reader).unwrap();
     assert_eq!(encoding, encoding2);
 

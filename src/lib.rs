@@ -5,6 +5,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 mod bit_helper;
+mod bit_reader;
 mod bit_writer;
 mod cabac_codec;
 mod complevel_estimator;
@@ -26,7 +27,6 @@ mod process;
 mod statistical_codec;
 mod token_predictor;
 mod tree_predictor;
-mod zip_bit_reader;
 
 use anyhow::{self};
 use cabac::{

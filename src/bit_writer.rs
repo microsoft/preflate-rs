@@ -61,7 +61,7 @@ fn write_simple() {
 /// write various bit patterns and see if the result matches the input
 #[test]
 fn write_roundtrip() {
-    use crate::zip_bit_reader::ZipBitReader;
+    use crate::bit_reader::BitReader;
 
     let mut b = BitWriter::default();
     let mut data_buffer = Vec::new();
@@ -92,7 +92,7 @@ fn write_roundtrip() {
 
     let len = data_buffer.len() as i64;
     let mut cursor = std::io::Cursor::new(data_buffer);
-    let mut reader = ZipBitReader::new(&mut cursor, len);
+    let mut reader = BitReader::new(&mut cursor);
 
     for &(bits, len) in pattern.iter() {
         assert_eq!(reader.get(len).unwrap(), bits);

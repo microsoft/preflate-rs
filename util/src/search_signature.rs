@@ -36,7 +36,14 @@ pub fn add_location(
     start: u64,
     compressed: &[u8],
 ) {
-    if let Ok(r) = decompress_deflate_stream(compressed, true) {
+    let ret = decompress_deflate_stream(compressed, true);
+    if let Err(e) = ret
+    {
+        //println!("Error decompressing {:?} {:?} at {}", signature, e, start);
+        return;
+    }
+
+    if let Ok(r) = ret {
         let mut output = Vec::new();
         let mut encoder = zstd::stream::Encoder::new(&mut output, 9).unwrap();
 
@@ -106,7 +113,7 @@ fn test_zip_stream(
     index: &mut usize,
     locations_found: &mut Vec<DeflateStreamLocation>,
 ) -> anyhow::Result<()> {
-    let contents = &src[*index..];
+    let contents = &src[*index - 2..];
 
     let mut binary_reader = Cursor::new(&contents);
 
@@ -165,7 +172,7 @@ fn test_zip_stream(
         add_location(
             locations_found,
             Signature::ZipLocalFileHeader,
-            deflate_start_position,
+            *index as u64 + deflate_start_position,
             &contents[deflate_start_position as usize..],
         );
 

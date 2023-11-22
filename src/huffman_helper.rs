@@ -4,7 +4,7 @@
  *  This software incorporates material from third parties. See NOTICE.txt for details.
  *--------------------------------------------------------------------------------------------*/
 
-use crate::zip_bit_reader::ReadBits;
+use crate::bit_reader::ReadBits;
 use std::vec;
 
 /// Calculates Huffman code array given an array of Huffman Code Lengths using the RFC 1951 algorithm
