@@ -305,6 +305,15 @@ fn do_analyze(crc: Option<u32>, compressed_data: &[u8], verify: bool) {
 }
 
 #[test]
+fn verify_longmatch() {
+    do_analyze(
+        None,
+        &read_file("compressed_flate2_level1_longmatch.bin"),
+        false,
+    );
+}
+
+#[test]
 fn verify_zlib_compressed() {
     for i in 0..9 {
         let v = read_file(&format!("compressed_miniz_oxide_level{}.bin", i));

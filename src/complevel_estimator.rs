@@ -207,8 +207,8 @@ impl<'a> CompLevelEstimatorState<'a> {
         self.info.recommended_compression_level = 9;
         self.info.very_far_matches = self.info.longest_dist_at_hop_0
             > self.window_size() - preflate_constants::MIN_LOOKAHEAD
-            && self.info.longest_dist_at_hop_1_plus
-                < self.window_size() - preflate_constants::MIN_LOOKAHEAD;
+            || self.info.longest_dist_at_hop_1_plus
+                >= self.window_size() - preflate_constants::MIN_LOOKAHEAD;
         self.info.far_len_3_matches = self.info.longest_len_3_dist > 4096;
 
         self.info.zlib_compatible = self.info.possible_compression_levels > 1

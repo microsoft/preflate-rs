@@ -5,7 +5,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 use std::fs::File;
-use std::io::{Cursor, Read};
+use std::io::{Cursor, Read, Write};
 use std::path::Path;
 
 use flate2::{read::ZlibEncoder, Compression};
@@ -35,7 +35,17 @@ fn end_to_end_compressed() {
 }
 
 #[test]
-fn test_wrong() {
+fn test_matchnotfound() {
+    test_file("sample3.bin");
+}
+
+#[test]
+fn test_nomatch() {
+    test_file("sample2.bin");
+}
+
+#[test]
+fn test_sample1() {
     test_file("sample1.bin");
 }
 
@@ -85,6 +95,11 @@ fn test_file(filename: &str) {
 
         // skip header and final crc
         let minusheader = &output[2..output.len() - 4];
+
+        // write to file
+        let mut f =
+            File::create(format!("c:\\temp\\compressed_flate2_level{}.bin", level)).unwrap();
+        f.write_all(minusheader).unwrap();
 
         verifyresult(minusheader);
     }

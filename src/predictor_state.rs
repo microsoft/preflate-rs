@@ -16,7 +16,7 @@ pub enum MatchResult {
     Success(PreflateTokenReference),
     DistanceLargerThanHop0(u32, u32),
     NoInput,
-    NoMoreMatchesFound(u32),
+    NoMoreMatchesFound { start_len: u32, last_dist: u32 },
     MaxChainExceeded,
 }
 
@@ -174,10 +174,9 @@ impl<'a> PredictorState<'a> {
         let mut best_match: Option<PreflateTokenReference> = None;
         let input = self.hash.input().cur_chars(offset as i32);
         loop {
-            let match_start = self
-                .hash
-                .input()
-                .cur_chars(offset as i32 - chain_it.dist() as i32);
+            let dist = chain_it.dist();
+
+            let match_start = self.hash.input().cur_chars(offset as i32 - dist as i32);
 
             let match_length = Self::prefix_compare(match_start, input, best_len, max_len);
             if match_length > best_len {
@@ -195,7 +194,10 @@ impl<'a> PredictorState<'a> {
                 if let Some(r) = best_match {
                     return MatchResult::Success(r);
                 } else {
-                    return MatchResult::NoMoreMatchesFound(match_length);
+                    return MatchResult::NoMoreMatchesFound {
+                        start_len: match_length,
+                        last_dist: dist,
+                    };
                 }
             }
 
@@ -302,5 +304,11 @@ impl<'a> PredictorState<'a> {
                 return Err(anyhow::anyhow!("no match found"));
             }
         }
+    }
+
+    /// debugging function to verify that the hash chain is correct
+    #[allow(dead_code)]
+    pub fn verify_hash(&self, dist: Option<PreflateTokenReference>) {
+        self.hash.verify_hash(dist);
     }
 }

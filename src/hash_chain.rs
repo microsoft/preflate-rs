@@ -83,7 +83,7 @@ pub struct HashChain<'a> {
     hash_shift: u32,
     running_hash: RotatingHash,
     hash_mask: u16,
-    total_shift: u32,
+    total_shift: i32,
 }
 
 #[derive(Default, Debug, Copy, Clone)]
@@ -108,9 +108,12 @@ impl<'a> HashChain<'a> {
         let hash_bits = mem_level + 7;
         let hash_mask = ((1u32 << hash_bits) - 1) as u16;
 
+        // Important: total_shift starts at -8 since 0 indicates the end of the hash chain
+        // so this means that all valid values will be >= 8, otherwise the very first hash
+        // offset would be zero and so it would get missed
         let mut hash_chain_ext = HashChain {
             input: PreflateInput::new(i),
-            total_shift: 0,
+            total_shift: -8,
             hash_shift: (hash_bits + MIN_MATCH - 1) / MIN_MATCH,
             hash_mask,
             hash_table: HashTable::default_boxed(),
@@ -150,20 +153,86 @@ impl<'a> HashChain<'a> {
     }
 
     fn reshift_if_necessary(&mut self) {
-        if self.input.pos() - self.total_shift >= 0xfd00 {
+        if self.input.pos() as i32 - self.total_shift >= 0xfe00 {
             const DELTA: usize = 0x7e00;
             for i in 0..=self.hash_mask as usize {
                 self.hash_table.head[i] = self.hash_table.head[i].saturating_sub(DELTA as u16);
             }
 
-            for i in DELTA..(1 << 16) {
+            for i in DELTA..=65535 {
                 self.hash_table.prev[i - DELTA] =
                     self.hash_table.prev[i].saturating_sub(DELTA as u16);
             }
 
-            self.hash_table.chain_depth.copy_within(DELTA..65536, 0);
-            self.total_shift += DELTA as u32;
+            self.hash_table.chain_depth.copy_within(DELTA..=65535, 0);
+            self.total_shift += DELTA as i32;
         }
+    }
+
+    /// construct a hash chain from scratch and verify that we match the existing hash chain
+    /// used for debugging only
+    #[allow(dead_code)]
+    pub fn verify_hash(&self, dist: Option<PreflateTokenReference>) {
+        let mut hash = RotatingHash::default();
+        let mut start_pos = self.total_shift as i32;
+
+        let mut chains: Vec<Vec<u16>> = Vec::new();
+        chains.resize(self.hash_mask as usize + 1, Vec::new());
+
+        let mut start_delay = 2;
+
+        while start_pos - 1 <= self.input.pos() as i32 {
+            hash = hash.append(
+                self.input.cur_char(start_pos - self.input.pos() as i32),
+                self.hash_shift,
+            );
+
+            if start_delay > 0 {
+                start_delay -= 1;
+            } else {
+                chains[hash.hash(self.hash_mask) as usize]
+                    .push((start_pos - 2 - self.total_shift as i32) as u16);
+            }
+
+            start_pos += 1;
+        }
+
+        let distance = dist.map_or(0, |d| d.dist() as i32);
+
+        println!(
+            "MATCH t={:?} a={:?} b={:?} d={}",
+            dist,
+            &self.input.cur_chars(-distance)[0..10],
+            &self.input.cur_chars(0)[0..10],
+            self.input.pos() - self.total_shift as u32 - distance as u32
+        );
+
+        //println!("MATCH pos = {}, total_shift = {}", self.input.pos(), self.total_shift);
+        let mut mismatch = false;
+        for i in 0..=self.hash_mask {
+            let current_chain = &chains[i as usize];
+
+            let mut hash_table_chain = Vec::new();
+            hash_table_chain.reserve(current_chain.len());
+
+            let mut curr_pos = self.hash_table.head[i as usize];
+            while curr_pos != 0 {
+                hash_table_chain.push(curr_pos);
+                curr_pos = self.hash_table.prev[curr_pos as usize];
+            }
+            hash_table_chain.reverse();
+
+            if hash_table_chain[..] != current_chain[..] {
+                mismatch = true;
+                println!(
+                    "HASH {i} MISMATCH a={:?} b={:?}",
+                    hash_table_chain, current_chain
+                );
+            }
+
+            //assert_eq!(0, chains[i as usize].len());
+        }
+        assert!(!mismatch);
     }
 
     pub fn get_head(&self, hash: RotatingHash) -> u32 {
@@ -184,7 +253,7 @@ impl<'a> HashChain<'a> {
         HashIterator::new(
             &self.hash_table.prev,
             &self.hash_table.chain_depth,
-            ref_pos - self.total_shift,
+            (ref_pos as i32 - self.total_shift) as u32,
             max_dist,
             head,
         )
@@ -194,9 +263,9 @@ impl<'a> HashChain<'a> {
         HashIterator::new(
             &self.hash_table.prev,
             &self.hash_table.chain_depth,
-            ref_pos - self.total_shift,
+            (ref_pos as i32 - self.total_shift) as u32,
             max_dist,
-            pos - self.total_shift,
+            (pos as i32 - self.total_shift) as u32,
         )
     }
 
@@ -228,7 +297,7 @@ impl<'a> HashChain<'a> {
 
         self.reshift_if_necessary();
 
-        let pos = (self.input.pos() - self.total_shift) as u16;
+        let pos = (self.input.pos() as i32 - self.total_shift) as u16;
 
         let limit = std::cmp::min(length + 2, self.input.remaining()) as u16;
 
@@ -251,7 +320,7 @@ impl<'a> HashChain<'a> {
     pub fn skip_hash(&mut self, l: u32) {
         self.reshift_if_necessary();
 
-        let pos = self.input.pos();
+        let pos = self.input.pos() as i32;
 
         let remaining = self.input.remaining();
         if remaining > 2 {
@@ -268,7 +337,7 @@ impl<'a> HashChain<'a> {
             // bad analysis results
             // --------------------
             for i in 1..l {
-                let p = (pos + i) - self.total_shift;
+                let p = (pos + i as i32) - self.total_shift;
                 self.hash_table.chain_depth[p as usize] = 0xffff8000;
             }
 

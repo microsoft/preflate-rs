@@ -162,9 +162,13 @@ impl<'a> TokenPredictor<'a> {
                                 CodecMisprediction::LiteralPredictionWrong,
                                 true,
                             );
-                            self.repredict_reference().with_context(|| {
-                                format!("repredict_reference target={:?} index={}", target_ref, i)
-                            })?
+                            self.repredict_reference(Some(*target_ref))
+                                .with_context(|| {
+                                    format!(
+                                        "repredict_reference target={:?} index={}",
+                                        target_ref, i
+                                    )
+                                })?
                         }
                         PreflateToken::Reference(r) => {
                             // we predicted a reference correctly, so verify that the length/dist was correct
@@ -280,7 +284,7 @@ impl<'a> TokenPredictor<'a> {
                         continue;
                     }
 
-                    predicted_ref = self.repredict_reference().with_context(|| {
+                    predicted_ref = self.repredict_reference(None).with_context(|| {
                         format!(
                             "repredict_reference token_count={:?}",
                             self.current_token_count
@@ -443,11 +447,20 @@ impl<'a> TokenPredictor<'a> {
 
     /// When the predicted token was a literal, but the actual token was a reference, try again
     /// to find a match for the reference.
-    fn repredict_reference(&mut self) -> anyhow::Result<PreflateTokenReference> {
+    fn repredict_reference(
+        &mut self,
+        dist_match: Option<PreflateTokenReference>,
+    ) -> anyhow::Result<PreflateTokenReference> {
         if self.state.current_input_pos() == 0 || self.state.available_input_size() < MIN_MATCH {
             return Err(anyhow::Error::msg(
                 "Not enough space left to find a reference",
             ));
+        }
+
+        if let Some(x) = dist_match {
+            if x.dist() == 32653 {
+                println!("dist_match = {:?}", dist_match);
+            }
         }
 
         let hash = self.state.calculate_hash();
@@ -462,6 +475,9 @@ impl<'a> TokenPredictor<'a> {
                 return Ok(m);
             }
         }
+
+        //self.state.verify_hash(dist_match);
+
         Err(anyhow::Error::msg(format!(
             "Didnt find a match {:?}",
             match_token
