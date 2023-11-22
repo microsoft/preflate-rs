@@ -78,9 +78,20 @@ fn is_valid_huffman_code_lengths(code_lengths: &[u8]) -> bool {
         length_count[length as usize] += 1;
     }
 
-    // todo - check for invalid code lengths
+    // essential property of huffman codes is that all internal nodes
+    // have exactly two children. This means that the amount of free
+    // space doubles each time we go down the node tree.
+    let mut internal_nodes = 2;
+    for i in 1..length_count.len() {
+        internal_nodes -= length_count[i];
+        if internal_nodes < 0 {
+            return false;
+        }
+        internal_nodes *= 2;
+    }
 
-    true
+    // there should be no more internal nodes left
+    internal_nodes == 0
 }
 
 /// Calculates Huffman code array given an array of Huffman Code Lengths using the RFC 1951 algorithm
