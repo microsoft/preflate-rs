@@ -79,8 +79,8 @@ fn is_valid_huffman_code_lengths(code_lengths: &[u8]) -> bool {
     }
 
     // essential property of huffman codes is that all internal nodes
-    // have exactly two children. This means that the amount of free
-    // space doubles each time we go down the node tree.
+    // have exactly two children. This means that the number of internal
+    // nodes doubles each time we go down one level in the tree.
     let mut internal_nodes = 2;
     for i in 1..length_count.len() {
         internal_nodes -= length_count[i];

@@ -9,6 +9,19 @@ sure that the DEFLATE content is recreated exactly as it was written. This is no
 DEFLATE has a large degree of freedom in choosing both how the distance/length pairs are chose
 and how the Huffman trees are created.
 
+The general approach is as follows:
+1. Decompress stream into plaintext and a list of blocks containing tokens that are either literals (bytes) or distance, length pairs.
+2. Estimation scan of content to estimate parameters used for compression. The better the estimation, the less corrections we need when we try to recreate the compression.
+3. Rerun compression using the zlib algorithm using the parameters gathered above. A difference encoder is used to record each instance where the token predicted by our implementation of DEFLATE differs from what we found in the file. 
+
+The following differences are corrected:
+- Type of block (uncompressed, static huffman, dynamic huffman)
+- Number of tokens in block (normally 16386)
+- Dynamic huffman encoding (estimated using the zlib algorithm, but there are multiple ways to construct more or less optimal length limited Huffman codes)
+- Literal vs (distance, length) pair (corrected by a single bit)
+- Length or distance is incorrect (corrected by encoding the number of hops backwards until the correct one)
+- Weird 258 length size (standard allows for two different encodings)
+
 Note that the data formats of the recompression information are different and incompatible to the original preflate implemenation, as this library uses a different arithmetic encoder (shared from the Lepton JPEG compression library).
 
 ## How to Use This Library
