@@ -4,7 +4,7 @@
  *  This software incorporates material from third parties. See NOTICE.txt for details.
  *--------------------------------------------------------------------------------------------*/
 
-use crate::hash_chain::{HashChain, RotatingHash};
+use crate::hash_chain::{HashChain, ZlibRotatingHash};
 use crate::preflate_constants;
 use crate::preflate_parse_config::{
     PreflateParserConfig, FAST_PREFLATE_PARSER_SETTINGS, SLOW_PREFLATE_PARSER_SETTINGS,
@@ -27,10 +27,10 @@ pub struct CompLevelInfo {
     pub far_len_3_matches: bool,
 }
 struct CompLevelEstimatorState<'a> {
-    slow_hash: HashChain<'a>,
-    fast_l1_hash: HashChain<'a>,
-    fast_l2_hash: HashChain<'a>,
-    fast_l3_hash: HashChain<'a>,
+    slow_hash: HashChain<'a, ZlibRotatingHash>,
+    fast_l1_hash: HashChain<'a, ZlibRotatingHash>,
+    fast_l2_hash: HashChain<'a, ZlibRotatingHash>,
+    fast_l3_hash: HashChain<'a, ZlibRotatingHash>,
     blocks: &'a Vec<PreflateTokenBlock>,
     info: CompLevelInfo,
     wsize: u16,
@@ -39,15 +39,16 @@ struct CompLevelEstimatorState<'a> {
 impl<'a> CompLevelEstimatorState<'a> {
     pub fn new(
         wbits: u32,
-        mbits: u32,
+        hash_shift: u32,
+        hash_mask: u16,
         plain_text: &'a [u8],
         blocks: &'a Vec<PreflateTokenBlock>,
     ) -> Self {
         CompLevelEstimatorState::<'a> {
-            slow_hash: HashChain::<'a>::new(plain_text, mbits),
-            fast_l1_hash: HashChain::<'a>::new(plain_text, mbits),
-            fast_l2_hash: HashChain::<'a>::new(plain_text, mbits),
-            fast_l3_hash: HashChain::<'a>::new(plain_text, mbits),
+            slow_hash: HashChain::<'a>::new(plain_text, hash_shift, hash_mask),
+            fast_l1_hash: HashChain::<'a>::new(plain_text, hash_shift, hash_mask),
+            fast_l2_hash: HashChain::<'a>::new(plain_text, hash_shift, hash_mask),
+            fast_l3_hash: HashChain::<'a>::new(plain_text, hash_shift, hash_mask),
             blocks,
             info: CompLevelInfo {
                 possible_compression_levels: 0b_111111110,
@@ -238,7 +239,7 @@ impl<'a> CompLevelEstimatorState<'a> {
     }
 
     fn update_or_skip_single_fast_hash(
-        hash: &mut HashChain,
+        hash: &mut HashChain<ZlibRotatingHash>,
         len: u32,
         config: &PreflateParserConfig,
     ) {
@@ -251,9 +252,9 @@ impl<'a> CompLevelEstimatorState<'a> {
 
     fn check_match_single_fast_hash(
         token: &PreflateTokenReference,
-        hash: &HashChain,
+        hash: &HashChain<ZlibRotatingHash>,
         config: &PreflateParserConfig,
-        hash_head: RotatingHash,
+        hash_head: ZlibRotatingHash,
         window_size: u32,
     ) -> bool {
         let mdepth = hash.match_depth(hash_head, token, window_size);
@@ -270,12 +271,13 @@ impl<'a> CompLevelEstimatorState<'a> {
 
 pub fn estimate_preflate_comp_level(
     wbits: u32,
-    mbits: u32,
+    hash_shift: u32,
+    hash_mask: u16,
     plain_text: &[u8],
     blocks: &Vec<PreflateTokenBlock>,
     early_out: bool,
 ) -> CompLevelInfo {
-    let mut state = CompLevelEstimatorState::new(wbits, mbits, plain_text, blocks);
+    let mut state = CompLevelEstimatorState::new(wbits, hash_shift, hash_mask, plain_text, blocks);
     state.check_dump(early_out);
     state.recommend();
     state.info

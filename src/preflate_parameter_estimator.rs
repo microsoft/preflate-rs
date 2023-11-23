@@ -7,7 +7,7 @@
 use crate::{
     bit_helper::bit_length,
     complevel_estimator::estimate_preflate_comp_level,
-    preflate_constants,
+    preflate_constants::{self, MIN_MATCH},
     preflate_parse_config::*,
     preflate_stream_info::{extract_preflate_info, PreflateStreamInfo},
     preflate_token::PreflateTokenBlock,
@@ -35,7 +35,9 @@ pub struct PreflateParameters {
     pub huff_strategy: PreflateHuffStrategy,
     pub zlib_compatible: bool,
     pub window_bits: u32,
-    pub mem_level: u32,
+    pub hash_shift: u32,
+    pub hash_mask: u16,
+    pub max_token_count: u16,
     pub far_len3_matches_detected: bool,
     pub very_far_matches_detected: bool,
     pub matches_to_start_detected: bool,
@@ -53,7 +55,9 @@ impl PreflateParameters {
         let huff_strategy = decoder.decode_value(4);
         let zlib_compatible = decoder.decode_value(1) != 0;
         let window_bits = decoder.decode_value(8);
-        let mem_level = decoder.decode_value(8);
+        let hash_shift = decoder.decode_value(8);
+        let hash_mask = decoder.decode_value(16);
+        let max_token_count = decoder.decode_value(16);
         let far_len3_matches_detected = decoder.decode_value(1) != 0;
         let very_far_matches_detected = decoder.decode_value(1) != 0;
         let matches_to_start_detected = decoder.decode_value(1) != 0;
@@ -80,7 +84,9 @@ impl PreflateParameters {
             },
             zlib_compatible,
             window_bits: window_bits.into(),
-            mem_level: mem_level.into(),
+            hash_shift: hash_shift.into(),
+            hash_mask: hash_mask,
+            max_token_count: max_token_count,
             far_len3_matches_detected,
             very_far_matches_detected,
             matches_to_start_detected,
@@ -98,7 +104,9 @@ impl PreflateParameters {
         encoder.encode_value(self.huff_strategy as u16, 4);
         encoder.encode_value(u16::try_from(self.zlib_compatible).unwrap(), 1);
         encoder.encode_value(u16::try_from(self.window_bits).unwrap(), 8);
-        encoder.encode_value(u16::try_from(self.mem_level).unwrap(), 8);
+        encoder.encode_value(u16::try_from(self.hash_shift).unwrap(), 8);
+        encoder.encode_value(u16::try_from(self.hash_mask).unwrap(), 16);
+        encoder.encode_value(u16::try_from(self.max_token_count).unwrap(), 16);
         encoder.encode_value(u16::try_from(self.far_len3_matches_detected).unwrap(), 1);
         encoder.encode_value(u16::try_from(self.very_far_matches_detected).unwrap(), 1);
         encoder.encode_value(u16::try_from(self.matches_to_start_detected).unwrap(), 1);
@@ -161,7 +169,23 @@ pub fn estimate_preflate_parameters(
     let window_bits = estimate_preflate_window_bits(info.max_dist);
     let mem_level = estimate_preflate_mem_level(info.max_tokens_per_block);
 
-    let cl = estimate_preflate_comp_level(window_bits, mem_level, unpacked_output, blocks, false);
+    let hash_bits = mem_level + 7;
+    let hash_shift = (hash_bits + 2) / 3;
+    let hash_mask = ((1u32 << hash_bits) - 1) as u16;
+
+    //let hash_shift = 5;
+    //let hash_mask = 32767;
+
+    let max_token_count = (1 << (6 + mem_level)) - 1;
+
+    let cl = estimate_preflate_comp_level(
+        window_bits,
+        hash_shift,
+        hash_mask,
+        unpacked_output,
+        blocks,
+        false,
+    );
 
     let config;
     let comp_level = cl.recommended_compression_level;
@@ -181,7 +205,9 @@ pub fn estimate_preflate_parameters(
 
     PreflateParameters {
         window_bits,
-        mem_level,
+        hash_shift,
+        hash_mask,
+        max_token_count,
         strategy: estimate_preflate_strategy(&info),
         huff_strategy: estimate_preflate_huff_strategy(&info),
         zlib_compatible: cl.zlib_compatible,

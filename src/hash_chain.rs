@@ -7,8 +7,7 @@
 use default_boxed::DefaultBoxed;
 
 use crate::{
-    bit_helper::DebugHash, preflate_constants::MIN_MATCH, preflate_input::PreflateInput,
-    preflate_token::PreflateTokenReference,
+    bit_helper::DebugHash, preflate_input::PreflateInput, preflate_token::PreflateTokenReference,
 };
 
 pub struct HashIterator<'a> {
@@ -61,47 +60,49 @@ struct HashTable {
     prev: [u16; 65536],
 }
 
-pub struct HashChain<'a> {
+pub struct HashChain<'a, H: RotatingHashTrait> {
     input: PreflateInput<'a>,
     hash_table: Box<HashTable>,
     hash_shift: u32,
-    running_hash: RotatingHash,
+    running_hash: H,
     hash_mask: u16,
     total_shift: i32,
 }
 
 #[derive(Default, Debug, Copy, Clone)]
-pub struct RotatingHash {
+pub struct ZlibRotatingHash {
     hash: u16,
 }
 
-impl RotatingHash {
-    pub fn hash(&self, mask: u16) -> u16 {
+pub trait RotatingHashTrait {
+    fn hash(&self, mask: u16) -> u16;
+    fn append(&self, c: u8, hash_shift: u32) -> Self;
+}
+
+impl RotatingHashTrait for ZlibRotatingHash {
+    fn hash(&self, mask: u16) -> u16 {
         self.hash & mask
     }
 
-    pub fn append(&self, c: u8, hash_shift: u32) -> RotatingHash {
-        RotatingHash {
+    fn append(&self, c: u8, hash_shift: u32) -> ZlibRotatingHash {
+        ZlibRotatingHash {
             hash: (self.hash << hash_shift) ^ u16::from(c),
         }
     }
 }
 
-impl<'a> HashChain<'a> {
-    pub fn new(i: &'a [u8], mem_level: u32) -> Self {
-        let hash_bits = mem_level + 7;
-        let hash_mask = ((1u32 << hash_bits) - 1) as u16;
-
+impl<'a, H: RotatingHashTrait + Default> HashChain<'a, H> {
+    pub fn new(i: &'a [u8], hash_shift: u32, hash_mask: u16) -> Self {
         // Important: total_shift starts at -8 since 0 indicates the end of the hash chain
         // so this means that all valid values will be >= 8, otherwise the very first hash
         // offset would be zero and so it would get missed
         let mut hash_chain_ext = HashChain {
             input: PreflateInput::new(i),
             total_shift: -8,
-            hash_shift: (hash_bits + MIN_MATCH - 1) / MIN_MATCH,
+            hash_shift,
             hash_mask,
             hash_table: HashTable::default_boxed(),
-            running_hash: RotatingHash::default(),
+            running_hash: H::default(),
         };
 
         if i.len() > 2 {
@@ -122,11 +123,11 @@ impl<'a> HashChain<'a> {
         checksum.update(self.total_shift);
     }
 
-    fn next_hash(&self, b: u8) -> RotatingHash {
+    fn next_hash(&self, b: u8) -> H {
         self.running_hash.append(b, self.hash_shift)
     }
 
-    fn next_hash_double(&self, b1: u8, b2: u8) -> RotatingHash {
+    fn next_hash_double(&self, b1: u8, b2: u8) -> H {
         self.running_hash
             .append(b1, self.hash_shift)
             .append(b2, self.hash_shift)
@@ -157,7 +158,7 @@ impl<'a> HashChain<'a> {
     /// used for debugging only
     #[allow(dead_code)]
     pub fn verify_hash(&self, dist: Option<PreflateTokenReference>) {
-        let mut hash = RotatingHash::default();
+        let mut hash = H::default();
         let mut start_pos = self.total_shift as i32;
 
         let mut chains: Vec<Vec<u16>> = Vec::new();
@@ -219,7 +220,7 @@ impl<'a> HashChain<'a> {
         assert!(!mismatch);
     }
 
-    pub fn get_head(&self, hash: RotatingHash) -> u32 {
+    pub fn get_head(&self, hash: H) -> u32 {
         self.hash_table.head[hash.hash(self.hash_mask) as usize].into()
     }
 
@@ -227,12 +228,7 @@ impl<'a> HashChain<'a> {
         self.hash_table.chain_depth[node as usize]
     }
 
-    pub fn iterate_from_head(
-        &self,
-        hash: RotatingHash,
-        ref_pos: u32,
-        max_dist: u32,
-    ) -> HashIterator {
+    pub fn iterate_from_head(&self, hash: H, ref_pos: u32, max_dist: u32) -> HashIterator {
         let head = self.get_head(hash);
         HashIterator::new(
             &self.hash_table.prev,
@@ -246,15 +242,15 @@ impl<'a> HashChain<'a> {
         &self.input
     }
 
-    pub fn cur_hash(&self) -> RotatingHash {
+    pub fn cur_hash(&self) -> H {
         self.next_hash(self.input.cur_char(2))
     }
 
-    pub fn cur_plus_1_hash(&self) -> RotatingHash {
+    pub fn cur_plus_1_hash(&self) -> H {
         self.next_hash_double(self.input.cur_char(2), self.input.cur_char(3))
     }
 
-    pub fn hash_equal(&self, a: RotatingHash, b: RotatingHash) -> bool {
+    pub fn hash_equal(&self, a: H, b: H) -> bool {
         a.hash(self.hash_mask) == b.hash(self.hash_mask)
     }
 
@@ -330,7 +326,7 @@ impl<'a> HashChain<'a> {
 
     pub fn match_depth(
         &self,
-        hash: RotatingHash,
+        hash: H,
         target_reference: &PreflateTokenReference,
         window_size: u32,
     ) -> u32 {

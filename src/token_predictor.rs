@@ -9,6 +9,7 @@ use anyhow::Context;
 use crate::{
     bit_helper::DebugHash,
     cabac_codec::{decode_difference, encode_difference},
+    hash_chain::ZlibRotatingHash,
     predictor_state::{MatchResult, PredictorState},
     preflate_constants::{MAX_MATCH, MIN_MATCH, TOO_FAR},
     preflate_parameter_estimator::PreflateParameters,
@@ -21,7 +22,7 @@ use crate::{
 const VERIFY: bool = false;
 
 pub struct TokenPredictor<'a> {
-    state: PredictorState<'a>,
+    state: PredictorState<'a, ZlibRotatingHash>,
     params: PreflateParameters,
     pending_reference: Option<PreflateTokenReference>,
     current_token_count: u32,
@@ -40,7 +41,7 @@ impl<'a> TokenPredictor<'a> {
             params: *params,
             pending_reference: None,
             current_token_count: 0,
-            max_token_count: ((1 << (6 + params.mem_level)) - 1),
+            max_token_count: params.max_token_count.into(),
         };
 
         if r.state.available_input_size() >= 2 {
