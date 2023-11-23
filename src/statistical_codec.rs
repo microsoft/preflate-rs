@@ -7,7 +7,6 @@
 /// boolean misprediction indictions
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum CodecMisprediction {
-    EOBMisprediction,
     EOFMisprediction,
     LiteralPredictionWrong,
     ReferencePredictionWrong,
@@ -22,6 +21,7 @@ pub enum CodecMisprediction {
 /// correction indictions, which are followed by a 16 bit value
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum CodecCorrection {
+    TokenCount,
     NonZeroPadding,
     BlockTypeCorrection,
     LenCorrection,
@@ -98,7 +98,6 @@ impl CountNonDefaultActions {
         ];
 
         let mispred = [
-            EOBMisprediction,
             EOFMisprediction,
             LiteralPredictionWrong,
             ReferencePredictionWrong,

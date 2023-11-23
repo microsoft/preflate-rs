@@ -96,18 +96,18 @@ impl PreflateParameters {
     pub fn write<E: PredictionEncoder>(&self, encoder: &mut E) {
         encoder.encode_value(self.strategy as u16, 4);
         encoder.encode_value(self.huff_strategy as u16, 4);
-        encoder.encode_value(self.zlib_compatible as u16, 1);
-        encoder.encode_value(self.window_bits as u16, 8);
-        encoder.encode_value(self.mem_level as u16, 8);
-        encoder.encode_value(self.far_len3_matches_detected as u16, 1);
-        encoder.encode_value(self.very_far_matches_detected as u16, 1);
-        encoder.encode_value(self.matches_to_start_detected as u16, 1);
-        encoder.encode_value(self.log2_of_max_chain_depth_m1 as u16, 16);
-        encoder.encode_value(self.is_fast_compressor as u16, 1);
-        encoder.encode_value(self.good_length as u16, 16);
-        encoder.encode_value(self.max_lazy as u16, 16);
-        encoder.encode_value(self.nice_length as u16, 16);
-        encoder.encode_value(self.max_chain as u16, 16);
+        encoder.encode_value(u16::try_from(self.zlib_compatible).unwrap(), 1);
+        encoder.encode_value(u16::try_from(self.window_bits).unwrap(), 8);
+        encoder.encode_value(u16::try_from(self.mem_level).unwrap(), 8);
+        encoder.encode_value(u16::try_from(self.far_len3_matches_detected).unwrap(), 1);
+        encoder.encode_value(u16::try_from(self.very_far_matches_detected).unwrap(), 1);
+        encoder.encode_value(u16::try_from(self.matches_to_start_detected).unwrap(), 1);
+        encoder.encode_value(u16::try_from(self.log2_of_max_chain_depth_m1).unwrap(), 16);
+        encoder.encode_value(u16::try_from(self.is_fast_compressor).unwrap(), 1);
+        encoder.encode_value(u16::try_from(self.good_length).unwrap(), 16);
+        encoder.encode_value(u16::try_from(self.max_lazy).unwrap(), 16);
+        encoder.encode_value(u16::try_from(self.nice_length).unwrap(), 16);
+        encoder.encode_value(u16::try_from(self.max_chain).unwrap(), 16);
     }
 }
 

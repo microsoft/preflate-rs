@@ -165,14 +165,6 @@ fn test_zip_stream(
     if zip_local_file_header.compression_method == 8 {
         let deflate_start_position = binary_reader.stream_position()?;
 
-        // dump to file
-        let mut f =
-            std::fs::File::create(format!("dump{}", *index as u64 + deflate_start_position))?;
-        f.write_all(
-            &contents[deflate_start_position as usize
-                ..zip_local_file_header.compressed_size as usize + deflate_start_position as usize],
-        )?;
-
         add_location(
             locations_found,
             Signature::ZipLocalFileHeader,

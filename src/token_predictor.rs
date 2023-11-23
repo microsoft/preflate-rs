@@ -91,10 +91,12 @@ impl<'a> TokenPredictor<'a> {
         if (!last_block && block.tokens.len() != self.max_token_count as usize)
             || block.tokens.len() > self.max_token_count as usize
         {
-            codec.encode_misprediction(CodecMisprediction::EOBMisprediction, true);
-            codec.encode_value(block.tokens.len() as u16, 16);
+            codec.encode_correction(
+                CodecCorrection::TokenCount,
+                u32::try_from(block.tokens.len()).unwrap() + 1,
+            );
         } else {
-            codec.encode_misprediction(CodecMisprediction::EOBMisprediction, false);
+            codec.encode_correction(CodecCorrection::TokenCount, 0);
         }
 
         codec.encode_verify_state("start", self.checksum().hash());
@@ -254,11 +256,12 @@ impl<'a> TokenPredictor<'a> {
             }
         }
 
-        let blocksize = if codec.decode_misprediction(CodecMisprediction::EOBMisprediction) {
-            codec.decode_value(16).into()
+        let mut blocksize = codec.decode_correction(CodecCorrection::TokenCount);
+        if blocksize == 0 {
+            blocksize = self.max_token_count;
         } else {
-            self.max_token_count
-        };
+            blocksize -= 1;
+        }
 
         block.tokens.reserve(blocksize as usize);
 

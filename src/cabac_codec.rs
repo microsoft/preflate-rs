@@ -341,7 +341,7 @@ fn roundtree_cabac_decoding() {
     let test_codec_actions = [
         CodecAction::Value(200, 8),
         CodecAction::Misprediction(CodecMisprediction::DistanceCountMisprediction, true),
-        CodecAction::Misprediction(CodecMisprediction::EOBMisprediction, false),
+        CodecAction::Correction(CodecCorrection::TokenCount, 100000),
         CodecAction::Correction(CodecCorrection::BlockTypeCorrection, 5),
         CodecAction::Correction(CodecCorrection::DistAfterLenCorrection, 0),
     ];
@@ -387,7 +387,7 @@ fn roundtree_cabac_correction() {
         Operation::Correction(7, CodecCorrection::LDTypeCorrection),
         Operation::Correction(9, CodecCorrection::LenCorrection),
         Operation::Misprediction(false, CodecMisprediction::DistanceCountMisprediction),
-        Operation::Misprediction(true, CodecMisprediction::EOBMisprediction),
+        Operation::Correction(100000, CodecCorrection::TokenCount),
         Operation::Misprediction(false, CodecMisprediction::IrregularLen258),
         Operation::Value(10, 4),
         Operation::Misprediction(false, CodecMisprediction::DistanceCountMisprediction),
