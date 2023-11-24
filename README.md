@@ -41,7 +41,8 @@ cargo build --release
 #### Running
 
 There is an `preflate_util.exe` wrapper that is built as part of the project that can be used to
-test out the library against Deflate compressed content. 
+test out the library against Deflate compressed content. The `preflate_util` feature is required for the wrapper and is
+enabled by default. 
 
 ## Contributing
 

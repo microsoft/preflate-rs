@@ -19,18 +19,26 @@ exclude = [
 [profile.release]
 debug=true
 
+# Dependencies marked as optional are used for the binaries
+# Currently it is not possible to specify them only for the specific binaries
+# See https://github.com/rust-lang/cargo/issues/1982
 [dependencies]
 anyhow = { version="1.0", features = ["backtrace"]}
 byteorder = "1.4"
 cabac = "0.6.0"
 default-boxed = "0.2"
-clap = { version="4.4", features = ["derive"]}
+clap = { version="4.4", features = ["derive"], optional = true}
 
 [dev-dependencies]
 crc32fast = "1.3"
 libz-sys = "1.1"
 flate2 = "1.0"
 
+[features]
+default = ["preflate_util"]
+preflate_util = ["dep:clap"]
+
 [[bin]]
 name = "preflate_util"
-path = "src/main.rs"
+path = "src/bin/preflate_util/main.rs"
+required-features = ["preflate_util"]
