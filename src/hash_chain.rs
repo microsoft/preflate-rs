@@ -55,8 +55,26 @@ impl<'a> HashIterator<'a> {
 
 #[derive(DefaultBoxed)]
 struct HashTable {
+    /// Represents the head of the hash chain for a given hash value. In order
+    /// to find additional matches, you follow the prev chain from the head.
     head: [u16; 65536],
+
+    /// Represents the number of following nodes in the chain for a given
+    /// position. For example, if chainDepth[100] == 5, then there are 5 more
+    /// matches if we follow the prev chain from position 100 back to 0. The value goes back
+    /// all the way to be beginning of the compressed data (not readjusted when we shift
+    /// the compression window), so in order to calculate the number of chain positions,
+    /// you need to subtract the value from the head position.
+    ///
+    /// This is used during estimation only to figure out how deep we need to match
+    /// into the hash chain, which allows us to estimate which parameters were used
+    /// to generate the deflate data.
     chain_depth: [u32; 65536],
+
+    /// Represents the prev chain for a given position. This is used to find
+    /// all the potential matches for a given hash. The value points to previous
+    /// position in the chain, or 0 if there are no more matches. (We start
+    /// with an offset of 8 to avoid confusion with the end of the chain)
     prev: [u16; 65536],
 }
 
@@ -137,7 +155,7 @@ impl<'a, H: RotatingHashTrait + Default> HashChain<'a, H> {
         self.running_hash = self.running_hash.append(b, self.hash_shift);
     }
 
-    fn reshift_if_necessary(&mut self) {
+    fn reshift_if_necessary<const MAINTAIN_DEPTH: bool>(&mut self) {
         if self.input.pos() as i32 - self.total_shift >= 0xfe00 {
             const DELTA: usize = 0x7e00;
             for i in 0..=self.hash_mask as usize {
@@ -149,7 +167,9 @@ impl<'a, H: RotatingHashTrait + Default> HashChain<'a, H> {
                     self.hash_table.prev[i].saturating_sub(DELTA as u16);
             }
 
-            self.hash_table.chain_depth.copy_within(DELTA..=65535, 0);
+            if MAINTAIN_DEPTH {
+                self.hash_table.chain_depth.copy_within(DELTA..=65535, 0);
+            }
             self.total_shift += DELTA as i32;
         }
     }
@@ -254,17 +274,17 @@ impl<'a, H: RotatingHashTrait + Default> HashChain<'a, H> {
         a.hash(self.hash_mask) == b.hash(self.hash_mask)
     }
 
-    pub fn update_hash(&mut self, mut length: u32) {
+    pub fn update_hash<const MAINTAIN_DEPTH: bool>(&mut self, mut length: u32) {
         if length > 0x180 {
             while length > 0 {
                 let blk = std::cmp::min(length, 0x180);
-                self.update_hash(blk);
+                self.update_hash::<MAINTAIN_DEPTH>(blk);
                 length -= blk;
             }
             return;
         }
 
-        self.reshift_if_necessary();
+        self.reshift_if_necessary::<MAINTAIN_DEPTH>();
 
         let pos = (self.input.pos() as i32 - self.total_shift) as u16;
 
@@ -274,8 +294,13 @@ impl<'a, H: RotatingHashTrait + Default> HashChain<'a, H> {
             self.update_running_hash(self.input.cur_char(i as i32));
             let h = self.running_hash.hash(self.hash_mask);
             let p = pos + i - 2;
-            self.hash_table.chain_depth[usize::from(p)] =
-                self.hash_table.chain_depth[usize::from(self.hash_table.head[usize::from(h)])] + 1;
+
+            if MAINTAIN_DEPTH {
+                self.hash_table.chain_depth[usize::from(p)] = self.hash_table.chain_depth
+                    [usize::from(self.hash_table.head[usize::from(h)])]
+                    + 1;
+            }
+
             self.hash_table.prev[usize::from(p)] = self.hash_table.head[usize::from(h)];
             self.hash_table.head[usize::from(h)] = p;
         }
@@ -286,8 +311,8 @@ impl<'a, H: RotatingHashTrait + Default> HashChain<'a, H> {
         //println!("u {} = {}", length, c);
     }
 
-    pub fn skip_hash(&mut self, l: u32) {
-        self.reshift_if_necessary();
+    pub fn skip_hash<const MAINTAIN_DEPTH: bool>(&mut self, l: u32) {
+        self.reshift_if_necessary::<MAINTAIN_DEPTH>();
 
         let pos = self.input.pos() as i32;
 
@@ -296,19 +321,23 @@ impl<'a, H: RotatingHashTrait + Default> HashChain<'a, H> {
             self.update_running_hash(self.input.cur_char(2));
             let h = self.running_hash.hash(self.hash_mask);
             let p = pos - self.total_shift;
-            self.hash_table.chain_depth[p as usize] =
-                self.hash_table.chain_depth[self.hash_table.head[h as usize] as usize] + 1;
+
+            if MAINTAIN_DEPTH {
+                self.hash_table.chain_depth[p as usize] =
+                    self.hash_table.chain_depth[self.hash_table.head[h as usize] as usize] + 1;
+
+                // Skipped data is not inserted into the hash chain,
+                // but we must still update the chainDepth, to avoid
+                // bad analysis results
+                // --------------------
+                for i in 1..l {
+                    let p = (pos + i as i32) - self.total_shift;
+                    self.hash_table.chain_depth[p as usize] = 0xffff8000;
+                }
+            }
+
             self.hash_table.prev[p as usize] = self.hash_table.head[h as usize];
             self.hash_table.head[h as usize] = p as u16;
-
-            // Skipped data is not inserted into the hash chain,
-            // but we must still update the chainDepth, to avoid
-            // bad analysis results
-            // --------------------
-            for i in 1..l {
-                let p = (pos + i as i32) - self.total_shift;
-                self.hash_table.chain_depth[p as usize] = 0xffff8000;
-            }
 
             if remaining > l {
                 self.update_running_hash(self.input.cur_char(l as i32));

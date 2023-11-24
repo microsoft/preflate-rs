@@ -51,11 +51,11 @@ impl<'a, H: RotatingHashTrait + Default> PredictorState<'a, H> {
     }
 
     pub fn update_hash(&mut self, pos: u32) {
-        self.hash.update_hash(pos);
+        self.hash.update_hash::<false>(pos);
     }
 
     pub fn skip_hash(&mut self, pos: u32) {
-        self.hash.skip_hash(pos);
+        self.hash.skip_hash::<false>(pos);
     }
 
     pub fn current_input_pos(&self) -> u32 {

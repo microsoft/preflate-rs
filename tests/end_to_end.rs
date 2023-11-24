@@ -28,8 +28,10 @@ pub fn read_file(filename: &str) -> Vec<u8> {
 #[test]
 fn end_to_end_compressed() {
     for i in 0..9 {
-        let compressed_data = read_file(&format!("compressed_miniz_oxide_level{}.bin", i));
+        let compressed_data = read_file(&format!("compressed_flate2_level{}.deflate", i));
+        verifyresult(&compressed_data);
 
+        let compressed_data = read_file(&format!("compressed_zlib_level{}.deflate", i));
         verifyresult(&compressed_data);
     }
 }
@@ -88,6 +90,10 @@ fn test_file(filename: &str) {
         }
 
         let minusheader = &output[2..output.len() - 4];
+
+        // write to file
+        let mut f = File::create(format!("c:\\temp\\compressed_zlib_level{}.bin", level)).unwrap();
+        f.write_all(minusheader).unwrap();
 
         verifyresult(minusheader);
     }

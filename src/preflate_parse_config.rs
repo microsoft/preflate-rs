@@ -11,7 +11,15 @@ pub struct PreflateParserConfig {
     pub max_chain: u32,
 }
 
-pub const FAST_PREFLATE_PARSER_SETTINGS: [PreflateParserConfig; 3] = [
+pub const FAST_PREFLATE_PARSER_SETTINGS: [PreflateParserConfig; 4] = [
+    // max speed used by miniz, always match the first entry
+    PreflateParserConfig {
+        good_length: 4,
+        max_lazy: 2,
+        nice_length: 8,
+        max_chain: 200,
+    },
+    // these three levels are used by zlib
     PreflateParserConfig {
         good_length: 4,
         max_lazy: 4,

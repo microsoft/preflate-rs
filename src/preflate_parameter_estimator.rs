@@ -7,8 +7,7 @@
 use crate::{
     bit_helper::bit_length,
     complevel_estimator::estimate_preflate_comp_level,
-    preflate_constants::{self, MIN_MATCH},
-    preflate_parse_config::*,
+    preflate_constants::{self},
     preflate_stream_info::{extract_preflate_info, PreflateStreamInfo},
     preflate_token::PreflateTokenBlock,
     statistical_codec::{PredictionDecoder, PredictionEncoder},
@@ -169,39 +168,15 @@ pub fn estimate_preflate_parameters(
     let window_bits = estimate_preflate_window_bits(info.max_dist);
     let mem_level = estimate_preflate_mem_level(info.max_tokens_per_block);
 
-    let hash_bits = mem_level + 7;
-    let hash_shift = (hash_bits + 2) / 3;
-    let hash_mask = ((1u32 << hash_bits) - 1) as u16;
-
     //let hash_shift = 5;
     //let hash_mask = 32767;
 
     let max_token_count = (1 << (6 + mem_level)) - 1;
 
-    let cl = estimate_preflate_comp_level(
-        window_bits,
-        hash_shift,
-        hash_mask,
-        unpacked_output,
-        blocks,
-        false,
-    );
+    let cl = estimate_preflate_comp_level(window_bits, mem_level, unpacked_output, blocks);
 
-    let config;
-    let comp_level = cl.recommended_compression_level;
-    let is_fast_compressor;
-
-    if (1..=3).contains(&comp_level) {
-        is_fast_compressor = true;
-        config = &FAST_PREFLATE_PARSER_SETTINGS[(comp_level - 1) as usize]
-    } else {
-        is_fast_compressor = false;
-        config = &SLOW_PREFLATE_PARSER_SETTINGS[if (4..=9).contains(&comp_level) {
-            (comp_level - 4) as usize
-        } else {
-            5
-        }]
-    }
+    let hash_shift = cl.hash_shift;
+    let hash_mask = cl.hash_mask;
 
     PreflateParameters {
         window_bits,
@@ -219,10 +194,10 @@ pub fn estimate_preflate_parameters(
         } else {
             bit_length(cl.max_chain_depth as u32 - 1)
         },
-        is_fast_compressor,
-        good_length: config.good_length,
-        max_lazy: config.max_lazy,
-        nice_length: config.nice_length,
-        max_chain: config.max_chain,
+        is_fast_compressor: cl.fast_compressor,
+        good_length: cl.good_length,
+        max_lazy: cl.max_lazy,
+        nice_length: cl.nice_length,
+        max_chain: cl.max_chain,
     }
 }
