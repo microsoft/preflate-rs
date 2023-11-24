@@ -78,8 +78,7 @@ struct HashTable {
     prev: [u16; 65536],
 }
 
-pub struct HashChain<'a, H: RotatingHashTrait> {
-    input: PreflateInput<'a>,
+pub struct HashChain<H: RotatingHashTrait> {
     hash_table: Box<HashTable>,
     hash_shift: u32,
     running_hash: H,
@@ -87,14 +86,18 @@ pub struct HashChain<'a, H: RotatingHashTrait> {
     total_shift: i32,
 }
 
+pub const HASH_ALGORITHM_ZLIB: u16 = 0;
+pub const HASH_ALGORITHM_MINIZ_FAST: u16 = 1;
+
 #[derive(Default, Debug, Copy, Clone)]
 pub struct ZlibRotatingHash {
     hash: u16,
 }
 
-pub trait RotatingHashTrait {
+pub trait RotatingHashTrait: Default + Copy + Clone {
     fn hash(&self, mask: u16) -> u16;
     fn append(&self, c: u8, hash_shift: u32) -> Self;
+    fn hash_algorithm() -> u16;
 }
 
 impl RotatingHashTrait for ZlibRotatingHash {
@@ -107,28 +110,45 @@ impl RotatingHashTrait for ZlibRotatingHash {
             hash: (self.hash << hash_shift) ^ u16::from(c),
         }
     }
+
+    fn hash_algorithm() -> u16 {
+        HASH_ALGORITHM_ZLIB
+    }
 }
 
-impl<'a, H: RotatingHashTrait + Default> HashChain<'a, H> {
-    pub fn new(i: &'a [u8], hash_shift: u32, hash_mask: u16) -> Self {
+#[derive(Default, Copy, Clone)]
+pub struct MiniZHash {
+    hash: u32,
+}
+
+impl RotatingHashTrait for MiniZHash {
+    fn hash(&self, _mask: u16) -> u16 {
+        ((self.hash ^ (self.hash >> 11)) & 0x7fff) as u16
+    }
+
+    fn append(&self, c: u8, _hash_shift: u32) -> Self {
+        MiniZHash {
+            hash: (c as u32) << 16 | (self.hash >> 8),
+        }
+    }
+
+    fn hash_algorithm() -> u16 {
+        HASH_ALGORITHM_MINIZ_FAST
+    }
+}
+
+impl<H: RotatingHashTrait> HashChain<H> {
+    pub fn new(hash_shift: u32, hash_mask: u16) -> Self {
         // Important: total_shift starts at -8 since 0 indicates the end of the hash chain
         // so this means that all valid values will be >= 8, otherwise the very first hash
         // offset would be zero and so it would get missed
-        let mut hash_chain_ext = HashChain {
-            input: PreflateInput::new(i),
+        HashChain {
             total_shift: -8,
             hash_shift,
             hash_mask,
             hash_table: HashTable::default_boxed(),
             running_hash: H::default(),
-        };
-
-        if i.len() > 2 {
-            hash_chain_ext.update_running_hash(i[0]);
-            hash_chain_ext.update_running_hash(i[1]);
         }
-
-        hash_chain_ext
     }
 
     #[allow(dead_code)]
@@ -155,8 +175,8 @@ impl<'a, H: RotatingHashTrait + Default> HashChain<'a, H> {
         self.running_hash = self.running_hash.append(b, self.hash_shift);
     }
 
-    fn reshift_if_necessary<const MAINTAIN_DEPTH: bool>(&mut self) {
-        if self.input.pos() as i32 - self.total_shift >= 0xfe00 {
+    fn reshift_if_necessary<const MAINTAIN_DEPTH: bool>(&mut self, input: &PreflateInput) {
+        if input.pos() as i32 - self.total_shift >= 0xfe00 {
             const DELTA: usize = 0x7e00;
             for i in 0..=self.hash_mask as usize {
                 self.hash_table.head[i] = self.hash_table.head[i].saturating_sub(DELTA as u16);
@@ -177,7 +197,7 @@ impl<'a, H: RotatingHashTrait + Default> HashChain<'a, H> {
     /// construct a hash chain from scratch and verify that we match the existing hash chain
     /// used for debugging only
     #[allow(dead_code)]
-    pub fn verify_hash(&self, dist: Option<PreflateTokenReference>) {
+    pub fn verify_hash(&self, dist: Option<PreflateTokenReference>, input: &PreflateInput) {
         let mut hash = H::default();
         let mut start_pos = self.total_shift as i32;
 
@@ -186,9 +206,9 @@ impl<'a, H: RotatingHashTrait + Default> HashChain<'a, H> {
 
         let mut start_delay = 2;
 
-        while start_pos - 1 <= self.input.pos() as i32 {
+        while start_pos - 1 <= input.pos() as i32 {
             hash = hash.append(
-                self.input.cur_char(start_pos - self.input.pos() as i32),
+                input.cur_char(start_pos - input.pos() as i32),
                 self.hash_shift,
             );
 
@@ -207,9 +227,9 @@ impl<'a, H: RotatingHashTrait + Default> HashChain<'a, H> {
         println!(
             "MATCH t={:?} a={:?} b={:?} d={}",
             dist,
-            &self.input.cur_chars(-distance)[0..10],
-            &self.input.cur_chars(0)[0..10],
-            self.input.pos() - self.total_shift as u32 - distance as u32
+            &input.cur_chars(-distance)[0..10],
+            &input.cur_chars(0)[0..10],
+            input.pos() - self.total_shift as u32 - distance as u32
         );
 
         //println!("MATCH pos = {}, total_shift = {}", self.input.pos(), self.total_shift);
@@ -258,40 +278,40 @@ impl<'a, H: RotatingHashTrait + Default> HashChain<'a, H> {
         )
     }
 
-    pub fn input(&self) -> &PreflateInput {
-        &self.input
+    pub fn cur_hash(&self, input: &PreflateInput) -> H {
+        self.next_hash(input.cur_char(2))
     }
 
-    pub fn cur_hash(&self) -> H {
-        self.next_hash(self.input.cur_char(2))
-    }
-
-    pub fn cur_plus_1_hash(&self) -> H {
-        self.next_hash_double(self.input.cur_char(2), self.input.cur_char(3))
+    pub fn cur_plus_1_hash(&self, input: &PreflateInput) -> H {
+        self.next_hash_double(input.cur_char(2), input.cur_char(3))
     }
 
     pub fn hash_equal(&self, a: H, b: H) -> bool {
         a.hash(self.hash_mask) == b.hash(self.hash_mask)
     }
 
-    pub fn update_hash<const MAINTAIN_DEPTH: bool>(&mut self, mut length: u32) {
+    pub fn update_hash<const MAINTAIN_DEPTH: bool>(
+        &mut self,
+        mut length: u32,
+        input: &PreflateInput,
+    ) {
         if length > 0x180 {
             while length > 0 {
                 let blk = std::cmp::min(length, 0x180);
-                self.update_hash::<MAINTAIN_DEPTH>(blk);
+                self.update_hash::<MAINTAIN_DEPTH>(blk, input);
                 length -= blk;
             }
             return;
         }
 
-        self.reshift_if_necessary::<MAINTAIN_DEPTH>();
+        self.reshift_if_necessary::<MAINTAIN_DEPTH>(input);
 
-        let pos = (self.input.pos() as i32 - self.total_shift) as u16;
+        let pos = (input.pos() as i32 - self.total_shift) as u16;
 
-        let limit = std::cmp::min(length + 2, self.input.remaining()) as u16;
+        let limit = std::cmp::min(length + 2, input.remaining()) as u16;
 
         for i in 2..limit {
-            self.update_running_hash(self.input.cur_char(i as i32));
+            self.update_running_hash(input.cur_char(i as i32));
             let h = self.running_hash.hash(self.hash_mask);
             let p = pos + i - 2;
 
@@ -305,20 +325,18 @@ impl<'a, H: RotatingHashTrait + Default> HashChain<'a, H> {
             self.hash_table.head[usize::from(h)] = p;
         }
 
-        self.input.advance(length);
-
         //let c = self.checksum_whole_struct();
         //println!("u {} = {}", length, c);
     }
 
-    pub fn skip_hash<const MAINTAIN_DEPTH: bool>(&mut self, l: u32) {
-        self.reshift_if_necessary::<MAINTAIN_DEPTH>();
+    pub fn skip_hash<const MAINTAIN_DEPTH: bool>(&mut self, l: u32, input: &PreflateInput) {
+        self.reshift_if_necessary::<MAINTAIN_DEPTH>(input);
 
-        let pos = self.input.pos() as i32;
+        let pos = input.pos() as i32;
 
-        let remaining = self.input.remaining();
+        let remaining = input.remaining();
         if remaining > 2 {
-            self.update_running_hash(self.input.cur_char(2));
+            self.update_running_hash(input.cur_char(2));
             let h = self.running_hash.hash(self.hash_mask);
             let p = pos - self.total_shift;
 
@@ -340,14 +358,12 @@ impl<'a, H: RotatingHashTrait + Default> HashChain<'a, H> {
             self.hash_table.head[h as usize] = p as u16;
 
             if remaining > l {
-                self.update_running_hash(self.input.cur_char(l as i32));
+                self.update_running_hash(input.cur_char(l as i32));
                 if remaining > l + 1 {
-                    self.update_running_hash(self.input.cur_char(l as i32 + 1));
+                    self.update_running_hash(input.cur_char(l as i32 + 1));
                 }
             }
         }
-
-        self.input.advance(l);
 
         //let c = self.checksum_whole_struct();
         //println!("s {} = {}", l, c);
@@ -358,11 +374,13 @@ impl<'a, H: RotatingHashTrait + Default> HashChain<'a, H> {
         hash: H,
         target_reference: &PreflateTokenReference,
         window_size: u32,
+        input: &PreflateInput,
     ) -> u32 {
-        let cur_pos = self.input().pos();
+        let cur_pos = input.pos();
         let cur_max_dist = std::cmp::min(cur_pos, window_size);
 
-        let start_depth = self.get_node_depth(self.get_head(hash));
+        let head = self.get_head(hash);
+        let start_depth = self.get_node_depth(head);
 
         if target_reference.dist() > cur_max_dist {
             return 0xffff;

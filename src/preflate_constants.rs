@@ -12,9 +12,6 @@ pub const DIST_CODE_COUNT: usize = 30;
 pub const LITLENDIST_CODE_COUNT: usize = LITLEN_CODE_COUNT + DIST_CODE_COUNT;
 pub const CODETREE_CODE_COUNT: usize = 19;
 
-/// Matches of length 3 are discarded if their distance exceeds TOO_FAR
-pub const TOO_FAR: u32 = 4096;
-
 pub const MIN_MATCH: u32 = 3;
 pub const MAX_MATCH: u32 = 258;
 

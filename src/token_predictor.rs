@@ -9,9 +9,9 @@ use anyhow::Context;
 use crate::{
     bit_helper::DebugHash,
     cabac_codec::{decode_difference, encode_difference},
-    hash_chain::ZlibRotatingHash,
+    hash_chain::RotatingHashTrait,
     predictor_state::{MatchResult, PredictorState},
-    preflate_constants::{MAX_MATCH, MIN_MATCH, TOO_FAR},
+    preflate_constants::{MAX_MATCH, MIN_MATCH},
     preflate_parameter_estimator::PreflateParameters,
     preflate_token::{BlockType, PreflateToken, PreflateTokenBlock, PreflateTokenReference},
     statistical_codec::{
@@ -21,15 +21,15 @@ use crate::{
 
 const VERIFY: bool = false;
 
-pub struct TokenPredictor<'a> {
-    state: PredictorState<'a, ZlibRotatingHash>,
+pub struct TokenPredictor<'a, H: RotatingHashTrait> {
+    state: PredictorState<'a, H>,
     params: PreflateParameters,
     pending_reference: Option<PreflateTokenReference>,
     current_token_count: u32,
     max_token_count: u32,
 }
 
-impl<'a> TokenPredictor<'a> {
+impl<'a, H: RotatingHashTrait> TokenPredictor<'a, H> {
     pub fn new(uncompressed: &'a [u8], params: &PreflateParameters, offset: u32) -> Self {
         // Implement constructor logic for PreflateTokenPredictor
         // Initialize fields as necessary
@@ -387,7 +387,8 @@ impl<'a> TokenPredictor<'a> {
             }
 
             // match is too small and far way to be worth encoding as a distance/length pair.
-            if match_token.len() == 3 && match_token.dist() > TOO_FAR {
+            if match_token.len() == 3 && match_token.dist() > self.params.max_dist_3_matches.into()
+            {
                 return PreflateToken::Literal;
             }
 

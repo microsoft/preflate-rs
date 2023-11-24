@@ -4,8 +4,11 @@
  *  This software incorporates material from third parties. See NOTICE.txt for details.
  *--------------------------------------------------------------------------------------------*/
 
-use crate::hash_chain::{HashChain, ZlibRotatingHash};
+use crate::hash_chain::{
+    HashChain, MiniZHash, RotatingHashTrait, ZlibRotatingHash, HASH_ALGORITHM_ZLIB,
+};
 use crate::preflate_constants;
+use crate::preflate_input::PreflateInput;
 use crate::preflate_parse_config::{FAST_PREFLATE_PARSER_SETTINGS, SLOW_PREFLATE_PARSER_SETTINGS};
 use crate::preflate_token::{BlockType, PreflateToken, PreflateTokenBlock, PreflateTokenReference};
 
@@ -17,32 +20,113 @@ pub struct CompLevelInfo {
     pub max_chain_depth: u32,
     pub match_to_start: bool,
     pub very_far_matches: bool,
-    pub far_len_3_matches: bool,
+    pub max_dist_3_matches: u16,
     pub hash_mask: u16,
     pub hash_shift: u32,
     pub fast_compressor: bool,
+    pub hash_algorithm: u16,
     pub good_length: u32,
     pub max_lazy: u32,
     pub nice_length: u32,
     pub max_chain: u32,
 }
 
-struct CandidateInfo<'a> {
+struct CandidateInfo<H: RotatingHashTrait> {
     hash_mask: u16,
     hash_shift: u32,
     skip_length: u32,
     max_chain_found: u32,
-    hash_chain: HashChain<'a, ZlibRotatingHash>,
+    hash_chain: HashChain<H>,
+}
+
+trait CandidateInfoTrait {
+    fn update_hash(&mut self, len: u32, input: &PreflateInput);
+    fn skip_or_update_hash(&mut self, len: u32, input: &PreflateInput);
+    fn match_depth(
+        &mut self,
+        token: &PreflateTokenReference,
+        window_size: u32,
+        input: &PreflateInput,
+    ) -> bool;
+    fn max_chain_found(&self) -> u32;
+    fn hash_mask(&self) -> u16;
+    fn hash_shift(&self) -> u32;
+    fn skip_length(&self) -> u32;
+    fn hash_algorithm(&self) -> u16;
+}
+
+impl<H: RotatingHashTrait + Default> CandidateInfoTrait for CandidateInfo<H> {
+    fn update_hash(&mut self, len: u32, input: &PreflateInput) {
+        self.hash_chain.update_hash::<true>(len, input);
+    }
+
+    fn match_depth(
+        &mut self,
+        token: &PreflateTokenReference,
+        window_size: u32,
+        input: &PreflateInput,
+    ) -> bool {
+        let hash_head = self.hash_chain.cur_hash(input);
+
+        let mdepth = self
+            .hash_chain
+            .match_depth(hash_head, token, window_size, input);
+
+        // remove element if the match was impossible due to matching the
+        // content of references in fast mode, where we only add the beginning
+        // of each reference to the hash table, not every subsequent byte.
+        if mdepth != 0xffff {
+            self.max_chain_found = std::cmp::max(self.max_chain_found, mdepth);
+            true
+        } else {
+            println!(
+                "removed fast candidate sl={}, mask={}, pos={}",
+                self.skip_length,
+                self.hash_mask,
+                input.pos()
+            );
+            false
+        }
+    }
+
+    fn skip_or_update_hash(&mut self, len: u32, input: &PreflateInput) {
+        if len <= self.skip_length {
+            self.hash_chain.update_hash::<true>(len, input);
+        } else {
+            self.hash_chain.skip_hash::<true>(len, input);
+        }
+    }
+
+    fn max_chain_found(&self) -> u32 {
+        self.max_chain_found
+    }
+
+    fn hash_mask(&self) -> u16 {
+        self.hash_mask
+    }
+
+    fn hash_shift(&self) -> u32 {
+        self.hash_shift
+    }
+
+    fn skip_length(&self) -> u32 {
+        self.skip_length
+    }
+
+    fn hash_algorithm(&self) -> u16 {
+        H::hash_algorithm()
+    }
 }
 
 struct CompLevelEstimatorState<'a> {
-    slow_hash: HashChain<'a, ZlibRotatingHash>,
+    input: PreflateInput<'a>,
+    slow_hash: HashChain<ZlibRotatingHash>,
 
     // fast compressor candidates, depending on the hash shift and mask
     // and what length of matches we should skip adding to the hash table.
     // As we look at the data, we remove candidates that have impossible
     // matches, and at the end we pick the best candidate.
-    fast_candidates: Vec<Box<CandidateInfo<'a>>>,
+    fast_candidates: Vec<Box<dyn CandidateInfoTrait>>,
 
     blocks: &'a Vec<PreflateTokenBlock>,
     wsize: u16,
@@ -72,22 +156,33 @@ impl<'a> CompLevelEstimatorState<'a> {
             hashparameters.push((5, 32767));
         }
 
-        let mut candidates = Vec::new();
+        let mut fast_candidates: Vec<Box<dyn CandidateInfoTrait>> = Vec::new();
+
+        // add the ZlibRotatingHash candidates
         for config in &FAST_PREFLATE_PARSER_SETTINGS {
             for &(hash_shift, hash_mask) in hashparameters.iter() {
-                candidates.push(Box::new(CandidateInfo {
+                fast_candidates.push(Box::new(CandidateInfo {
                     skip_length: config.max_lazy,
                     hash_mask,
                     hash_shift,
                     max_chain_found: 0,
-                    hash_chain: HashChain::<'a>::new(plain_text, hash_shift, hash_mask),
+                    hash_chain: HashChain::<ZlibRotatingHash>::new(hash_shift, hash_mask),
                 }));
             }
         }
 
-        CompLevelEstimatorState::<'a> {
-            slow_hash: HashChain::<'a>::new(plain_text, 5, 32767),
-            fast_candidates: candidates,
+        fast_candidates.push(Box::new(CandidateInfo {
+            skip_length: 1,
+            hash_shift: 5,
+            hash_mask: 32767,
+            max_chain_found: 0,
+            hash_chain: HashChain::<MiniZHash>::new(5, 32767),
+        }));
+
+        CompLevelEstimatorState {
+            slow_hash: HashChain::new(5, 32767),
+            input: PreflateInput::new(plain_text),
+            fast_candidates,
             blocks,
             wsize: 1 << wbits,
             reference_count: 0,
@@ -102,56 +197,49 @@ impl<'a> CompLevelEstimatorState<'a> {
 
     fn update_hash(&mut self, len: u32) {
         for i in &mut self.fast_candidates {
-            i.hash_chain.update_hash::<true>(len);
+            i.update_hash(len, &self.input);
         }
 
-        self.slow_hash.update_hash::<true>(len);
+        self.slow_hash.update_hash::<true>(len, &self.input);
+
+        self.input.advance(len);
     }
 
     pub fn update_or_skip_hash(&mut self, len: u32) {
         for c in &mut self.fast_candidates {
-            Self::update_or_skip_single_fast_hash(&mut c.hash_chain, len, c.skip_length);
+            c.skip_or_update_hash(len, &self.input);
         }
 
-        self.slow_hash.update_hash::<true>(len);
+        self.slow_hash.update_hash::<true>(len, &self.input);
+
+        self.input.advance(len);
     }
 
     fn check_match(&mut self, token: &PreflateTokenReference) {
-        let hash_head = self.slow_hash.cur_hash();
+        let hash_head = self.slow_hash.cur_hash(&self.input);
 
         self.reference_count += 1;
 
-        if self.slow_hash.input().pos() < token.dist() {
+        if self.input.pos() < token.dist() {
             self.unfound_references += 1;
             return;
         }
 
         let window_size = self.window_size();
 
-        self.fast_candidates.retain_mut(|c| {
-            let mdepth = c.hash_chain.match_depth(hash_head, token, window_size);
-
-            // remove element if the match was impossible due to matching the
-            // content of references in fast mode, where we only add the beginning
-            // of each reference to the hash table, not every subsequent byte.
-            if mdepth != 0xffff {
-                c.max_chain_found = std::cmp::max(c.max_chain_found, mdepth);
-                true
-            } else {
-                false
-            }
-        });
+        self.fast_candidates
+            .retain_mut(|c| c.match_depth(token, window_size, &self.input));
 
         let mdepth = self
             .slow_hash
-            .match_depth(hash_head, token, self.window_size());
+            .match_depth(hash_head, token, self.window_size(), &self.input);
         if mdepth >= 0x8001 {
             self.unfound_references += 1;
         } else {
             self.slow_max_chain_depth = std::cmp::max(self.slow_max_chain_depth, mdepth);
         }
 
-        if token.dist() == self.slow_hash.input().pos() {
+        if token.dist() == self.input.pos() {
             self.match_to_start = true;
         }
 
@@ -197,22 +285,25 @@ impl<'a> CompLevelEstimatorState<'a> {
         let mut nice_length = 258;
         let mut max_chain = 4096;
 
+        let mut hash_algorithm = HASH_ALGORITHM_ZLIB;
+
         if !self.fast_candidates.is_empty() {
             let candidate = self
                 .fast_candidates
                 .iter()
-                .min_by(|&a, &b| a.max_chain_found.cmp(&b.max_chain_found))
+                .min_by(|&a, &b| a.max_chain_found().cmp(&b.max_chain_found()))
                 .unwrap();
 
-            hash_mask = candidate.hash_mask;
-            hash_shift = candidate.hash_shift;
+            hash_mask = candidate.hash_mask();
+            hash_shift = candidate.hash_shift();
             fast_compressor = true;
-            max_chain = candidate.max_chain_found;
-            max_lazy = candidate.skip_length;
+            max_chain = candidate.max_chain_found();
+            max_lazy = candidate.skip_length();
+            hash_algorithm = candidate.hash_algorithm();
 
             for config in &FAST_PREFLATE_PARSER_SETTINGS {
-                if candidate.max_chain_found <= config.max_chain
-                    && candidate.skip_length <= config.max_lazy
+                if candidate.max_chain_found() <= config.max_chain
+                    && candidate.skip_length() <= config.max_lazy
                 {
                     good_length = config.good_length;
                     max_lazy = config.max_lazy;
@@ -238,15 +329,13 @@ impl<'a> CompLevelEstimatorState<'a> {
             || self.longest_dist_at_hop_1_plus
                 >= self.window_size() - preflate_constants::MIN_LOOKAHEAD;
 
-        let far_len_3_matches = self.longest_len_3_dist > 4096;
-
         CompLevelInfo {
             reference_count: self.reference_count,
             unfound_references: self.unfound_references,
             max_chain_depth: self.slow_max_chain_depth,
             match_to_start: self.match_to_start,
             very_far_matches,
-            far_len_3_matches,
+            max_dist_3_matches: self.longest_len_3_dist as u16,
             hash_mask,
             hash_shift,
             fast_compressor,
@@ -254,21 +343,10 @@ impl<'a> CompLevelEstimatorState<'a> {
             max_lazy,
             nice_length,
             max_chain,
+            hash_algorithm,
             zlib_compatible: !self.match_to_start
                 && !very_far_matches
-                && (far_len_3_matches || fast_compressor),
-        }
-    }
-
-    fn update_or_skip_single_fast_hash(
-        hash: &mut HashChain<ZlibRotatingHash>,
-        len: u32,
-        skip_length: u32,
-    ) {
-        if len <= skip_length {
-            hash.update_hash::<true>(len);
-        } else {
-            hash.skip_hash::<true>(len);
+                && (self.longest_len_3_dist < 4096 || fast_compressor),
         }
     }
 

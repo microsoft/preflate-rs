@@ -37,7 +37,7 @@ pub struct PreflateParameters {
     pub hash_shift: u32,
     pub hash_mask: u16,
     pub max_token_count: u16,
-    pub far_len3_matches_detected: bool,
+    pub max_dist_3_matches: u16,
     pub very_far_matches_detected: bool,
     pub matches_to_start_detected: bool,
     pub log2_of_max_chain_depth_m1: u32,
@@ -46,6 +46,7 @@ pub struct PreflateParameters {
     pub max_lazy: u32,
     pub nice_length: u32,
     pub max_chain: u32,
+    pub hash_algorithm: u16,
 }
 
 impl PreflateParameters {
@@ -57,7 +58,7 @@ impl PreflateParameters {
         let hash_shift = decoder.decode_value(8);
         let hash_mask = decoder.decode_value(16);
         let max_token_count = decoder.decode_value(16);
-        let far_len3_matches_detected = decoder.decode_value(1) != 0;
+        let max_dist_3_matches = decoder.decode_value(16);
         let very_far_matches_detected = decoder.decode_value(1) != 0;
         let matches_to_start_detected = decoder.decode_value(1) != 0;
         let log2_of_max_chain_depth_m1 = decoder.decode_value(16);
@@ -66,6 +67,7 @@ impl PreflateParameters {
         let max_lazy = decoder.decode_value(16);
         let nice_length = decoder.decode_value(16);
         let max_chain = decoder.decode_value(16);
+        let hash_algorithm = decoder.decode_value(16);
 
         PreflateParameters {
             strategy: match strategy {
@@ -86,7 +88,7 @@ impl PreflateParameters {
             hash_shift: hash_shift.into(),
             hash_mask: hash_mask,
             max_token_count: max_token_count,
-            far_len3_matches_detected,
+            max_dist_3_matches,
             very_far_matches_detected,
             matches_to_start_detected,
             log2_of_max_chain_depth_m1: log2_of_max_chain_depth_m1.into(),
@@ -95,6 +97,7 @@ impl PreflateParameters {
             max_lazy: max_lazy.into(),
             nice_length: nice_length.into(),
             max_chain: max_chain.into(),
+            hash_algorithm,
         }
     }
 
@@ -106,7 +109,7 @@ impl PreflateParameters {
         encoder.encode_value(u16::try_from(self.hash_shift).unwrap(), 8);
         encoder.encode_value(u16::try_from(self.hash_mask).unwrap(), 16);
         encoder.encode_value(u16::try_from(self.max_token_count).unwrap(), 16);
-        encoder.encode_value(u16::try_from(self.far_len3_matches_detected).unwrap(), 1);
+        encoder.encode_value(u16::try_from(self.max_dist_3_matches).unwrap(), 16);
         encoder.encode_value(u16::try_from(self.very_far_matches_detected).unwrap(), 1);
         encoder.encode_value(u16::try_from(self.matches_to_start_detected).unwrap(), 1);
         encoder.encode_value(u16::try_from(self.log2_of_max_chain_depth_m1).unwrap(), 16);
@@ -115,6 +118,7 @@ impl PreflateParameters {
         encoder.encode_value(u16::try_from(self.max_lazy).unwrap(), 16);
         encoder.encode_value(u16::try_from(self.nice_length).unwrap(), 16);
         encoder.encode_value(u16::try_from(self.max_chain).unwrap(), 16);
+        encoder.encode_value(u16::try_from(self.hash_algorithm).unwrap(), 16);
     }
 }
 
@@ -186,7 +190,7 @@ pub fn estimate_preflate_parameters(
         strategy: estimate_preflate_strategy(&info),
         huff_strategy: estimate_preflate_huff_strategy(&info),
         zlib_compatible: cl.zlib_compatible,
-        far_len3_matches_detected: cl.far_len_3_matches,
+        max_dist_3_matches: cl.max_dist_3_matches,
         very_far_matches_detected: cl.very_far_matches,
         matches_to_start_detected: cl.match_to_start,
         log2_of_max_chain_depth_m1: if cl.max_chain_depth == 0 {
@@ -199,5 +203,6 @@ pub fn estimate_preflate_parameters(
         max_lazy: cl.max_lazy,
         nice_length: cl.nice_length,
         max_chain: cl.max_chain,
+        hash_algorithm: cl.hash_algorithm,
     }
 }

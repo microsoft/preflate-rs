@@ -9,6 +9,7 @@ use std::io::{Cursor, Write};
 use crate::{
     deflate_reader::DeflateReader,
     deflate_writer::DeflateWriter,
+    hash_chain::{MiniZHash, RotatingHashTrait, ZlibRotatingHash, HASH_ALGORITHM_MINIZ_FAST},
     huffman_calc::HufftreeBitCalc,
     preflate_error::PreflateError,
     preflate_parameter_estimator::{estimate_preflate_parameters, PreflateParameters},
@@ -55,8 +56,39 @@ pub fn read_deflate<E: PredictionEncoder>(
         println!("prediction parameters: {:?}", params_e);
     }
 
-    let mut token_predictor_in = TokenPredictor::new(block_decoder.get_plain_text(), &params_e, 0);
+    if params_e.hash_algorithm == HASH_ALGORITHM_MINIZ_FAST {
+        predict_blocks(
+            &blocks,
+            TokenPredictor::<MiniZHash>::new(block_decoder.get_plain_text(), &params_e, 0),
+            encoder,
+        )?;
+    } else {
+        predict_blocks(
+            &blocks,
+            TokenPredictor::<ZlibRotatingHash>::new(block_decoder.get_plain_text(), &params_e, 0),
+            encoder,
+        )?;
+    }
 
+    encoder.encode_misprediction(CodecMisprediction::EOFMisprediction, false);
+
+    encoder.encode_correction(CodecCorrection::NonZeroPadding, eof_padding.into());
+
+    let plain_text = block_decoder.move_plain_text();
+    let amount_processed = input_stream.position() as usize;
+
+    // dump compressed content to file (TODO test code remove)
+    let mut f = std::fs::File::create("dump").unwrap();
+    f.write_all(&compressed_data[0..amount_processed]).unwrap();
+
+    Ok((amount_processed, params_e, plain_text, blocks))
+}
+
+fn predict_blocks<H: RotatingHashTrait, E: PredictionEncoder>(
+    blocks: &[PreflateTokenBlock],
+    mut token_predictor_in: TokenPredictor<H>,
+    encoder: &mut E,
+) -> Result<(), PreflateError> {
     for i in 0..blocks.len() {
         if token_predictor_in.input_eof() {
             encoder.encode_misprediction(CodecMisprediction::EOFMisprediction, true);
@@ -76,21 +108,8 @@ pub fn read_deflate<E: PredictionEncoder>(
             .map_err(|e| PreflateError::PredictTree(i, e))?;
         }
     }
-
     assert!(token_predictor_in.input_eof());
-
-    encoder.encode_misprediction(CodecMisprediction::EOFMisprediction, false);
-
-    encoder.encode_correction(CodecCorrection::NonZeroPadding, eof_padding.into());
-
-    let plain_text = block_decoder.move_plain_text();
-    let amount_processed = input_stream.position() as usize;
-
-    // dump compressed content to file (TODO test code remove)
-    let mut f = std::fs::File::create("dump").unwrap();
-    f.write_all(&compressed_data[0..amount_processed]).unwrap();
-
-    Ok((amount_processed, params_e, plain_text, blocks))
+    Ok(())
 }
 
 pub fn write_deflate<D: PredictionDecoder>(
@@ -98,15 +117,38 @@ pub fn write_deflate<D: PredictionDecoder>(
     decoder: &mut D,
 ) -> Result<(Vec<u8>, Vec<PreflateTokenBlock>), PreflateError> {
     let params = PreflateParameters::read(decoder);
-    let mut token_predictor = TokenPredictor::new(plain_text, &params, 0);
+    let mut deflate_writer: DeflateWriter<'_> = DeflateWriter::new(plain_text);
 
+    let output_blocks = if params.hash_algorithm == HASH_ALGORITHM_MINIZ_FAST {
+        recreate_blocks(
+            TokenPredictor::<MiniZHash>::new(plain_text, &params, 0),
+            decoder,
+            &mut deflate_writer,
+        )?
+    } else {
+        recreate_blocks(
+            TokenPredictor::<ZlibRotatingHash>::new(plain_text, &params, 0),
+            decoder,
+            &mut deflate_writer,
+        )?
+    };
+
+    // flush the last byte, which may be incomplete and normally
+    // padded with zeros, but maybe not
+    let padding = decoder.decode_correction(CodecCorrection::NonZeroPadding) as u8;
+    deflate_writer.flush_with_padding(padding);
+
+    Ok((deflate_writer.detach_output(), output_blocks))
+}
+
+fn recreate_blocks<H: RotatingHashTrait, D: PredictionDecoder>(
+    mut token_predictor: TokenPredictor<H>,
+    decoder: &mut D,
+    deflate_writer: &mut DeflateWriter,
+) -> Result<Vec<PreflateTokenBlock>, PreflateError> {
     let mut output_blocks = Vec::new();
-
-    let mut deflate_encoder = DeflateWriter::new(plain_text);
-
     let mut is_eof = token_predictor.input_eof()
         && !decoder.decode_misprediction(CodecMisprediction::EOFMisprediction);
-
     while !is_eof {
         let mut block = token_predictor
             .recreate_block(decoder)
@@ -121,19 +163,13 @@ pub fn write_deflate<D: PredictionDecoder>(
         is_eof = token_predictor.input_eof()
             && !decoder.decode_misprediction(CodecMisprediction::EOFMisprediction);
 
-        deflate_encoder
+        deflate_writer
             .encode_block(&block, is_eof)
             .map_err(|e| PreflateError::EncodeBlock(output_blocks.len(), e))?;
 
         output_blocks.push(block);
     }
-
-    // flush the last byte, which may be incomplete and normally
-    // padded with zeros, but maybe not
-    let padding = decoder.decode_correction(CodecCorrection::NonZeroPadding) as u8;
-    deflate_encoder.flush_with_padding(padding);
-
-    Ok((deflate_encoder.detach_output(), output_blocks))
+    Ok(output_blocks)
 }
 
 #[cfg(test)]
@@ -367,6 +403,7 @@ fn verify_miniz_compressed_1() {
 fn verify_miniz_compressed() {
     for i in 0..9 {
         let filename = format!("compressed_flate2_level{}.deflate", i);
+        println!();
         println!("loading {}", filename);
         let v = read_file(&filename);
 

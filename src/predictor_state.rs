@@ -7,6 +7,7 @@
 use crate::bit_helper::DebugHash;
 use crate::hash_chain::{HashChain, RotatingHashTrait};
 use crate::preflate_constants::{MAX_MATCH, MIN_LOOKAHEAD, MIN_MATCH};
+use crate::preflate_input::PreflateInput;
 use crate::preflate_parameter_estimator::PreflateParameters;
 use crate::preflate_token::PreflateTokenReference;
 use std::cmp;
@@ -27,17 +28,19 @@ pub struct PreflateRematchInfo {
 }
 
 pub struct PredictorState<'a, H: RotatingHashTrait> {
-    hash: HashChain<'a, H>,
+    hash: HashChain<H>,
+    input: PreflateInput<'a>,
     params: PreflateParameters,
     window_bytes: u32,
 }
 
-impl<'a, H: RotatingHashTrait + Default> PredictorState<'a, H> {
+impl<'a, H: RotatingHashTrait> PredictorState<'a, H> {
     pub fn new(uncompressed: &'a [u8], params: &PreflateParameters) -> Self {
         Self {
-            hash: HashChain::new(uncompressed, params.hash_shift, params.hash_mask),
+            hash: HashChain::new(params.hash_shift, params.hash_mask),
             window_bytes: 1 << params.window_bits,
             params: *params,
+            input: PreflateInput::new(uncompressed),
         }
     }
 
@@ -50,24 +53,26 @@ impl<'a, H: RotatingHashTrait + Default> PredictorState<'a, H> {
         self.hash.update_running_hash(b);
     }
 
-    pub fn update_hash(&mut self, pos: u32) {
-        self.hash.update_hash::<false>(pos);
+    pub fn update_hash(&mut self, length: u32) {
+        self.hash.update_hash::<false>(length, &self.input);
+        self.input.advance(length);
     }
 
-    pub fn skip_hash(&mut self, pos: u32) {
-        self.hash.skip_hash::<false>(pos);
+    pub fn skip_hash(&mut self, length: u32) {
+        self.hash.skip_hash::<false>(length, &self.input);
+        self.input.advance(length);
     }
 
     pub fn current_input_pos(&self) -> u32 {
-        self.hash.input().pos()
+        self.input.pos()
     }
 
     pub fn input_cursor(&self) -> &[u8] {
-        self.hash.input().cur_chars(0)
+        self.input.cur_chars(0)
     }
 
     pub fn input_cursor_offset(&self, offset: i32) -> &[u8] {
-        self.hash.input().cur_chars(offset)
+        self.input.cur_chars(offset)
     }
 
     pub fn window_size(&self) -> u32 {
@@ -75,11 +80,11 @@ impl<'a, H: RotatingHashTrait + Default> PredictorState<'a, H> {
     }
 
     fn total_input_size(&self) -> u32 {
-        self.hash.input().size()
+        self.input.size()
     }
 
     pub fn available_input_size(&self) -> u32 {
-        self.hash.input().remaining()
+        self.input.remaining()
     }
 
     pub fn hash_equal(&self, a: H, b: H) -> bool {
@@ -87,11 +92,11 @@ impl<'a, H: RotatingHashTrait + Default> PredictorState<'a, H> {
     }
 
     pub fn calculate_hash(&self) -> H {
-        self.hash.cur_hash()
+        self.hash.cur_hash(&self.input)
     }
 
     pub fn calculate_hash_next(&self) -> H {
-        self.hash.cur_plus_1_hash()
+        self.hash.cur_plus_1_hash(&self.input)
     }
 
     fn prefix_compare(s1: &[u8], s2: &[u8], best_len: u32, max_len: u32) -> u32 {
@@ -166,11 +171,11 @@ impl<'a, H: RotatingHashTrait + Default> PredictorState<'a, H> {
 
         let mut best_len = prev_len;
         let mut best_match: Option<PreflateTokenReference> = None;
-        let input = self.hash.input().cur_chars(offset as i32);
+        let input = self.input.cur_chars(offset as i32);
         loop {
             let dist = chain_it.dist();
 
-            let match_start = self.hash.input().cur_chars(offset as i32 - dist as i32);
+            let match_start = self.input.cur_chars(offset as i32 - dist as i32);
 
             let match_length = Self::prefix_compare(match_start, input, best_len, max_len);
             if match_length > best_len {
@@ -210,7 +215,7 @@ impl<'a, H: RotatingHashTrait + Default> PredictorState<'a, H> {
     /// Tries to find the match by continuing on the hash chain, returns how many hops we went
     /// or none if it wasn't found
     pub fn calculate_hops(&self, target_reference: &PreflateTokenReference) -> anyhow::Result<u32> {
-        let hash = self.hash.cur_hash();
+        let hash = self.hash.cur_hash(&self.input);
 
         let max_len = std::cmp::min(self.available_input_size(), MAX_MATCH);
 
@@ -303,6 +308,6 @@ impl<'a, H: RotatingHashTrait + Default> PredictorState<'a, H> {
     /// debugging function to verify that the hash chain is correct
     #[allow(dead_code)]
     pub fn verify_hash(&self, dist: Option<PreflateTokenReference>) {
-        self.hash.verify_hash(dist);
+        self.hash.verify_hash(dist, &self.input);
     }
 }
