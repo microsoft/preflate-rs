@@ -23,7 +23,8 @@ fn main_with_result() -> anyhow::Result<()> {
 
     let result = preflate_rs::decompress_deflate_stream(&content, true)?;
 
-    let recomp = preflate_rs::recompress_deflate_stream(&result.plain_text, &result.cabac_encoded)?;
+    let recomp =
+        preflate_rs::recompress_deflate_stream(&result.plain_text, &result.prediction_corrections)?;
 
     if content[..] != recomp[..] {
         return Err(anyhow::anyhow!("recompressed data does not match original"));

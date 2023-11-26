@@ -13,7 +13,7 @@ use crate::{
     statistical_codec::{PredictionDecoder, PredictionEncoder},
 };
 
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum PreflateStrategy {
     Default,
     RleOnly,
@@ -21,14 +21,14 @@ pub enum PreflateStrategy {
     Store,
 }
 
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum PreflateHuffStrategy {
     Dynamic,
     Mixed,
     Static,
 }
 
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub struct PreflateParameters {
     pub strategy: PreflateStrategy,
     pub huff_strategy: PreflateHuffStrategy,

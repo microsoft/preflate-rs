@@ -36,10 +36,6 @@ impl<R: Read> DeflateReader<R> {
         self.input.get(padding_bit_count.into()).unwrap() as u8
     }
 
-    pub fn get_plain_text(&self) -> &[u8] {
-        &self.plain_text
-    }
-
     /// moves ownership out of block reader
     pub fn move_plain_text(&mut self) -> Vec<u8> {
         std::mem::take(&mut self.plain_text)

@@ -278,11 +278,35 @@ pub fn verify_decoder<T: PredictionDecoder>(decoder: &mut T, actions: &[CodecAct
     }
 }
 
+// used by tests to ensure that perfect prediction is performed for data
+// that we know should be encoded without any mispredictions or corrections
 #[cfg(test)]
-pub struct DefaultOnlyDecoder {}
+#[derive(Default)]
+pub struct AssertDefaultOnlyEncoder {}
 
 #[cfg(test)]
-impl PredictionDecoder for DefaultOnlyDecoder {
+impl PredictionEncoder for AssertDefaultOnlyEncoder {
+    fn encode_correction(&mut self, _action: CodecCorrection, value: u32) {
+        assert_eq!(0, value);
+    }
+
+    fn encode_misprediction(&mut self, _action: CodecMisprediction, value: bool) {
+        assert_eq!(false, value);
+    }
+
+    fn encode_value(&mut self, _value: u16, _max_bits: u8) {}
+
+    fn encode_verify_state(&mut self, _message: &'static str, _checksum: u64) {}
+
+    fn finish(&mut self) {}
+}
+
+#[cfg(test)]
+#[derive(Default)]
+pub struct AssertDefaultOnlyDecoder {}
+
+#[cfg(test)]
+impl PredictionDecoder for AssertDefaultOnlyDecoder {
     fn decode_value(&mut self, _max_bits_orig: u8) -> u16 {
         unimplemented!()
     }

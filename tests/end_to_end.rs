@@ -53,12 +53,13 @@ fn test_sample1() {
 
 fn verifyresult(compressed_data: &[u8]) {
     let result = decompress_deflate_stream(compressed_data, true).unwrap();
-    let recomp = recompress_deflate_stream(&result.plain_text, &result.cabac_encoded).unwrap();
+    let recomp =
+        recompress_deflate_stream(&result.plain_text, &result.prediction_corrections).unwrap();
 
     println!(
         "compressed size: {}, cabac: {}",
         compressed_data.len(),
-        result.cabac_encoded.len()
+        result.prediction_corrections.len()
     );
     assert_eq!(compressed_data, recomp);
 }

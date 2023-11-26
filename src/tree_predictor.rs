@@ -387,7 +387,7 @@ fn predict_code_data(sym_bit_len: &[u8], code_type: TreeCodeType) -> u8 {
 
 #[test]
 fn encode_roundtrip_perfect() {
-    use crate::statistical_codec::DefaultOnlyDecoder;
+    use crate::statistical_codec::AssertDefaultOnlyDecoder;
     use crate::statistical_codec::VerifyPredictionEncoder;
 
     for huffcalc in [HufftreeBitCalc::Miniz, HufftreeBitCalc::Zlib] {
@@ -400,7 +400,7 @@ fn encode_roundtrip_perfect() {
         freq.distance_codes[1] = 50;
         freq.distance_codes[2] = 25;
 
-        let mut empty_decoder = DefaultOnlyDecoder {};
+        let mut empty_decoder = AssertDefaultOnlyDecoder {};
         let regenerated_header =
             recreate_tree_for_block(&freq, &mut empty_decoder, huffcalc).unwrap();
 
@@ -418,7 +418,7 @@ fn encode_roundtrip_perfect() {
 
 #[test]
 fn encode_perfect_encoding() {
-    use crate::statistical_codec::{DefaultOnlyDecoder, VerifyPredictionEncoder};
+    use crate::statistical_codec::{AssertDefaultOnlyDecoder, VerifyPredictionEncoder};
 
     let mut freq = TokenFrequency::default();
     // fill with random frequencies
@@ -433,7 +433,7 @@ fn encode_perfect_encoding() {
     });
 
     // use the default encoder the says that everything is ok
-    let mut default_only_decoder = DefaultOnlyDecoder {};
+    let mut default_only_decoder = AssertDefaultOnlyDecoder {};
     let default_encoding =
         recreate_tree_for_block(&freq, &mut default_only_decoder, HufftreeBitCalc::Zlib).unwrap();
 

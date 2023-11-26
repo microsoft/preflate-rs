@@ -34,11 +34,13 @@ use cabac::{
     vp8::{VP8Reader, VP8Writer},
 };
 use preflate_error::PreflateError;
+use preflate_parameter_estimator::{estimate_preflate_parameters, PreflateParameters};
+use process::parse_deflate;
 use std::io::Cursor;
 
 use crate::{
     cabac_codec::{PredictionDecoderCabac, PredictionEncoderCabac},
-    process::{read_deflate, write_deflate},
+    process::{decode_mispredictions, encode_mispredictions},
     statistical_codec::PredictionEncoder,
 };
 
@@ -46,11 +48,13 @@ use crate::{
 pub struct DecompressResult {
     /// the plaintext that was decompressed from the stream
     pub plain_text: Vec<u8>,
+
     /// the extra data that is needed to reconstruct the deflate stream exactly as it was written
-    pub cabac_encoded: Vec<u8>,
+    pub prediction_corrections: Vec<u8>,
+
     /// the number of bytes that were processed from the compressed stream (this will be exactly the
     /// data that will be recreated using the cabac_encoded data)
-    pub compressed_processed: usize,
+    pub compressed_size: usize,
 }
 
 /// decompresses a deflate stream and returns the plaintext and cabac_encoded data that can be used to reconstruct it
@@ -62,17 +66,27 @@ pub fn decompress_deflate_stream(
 
     let mut cabac_encoder =
         PredictionEncoderCabac::new(VP8Writer::new(&mut cabac_encoded).unwrap());
-    let (compressed_processed, _params, plain_text, _original_blocks) =
-        read_deflate(compressed_data, &mut cabac_encoder, 0)?;
+
+    let contents = parse_deflate(compressed_data, 1)?;
+
+    let params = estimate_preflate_parameters(&contents.plain_text, &contents.blocks);
+
+    params.write(&mut cabac_encoder);
+    encode_mispredictions(&contents, &params, &mut cabac_encoder)?;
 
     cabac_encoder.finish();
 
     if verify {
         let mut cabac_decoder =
             PredictionDecoderCabac::new(VP8Reader::new(Cursor::new(&cabac_encoded)).unwrap());
-        let (recompressed, _recreated_blocks) = write_deflate(&plain_text, &mut cabac_decoder)?;
 
-        if recompressed[..] != compressed_data[..compressed_processed] {
+        let reread_params = PreflateParameters::read(&mut cabac_decoder);
+        assert_eq!(params, reread_params);
+
+        let (recompressed, _recreated_blocks) =
+            decode_mispredictions(&reread_params, &contents.plain_text, &mut cabac_decoder)?;
+
+        if recompressed[..] != compressed_data[..contents.compressed_size] {
             return Err(PreflateError::Mismatch(anyhow::anyhow!(
                 "recompressed data does not match original"
             )));
@@ -80,9 +94,9 @@ pub fn decompress_deflate_stream(
     }
 
     Ok(DecompressResult {
-        plain_text,
-        cabac_encoded,
-        compressed_processed,
+        plain_text: contents.plain_text,
+        prediction_corrections: cabac_encoded,
+        compressed_size: contents.compressed_size,
     })
 }
 
@@ -93,7 +107,10 @@ pub fn recompress_deflate_stream(
 ) -> Result<Vec<u8>, PreflateError> {
     let mut cabac_decoder =
         PredictionDecoderCabac::new(VP8Reader::new(Cursor::new(&cabac_encoded)).unwrap());
-    let (recompressed, _recreated_blocks) = write_deflate(plain_text, &mut cabac_decoder)?;
+
+    let params = PreflateParameters::read(&mut cabac_decoder);
+    let (recompressed, _recreated_blocks) =
+        decode_mispredictions(&params, plain_text, &mut cabac_decoder)?;
     Ok(recompressed)
 }
 
@@ -107,16 +124,24 @@ pub fn decompress_deflate_stream_assert(
 
     let mut cabac_encoder =
         PredictionEncoderCabac::new(DebugWriter::new(&mut cabac_encoded).unwrap());
-    let (compressed_processed, _params, plain_text, _original_blocks) =
-        read_deflate(compressed_data, &mut cabac_encoder, 0)?;
 
-    assert_eq!(compressed_processed, compressed_data.len());
+    let contents = parse_deflate(compressed_data, 1)?;
+
+    let params = estimate_preflate_parameters(&contents.plain_text, &contents.blocks);
+
+    params.write(&mut cabac_encoder);
+    encode_mispredictions(&contents, &params, &mut cabac_encoder)?;
+
+    assert_eq!(contents.compressed_size, compressed_data.len());
     cabac_encoder.finish();
 
     if verify {
         let mut cabac_decoder =
             PredictionDecoderCabac::new(DebugReader::new(Cursor::new(&cabac_encoded)).unwrap());
-        let (recompressed, _recreated_blocks) = write_deflate(&plain_text, &mut cabac_decoder)?;
+
+        let params = PreflateParameters::read(&mut cabac_decoder);
+        let (recompressed, _recreated_blocks) =
+            decode_mispredictions(&params, &contents.plain_text, &mut cabac_decoder)?;
 
         if recompressed[..] != compressed_data[..] {
             return Err(PreflateError::Mismatch(anyhow::anyhow!(
@@ -126,9 +151,9 @@ pub fn decompress_deflate_stream_assert(
     }
 
     Ok(DecompressResult {
-        plain_text,
-        cabac_encoded,
-        compressed_processed,
+        plain_text: contents.plain_text,
+        prediction_corrections: cabac_encoded,
+        compressed_size: contents.compressed_size,
     })
 }
 
@@ -140,6 +165,33 @@ pub fn recompress_deflate_stream_assert(
 ) -> Result<Vec<u8>, PreflateError> {
     let mut cabac_decoder =
         PredictionDecoderCabac::new(DebugReader::new(Cursor::new(&cabac_encoded)).unwrap());
-    let (recompressed, _recreated_blocks) = write_deflate(plain_text, &mut cabac_decoder)?;
+
+    let params = PreflateParameters::read(&mut cabac_decoder);
+
+    let (recompressed, _recreated_blocks) =
+        decode_mispredictions(&params, plain_text, &mut cabac_decoder)?;
     Ok(recompressed)
+}
+
+#[test]
+fn verify_roundtrip() {
+    use crate::process::read_file;
+    
+    let v = read_file("compressed_zlib_level1.deflate");
+
+    let r = decompress_deflate_stream(&v, true).unwrap();
+    let recompressed = recompress_deflate_stream(&r.plain_text, &r.prediction_corrections).unwrap();
+    assert_eq!(v, recompressed);
+}
+
+#[test]
+fn verify_roundtrip_assert() {
+    use crate::process::read_file;
+
+    let v = read_file("compressed_zlib_level1.deflate");
+
+    let r = decompress_deflate_stream_assert(&v, true).unwrap();
+    let recompressed =
+        recompress_deflate_stream_assert(&r.plain_text, &r.prediction_corrections).unwrap();
+    assert_eq!(v, recompressed);
 }

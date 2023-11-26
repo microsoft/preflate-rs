@@ -4,15 +4,18 @@
  *  This software incorporates material from third parties. See NOTICE.txt for details.
  *--------------------------------------------------------------------------------------------*/
 
-use std::io::{Cursor, Write};
+use std::io::Cursor;
 
 use crate::{
     deflate_reader::DeflateReader,
     deflate_writer::DeflateWriter,
-    hash_chain::{MiniZHash, RotatingHashTrait, ZlibRotatingHash, HASH_ALGORITHM_MINIZ_FAST},
+    hash_chain::{
+        MiniZHash, RotatingHashTrait, ZlibRotatingHash, HASH_ALGORITHM_MINIZ_FAST,
+        HASH_ALGORITHM_ZLIB,
+    },
     huffman_calc::HufftreeBitCalc,
     preflate_error::PreflateError,
-    preflate_parameter_estimator::{estimate_preflate_parameters, PreflateParameters},
+    preflate_parameter_estimator::PreflateParameters,
     preflate_token::{BlockType, PreflateTokenBlock},
     statistical_codec::{
         CodecCorrection, CodecMisprediction, PredictionDecoder, PredictionEncoder,
@@ -23,14 +26,45 @@ use crate::{
 
 /// takes a deflate compressed stream, analyzes it, decoompresses it, and records
 /// any differences in the encoder codec
-pub fn read_deflate<E: PredictionEncoder>(
+pub fn encode_mispredictions(
+    deflate: &DeflateContents,
+    params: &PreflateParameters,
+    encoder: &mut impl PredictionEncoder,
+) -> Result<(), PreflateError> {
+    match params.hash_algorithm {
+        HASH_ALGORITHM_MINIZ_FAST => predict_blocks(
+            &deflate.blocks,
+            TokenPredictor::<MiniZHash>::new(&deflate.plain_text, &params, 0),
+            encoder,
+        )?,
+        HASH_ALGORITHM_ZLIB => predict_blocks(
+            &deflate.blocks,
+            TokenPredictor::<ZlibRotatingHash>::new(&deflate.plain_text, &params, 0),
+            encoder,
+        )?,
+        _ => panic!("unknown hash algorithm"),
+    }
+
+    encoder.encode_misprediction(CodecMisprediction::EOFMisprediction, false);
+
+    encoder.encode_correction(CodecCorrection::NonZeroPadding, deflate.eof_padding.into());
+
+    Ok(())
+}
+
+pub struct DeflateContents {
+    pub compressed_size: usize,
+    pub plain_text: Vec<u8>,
+    pub blocks: Vec<PreflateTokenBlock>,
+    pub eof_padding: u8,
+}
+
+pub fn parse_deflate(
     compressed_data: &[u8],
-    encoder: &mut E,
     deflate_info_dump_level: u32,
-) -> Result<(usize, PreflateParameters, Vec<u8>, Vec<PreflateTokenBlock>), PreflateError> {
+) -> Result<DeflateContents, PreflateError> {
     let mut input_stream = Cursor::new(compressed_data);
     let mut block_decoder = DeflateReader::new(&mut input_stream);
-
     let mut blocks = Vec::new();
     let mut last = false;
     while !last {
@@ -45,49 +79,21 @@ pub fn read_deflate<E: PredictionEncoder>(
 
         blocks.push(block);
     }
-
     let eof_padding = block_decoder.read_eof_padding();
-
-    let params_e = estimate_preflate_parameters(block_decoder.get_plain_text(), &blocks);
-
-    params_e.write(encoder);
-
-    if deflate_info_dump_level > 0 {
-        println!("prediction parameters: {:?}", params_e);
-    }
-
-    if params_e.hash_algorithm == HASH_ALGORITHM_MINIZ_FAST {
-        predict_blocks(
-            &blocks,
-            TokenPredictor::<MiniZHash>::new(block_decoder.get_plain_text(), &params_e, 0),
-            encoder,
-        )?;
-    } else {
-        predict_blocks(
-            &blocks,
-            TokenPredictor::<ZlibRotatingHash>::new(block_decoder.get_plain_text(), &params_e, 0),
-            encoder,
-        )?;
-    }
-
-    encoder.encode_misprediction(CodecMisprediction::EOFMisprediction, false);
-
-    encoder.encode_correction(CodecCorrection::NonZeroPadding, eof_padding.into());
-
     let plain_text = block_decoder.move_plain_text();
-    let amount_processed = input_stream.position() as usize;
-
-    // dump compressed content to file (TODO test code remove)
-    let mut f = std::fs::File::create("dump").unwrap();
-    f.write_all(&compressed_data[0..amount_processed]).unwrap();
-
-    Ok((amount_processed, params_e, plain_text, blocks))
+    let compressed_size = input_stream.position() as usize;
+    Ok(DeflateContents {
+        compressed_size,
+        plain_text,
+        blocks,
+        eof_padding,
+    })
 }
 
-fn predict_blocks<H: RotatingHashTrait, E: PredictionEncoder>(
+fn predict_blocks<H: RotatingHashTrait>(
     blocks: &[PreflateTokenBlock],
     mut token_predictor_in: TokenPredictor<H>,
-    encoder: &mut E,
+    encoder: &mut impl PredictionEncoder,
 ) -> Result<(), PreflateError> {
     for i in 0..blocks.len() {
         if token_predictor_in.input_eof() {
@@ -112,11 +118,11 @@ fn predict_blocks<H: RotatingHashTrait, E: PredictionEncoder>(
     Ok(())
 }
 
-pub fn write_deflate<D: PredictionDecoder>(
+pub fn decode_mispredictions(
+    params: &PreflateParameters,
     plain_text: &[u8],
-    decoder: &mut D,
+    decoder: &mut impl PredictionDecoder,
 ) -> Result<(Vec<u8>, Vec<PreflateTokenBlock>), PreflateError> {
-    let params = PreflateParameters::read(decoder);
     let mut deflate_writer: DeflateWriter<'_> = DeflateWriter::new(plain_text);
 
     let output_blocks = if params.hash_algorithm == HASH_ALGORITHM_MINIZ_FAST {
@@ -197,21 +203,27 @@ fn analyze_compressed_data_fast(
     uncompressed_size: &mut u64,
 ) {
     use crate::cabac_codec::{PredictionDecoderCabac, PredictionEncoderCabac};
+    use crate::preflate_parameter_estimator::estimate_preflate_parameters;
+
     use cabac::vp8::{VP8Reader, VP8Writer};
 
     let mut buffer = Vec::new();
 
     let mut cabac_encoder = PredictionEncoderCabac::new(VP8Writer::new(&mut buffer).unwrap());
 
-    let (compressed_processed, _params, plain_text, _original_blocks) =
-        read_deflate(compressed_data, &mut cabac_encoder, 1).unwrap();
+    let contents = parse_deflate(compressed_data, 1).unwrap();
+
+    let params = estimate_preflate_parameters(&contents.plain_text, &contents.blocks);
+
+    params.write(&mut cabac_encoder);
+    encode_mispredictions(&contents, &params, &mut cabac_encoder).unwrap();
 
     if let Some(crc) = header_crc32 {
-        let result_crc = crc32fast::hash(&plain_text);
+        let result_crc = crc32fast::hash(&contents.plain_text);
         assert_eq!(result_crc, crc);
     }
 
-    assert_eq!(compressed_processed, compressed_data.len());
+    assert_eq!(contents.compressed_size, compressed_data.len());
 
     cabac_encoder.finish();
 
@@ -222,11 +234,14 @@ fn analyze_compressed_data_fast(
     let mut cabac_decoder =
         PredictionDecoderCabac::new(VP8Reader::new(Cursor::new(&buffer)).unwrap());
 
-    let (recompressed, _recreated_blocks) = write_deflate(&plain_text, &mut cabac_decoder).unwrap();
+    let params = PreflateParameters::read(&mut cabac_decoder);
+
+    let (recompressed, _recreated_blocks) =
+        decode_mispredictions(&params, &contents.plain_text, &mut cabac_decoder).unwrap();
 
     assert!(recompressed[..] == compressed_data[..]);
 
-    *uncompressed_size = plain_text.len() as u64;
+    *uncompressed_size = contents.plain_text.len() as u64;
 }
 
 #[cfg(test)]
@@ -236,6 +251,7 @@ fn analyze_compressed_data_verify(
     _deflate_info_dump_level: i32,
     uncompressed_size: &mut u64,
 ) {
+    use crate::preflate_parameter_estimator::estimate_preflate_parameters;
     use crate::{
         cabac_codec::{PredictionDecoderCabac, PredictionEncoderCabac},
         statistical_codec::{VerifyPredictionDecoder, VerifyPredictionEncoder},
@@ -261,10 +277,14 @@ fn analyze_compressed_data_verify(
 
     let mut combined_encoder = (debug_encoder, cabac_encoder);
 
-    let (compressed_processed, _params, plain_text, original_blocks) =
-        read_deflate(compressed_data, &mut combined_encoder, 1).unwrap();
+    let contents = parse_deflate(compressed_data, 1).unwrap();
 
-    assert_eq!(compressed_processed, compressed_data.len());
+    let params = estimate_preflate_parameters(&contents.plain_text, &contents.blocks);
+
+    params.write(&mut combined_encoder);
+    encode_mispredictions(&contents, &params, &mut combined_encoder).unwrap();
+
+    assert_eq!(contents.compressed_size, compressed_data.len());
 
     combined_encoder.finish();
 
@@ -274,15 +294,21 @@ fn analyze_compressed_data_verify(
 
     println!("buffer size: {}", buffer.len());
 
-    let debug_encoder = VerifyPredictionDecoder::new(actions);
+    let debug_decoder = VerifyPredictionDecoder::new(actions);
     let cabac_decoder =
         PredictionDecoderCabac::new(DebugReader::new(Cursor::new(&buffer)).unwrap());
 
-    let (recompressed, recreated_blocks) =
-        write_deflate(&plain_text, &mut (debug_encoder, cabac_decoder)).unwrap();
+    let mut combined_decoder = (debug_decoder, cabac_decoder);
 
-    assert_eq!(original_blocks.len(), recreated_blocks.len());
-    original_blocks
+    let params_reread = PreflateParameters::read(&mut combined_decoder);
+    assert_eq!(params, params_reread);
+
+    let (recompressed, recreated_blocks) =
+        decode_mispredictions(&params_reread, &contents.plain_text, &mut combined_decoder).unwrap();
+
+    assert_eq!(contents.blocks.len(), recreated_blocks.len());
+    contents
+        .blocks
         .iter()
         .zip(recreated_blocks)
         .enumerate()
@@ -324,13 +350,13 @@ fn analyze_compressed_data_verify(
         "re-compressed version should be same (content)"
     );
 
-    let result_crc = crc32fast::hash(&plain_text);
+    let result_crc = crc32fast::hash(&contents.plain_text);
 
     if let Some(crc) = header_crc32 {
         assert_eq!(crc, result_crc, "crc mismatch");
     }
 
-    *uncompressed_size = plain_text.len() as u64;
+    *uncompressed_size = contents.plain_text.len() as u64;
 }
 
 #[cfg(test)]
@@ -386,6 +412,62 @@ fn verify_zlib_compressed() {
 
         do_analyze(None, &v, true);
         do_analyze(None, &v, false);
+    }
+}
+
+#[test]
+fn verify_zlib_compressed_good() {
+    use crate::{
+        preflate_parameter_estimator::PreflateHuffStrategy,
+        preflate_parameter_estimator::PreflateStrategy,
+        preflate_parse_config::{FAST_PREFLATE_PARSER_SETTINGS, SLOW_PREFLATE_PARSER_SETTINGS},
+        statistical_codec::{AssertDefaultOnlyDecoder, AssertDefaultOnlyEncoder},
+    };
+
+    for i in 1..4 {
+        let v = read_file(&format!("compressed_zlib_level{}.deflate", i));
+
+        let config;
+        let is_fast_compressor;
+        let max_dist_3_matches;
+        if i < 4 {
+            config = &FAST_PREFLATE_PARSER_SETTINGS[i - 1];
+            is_fast_compressor = true;
+            max_dist_3_matches = 32768;
+        } else {
+            config = &SLOW_PREFLATE_PARSER_SETTINGS[i - 3];
+            is_fast_compressor = false;
+            max_dist_3_matches = 4096;
+        }
+
+        let params = PreflateParameters {
+            strategy: PreflateStrategy::Default,
+            huff_strategy: PreflateHuffStrategy::Dynamic,
+            zlib_compatible: true,
+            window_bits: 15,
+            hash_shift: 5,
+            hash_mask: 0x7fff,
+            max_token_count: 16383,
+            max_dist_3_matches,
+            very_far_matches_detected: false,
+            matches_to_start_detected: false,
+            log2_of_max_chain_depth_m1: 12,
+            is_fast_compressor,
+            good_length: config.good_length,
+            max_lazy: config.max_lazy,
+            nice_length: config.nice_length,
+            max_chain: config.max_chain,
+            hash_algorithm: HASH_ALGORITHM_ZLIB,
+        };
+
+        let contents = parse_deflate(&v, 1).unwrap();
+
+        // assert that we don't get any mispredictions on known good zlib compressed data
+        let mut cabac_encoder = AssertDefaultOnlyEncoder {};
+        encode_mispredictions(&contents, &params, &mut cabac_encoder).unwrap();
+
+        let mut cabac_decoder = AssertDefaultOnlyDecoder {};
+        decode_mispredictions(&params, &contents.plain_text, &mut cabac_decoder).unwrap();
     }
 }
 

@@ -11,21 +11,18 @@ pub struct PreflateParserConfig {
     pub max_chain: u32,
 }
 
-pub const FAST_PREFLATE_PARSER_SETTINGS: [PreflateParserConfig; 4] = [
-    // max speed used by miniz, always match the first entry
-    PreflateParserConfig {
-        good_length: 4,
-        max_lazy: 2,
-        nice_length: 8,
-        max_chain: 200,
-    },
+pub const FAST_PREFLATE_PARSER_SETTINGS: [PreflateParserConfig; 3] = [
     // these three levels are used by zlib
+
+    // max speed, no lazy matches (the lazy field means
+    // the maximum length that is added to the dictionary during
+    // a match)
     PreflateParserConfig {
         good_length: 4,
         max_lazy: 4,
         nice_length: 8,
         max_chain: 4,
-    }, // max speed, no lazy matches
+    },
     PreflateParserConfig {
         good_length: 4,
         max_lazy: 5,
