@@ -114,10 +114,12 @@ impl<'a, H: RotatingHashTrait> TokenPredictor<'a, H> {
                 },
             );
 
-            /*if i == 15 {
-                println!(
-                    "target = {:?}", target_token
-                )
+            /*
+            if i == 7718
+                && *target_token
+                    == PreflateToken::Reference(PreflateTokenReference::new(7, 17, false))
+            {
+                println!("target = {:?}", target_token)
             }*/
 
             let predicted_token = self.predict_token();
@@ -363,16 +365,7 @@ impl<'a, H: RotatingHashTrait> TokenPredictor<'a, H> {
         let m = if let Some(pending) = self.pending_reference {
             MatchResult::Success(pending)
         } else {
-            self.state.match_token(
-                hash,
-                0,
-                0,
-                if self.params.zlib_compatible {
-                    0
-                } else {
-                    1 << self.params.log2_of_max_chain_depth_m1
-                },
-            )
+            self.state.match_token(hash, 0, 0, self.params.max_chain)
         };
 
         self.pending_reference = None;
@@ -400,18 +393,28 @@ impl<'a, H: RotatingHashTrait> TokenPredictor<'a, H> {
                 let mut match_next;
                 let hash_next = self.state.calculate_hash_next();
 
-                match_next = self.state.match_token(
-                    hash_next,
-                    match_token.len(),
-                    1,
-                    if self.params.zlib_compatible {
-                        0
-                    } else {
-                        2 << self.params.log2_of_max_chain_depth_m1
-                    },
-                );
+                let mut max_depth = self.params.max_chain;
+                let hash_equal = self.state.hash_equal(hash_next, hash);
 
-                if self.state.hash_equal(hash_next, hash) {
+                if self.params.zlib_compatible {
+                    if match_token.len() >= self.params.good_length {
+                        max_depth >>= 2;
+                    }
+                }
+
+                // if the hashes are equal, then the match will have already
+                // been added to the dictionary at this point, which means that
+                // the depth with match to should be one less (since this chain
+                // will be one longer with the addition of the hash)
+                if hash_equal {
+                    max_depth -= 1;
+                }
+
+                match_next = self
+                    .state
+                    .match_token(hash_next, match_token.len(), 1, max_depth);
+
+                if hash_equal {
                     let max_size = std::cmp::min(self.state.available_input_size() - 1, MAX_MATCH);
                     let mut rle = 0;
                     let c = self.state.input_cursor();
@@ -462,16 +465,16 @@ impl<'a, H: RotatingHashTrait> TokenPredictor<'a, H> {
             ));
         }
 
+        /*
         if let Some(x) = dist_match {
             if x.dist() == 32653 {
                 println!("dist_match = {:?}", dist_match);
             }
         }
+        */
 
         let hash = self.state.calculate_hash();
-        let match_token =
-            self.state
-                .match_token(hash, 0, 0, 2 << self.params.log2_of_max_chain_depth_m1);
+        let match_token = self.state.match_token(hash, 0, 0, self.params.max_chain);
 
         self.pending_reference = None;
 

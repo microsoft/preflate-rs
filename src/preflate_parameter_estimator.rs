@@ -28,6 +28,13 @@ pub enum PreflateHuffStrategy {
     Static,
 }
 
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Default)]
+pub enum HashAlgorithm {
+    #[default]
+    Zlib,
+    MiniZFast,
+}
+
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub struct PreflateParameters {
     pub strategy: PreflateStrategy,
@@ -40,13 +47,12 @@ pub struct PreflateParameters {
     pub max_dist_3_matches: u16,
     pub very_far_matches_detected: bool,
     pub matches_to_start_detected: bool,
-    pub log2_of_max_chain_depth_m1: u32,
     pub is_fast_compressor: bool,
     pub good_length: u32,
     pub max_lazy: u32,
     pub nice_length: u32,
     pub max_chain: u32,
-    pub hash_algorithm: u16,
+    pub hash_algorithm: HashAlgorithm,
 }
 
 impl PreflateParameters {
@@ -61,26 +67,37 @@ impl PreflateParameters {
         let max_dist_3_matches = decoder.decode_value(16);
         let very_far_matches_detected = decoder.decode_value(1) != 0;
         let matches_to_start_detected = decoder.decode_value(1) != 0;
-        let log2_of_max_chain_depth_m1 = decoder.decode_value(16);
         let is_fast_compressor = decoder.decode_value(1) != 0;
         let good_length = decoder.decode_value(16);
         let max_lazy = decoder.decode_value(16);
         let nice_length = decoder.decode_value(16);
         let max_chain = decoder.decode_value(16);
-        let hash_algorithm = decoder.decode_value(16);
+        let hash_algorithm = decoder.decode_value(4);
+
+        const STRATEGY_DEFAULT: u16 = PreflateStrategy::Default as u16;
+        const STRATEGY_RLE_ONLY: u16 = PreflateStrategy::RleOnly as u16;
+        const STRATEGY_HUFF_ONLY: u16 = PreflateStrategy::HuffOnly as u16;
+        const STRATEGY_STORE: u16 = PreflateStrategy::Store as u16;
+
+        const HUFF_STRATEGY_DYNAMIC: u16 = PreflateHuffStrategy::Dynamic as u16;
+        const HUFF_STRATEGY_MIXED: u16 = PreflateHuffStrategy::Mixed as u16;
+        const HUFF_STRATEGY_STATIC: u16 = PreflateHuffStrategy::Static as u16;
+
+        const HASH_ALGORITHM_ZLIB: u16 = HashAlgorithm::Zlib as u16;
+        const HASH_ALGORITHM_MINIZ_FAST: u16 = HashAlgorithm::MiniZFast as u16;
 
         PreflateParameters {
             strategy: match strategy {
-                0 => PreflateStrategy::Default,
-                1 => PreflateStrategy::RleOnly,
-                2 => PreflateStrategy::HuffOnly,
-                3 => PreflateStrategy::Store,
+                STRATEGY_DEFAULT => PreflateStrategy::Default,
+                STRATEGY_RLE_ONLY => PreflateStrategy::RleOnly,
+                STRATEGY_HUFF_ONLY => PreflateStrategy::HuffOnly,
+                STRATEGY_STORE => PreflateStrategy::Store,
                 _ => panic!("invalid strategy"),
             },
             huff_strategy: match huff_strategy {
-                0 => PreflateHuffStrategy::Dynamic,
-                1 => PreflateHuffStrategy::Mixed,
-                2 => PreflateHuffStrategy::Static,
+                HUFF_STRATEGY_DYNAMIC => PreflateHuffStrategy::Dynamic,
+                HUFF_STRATEGY_MIXED => PreflateHuffStrategy::Mixed,
+                HUFF_STRATEGY_STATIC => PreflateHuffStrategy::Static,
                 _ => panic!("invalid huff strategy"),
             },
             zlib_compatible,
@@ -91,13 +108,16 @@ impl PreflateParameters {
             max_dist_3_matches,
             very_far_matches_detected,
             matches_to_start_detected,
-            log2_of_max_chain_depth_m1: log2_of_max_chain_depth_m1.into(),
             is_fast_compressor,
             good_length: good_length.into(),
             max_lazy: max_lazy.into(),
             nice_length: nice_length.into(),
             max_chain: max_chain.into(),
-            hash_algorithm,
+            hash_algorithm: match hash_algorithm {
+                HASH_ALGORITHM_ZLIB => HashAlgorithm::Zlib,
+                HASH_ALGORITHM_MINIZ_FAST => HashAlgorithm::MiniZFast,
+                _ => panic!("invalid hash algorithm"),
+            },
         }
     }
 
@@ -112,13 +132,12 @@ impl PreflateParameters {
         encoder.encode_value(u16::try_from(self.max_dist_3_matches).unwrap(), 16);
         encoder.encode_value(u16::try_from(self.very_far_matches_detected).unwrap(), 1);
         encoder.encode_value(u16::try_from(self.matches_to_start_detected).unwrap(), 1);
-        encoder.encode_value(u16::try_from(self.log2_of_max_chain_depth_m1).unwrap(), 16);
         encoder.encode_value(u16::try_from(self.is_fast_compressor).unwrap(), 1);
         encoder.encode_value(u16::try_from(self.good_length).unwrap(), 16);
         encoder.encode_value(u16::try_from(self.max_lazy).unwrap(), 16);
         encoder.encode_value(u16::try_from(self.nice_length).unwrap(), 16);
         encoder.encode_value(u16::try_from(self.max_chain).unwrap(), 16);
-        encoder.encode_value(u16::try_from(self.hash_algorithm).unwrap(), 16);
+        encoder.encode_value(u16::try_from(self.hash_algorithm as u16).unwrap(), 4);
     }
 }
 
@@ -193,11 +212,6 @@ pub fn estimate_preflate_parameters(
         max_dist_3_matches: cl.max_dist_3_matches,
         very_far_matches_detected: cl.very_far_matches,
         matches_to_start_detected: cl.match_to_start,
-        log2_of_max_chain_depth_m1: if cl.max_chain_depth == 0 {
-            0
-        } else {
-            bit_length(cl.max_chain_depth as u32 - 1)
-        },
         is_fast_compressor: cl.fast_compressor,
         good_length: cl.good_length,
         max_lazy: cl.max_lazy,

@@ -176,7 +176,7 @@ pub fn recompress_deflate_stream_assert(
 #[test]
 fn verify_roundtrip() {
     use crate::process::read_file;
-    
+
     let v = read_file("compressed_zlib_level1.deflate");
 
     let r = decompress_deflate_stream(&v, true).unwrap();

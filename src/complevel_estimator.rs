@@ -4,11 +4,10 @@
  *  This software incorporates material from third parties. See NOTICE.txt for details.
  *--------------------------------------------------------------------------------------------*/
 
-use crate::hash_chain::{
-    HashChain, MiniZHash, RotatingHashTrait, ZlibRotatingHash, HASH_ALGORITHM_ZLIB,
-};
+use crate::hash_chain::{HashChain, MiniZHash, RotatingHashTrait, ZlibRotatingHash};
 use crate::preflate_constants;
 use crate::preflate_input::PreflateInput;
+use crate::preflate_parameter_estimator::HashAlgorithm;
 use crate::preflate_parse_config::{FAST_PREFLATE_PARSER_SETTINGS, SLOW_PREFLATE_PARSER_SETTINGS};
 use crate::preflate_token::{BlockType, PreflateToken, PreflateTokenBlock, PreflateTokenReference};
 
@@ -24,7 +23,7 @@ pub struct CompLevelInfo {
     pub hash_mask: u16,
     pub hash_shift: u32,
     pub fast_compressor: bool,
-    pub hash_algorithm: u16,
+    pub hash_algorithm: HashAlgorithm,
     pub good_length: u32,
     pub max_lazy: u32,
     pub nice_length: u32,
@@ -52,7 +51,7 @@ trait CandidateInfoTrait {
     fn hash_mask(&self) -> u16;
     fn hash_shift(&self) -> u32;
     fn skip_length(&self) -> u32;
-    fn hash_algorithm(&self) -> u16;
+    fn hash_algorithm(&self) -> HashAlgorithm;
 }
 
 impl<H: RotatingHashTrait + Default> CandidateInfoTrait for CandidateInfo<H> {
@@ -113,7 +112,7 @@ impl<H: RotatingHashTrait + Default> CandidateInfoTrait for CandidateInfo<H> {
         self.skip_length
     }
 
-    fn hash_algorithm(&self) -> u16 {
+    fn hash_algorithm(&self) -> HashAlgorithm {
         H::hash_algorithm()
     }
 }
@@ -283,9 +282,9 @@ impl<'a> CompLevelEstimatorState<'a> {
         let mut good_length = 32;
         let mut max_lazy = 258;
         let mut nice_length = 258;
-        let mut max_chain = 4096;
+        let mut max_chain;
 
-        let mut hash_algorithm = HASH_ALGORITHM_ZLIB;
+        let mut hash_algorithm = HashAlgorithm::Zlib;
 
         if !self.fast_candidates.is_empty() {
             let candidate = self
@@ -297,7 +296,7 @@ impl<'a> CompLevelEstimatorState<'a> {
             hash_mask = candidate.hash_mask();
             hash_shift = candidate.hash_shift();
             fast_compressor = true;
-            max_chain = candidate.max_chain_found();
+            max_chain = candidate.max_chain_found() + 1;
             max_lazy = candidate.skip_length();
             hash_algorithm = candidate.hash_algorithm();
 
@@ -313,8 +312,10 @@ impl<'a> CompLevelEstimatorState<'a> {
                 }
             }
         } else {
+            max_chain = self.slow_max_chain_depth;
+
             for config in &SLOW_PREFLATE_PARSER_SETTINGS {
-                if self.slow_max_chain_depth <= config.max_chain {
+                if self.slow_max_chain_depth < config.max_chain {
                     good_length = config.good_length;
                     max_lazy = config.max_lazy;
                     nice_length = config.nice_length;

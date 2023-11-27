@@ -38,36 +38,42 @@ pub const FAST_PREFLATE_PARSER_SETTINGS: [PreflateParserConfig; 3] = [
 ];
 
 pub const SLOW_PREFLATE_PARSER_SETTINGS: [PreflateParserConfig; 6] = [
+    // 4
     PreflateParserConfig {
         good_length: 4,
         max_lazy: 4,
         nice_length: 16,
         max_chain: 16,
-    }, // lazy matches
+    },
+    // 5
     PreflateParserConfig {
         good_length: 8,
         max_lazy: 16,
         nice_length: 32,
         max_chain: 32,
     },
+    // 6
     PreflateParserConfig {
         good_length: 8,
         max_lazy: 16,
         nice_length: 128,
         max_chain: 128,
     },
+    // 7
     PreflateParserConfig {
         good_length: 8,
         max_lazy: 32,
         nice_length: 128,
         max_chain: 256,
     },
+    // 8
     PreflateParserConfig {
         good_length: 32,
         max_lazy: 128,
         nice_length: 258,
         max_chain: 1024,
     },
+    // 9
     PreflateParserConfig {
         good_length: 32,
         max_lazy: 258,

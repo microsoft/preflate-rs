@@ -11,6 +11,7 @@ use crate::preflate_input::PreflateInput;
 use crate::preflate_parameter_estimator::PreflateParameters;
 use crate::preflate_token::PreflateTokenReference;
 use std::cmp;
+use std::sync::atomic;
 
 #[derive(Debug, Copy, Clone)]
 pub enum MatchResult {
@@ -18,7 +19,7 @@ pub enum MatchResult {
     DistanceLargerThanHop0(u32, u32),
     NoInput,
     NoMoreMatchesFound { start_len: u32, last_dist: u32 },
-    MaxChainExceeded,
+    MaxChainExceeded(u32),
 }
 
 #[derive(Default)]
@@ -32,6 +33,7 @@ pub struct PredictorState<'a, H: RotatingHashTrait> {
     input: PreflateInput<'a>,
     params: PreflateParameters,
     window_bytes: u32,
+    last_chain: atomic::AtomicU32,
 }
 
 impl<'a, H: RotatingHashTrait> PredictorState<'a, H> {
@@ -41,6 +43,7 @@ impl<'a, H: RotatingHashTrait> PredictorState<'a, H> {
             window_bytes: 1 << params.window_bits,
             params: *params,
             input: PreflateInput::new(uncompressed),
+            last_chain: atomic::AtomicU32::new(0),
         }
     }
 
@@ -145,19 +148,8 @@ impl<'a, H: RotatingHashTrait> PredictorState<'a, H> {
             cur_max_dist_hop1_plus = cmp::min(max_dist_to_start, max_dist - 1);
         }
 
-        let mut max_chain;
-        let nice_len;
-        if max_depth > 0 {
-            max_chain = max_depth;
-            nice_len = max_len;
-        } else {
-            max_chain = self.params.max_chain; // max hash chain length
-            nice_len = std::cmp::min(self.params.nice_length, max_len);
-
-            if prev_len >= self.params.good_length {
-                max_chain >>= 2;
-            }
-        }
+        let nice_len = std::cmp::min(self.params.nice_length, max_len);
+        let mut max_chain = max_depth;
 
         let mut chain_it = self
             .hash
@@ -172,6 +164,7 @@ impl<'a, H: RotatingHashTrait> PredictorState<'a, H> {
         let mut best_len = prev_len;
         let mut best_match: Option<PreflateTokenReference> = None;
         let input = self.input.cur_chars(offset as i32);
+        let mut num_chain_matches = 0;
         loop {
             let dist = chain_it.dist();
 
@@ -201,12 +194,15 @@ impl<'a, H: RotatingHashTrait> PredictorState<'a, H> {
             }
 
             max_chain -= 1;
+            num_chain_matches += 1;
 
             if max_chain == 0 {
                 if let Some(r) = best_match {
+                    self.last_chain
+                        .store(num_chain_matches, atomic::Ordering::Relaxed);
                     return MatchResult::Success(r);
                 } else {
-                    return MatchResult::MaxChainExceeded;
+                    return MatchResult::MaxChainExceeded(max_depth);
                 }
             }
         }

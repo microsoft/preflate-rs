@@ -7,7 +7,8 @@
 use default_boxed::DefaultBoxed;
 
 use crate::{
-    bit_helper::DebugHash, preflate_input::PreflateInput, preflate_token::PreflateTokenReference,
+    bit_helper::DebugHash, preflate_input::PreflateInput,
+    preflate_parameter_estimator::HashAlgorithm, preflate_token::PreflateTokenReference,
 };
 
 pub struct HashIterator<'a> {
@@ -86,9 +87,6 @@ pub struct HashChain<H: RotatingHashTrait> {
     total_shift: i32,
 }
 
-pub const HASH_ALGORITHM_ZLIB: u16 = 0;
-pub const HASH_ALGORITHM_MINIZ_FAST: u16 = 1;
-
 #[derive(Default, Debug, Copy, Clone)]
 pub struct ZlibRotatingHash {
     hash: u16,
@@ -97,7 +95,7 @@ pub struct ZlibRotatingHash {
 pub trait RotatingHashTrait: Default + Copy + Clone {
     fn hash(&self, mask: u16) -> u16;
     fn append(&self, c: u8, hash_shift: u32) -> Self;
-    fn hash_algorithm() -> u16;
+    fn hash_algorithm() -> HashAlgorithm;
 }
 
 impl RotatingHashTrait for ZlibRotatingHash {
@@ -111,8 +109,8 @@ impl RotatingHashTrait for ZlibRotatingHash {
         }
     }
 
-    fn hash_algorithm() -> u16 {
-        HASH_ALGORITHM_ZLIB
+    fn hash_algorithm() -> HashAlgorithm {
+        HashAlgorithm::Zlib
     }
 }
 
@@ -132,8 +130,8 @@ impl RotatingHashTrait for MiniZHash {
         }
     }
 
-    fn hash_algorithm() -> u16 {
-        HASH_ALGORITHM_MINIZ_FAST
+    fn hash_algorithm() -> HashAlgorithm {
+        HashAlgorithm::MiniZFast
     }
 }
 

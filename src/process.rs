@@ -9,13 +9,10 @@ use std::io::Cursor;
 use crate::{
     deflate_reader::DeflateReader,
     deflate_writer::DeflateWriter,
-    hash_chain::{
-        MiniZHash, RotatingHashTrait, ZlibRotatingHash, HASH_ALGORITHM_MINIZ_FAST,
-        HASH_ALGORITHM_ZLIB,
-    },
+    hash_chain::{MiniZHash, RotatingHashTrait, ZlibRotatingHash},
     huffman_calc::HufftreeBitCalc,
     preflate_error::PreflateError,
-    preflate_parameter_estimator::PreflateParameters,
+    preflate_parameter_estimator::{HashAlgorithm, PreflateParameters},
     preflate_token::{BlockType, PreflateTokenBlock},
     statistical_codec::{
         CodecCorrection, CodecMisprediction, PredictionDecoder, PredictionEncoder,
@@ -32,17 +29,16 @@ pub fn encode_mispredictions(
     encoder: &mut impl PredictionEncoder,
 ) -> Result<(), PreflateError> {
     match params.hash_algorithm {
-        HASH_ALGORITHM_MINIZ_FAST => predict_blocks(
+        HashAlgorithm::MiniZFast => predict_blocks(
             &deflate.blocks,
             TokenPredictor::<MiniZHash>::new(&deflate.plain_text, &params, 0),
             encoder,
         )?,
-        HASH_ALGORITHM_ZLIB => predict_blocks(
+        HashAlgorithm::Zlib => predict_blocks(
             &deflate.blocks,
             TokenPredictor::<ZlibRotatingHash>::new(&deflate.plain_text, &params, 0),
             encoder,
         )?,
-        _ => panic!("unknown hash algorithm"),
     }
 
     encoder.encode_misprediction(CodecMisprediction::EOFMisprediction, false);
@@ -125,18 +121,17 @@ pub fn decode_mispredictions(
 ) -> Result<(Vec<u8>, Vec<PreflateTokenBlock>), PreflateError> {
     let mut deflate_writer: DeflateWriter<'_> = DeflateWriter::new(plain_text);
 
-    let output_blocks = if params.hash_algorithm == HASH_ALGORITHM_MINIZ_FAST {
-        recreate_blocks(
+    let output_blocks = match params.hash_algorithm {
+        HashAlgorithm::MiniZFast => recreate_blocks(
             TokenPredictor::<MiniZHash>::new(plain_text, &params, 0),
             decoder,
             &mut deflate_writer,
-        )?
-    } else {
-        recreate_blocks(
+        )?,
+        HashAlgorithm::Zlib => recreate_blocks(
             TokenPredictor::<ZlibRotatingHash>::new(plain_text, &params, 0),
             decoder,
             &mut deflate_writer,
-        )?
+        )?,
     };
 
     // flush the last byte, which may be incomplete and normally
@@ -281,6 +276,8 @@ fn analyze_compressed_data_verify(
 
     let params = estimate_preflate_parameters(&contents.plain_text, &contents.blocks);
 
+    println!("params: {:?}", params);
+
     params.write(&mut combined_encoder);
     encode_mispredictions(&contents, &params, &mut combined_encoder).unwrap();
 
@@ -415,8 +412,9 @@ fn verify_zlib_compressed() {
     }
 }
 
+/// with the right parameters, Zlib compressed data should be recreated perfectly
 #[test]
-fn verify_zlib_compressed_good() {
+fn verify_zlib_compressed_perfect() {
     use crate::{
         preflate_parameter_estimator::PreflateHuffStrategy,
         preflate_parameter_estimator::PreflateStrategy,
@@ -424,18 +422,21 @@ fn verify_zlib_compressed_good() {
         statistical_codec::{AssertDefaultOnlyDecoder, AssertDefaultOnlyEncoder},
     };
 
-    for i in 1..4 {
+    for i in 1..=9 {
+        println!();
+        println!("testing zlib level {}", i);
+
         let v = read_file(&format!("compressed_zlib_level{}.deflate", i));
 
         let config;
         let is_fast_compressor;
         let max_dist_3_matches;
         if i < 4 {
-            config = &FAST_PREFLATE_PARSER_SETTINGS[i - 1];
+            config = &FAST_PREFLATE_PARSER_SETTINGS[i as usize - 1];
             is_fast_compressor = true;
             max_dist_3_matches = 32768;
         } else {
-            config = &SLOW_PREFLATE_PARSER_SETTINGS[i - 3];
+            config = &SLOW_PREFLATE_PARSER_SETTINGS[i as usize - 4];
             is_fast_compressor = false;
             max_dist_3_matches = 4096;
         }
@@ -451,13 +452,12 @@ fn verify_zlib_compressed_good() {
             max_dist_3_matches,
             very_far_matches_detected: false,
             matches_to_start_detected: false,
-            log2_of_max_chain_depth_m1: 12,
             is_fast_compressor,
             good_length: config.good_length,
             max_lazy: config.max_lazy,
             nice_length: config.nice_length,
             max_chain: config.max_chain,
-            hash_algorithm: HASH_ALGORITHM_ZLIB,
+            hash_algorithm: HashAlgorithm::Zlib,
         };
 
         let contents = parse_deflate(&v, 1).unwrap();
@@ -495,4 +495,27 @@ fn verify_miniz_compressed() {
         do_analyze(None, &v, true);
         do_analyze(None, &v, false);
     }
+}
+
+#[cfg(test)]
+pub fn zlibcompress(v: &[u8], level: i32) -> Vec<u8> {
+    let mut output = Vec::new();
+    output.resize(v.len() + 1000, 0);
+
+    let mut output_size = output.len() as libz_sys::uLongf;
+
+    unsafe {
+        let err = libz_sys::compress2(
+            output.as_mut_ptr(),
+            &mut output_size,
+            v.as_ptr(),
+            v.len() as libz_sys::uLongf,
+            level,
+        );
+
+        assert_eq!(err, 0, "shouldn't fail zlib compression");
+
+        output.set_len(output_size as usize);
+    }
+    output
 }

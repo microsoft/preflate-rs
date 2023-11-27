@@ -71,24 +71,7 @@ fn test_file(filename: &str) {
     for level in 0..10 {
         println!("zlib level: {}", level);
 
-        let mut output = Vec::new();
-        output.resize(v.len() + 1000, 0);
-
-        let mut output_size = output.len() as libz_sys::uLongf;
-
-        unsafe {
-            let err = libz_sys::compress2(
-                output.as_mut_ptr(),
-                &mut output_size,
-                v.as_ptr(),
-                v.len() as libz_sys::uLongf,
-                level,
-            );
-
-            assert_eq!(err, 0, "shouldn't fail zlib compression");
-
-            output.set_len(output_size as usize);
-        }
+        let output = zlibcompress(&v, level);
 
         let minusheader = &output[2..output.len() - 4];
 
@@ -117,4 +100,26 @@ fn test_file(filename: &str) {
 
         verifyresult(minusheader);
     }
+}
+
+fn zlibcompress(v: &[u8], level: i32) -> Vec<u8> {
+    let mut output = Vec::new();
+    output.resize(v.len() + 1000, 0);
+
+    let mut output_size = output.len() as libz_sys::uLongf;
+
+    unsafe {
+        let err = libz_sys::compress2(
+            output.as_mut_ptr(),
+            &mut output_size,
+            v.as_ptr(),
+            v.len() as libz_sys::uLongf,
+            level,
+        );
+
+        assert_eq!(err, 0, "shouldn't fail zlib compression");
+
+        output.set_len(output_size as usize);
+    }
+    output
 }
