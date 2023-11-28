@@ -10,6 +10,7 @@ use std::fmt::Display;
 #[derive(Debug)]
 pub enum PreflateError {
     ReadDeflate(anyhow::Error),
+    AnalyzeFailed(anyhow::Error),
     RecompressFailed(anyhow::Error),
     Mismatch(anyhow::Error),
     ReadBlock(usize, anyhow::Error),
@@ -32,6 +33,7 @@ impl Display for PreflateError {
             PreflateError::RecreateTree(i, e) => write!(f, "RecreateTree[{}]: {}", i, e),
             PreflateError::EncodeBlock(i, e) => write!(f, "EncodeBlock[{}]: {}", i, e),
             PreflateError::RecompressFailed(e) => write!(f, "RecompressFailed: {}", e),
+            PreflateError::AnalyzeFailed(e) => write!(f, "AnalyzeFailed: {}", e),
         }
     }
 }

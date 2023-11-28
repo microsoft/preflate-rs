@@ -5,7 +5,8 @@
  *--------------------------------------------------------------------------------------------*/
 
 use crate::bit_helper::DebugHash;
-use crate::hash_chain::{HashChain, RotatingHashTrait};
+use crate::hash_algorithm::RotatingHashTrait;
+use crate::hash_chain::HashChain;
 use crate::preflate_constants::{MAX_MATCH, MIN_LOOKAHEAD, MIN_MATCH};
 use crate::preflate_input::PreflateInput;
 use crate::preflate_parameter_estimator::PreflateParameters;
@@ -38,11 +39,13 @@ pub struct PredictorState<'a, H: RotatingHashTrait> {
 
 impl<'a, H: RotatingHashTrait> PredictorState<'a, H> {
     pub fn new(uncompressed: &'a [u8], params: &PreflateParameters) -> Self {
+        let input = PreflateInput::new(uncompressed);
+
         Self {
-            hash: HashChain::new(params.hash_shift, params.hash_mask),
+            hash: HashChain::new(params.hash_shift, params.hash_mask, &input),
             window_bytes: 1 << params.window_bits,
             params: *params,
-            input: PreflateInput::new(uncompressed),
+            input,
             last_chain: atomic::AtomicU32::new(0),
         }
     }

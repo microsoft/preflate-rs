@@ -11,6 +11,7 @@ mod cabac_codec;
 mod complevel_estimator;
 mod deflate_reader;
 mod deflate_writer;
+mod hash_algorithm;
 mod hash_chain;
 mod huffman_calc;
 mod huffman_encoding;
@@ -36,7 +37,10 @@ use cabac::{
 use preflate_error::PreflateError;
 use preflate_parameter_estimator::{estimate_preflate_parameters, PreflateParameters};
 use process::parse_deflate;
-use std::io::Cursor;
+use std::{
+    fs::File,
+    io::{Cursor, Write},
+};
 
 use crate::{
     cabac_codec::{PredictionDecoderCabac, PredictionEncoderCabac},
@@ -69,7 +73,16 @@ pub fn decompress_deflate_stream(
 
     let contents = parse_deflate(compressed_data, 1)?;
 
-    let params = estimate_preflate_parameters(&contents.plain_text, &contents.blocks);
+    let mut writecomp = File::create("c:\\temp\\lastop.deflate").unwrap();
+    writecomp.write_all(&compressed_data).unwrap();
+
+    let mut writeplaintext = File::create("c:\\temp\\lastop.bin").unwrap();
+    writeplaintext.write_all(&contents.plain_text).unwrap();
+
+    let params = estimate_preflate_parameters(&contents.plain_text, &contents.blocks)
+        .map_err(|e| PreflateError::AnalyzeFailed(e))?;
+
+    println!("params: {:?}", params);
 
     params.write(&mut cabac_encoder);
     encode_mispredictions(&contents, &params, &mut cabac_encoder)?;
@@ -127,7 +140,8 @@ pub fn decompress_deflate_stream_assert(
 
     let contents = parse_deflate(compressed_data, 1)?;
 
-    let params = estimate_preflate_parameters(&contents.plain_text, &contents.blocks);
+    let params = estimate_preflate_parameters(&contents.plain_text, &contents.blocks)
+        .map_err(|e| PreflateError::AnalyzeFailed(e))?;
 
     params.write(&mut cabac_encoder);
     encode_mispredictions(&contents, &params, &mut cabac_encoder)?;

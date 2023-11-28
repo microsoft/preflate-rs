@@ -1,6 +1,6 @@
 use std::{
     collections::HashMap,
-    io::{Cursor, Read, Seek, SeekFrom, Write},
+    io::{Cursor, Read, Seek, SeekFrom, Write}, fs::File,
 };
 
 use anyhow;
@@ -32,29 +32,35 @@ pub fn add_location(
     signature: Signature,
     start: u64,
     compressed: &[u8],
-) {
+) -> usize {
     let ret = decompress_deflate_stream(compressed, true);
-    if let Err(_e) = ret {
-        //println!("Error decompressing {:?} {:?} at {}", signature, e, start);
-        return;
-    }
+    match ret {
+        Err(_e) => {
+            //println!("Error decompressing {:?} {:?} at {}", signature, e, start);
+            return 0;
+        }
+        Ok(r) => {
+            let mut dumpout = File::create(format!("dumpout-{}.bin", start)).unwrap();
+            dumpout.write_all(&compressed[..r.compressed_size]).unwrap();
 
-    if let Ok(r) = ret {
-        let mut output = Vec::new();
-        let mut encoder = zstd::stream::Encoder::new(&mut output, 9).unwrap();
+            let mut output = Vec::new();
+            let mut encoder = zstd::stream::Encoder::new(&mut output, 9).unwrap();
 
-        encoder.write(&r.plain_text).unwrap();
-        encoder.finish().unwrap();
+            encoder.write(&r.plain_text).unwrap();
+            encoder.finish().unwrap();
 
-        list.push(DeflateStreamLocation {
-            start,
-            end: start + r.compressed_processed as u64,
-            uncompressed_size: r.plain_text.len() as u64,
-            compressed_size: r.compressed_processed as u64,
-            signature: signature,
-            zstd: output.len() as u64,
-            cabac_length: r.cabac_encoded.len() as u64,
-        });
+            list.push(DeflateStreamLocation {
+                start,
+                end: start + r.compressed_size as u64,
+                uncompressed_size: r.plain_text.len() as u64,
+                compressed_size: r.compressed_size as u64,
+                signature: signature,
+                zstd: output.len() as u64,
+                cabac_length: r.prediction_corrections.len() as u64,
+            });
+
+            return r.compressed_size;
+        }
     }
 }
 
@@ -91,10 +97,10 @@ pub fn search_for_deflate_streams(src: &[u8], locations_found: &mut Vec<DeflateS
     while let Some(s) = search_signature(src, &mut index) {
         match s {
             Signature::Zlib(_level) => {
-                add_location(locations_found, s, index as u64, &src[index..]);
+                index += add_location(locations_found, s, index as u64, &src[index..]);
             }
             Signature::Gzip => {
-                add_location(locations_found, s, index as u64, &src[index..]);
+                index += add_location(locations_found, s, index as u64, &src[index..]);
             }
 
             Signature::ZipLocalFileHeader => {
@@ -165,14 +171,14 @@ fn test_zip_stream(
     if zip_local_file_header.compression_method == 8 {
         let deflate_start_position = binary_reader.stream_position()?;
 
-        add_location(
+        let amount = add_location(
             locations_found,
             Signature::ZipLocalFileHeader,
             *index as u64 + deflate_start_position,
             &contents[deflate_start_position as usize..],
         );
 
-        *index += binary_reader.position() as usize - 2;
+        *index += binary_reader.position() as usize - 2 + amount;
     }
 
     Ok(())

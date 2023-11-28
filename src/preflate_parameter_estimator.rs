@@ -7,6 +7,7 @@
 use crate::{
     bit_helper::bit_length,
     complevel_estimator::estimate_preflate_comp_level,
+    hash_algorithm::HashAlgorithm,
     preflate_constants::{self},
     preflate_stream_info::{extract_preflate_info, PreflateStreamInfo},
     preflate_token::PreflateTokenBlock,
@@ -28,13 +29,6 @@ pub enum PreflateHuffStrategy {
     Static,
 }
 
-#[derive(Debug, Copy, Clone, Eq, PartialEq, Default)]
-pub enum HashAlgorithm {
-    #[default]
-    Zlib,
-    MiniZFast,
-}
-
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub struct PreflateParameters {
     pub strategy: PreflateStrategy,
@@ -53,6 +47,7 @@ pub struct PreflateParameters {
     pub nice_length: u32,
     pub max_chain: u32,
     pub hash_algorithm: HashAlgorithm,
+    pub min_len: u32,
 }
 
 impl PreflateParameters {
@@ -73,6 +68,7 @@ impl PreflateParameters {
         let nice_length = decoder.decode_value(16);
         let max_chain = decoder.decode_value(16);
         let hash_algorithm = decoder.decode_value(4);
+        let min_len = decoder.decode_value(16);
 
         const STRATEGY_DEFAULT: u16 = PreflateStrategy::Default as u16;
         const STRATEGY_RLE_ONLY: u16 = PreflateStrategy::RleOnly as u16;
@@ -113,6 +109,7 @@ impl PreflateParameters {
             max_lazy: max_lazy.into(),
             nice_length: nice_length.into(),
             max_chain: max_chain.into(),
+            min_len: min_len.into(),
             hash_algorithm: match hash_algorithm {
                 HASH_ALGORITHM_ZLIB => HashAlgorithm::Zlib,
                 HASH_ALGORITHM_MINIZ_FAST => HashAlgorithm::MiniZFast,
@@ -138,6 +135,7 @@ impl PreflateParameters {
         encoder.encode_value(u16::try_from(self.nice_length).unwrap(), 16);
         encoder.encode_value(u16::try_from(self.max_chain).unwrap(), 16);
         encoder.encode_value(u16::try_from(self.hash_algorithm as u16).unwrap(), 4);
+        encoder.encode_value(u16::try_from(self.min_len).unwrap(), 16);
     }
 }
 
@@ -185,7 +183,7 @@ pub fn estimate_preflate_huff_strategy(info: &PreflateStreamInfo) -> PreflateHuf
 pub fn estimate_preflate_parameters(
     unpacked_output: &[u8],
     blocks: &Vec<PreflateTokenBlock>,
-) -> PreflateParameters {
+) -> anyhow::Result<PreflateParameters> {
     let info = extract_preflate_info(blocks);
 
     let window_bits = estimate_preflate_window_bits(info.max_dist);
@@ -196,12 +194,12 @@ pub fn estimate_preflate_parameters(
 
     let max_token_count = (1 << (6 + mem_level)) - 1;
 
-    let cl = estimate_preflate_comp_level(window_bits, mem_level, unpacked_output, blocks);
+    let cl = estimate_preflate_comp_level(window_bits, mem_level, unpacked_output, blocks)?;
 
     let hash_shift = cl.hash_shift;
     let hash_mask = cl.hash_mask;
 
-    PreflateParameters {
+    Ok(PreflateParameters {
         window_bits,
         hash_shift,
         hash_mask,
@@ -218,5 +216,60 @@ pub fn estimate_preflate_parameters(
         nice_length: cl.nice_length,
         max_chain: cl.max_chain,
         hash_algorithm: cl.hash_algorithm,
+        min_len: cl.min_len,
+    })
+}
+
+#[test]
+fn verify_zlib_recognition() {
+    use crate::{
+        preflate_parse_config::{FAST_PREFLATE_PARSER_SETTINGS, SLOW_PREFLATE_PARSER_SETTINGS},
+        process::{parse_deflate, read_file},
+    };
+
+    for i in 0..=9 {
+        let v = read_file(&format!("compressed_zlib_level{}.deflate", i));
+        let contents = parse_deflate(&v, 1).unwrap();
+
+        let params = estimate_preflate_parameters(&contents.plain_text, &contents.blocks).unwrap();
+
+        assert_eq!(params.zlib_compatible, true);
+        if i == 0 {
+            assert_eq!(params.strategy, PreflateStrategy::Store);
+        } else if i >= 1 && i < 4 {
+            let config = &FAST_PREFLATE_PARSER_SETTINGS[i as usize - 1];
+            assert_eq!(params.good_length, config.good_length);
+            assert_eq!(params.max_lazy, config.max_lazy);
+            assert_eq!(params.nice_length, config.nice_length);
+            assert!(params.max_chain <= config.max_chain);
+            assert_eq!(params.strategy, PreflateStrategy::Default);
+        } else if i >= 4 {
+            let config = &SLOW_PREFLATE_PARSER_SETTINGS[i as usize - 4];
+            assert_eq!(params.good_length, config.good_length);
+            assert_eq!(params.max_lazy, config.max_lazy);
+            assert_eq!(params.nice_length, config.nice_length);
+            assert!(params.max_chain <= config.max_chain);
+            assert_eq!(params.strategy, PreflateStrategy::Default);
+        }
+    }
+}
+
+#[test]
+fn verify_miniz_recognition() {
+    use crate::process::{parse_deflate, read_file};
+
+    for i in 0..=9 {
+        let v = read_file(&format!("compressed_flate2_level{}.deflate", i));
+        let contents = parse_deflate(&v, 1).unwrap();
+
+        let params = estimate_preflate_parameters(&contents.plain_text, &contents.blocks).unwrap();
+
+        if i == 0 {
+            assert_eq!(params.strategy, PreflateStrategy::Store);
+        } else if i == 1 {
+            println!("{:?}", params);
+        } else {
+            println!("{:?}", params);
+        }
     }
 }

@@ -9,10 +9,12 @@ use std::io::Cursor;
 use crate::{
     deflate_reader::DeflateReader,
     deflate_writer::DeflateWriter,
-    hash_chain::{MiniZHash, RotatingHashTrait, ZlibRotatingHash},
+    hash_algorithm::{
+        HashAlgorithm, LibdeflateRotatingHash, MiniZHash, RotatingHashTrait, ZlibRotatingHash,
+    },
     huffman_calc::HufftreeBitCalc,
     preflate_error::PreflateError,
-    preflate_parameter_estimator::{HashAlgorithm, PreflateParameters},
+    preflate_parameter_estimator::PreflateParameters,
     preflate_token::{BlockType, PreflateTokenBlock},
     statistical_codec::{
         CodecCorrection, CodecMisprediction, PredictionDecoder, PredictionEncoder,
@@ -37,6 +39,11 @@ pub fn encode_mispredictions(
         HashAlgorithm::Zlib => predict_blocks(
             &deflate.blocks,
             TokenPredictor::<ZlibRotatingHash>::new(&deflate.plain_text, &params, 0),
+            encoder,
+        )?,
+        HashAlgorithm::Libdeflate4 => predict_blocks(
+            &deflate.blocks,
+            TokenPredictor::<LibdeflateRotatingHash>::new(&deflate.plain_text, &params, 0),
             encoder,
         )?,
     }
@@ -132,6 +139,11 @@ pub fn decode_mispredictions(
             decoder,
             &mut deflate_writer,
         )?,
+        HashAlgorithm::Libdeflate4 => recreate_blocks(
+            TokenPredictor::<LibdeflateRotatingHash>::new(plain_text, &params, 0),
+            decoder,
+            &mut deflate_writer,
+        )?,
     };
 
     // flush the last byte, which may be incomplete and normally
@@ -208,7 +220,7 @@ fn analyze_compressed_data_fast(
 
     let contents = parse_deflate(compressed_data, 1).unwrap();
 
-    let params = estimate_preflate_parameters(&contents.plain_text, &contents.blocks);
+    let params = estimate_preflate_parameters(&contents.plain_text, &contents.blocks).unwrap();
 
     params.write(&mut cabac_encoder);
     encode_mispredictions(&contents, &params, &mut cabac_encoder).unwrap();
@@ -274,7 +286,7 @@ fn analyze_compressed_data_verify(
 
     let contents = parse_deflate(compressed_data, 1).unwrap();
 
-    let params = estimate_preflate_parameters(&contents.plain_text, &contents.blocks);
+    let params = estimate_preflate_parameters(&contents.plain_text, &contents.blocks).unwrap();
 
     println!("params: {:?}", params);
 
@@ -458,6 +470,7 @@ fn verify_zlib_compressed_perfect() {
             nice_length: config.nice_length,
             max_chain: config.max_chain,
             hash_algorithm: HashAlgorithm::Zlib,
+            min_len: 3,
         };
 
         let contents = parse_deflate(&v, 1).unwrap();
@@ -469,6 +482,53 @@ fn verify_zlib_compressed_perfect() {
         let mut cabac_decoder = AssertDefaultOnlyDecoder {};
         decode_mispredictions(&params, &contents.plain_text, &mut cabac_decoder).unwrap();
     }
+}
+
+#[test]
+fn verify_miniz1_compressed_perfect() {
+    use crate::{
+        cabac_codec::{PredictionDecoderCabac, PredictionEncoderCabac},
+        preflate_parameter_estimator::{PreflateHuffStrategy, PreflateStrategy},
+    };
+    use cabac::vp8::{VP8Reader, VP8Writer};
+
+    let v = read_file("compressed_flate2_level1.deflate");
+
+    let contents = parse_deflate(&v, 1).unwrap();
+
+    let mut buffer = Vec::new();
+    let mut cabac_encoder = PredictionEncoderCabac::new(VP8Writer::new(&mut buffer).unwrap());
+
+    let params = PreflateParameters {
+        strategy: PreflateStrategy::Default,
+        huff_strategy: PreflateHuffStrategy::Dynamic,
+        zlib_compatible: true,
+        window_bits: 15,
+        hash_shift: 5,
+        hash_mask: 0x7fff,
+        max_token_count: 16383,
+        max_dist_3_matches: 8192,
+        very_far_matches_detected: false,
+        matches_to_start_detected: false,
+        is_fast_compressor: true,
+        good_length: 258,
+        max_lazy: 2,
+        nice_length: 258,
+        max_chain: 1,
+        hash_algorithm: HashAlgorithm::MiniZFast,
+        min_len: 3,
+    };
+
+    encode_mispredictions(&contents, &params, &mut cabac_encoder).unwrap();
+
+    cabac_encoder.finish();
+
+    cabac_encoder.print();
+
+    let mut cabac_decoder =
+        PredictionDecoderCabac::new(VP8Reader::new(Cursor::new(&buffer)).unwrap());
+
+    decode_mispredictions(&params, &contents.plain_text, &mut cabac_decoder).unwrap();
 }
 
 #[test]
@@ -498,6 +558,7 @@ fn verify_miniz_compressed() {
 }
 
 #[cfg(test)]
+#[allow(dead_code)]
 pub fn zlibcompress(v: &[u8], level: i32) -> Vec<u8> {
     let mut output = Vec::new();
     output.resize(v.len() + 1000, 0);

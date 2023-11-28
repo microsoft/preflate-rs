@@ -9,7 +9,7 @@ use anyhow::Context;
 use crate::{
     bit_helper::DebugHash,
     cabac_codec::{decode_difference, encode_difference},
-    hash_chain::RotatingHashTrait,
+    hash_algorithm::RotatingHashTrait,
     predictor_state::{MatchResult, PredictorState},
     preflate_constants::{MAX_MATCH, MIN_MATCH},
     preflate_parameter_estimator::PreflateParameters,
@@ -457,7 +457,7 @@ impl<'a, H: RotatingHashTrait> TokenPredictor<'a, H> {
     /// to find a match for the reference.
     fn repredict_reference(
         &mut self,
-        dist_match: Option<PreflateTokenReference>,
+        _dist_match: Option<PreflateTokenReference>,
     ) -> anyhow::Result<PreflateTokenReference> {
         if self.state.current_input_pos() == 0 || self.state.available_input_size() < MIN_MATCH {
             return Err(anyhow::Error::msg(

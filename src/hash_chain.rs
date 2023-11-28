@@ -7,8 +7,8 @@
 use default_boxed::DefaultBoxed;
 
 use crate::{
-    bit_helper::DebugHash, preflate_input::PreflateInput,
-    preflate_parameter_estimator::HashAlgorithm, preflate_token::PreflateTokenReference,
+    bit_helper::DebugHash, hash_algorithm::RotatingHashTrait, preflate_input::PreflateInput,
+    preflate_token::PreflateTokenReference,
 };
 
 pub struct HashIterator<'a> {
@@ -70,7 +70,7 @@ struct HashTable {
     /// This is used during estimation only to figure out how deep we need to match
     /// into the hash chain, which allows us to estimate which parameters were used
     /// to generate the deflate data.
-    chain_depth: [u32; 65536],
+    chain_depth: [i32; 65536],
 
     /// Represents the prev chain for a given position. This is used to find
     /// all the potential matches for a given hash. The value points to previous
@@ -87,66 +87,25 @@ pub struct HashChain<H: RotatingHashTrait> {
     total_shift: i32,
 }
 
-#[derive(Default, Debug, Copy, Clone)]
-pub struct ZlibRotatingHash {
-    hash: u16,
-}
-
-pub trait RotatingHashTrait: Default + Copy + Clone {
-    fn hash(&self, mask: u16) -> u16;
-    fn append(&self, c: u8, hash_shift: u32) -> Self;
-    fn hash_algorithm() -> HashAlgorithm;
-}
-
-impl RotatingHashTrait for ZlibRotatingHash {
-    fn hash(&self, mask: u16) -> u16 {
-        self.hash & mask
-    }
-
-    fn append(&self, c: u8, hash_shift: u32) -> ZlibRotatingHash {
-        ZlibRotatingHash {
-            hash: (self.hash << hash_shift) ^ u16::from(c),
-        }
-    }
-
-    fn hash_algorithm() -> HashAlgorithm {
-        HashAlgorithm::Zlib
-    }
-}
-
-#[derive(Default, Copy, Clone)]
-pub struct MiniZHash {
-    hash: u32,
-}
-
-impl RotatingHashTrait for MiniZHash {
-    fn hash(&self, _mask: u16) -> u16 {
-        ((self.hash ^ (self.hash >> 11)) & 0x7fff) as u16
-    }
-
-    fn append(&self, c: u8, _hash_shift: u32) -> Self {
-        MiniZHash {
-            hash: (c as u32) << 16 | (self.hash >> 8),
-        }
-    }
-
-    fn hash_algorithm() -> HashAlgorithm {
-        HashAlgorithm::MiniZFast
-    }
-}
-
 impl<H: RotatingHashTrait> HashChain<H> {
-    pub fn new(hash_shift: u32, hash_mask: u16) -> Self {
+    pub fn new(hash_shift: u32, hash_mask: u16, input: &PreflateInput) -> Self {
         // Important: total_shift starts at -8 since 0 indicates the end of the hash chain
         // so this means that all valid values will be >= 8, otherwise the very first hash
         // offset would be zero and so it would get missed
-        HashChain {
+        let mut c = HashChain {
             total_shift: -8,
             hash_shift,
             hash_mask,
             hash_table: HashTable::default_boxed(),
             running_hash: H::default(),
+        };
+
+        if input.remaining() > 2 {
+            c.update_running_hash(input.cur_char(0));
+            c.update_running_hash(input.cur_char(1));
         }
+
+        c
     }
 
     #[allow(dead_code)]
@@ -262,7 +221,7 @@ impl<H: RotatingHashTrait> HashChain<H> {
         self.hash_table.head[hash.hash(self.hash_mask) as usize].into()
     }
 
-    pub fn get_node_depth(&self, node: u32) -> u32 {
+    pub fn get_node_depth(&self, node: u32) -> i32 {
         self.hash_table.chain_depth[node as usize]
     }
 
@@ -348,7 +307,7 @@ impl<H: RotatingHashTrait> HashChain<H> {
                 // --------------------
                 for i in 1..l {
                     let p = (pos + i as i32) - self.total_shift;
-                    self.hash_table.chain_depth[p as usize] = 0xffff8000;
+                    self.hash_table.chain_depth[p as usize] = -65536;
                 }
             }
 
@@ -369,7 +328,6 @@ impl<H: RotatingHashTrait> HashChain<H> {
 
     pub fn match_depth(
         &self,
-        hash: H,
         target_reference: &PreflateTokenReference,
         window_size: u32,
         input: &PreflateInput,
@@ -377,7 +335,7 @@ impl<H: RotatingHashTrait> HashChain<H> {
         let cur_pos = input.pos();
         let cur_max_dist = std::cmp::min(cur_pos, window_size);
 
-        let head = self.get_head(hash);
+        let head = self.get_head(self.cur_hash(input));
         let start_depth = self.get_node_depth(head);
 
         if target_reference.dist() > cur_max_dist {
@@ -392,6 +350,6 @@ impl<H: RotatingHashTrait> HashChain<H> {
             return 0xffff;
         }
 
-        std::cmp::min(start_depth.wrapping_sub(end_depth), 0xffff)
+        std::cmp::min(start_depth.wrapping_sub(end_depth) as u32, 0xffff)
     }
 }
