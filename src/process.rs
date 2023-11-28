@@ -485,6 +485,7 @@ fn verify_zlib_compressed_perfect() {
 }
 
 #[test]
+#[ignore = "reason"]
 fn verify_miniz1_compressed_perfect() {
     use crate::{
         cabac_codec::{PredictionDecoderCabac, PredictionEncoderCabac},

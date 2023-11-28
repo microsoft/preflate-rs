@@ -4,7 +4,7 @@
  *  This software incorporates material from third parties. See NOTICE.txt for details.
  *--------------------------------------------------------------------------------------------*/
 
-use crate::hash_algorithm::{HashAlgorithm, MiniZHash, ZlibRotatingHash};
+use crate::hash_algorithm::{HashAlgorithm, LibdeflateRotatingHash, MiniZHash, ZlibRotatingHash};
 use crate::hash_chain::HashChain;
 use crate::preflate_constants;
 use crate::preflate_input::PreflateInput;
@@ -33,6 +33,7 @@ pub struct CompLevelInfo {
 enum HashChainType {
     Zlib(HashChain<ZlibRotatingHash>),
     MiniZ(HashChain<MiniZHash>),
+    LibFlate4(HashChain<LibdeflateRotatingHash>),
 }
 
 struct CandidateInfo {
@@ -51,6 +52,7 @@ impl CandidateInfo {
         match self.hash_chain {
             HashChainType::Zlib(ref mut h) => h.update_hash::<true>(len, input),
             HashChainType::MiniZ(ref mut h) => h.update_hash::<true>(len, input),
+            HashChainType::LibFlate4(ref mut h) => h.update_hash::<true>(len, input),
         }
     }
 
@@ -58,6 +60,7 @@ impl CandidateInfo {
         match self.hash_chain {
             HashChainType::Zlib(ref mut h) => h.skip_hash::<true>(len, input),
             HashChainType::MiniZ(ref mut h) => h.skip_hash::<true>(len, input),
+            HashChainType::LibFlate4(ref mut h) => h.skip_hash::<true>(len, input),
         }
     }
 
@@ -70,6 +73,7 @@ impl CandidateInfo {
         match self.hash_chain {
             HashChainType::Zlib(ref mut h) => h.match_depth(token, window_size, input),
             HashChainType::MiniZ(ref mut h) => h.match_depth(token, window_size, input),
+            HashChainType::LibFlate4(ref mut h) => h.match_depth(token, window_size, input),
         }
     }
 
@@ -102,11 +106,13 @@ impl CandidateInfo {
             }*/
 
             println!(
-                "removed candidate sl={:?}, mask={}, pos={}, token={:?}",
+                "removed candidate sl={:?}, mask={}, pos={}, token={:?} hash={:?}, max_chain={}",
                 self.skip_length,
                 self.hash_mask,
                 input.pos(),
                 token,
+                self.hash_algorithm(),
+                self.max_chain_found,
             );
             false
         }
@@ -144,6 +150,7 @@ impl CandidateInfo {
         match self.hash_chain {
             HashChainType::Zlib(_) => HashAlgorithm::Zlib,
             HashChainType::MiniZ(_) => HashAlgorithm::MiniZFast,
+            HashChainType::LibFlate4(_) => HashAlgorithm::Libdeflate4,
         }
     }
 }
@@ -213,6 +220,19 @@ impl<'a> CompLevelEstimatorState<'a> {
             hash_shift: 5,
             hash_mask: 32767,
             hash_chain: HashChainType::MiniZ(HashChain::<MiniZHash>::new(5, 32767, &input)),
+            max_chain_found: 0,
+            longest_dist_at_hop_0: 0,
+            longest_dist_at_hop_1_plus: 0,
+        }));
+
+        // slow compressor candidates
+        candidates.push(Box::new(CandidateInfo {
+            skip_length: None,
+            hash_shift: 0,
+            hash_mask: 0x7fff,
+            hash_chain: HashChainType::LibFlate4(HashChain::<LibdeflateRotatingHash>::new(
+                0, 0x7fff, &input,
+            )),
             max_chain_found: 0,
             longest_dist_at_hop_0: 0,
             longest_dist_at_hop_1_plus: 0,

@@ -4,6 +4,8 @@
  *  This software incorporates material from third parties. See NOTICE.txt for details.
  *--------------------------------------------------------------------------------------------*/
 
+use std::cmp;
+
 use default_boxed::DefaultBoxed;
 
 use crate::{
@@ -223,15 +225,19 @@ impl<H: RotatingHashTrait> HashChain<H> {
         )
     }
 
-    pub fn cur_hash(&self, input: &PreflateInput) -> H {
+    /// calculate the hash for the current byte in the input stream, which
+    /// consists of the running hash plus the current character
+    pub fn calculate_hash(&self, input: &PreflateInput) -> H {
         self.running_hash.append(
             input.cur_char(H::num_hash_bytes() as i32 - 1),
             self.hash_shift,
         )
     }
 
-    pub fn cur_plus_1_hash(&self, input: &PreflateInput) -> H {
-        self.cur_hash(input)
+    /// calculate the hash for the next byte in the input stream which
+    /// consists of the running hash plus the next 2 characters
+    pub fn calculate_hash_next(&self, input: &PreflateInput) -> H {
+        self.calculate_hash(input)
             .append(input.cur_char(H::num_hash_bytes() as i32), self.hash_shift)
     }
 
@@ -257,12 +263,14 @@ impl<H: RotatingHashTrait> HashChain<H> {
 
         let pos = (input.pos() as i32 - self.total_shift) as u16;
 
-        let limit = std::cmp::min(length + 2, input.remaining()) as u16;
+        let hash_limit = H::num_hash_bytes() - 1;
 
-        for i in 2..limit {
+        let limit = std::cmp::min(length + u32::from(hash_limit), input.remaining()) as u16;
+
+        for i in hash_limit..limit {
             self.update_running_hash(input.cur_char(i as i32));
             let h = self.running_hash.hash(self.hash_mask);
-            let p = pos + i - 2;
+            let p = pos + i - hash_limit;
 
             if MAINTAIN_DEPTH {
                 self.hash_table.chain_depth[usize::from(p)] = self.hash_table.chain_depth
@@ -278,14 +286,16 @@ impl<H: RotatingHashTrait> HashChain<H> {
         //println!("u {} = {}", length, c);
     }
 
-    pub fn skip_hash<const MAINTAIN_DEPTH: bool>(&mut self, l: u32, input: &PreflateInput) {
+    pub fn skip_hash<const MAINTAIN_DEPTH: bool>(&mut self, length: u32, input: &PreflateInput) {
         self.reshift_if_necessary::<MAINTAIN_DEPTH>(input);
 
         let pos = input.pos() as i32;
 
+        let hash_limit = H::num_hash_bytes() - 1;
+
         let remaining = input.remaining();
-        if remaining > 2 {
-            self.update_running_hash(input.cur_char(2));
+        if remaining > u32::from(hash_limit) {
+            self.update_running_hash(input.cur_char(i32::from(hash_limit)));
             let h = self.running_hash.hash(self.hash_mask);
             let p = pos - self.total_shift;
 
@@ -297,7 +307,7 @@ impl<H: RotatingHashTrait> HashChain<H> {
                 // but we must still update the chainDepth, to avoid
                 // bad analysis results
                 // --------------------
-                for i in 1..l {
+                for i in 1..length {
                     let p = (pos + i as i32) - self.total_shift;
                     self.hash_table.chain_depth[p as usize] = -65536;
                 }
@@ -306,11 +316,8 @@ impl<H: RotatingHashTrait> HashChain<H> {
             self.hash_table.prev[p as usize] = self.hash_table.head[h as usize];
             self.hash_table.head[h as usize] = p as u16;
 
-            if remaining > l {
-                self.update_running_hash(input.cur_char(l as i32));
-                if remaining > l + 1 {
-                    self.update_running_hash(input.cur_char(l as i32 + 1));
-                }
+            for i in length..cmp::min(remaining, length + u32::from(hash_limit)) {
+                self.update_running_hash(input.cur_char(i as i32));
             }
         }
 
@@ -327,7 +334,7 @@ impl<H: RotatingHashTrait> HashChain<H> {
         let cur_pos = input.pos();
         let cur_max_dist = std::cmp::min(cur_pos, window_size);
 
-        let head = self.get_head(self.cur_hash(input));
+        let head = self.get_head(self.calculate_hash(input));
         let start_depth = self.get_node_depth(head);
 
         if target_reference.dist() > cur_max_dist {

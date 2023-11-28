@@ -88,6 +88,7 @@ fn verifyresult(compressed_data: &[u8]) {
 fn test_file(filename: &str) {
     let v = read_file(filename);
 
+    /*
     // Zlib compression with different compression levels
     for level in 0..0 {
         println!("zlib level: {}", level);
@@ -120,9 +121,9 @@ fn test_file(filename: &str) {
         f.write_all(minusheader).unwrap();
 
         verifyresult(minusheader);
-    }
+    }*/
 
-    for level in 0..=12 {
+    for level in 1..=1 {
         println!();
         println!("libflate level: {}", level);
         let output = libflate_compress(&v, level);

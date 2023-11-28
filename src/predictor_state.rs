@@ -98,11 +98,11 @@ impl<'a, H: RotatingHashTrait> PredictorState<'a, H> {
     }
 
     pub fn calculate_hash(&self) -> H {
-        self.hash.cur_hash(&self.input)
+        self.hash.calculate_hash(&self.input)
     }
 
     pub fn calculate_hash_next(&self) -> H {
-        self.hash.cur_plus_1_hash(&self.input)
+        self.hash.calculate_hash_next(&self.input)
     }
 
     fn prefix_compare(s1: &[u8], s2: &[u8], best_len: u32, max_len: u32) -> u32 {
@@ -214,7 +214,7 @@ impl<'a, H: RotatingHashTrait> PredictorState<'a, H> {
     /// Tries to find the match by continuing on the hash chain, returns how many hops we went
     /// or none if it wasn't found
     pub fn calculate_hops(&self, target_reference: &PreflateTokenReference) -> anyhow::Result<u32> {
-        let hash = self.hash.cur_hash(&self.input);
+        let hash = self.hash.calculate_hash(&self.input);
 
         let max_len = std::cmp::min(self.available_input_size(), MAX_MATCH);
 

@@ -9,7 +9,7 @@ pub trait RotatingHashTrait: Default + Copy + Clone {
     fn hash(&self, mask: u16) -> u16;
     fn append(&self, c: u8, hash_shift: u32) -> Self;
     fn hash_algorithm() -> HashAlgorithm;
-    fn num_hash_bytes() -> u32;
+    fn num_hash_bytes() -> u16;
 }
 
 #[derive(Default, Debug, Copy, Clone)]
@@ -32,7 +32,7 @@ impl RotatingHashTrait for ZlibRotatingHash {
         HashAlgorithm::Zlib
     }
 
-    fn num_hash_bytes() -> u32 {
+    fn num_hash_bytes() -> u16 {
         3
     }
 }
@@ -57,7 +57,7 @@ impl RotatingHashTrait for MiniZHash {
         HashAlgorithm::MiniZFast
     }
 
-    fn num_hash_bytes() -> u32 {
+    fn num_hash_bytes() -> u16 {
         3
     }
 }
@@ -74,7 +74,7 @@ impl RotatingHashTrait for LibdeflateRotatingHash {
 
     fn append(&self, c: u8, _hash_shift: u32) -> Self {
         Self {
-            hash: (c as u32) << 24 | (self.hash >> 8),
+            hash: ((c as u32) << 24) | (self.hash >> 8),
         }
     }
 
@@ -82,7 +82,7 @@ impl RotatingHashTrait for LibdeflateRotatingHash {
         HashAlgorithm::Libdeflate4
     }
 
-    fn num_hash_bytes() -> u32 {
+    fn num_hash_bytes() -> u16 {
         4
     }
 }
