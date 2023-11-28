@@ -100,11 +100,9 @@ impl<H: RotatingHashTrait> HashChain<H> {
             running_hash: H::default(),
         };
 
-        if input.remaining() > 2 {
-            c.update_running_hash(input.cur_char(0));
-            c.update_running_hash(input.cur_char(1));
+        for i in 0..H::num_hash_bytes() - 1 {
+            c.update_running_hash(input.cur_char(i as i32));
         }
-
         c
     }
 
@@ -116,16 +114,6 @@ impl<H: RotatingHashTrait> HashChain<H> {
         checksum.update(self.hash_shift);
         checksum.update(self.running_hash.hash(self.hash_mask));
         checksum.update(self.total_shift);
-    }
-
-    fn next_hash(&self, b: u8) -> H {
-        self.running_hash.append(b, self.hash_shift)
-    }
-
-    fn next_hash_double(&self, b1: u8, b2: u8) -> H {
-        self.running_hash
-            .append(b1, self.hash_shift)
-            .append(b2, self.hash_shift)
     }
 
     pub fn update_running_hash(&mut self, b: u8) {
@@ -236,11 +224,15 @@ impl<H: RotatingHashTrait> HashChain<H> {
     }
 
     pub fn cur_hash(&self, input: &PreflateInput) -> H {
-        self.next_hash(input.cur_char(2))
+        self.running_hash.append(
+            input.cur_char(H::num_hash_bytes() as i32 - 1),
+            self.hash_shift,
+        )
     }
 
     pub fn cur_plus_1_hash(&self, input: &PreflateInput) -> H {
-        self.next_hash_double(input.cur_char(2), input.cur_char(3))
+        self.cur_hash(input)
+            .append(input.cur_char(H::num_hash_bytes() as i32), self.hash_shift)
     }
 
     pub fn hash_equal(&self, a: H, b: H) -> bool {
