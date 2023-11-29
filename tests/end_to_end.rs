@@ -49,12 +49,12 @@ fn test_pptxplaintext() {
 
 #[test]
 fn test_dumpout() {
-    verifyresult(&read_file("dumpout-29473.bin"));
+    verifyresult(&read_file("dumpout-29473.deflate"));
 }
 
 #[test]
 fn test_dumpout2() {
-    verifyresult(&read_file("dumpout-355865.bin"));
+    verifyresult(&read_file("dumpout-355865.deflate"));
 }
 
 #[test]
@@ -88,9 +88,8 @@ fn verifyresult(compressed_data: &[u8]) {
 fn test_file(filename: &str) {
     let v = read_file(filename);
 
-    /*
     // Zlib compression with different compression levels
-    for level in 0..0 {
+    for level in 0..9 {
         println!("zlib level: {}", level);
 
         let output = zlibcompress(&v, level);
@@ -121,7 +120,7 @@ fn test_file(filename: &str) {
         f.write_all(minusheader).unwrap();
 
         verifyresult(minusheader);
-    }*/
+    }
 
     for level in 1..=1 {
         println!();

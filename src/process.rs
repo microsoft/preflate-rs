@@ -33,17 +33,17 @@ pub fn encode_mispredictions(
     match params.hash_algorithm {
         HashAlgorithm::MiniZFast => predict_blocks(
             &deflate.blocks,
-            TokenPredictor::<MiniZHash>::new(&deflate.plain_text, &params, 0),
+            TokenPredictor::<MiniZHash>::new(&deflate.plain_text, &params),
             encoder,
         )?,
         HashAlgorithm::Zlib => predict_blocks(
             &deflate.blocks,
-            TokenPredictor::<ZlibRotatingHash>::new(&deflate.plain_text, &params, 0),
+            TokenPredictor::<ZlibRotatingHash>::new(&deflate.plain_text, &params),
             encoder,
         )?,
         HashAlgorithm::Libdeflate4 => predict_blocks(
             &deflate.blocks,
-            TokenPredictor::<LibdeflateRotatingHash>::new(&deflate.plain_text, &params, 0),
+            TokenPredictor::<LibdeflateRotatingHash>::new(&deflate.plain_text, &params),
             encoder,
         )?,
     }
@@ -130,17 +130,17 @@ pub fn decode_mispredictions(
 
     let output_blocks = match params.hash_algorithm {
         HashAlgorithm::MiniZFast => recreate_blocks(
-            TokenPredictor::<MiniZHash>::new(plain_text, &params, 0),
+            TokenPredictor::<MiniZHash>::new(plain_text, &params),
             decoder,
             &mut deflate_writer,
         )?,
         HashAlgorithm::Zlib => recreate_blocks(
-            TokenPredictor::<ZlibRotatingHash>::new(plain_text, &params, 0),
+            TokenPredictor::<ZlibRotatingHash>::new(plain_text, &params),
             decoder,
             &mut deflate_writer,
         )?,
         HashAlgorithm::Libdeflate4 => recreate_blocks(
-            TokenPredictor::<LibdeflateRotatingHash>::new(plain_text, &params, 0),
+            TokenPredictor::<LibdeflateRotatingHash>::new(plain_text, &params),
             decoder,
             &mut deflate_writer,
         )?,
@@ -485,7 +485,6 @@ fn verify_zlib_compressed_perfect() {
 }
 
 #[test]
-#[ignore = "reason"]
 fn verify_miniz1_compressed_perfect() {
     use crate::{
         cabac_codec::{PredictionDecoderCabac, PredictionEncoderCabac},
@@ -515,7 +514,7 @@ fn verify_miniz1_compressed_perfect() {
         good_length: 258,
         max_lazy: 2,
         nice_length: 258,
-        max_chain: 1,
+        max_chain: 2,
         hash_algorithm: HashAlgorithm::MiniZFast,
         min_len: 3,
     };

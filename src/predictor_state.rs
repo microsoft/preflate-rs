@@ -6,7 +6,7 @@
 
 use crate::bit_helper::DebugHash;
 use crate::hash_algorithm::RotatingHashTrait;
-use crate::hash_chain::HashChain;
+use crate::hash_chain::{HashChain, MAX_UPDATE_HASH_BATCH};
 use crate::preflate_constants::{MAX_MATCH, MIN_LOOKAHEAD, MIN_MATCH};
 use crate::preflate_input::PreflateInput;
 use crate::preflate_parameter_estimator::PreflateParameters;
@@ -55,18 +55,25 @@ impl<'a, H: RotatingHashTrait> PredictorState<'a, H> {
         self.hash.checksum(checksum);
     }
 
-    pub fn update_running_hash(&mut self, b: u8) {
-        self.hash.update_running_hash(b);
+    pub fn update_hash(&mut self, mut length: u32) {
+        while length > 0 {
+            let batch_len = cmp::min(length, MAX_UPDATE_HASH_BATCH);
+
+            self.hash.update_hash::<true>(batch_len, &self.input);
+
+            self.input.advance(batch_len);
+            length -= batch_len;
+        }
     }
 
-    pub fn update_hash(&mut self, length: u32) {
-        self.hash.update_hash::<false>(length, &self.input);
-        self.input.advance(length);
-    }
+    pub fn skip_hash(&mut self, mut length: u32) {
+        while length > 0 {
+            let batch_len = cmp::min(length, MAX_UPDATE_HASH_BATCH);
+            self.hash.skip_hash::<true>(batch_len, &self.input);
 
-    pub fn skip_hash(&mut self, length: u32) {
-        self.hash.skip_hash::<false>(length, &self.input);
-        self.input.advance(length);
+            self.input.advance(batch_len);
+            length -= batch_len;
+        }
     }
 
     pub fn current_input_pos(&self) -> u32 {
@@ -306,7 +313,7 @@ impl<'a, H: RotatingHashTrait> PredictorState<'a, H> {
 
     /// debugging function to verify that the hash chain is correct
     #[allow(dead_code)]
-    pub fn verify_hash(&self, dist: Option<PreflateTokenReference>) {
-        self.hash.verify_hash(dist, &self.input);
+    pub fn verify_hash(&self, _dist: Option<PreflateTokenReference>) {
+        //self.hash.verify_hash(dist, &self.input);
     }
 }

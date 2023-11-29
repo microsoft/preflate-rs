@@ -5,7 +5,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 use crate::hash_algorithm::{HashAlgorithm, LibdeflateRotatingHash, MiniZHash, ZlibRotatingHash};
-use crate::hash_chain::HashChain;
+use crate::hash_chain::{HashChain, MAX_UPDATE_HASH_BATCH};
 use crate::preflate_constants;
 use crate::preflate_input::PreflateInput;
 use crate::preflate_parse_config::{FAST_PREFLATE_PARSER_SETTINGS, SLOW_PREFLATE_PARSER_SETTINGS};
@@ -103,7 +103,7 @@ impl CandidateInfo {
         } else {
             /*if input.pos() == 803428 {
                 let mdepth = self.invoke_match_depth(token, window_size, input);
-            }*/
+            }
 
             println!(
                 "removed candidate sl={:?}, mask={}, pos={}, token={:?} hash={:?}, max_chain={}",
@@ -113,7 +113,7 @@ impl CandidateInfo {
                 token,
                 self.hash_algorithm(),
                 self.max_chain_found,
-            );
+            ); */
             false
         }
     }
@@ -185,7 +185,7 @@ impl<'a> CompLevelEstimatorState<'a> {
         let mem_hash_shift = (hash_bits + 2) / 3;
         let mem_hash_mask = ((1u32 << hash_bits) - 1) as u16;
 
-        let mut hashparameters = vec![(5, 0x7fff), (4, 2047), (4, 4097)];
+        let mut hashparameters = vec![(5, 0x7fff), (4, 2047), (4, 4095)];
 
         if !hashparameters
             .iter()
@@ -226,19 +226,6 @@ impl<'a> CompLevelEstimatorState<'a> {
         }));
 
         // slow compressor candidates
-        candidates.push(Box::new(CandidateInfo {
-            skip_length: None,
-            hash_shift: 0,
-            hash_mask: 0x7fff,
-            hash_chain: HashChainType::LibFlate4(HashChain::<LibdeflateRotatingHash>::new(
-                0, 0x7fff, &input,
-            )),
-            max_chain_found: 0,
-            longest_dist_at_hop_0: 0,
-            longest_dist_at_hop_1_plus: 0,
-        }));
-
-        // slow compressor candidates
         for (hash_shift, hash_mask) in [(5, 32767), (4, 2047)] {
             candidates.push(Box::new(CandidateInfo {
                 skip_length: None,
@@ -253,19 +240,18 @@ impl<'a> CompLevelEstimatorState<'a> {
             }));
         }
 
-        for (hash_shift, hash_mask) in [(5, 32767)] {
-            candidates.push(Box::new(CandidateInfo {
-                skip_length: None,
-                hash_shift,
-                hash_mask,
-                hash_chain: HashChainType::Zlib(HashChain::<ZlibRotatingHash>::new(
-                    hash_shift, hash_mask, &input,
-                )),
-                max_chain_found: 0,
-                longest_dist_at_hop_0: 0,
-                longest_dist_at_hop_1_plus: 0,
-            }));
-        }
+        // LibFlate4 candidate
+        candidates.push(Box::new(CandidateInfo {
+            skip_length: None,
+            hash_shift: 0,
+            hash_mask: 0xffff,
+            hash_chain: HashChainType::LibFlate4(HashChain::<LibdeflateRotatingHash>::new(
+                0, 0xffff, &input,
+            )),
+            max_chain_found: 0,
+            longest_dist_at_hop_0: 0,
+            longest_dist_at_hop_1_plus: 0,
+        }));
 
         CompLevelEstimatorState {
             input,
@@ -280,20 +266,30 @@ impl<'a> CompLevelEstimatorState<'a> {
         }
     }
 
-    fn update_hash(&mut self, len: u32) {
-        for i in &mut self.candidates {
-            i.invoke_update_hash(len, &self.input);
-        }
+    fn update_hash(&mut self, mut length: u32) {
+        while length > 0 {
+            let batch_len = std::cmp::min(length, MAX_UPDATE_HASH_BATCH);
 
-        self.input.advance(len);
+            for i in &mut self.candidates {
+                i.invoke_update_hash(batch_len, &self.input);
+            }
+
+            self.input.advance(batch_len);
+            length -= batch_len;
+        }
     }
 
-    fn update_or_skip_hash(&mut self, len: u32) {
-        for c in &mut self.candidates {
-            c.skip_or_update_hash(len, &self.input);
-        }
+    fn skip_or_update_hash(&mut self, mut length: u32) {
+        while length > 0 {
+            let batch_len = std::cmp::min(length, MAX_UPDATE_HASH_BATCH);
 
-        self.input.advance(len);
+            for c in &mut self.candidates {
+                c.skip_or_update_hash(batch_len, &self.input);
+            }
+
+            self.input.advance(batch_len);
+            length -= batch_len;
+        }
     }
 
     fn check_match(&mut self, token: &PreflateTokenReference) {
@@ -333,7 +329,7 @@ impl<'a> CompLevelEstimatorState<'a> {
                     }
                     PreflateToken::Reference(r) => {
                         self.check_match(r);
-                        self.update_or_skip_hash(r.len());
+                        self.skip_or_update_hash(r.len());
                     }
                 }
             }

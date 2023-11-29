@@ -30,30 +30,19 @@ pub struct TokenPredictor<'a, H: RotatingHashTrait> {
 }
 
 impl<'a, H: RotatingHashTrait> TokenPredictor<'a, H> {
-    pub fn new(uncompressed: &'a [u8], params: &PreflateParameters, offset: u32) -> Self {
+    pub fn new(uncompressed: &'a [u8], params: &PreflateParameters) -> Self {
         // Implement constructor logic for PreflateTokenPredictor
         // Initialize fields as necessary
         // Create and initialize PreflatePredictorState, PreflateHashChainExt, and PreflateSeqChain instances
         // Construct the analysisResults vector
 
-        let mut r = Self {
+        Self {
             state: PredictorState::<'a>::new(uncompressed, params),
             params: *params,
             pending_reference: None,
             current_token_count: 0,
             max_token_count: params.max_token_count.into(),
-        };
-
-        if r.state.available_input_size() >= 2 {
-            let b0 = r.state.input_cursor()[0];
-            let b1 = r.state.input_cursor()[1];
-
-            r.state.update_running_hash(b0);
-            r.state.update_running_hash(b1);
         }
-        r.state.update_hash(offset);
-
-        r
     }
 
     pub fn checksum(&self) -> DebugHash {

@@ -6,7 +6,7 @@ pub enum HashAlgorithm {
     Libdeflate4,
 }
 pub trait RotatingHashTrait: Default + Copy + Clone {
-    fn hash(&self, mask: u16) -> u16;
+    fn hash(&self, mask: u16) -> usize;
     fn append(&self, c: u8, hash_shift: u32) -> Self;
     fn hash_algorithm() -> HashAlgorithm;
     fn num_hash_bytes() -> u16;
@@ -18,8 +18,8 @@ pub struct ZlibRotatingHash {
 }
 
 impl RotatingHashTrait for ZlibRotatingHash {
-    fn hash(&self, mask: u16) -> u16 {
-        self.hash & mask
+    fn hash(&self, mask: u16) -> usize {
+        usize::from(self.hash & mask)
     }
 
     fn append(&self, c: u8, hash_shift: u32) -> ZlibRotatingHash {
@@ -43,8 +43,9 @@ pub struct MiniZHash {
 }
 
 impl RotatingHashTrait for MiniZHash {
-    fn hash(&self, _mask: u16) -> u16 {
-        ((self.hash ^ (self.hash >> 17)) & 0x7fff) as u16
+    fn hash(&self, mask: u16) -> usize {
+        debug_assert!(mask == 0x7fff);
+        ((self.hash ^ (self.hash >> 17)) & 0x7fff) as usize
     }
 
     fn append(&self, c: u8, _hash_shift: u32) -> Self {
@@ -68,8 +69,9 @@ pub struct LibdeflateRotatingHash {
 }
 
 impl RotatingHashTrait for LibdeflateRotatingHash {
-    fn hash(&self, _mask: u16) -> u16 {
-        (self.hash.wrapping_mul(0x1E35A7BD) >> 16) as u16
+    fn hash(&self, mask: u16) -> usize {
+        debug_assert!(mask == 0xffff);
+        (self.hash.wrapping_mul(0x1E35A7BD) >> 16) as usize
     }
 
     fn append(&self, c: u8, _hash_shift: u32) -> Self {
