@@ -44,8 +44,10 @@ pub struct PreflateParameters {
     /// Zlib does not allow these.
     pub very_far_matches_detected: bool,
 
-    /// Zlib does not match to the first
+    /// Zlib does not match to first byte of a file in order to reserve 0 for the end of chain
     pub matches_to_start_detected: bool,
+
+    /// the fast compressor only adds each match to the dictionary, not each character of the match
     pub is_fast_compressor: bool,
     pub good_length: u32,
     pub max_lazy: u32,

@@ -149,21 +149,16 @@ impl<'a, H: RotatingHashTrait> PredictorState<'a, H> {
         let nice_len = std::cmp::min(self.params.nice_length, max_len);
         let mut max_chain = max_depth;
 
-        let mut chain_it = if offset == 0 {
-            self.hash
-                .iterate_from_current(&self.input, cur_max_dist_hop1_plus)
-        } else {
-            self.hash
-                .iterate_from_next(&self.input, cur_max_dist_hop1_plus)
-        };
-
+        let input = self.input.cur_chars(offset as i32);
         let mut best_len = prev_len;
         let mut best_match: Option<PreflateTokenReference> = None;
-        let input = self.input.cur_chars(offset as i32);
         let mut num_chain_matches = 0;
-
         let mut first = true;
-        while let Some(dist) = chain_it.next() {
+
+        for dist in self
+            .hash
+            .iterate(&self.input, offset, cur_max_dist_hop1_plus)
+        {
             // first entry gets a special treatment to make sure it doesn't exceed
             // the limits we calculated for the first hop
             if first {
@@ -221,14 +216,12 @@ impl<'a, H: RotatingHashTrait> PredictorState<'a, H> {
         let cur_pos = self.current_input_pos();
         let cur_max_dist = std::cmp::min(cur_pos, max_dist);
 
-        let mut chain_it = self.hash.iterate_from_current(&self.input, cur_max_dist);
-
         let max_chain_org = 0xffff; // max hash chain length
         let mut max_chain = max_chain_org; // max hash chain length
         let best_len = target_reference.len();
         let mut hops = 0;
 
-        while let Some(dist) = chain_it.next() {
+        for dist in self.hash.iterate(&self.input, 0, cur_max_dist) {
             let match_pos = self.input_cursor_offset(-(dist as i32));
             let match_length =
                 Self::prefix_compare(match_pos, self.input_cursor(), best_len - 1, best_len);
@@ -265,12 +258,9 @@ impl<'a, H: RotatingHashTrait> PredictorState<'a, H> {
 
         let cur_pos = self.current_input_pos();
         let cur_max_dist = std::cmp::min(cur_pos, self.window_size());
-
-        let mut chain_it = self.hash.iterate_from_current(&self.input, cur_max_dist);
-
         let mut current_hop = 0;
 
-        while let Some(dist) = chain_it.next() {
+        for dist in self.hash.iterate(&self.input, 0, cur_max_dist) {
             let match_length = Self::prefix_compare(
                 self.input_cursor_offset(-(dist as i32)),
                 self.input_cursor(),

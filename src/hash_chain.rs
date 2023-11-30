@@ -31,10 +31,8 @@ impl InternalPosition {
         usize::from(self.pos)
     }
 
-    fn add_offset(&self, offset: u32) -> Self {
-        Self {
-            pos: self.pos + u16::try_from(offset).unwrap(),
-        }
+    fn inc(&self) -> Self {
+        Self { pos: self.pos + 1 }
     }
 
     fn from_absolute(pos: u32, total_shift: i32) -> Self {
@@ -182,6 +180,28 @@ impl<H: RotatingHashTrait> HashTable<H> {
 
     fn update_running_hash(&mut self, b: u8) {
         self.running_hash = self.running_hash.append(b, self.hash_shift);
+    }
+
+    fn update_chain<const MAINTAIN_DEPTH: bool>(
+        &mut self,
+        pos: InternalPosition,
+        update_chain: bool,
+    ) {
+        if update_chain {
+            let h = self.get_running_hash();
+
+            if MAINTAIN_DEPTH {
+                self.chain_depth[pos.to_index()] = self.chain_depth[self.head[h].to_index()] + 1;
+                self.chain_depth_v[pos.to_index()] = h;
+            }
+
+            self.prev[pos.to_index()] = self.head[h];
+            self.head[h] = pos;
+        } else {
+            if MAINTAIN_DEPTH {
+                self.chain_depth[pos.to_index()] = -65535;
+            }
+        }
     }
 
     fn reshift<const MAINTAIN_DEPTH: bool, const DELTA: usize>(&mut self) {
@@ -365,44 +385,45 @@ impl<H: RotatingHashTrait> HashChain<H> {
         assert!(!mismatch);
     }
 
-    pub fn iterate_from_current(&self, input: &PreflateInput, max_dist: u32) -> HashIterator {
-        let head = self
-            .hash_table
-            .get_head(self.hash_table.calculate_hash(input));
-
-        HashIterator::new(
-            &self.hash_table.prev,
-            InternalPosition::from_absolute(input.pos(), self.total_shift),
-            max_dist,
-            head,
-            if head.is_valid() {
-                IteratorState::Valid
-            } else {
-                IteratorState::Nothing
-            },
-        )
-    }
-
-    pub fn iterate_from_next(&self, input: &PreflateInput, max_dist: u32) -> HashIterator {
+    pub fn iterate(&self, input: &PreflateInput, offset: u32, max_dist: u32) -> HashIterator {
         let curr_hash = self.hash_table.calculate_hash(input);
-        let next_hash = self.hash_table.calculate_hash_next(input);
 
-        let head = self.hash_table.get_head(next_hash);
-        HashIterator::new(
-            &self.hash_table.prev,
-            InternalPosition::from_absolute(input.pos() + 1, self.total_shift),
-            max_dist,
-            head,
-            if self.hash_table.hash_equal(curr_hash, next_hash) {
-                IteratorState::ValidDist1Match
-            } else {
+        if offset == 0 {
+            let head = self.hash_table.get_head(curr_hash);
+
+            HashIterator::new(
+                &self.hash_table.prev,
+                InternalPosition::from_absolute(input.pos(), self.total_shift),
+                max_dist,
+                head,
                 if head.is_valid() {
                     IteratorState::Valid
                 } else {
                     IteratorState::Nothing
-                }
-            },
-        )
+                },
+            )
+        } else {
+            assert_eq!(offset, 1);
+
+            let next_hash = self.hash_table.calculate_hash_next(input);
+
+            let head = self.hash_table.get_head(next_hash);
+            HashIterator::new(
+                &self.hash_table.prev,
+                InternalPosition::from_absolute(input.pos() + 1, self.total_shift),
+                max_dist,
+                head,
+                if self.hash_table.hash_equal(curr_hash, next_hash) {
+                    IteratorState::ValidDist1Match
+                } else {
+                    if head.is_valid() {
+                        IteratorState::Valid
+                    } else {
+                        IteratorState::Nothing
+                    }
+                },
+            )
+        }
     }
 
     pub fn update_hash<const MAINTAIN_DEPTH: bool>(&mut self, length: u32, input: &PreflateInput) {
@@ -418,21 +439,12 @@ impl<H: RotatingHashTrait> HashChain<H> {
 
         let mut pos = InternalPosition::from_absolute(input.pos(), self.total_shift);
         for i in 0..limit {
-            self.hash_table
-                .update_running_hash(input.cur_char((i + hash_limit) as i32));
+            let offset = (i + hash_limit) as i32;
 
-            let h = self.hash_table.get_running_hash();
+            self.hash_table.update_running_hash(input.cur_char(offset));
+            self.hash_table.update_chain::<MAINTAIN_DEPTH>(pos, true);
 
-            if MAINTAIN_DEPTH {
-                self.hash_table.chain_depth[pos.to_index()] =
-                    self.hash_table.chain_depth[self.hash_table.head[h].to_index()] + 1;
-                self.hash_table.chain_depth_v[pos.to_index()] = h;
-            }
-
-            self.hash_table.prev[pos.to_index()] = self.hash_table.head[h];
-            self.hash_table.head[h] = pos;
-
-            pos = pos.add_offset(1);
+            pos = pos.inc();
         }
 
         //let c = self.checksum_whole_struct();
@@ -453,27 +465,12 @@ impl<H: RotatingHashTrait> HashChain<H> {
         let mut pos: InternalPosition =
             InternalPosition::from_absolute(input.pos(), self.total_shift);
         for i in 0..limit {
-            self.hash_table
-                .update_running_hash(input.cur_char((i + hash_limit) as i32));
+            let offset = (i + hash_limit) as i32;
+            self.hash_table.update_running_hash(input.cur_char(offset));
 
-            if i == 0 {
-                let h = self.hash_table.get_running_hash();
+            self.hash_table.update_chain::<MAINTAIN_DEPTH>(pos, i == 0);
 
-                if MAINTAIN_DEPTH {
-                    self.hash_table.chain_depth[pos.to_index()] =
-                        self.hash_table.chain_depth[self.hash_table.head[h].to_index()] + 1;
-                    self.hash_table.chain_depth_v[pos.to_index()] = h;
-                }
-
-                self.hash_table.prev[pos.to_index()] = self.hash_table.head[h];
-                self.hash_table.head[h] = pos;
-            } else {
-                if MAINTAIN_DEPTH {
-                    self.hash_table.chain_depth[pos.to_index()] = -65535;
-                }
-            }
-
-            pos = pos.add_offset(1);
+            pos = pos.inc();
         }
     }
 
