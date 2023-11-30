@@ -13,7 +13,7 @@ use crate::{
 
 pub const MAX_UPDATE_HASH_BATCH: u32 = 0x180;
 
-pub trait HashChainTrait {}
+pub trait HashChainTrait: Default {}
 
 #[derive(Default, Copy, Clone, Eq, PartialEq, Debug)]
 struct InternalPosition {
@@ -82,8 +82,12 @@ impl<'a> HashIterator<'a> {
     fn calc_dist(p1: InternalPosition, p2: InternalPosition) -> u32 {
         u32::from(p1.pos - p2.pos)
     }
+}
 
-    pub fn next(&mut self) -> Option<u32> {
+impl Iterator for HashIterator<'_> {
+    type Item = u32;
+
+    fn next(&mut self) -> Option<u32> {
         match self.state {
             IteratorState::Nothing => None,
             IteratorState::Valid => {
@@ -112,7 +116,7 @@ impl<'a> HashIterator<'a> {
 }
 
 #[derive(DefaultBoxed)]
-struct HashTable {
+struct HashTable<H: RotatingHashTrait> {
     /// Represents the head of the hash chain for a given hash value. In order
     /// to find additional matches, you follow the prev chain from the head.
     head: [InternalPosition; 65536],
@@ -136,13 +140,88 @@ struct HashTable {
     /// position in the chain, or 0 if there are no more matches. (We start
     /// with an offset of 8 to avoid confusion with the end of the chain)
     prev: [InternalPosition; 65536],
-}
 
-pub struct HashChain<H: RotatingHashTrait> {
-    hash_table: Box<HashTable>,
     hash_shift: u32,
     running_hash: H,
     hash_mask: u16,
+}
+
+impl<H: RotatingHashTrait> HashTable<H> {
+    fn get_head(&self, hash: H) -> InternalPosition {
+        let h = hash.hash(self.hash_mask);
+        self.head[h]
+    }
+
+    fn get_running_hash(&self) -> usize {
+        self.running_hash.hash(self.hash_mask)
+    }
+
+    /// calculate the hash for the current byte in the input stream, which
+    /// consists of the running hash plus the current character
+    fn calculate_hash(&self, input: &PreflateInput) -> H {
+        self.running_hash.append(
+            input.cur_char(H::num_hash_bytes() as i32 - 1),
+            self.hash_shift,
+        )
+    }
+
+    /// calculate the hash for the next byte in the input stream which
+    /// consists of the running hash plus the next 2 characters
+    fn calculate_hash_next(&self, input: &PreflateInput) -> H {
+        self.calculate_hash(input)
+            .append(input.cur_char(H::num_hash_bytes() as i32), self.hash_shift)
+    }
+
+    fn hash_equal(&self, a: H, b: H) -> bool {
+        a.hash(self.hash_mask) == b.hash(self.hash_mask)
+    }
+
+    fn get_node_depth(&self, node: InternalPosition) -> i32 {
+        self.chain_depth[node.to_index()]
+    }
+
+    fn update_running_hash(&mut self, b: u8) {
+        self.running_hash = self.running_hash.append(b, self.hash_shift);
+    }
+
+    fn reshift<const MAINTAIN_DEPTH: bool, const DELTA: usize>(&mut self) {
+        for i in 0..=usize::from(self.hash_mask) as usize {
+            self.head[i] = self.head[i].saturating_sub(DELTA as u16);
+        }
+
+        for i in DELTA..=65535 {
+            self.prev[i - DELTA] = self.prev[i].saturating_sub(DELTA as u16);
+        }
+
+        if MAINTAIN_DEPTH {
+            self.chain_depth.copy_within(DELTA..=65535, 0);
+            self.chain_depth_v.copy_within(DELTA..=65535, 0);
+        }
+    }
+
+    pub fn match_depth(&self, end_pos: InternalPosition, input: &PreflateInput) -> u32 {
+        let hash = self.calculate_hash(input);
+        let head = self.get_head(hash);
+
+        let start_depth = self.get_node_depth(head);
+
+        let end_depth = self.get_node_depth(end_pos);
+
+        if start_depth < end_depth {
+            /*assert_eq!(
+                self.hash_table.chain_depth_v[end_pos.to_index()],
+                self.hash_table.chain_depth_v[head.to_index()]
+            );
+            println!("dtl {:?} {} > {}", target_reference, start_depth, end_depth);*/
+            return 0xffff;
+        }
+
+        std::cmp::min(start_depth.wrapping_sub(end_depth) as u32, 0xffff)
+    }
+}
+
+pub struct HashChain<H: RotatingHashTrait> {
+    hash_table: Box<HashTable<H>>,
     total_shift: i32,
 }
 
@@ -153,16 +232,16 @@ impl<H: RotatingHashTrait> HashChain<H> {
         // offset would be zero and so it would get missed
         let mut c = HashChain {
             total_shift: -8,
-            hash_shift,
-            hash_mask,
             hash_table: HashTable::default_boxed(),
-            running_hash: H::default(),
         };
+
+        c.hash_table.hash_shift = hash_shift;
+        c.hash_table.hash_mask = hash_mask;
 
         // initialize running hash so that it has one minus the number of bytes it needs
         // to calculate the hash (we add the current byte when we calculate the hash)
         for i in 0..H::num_hash_bytes() - 1 {
-            c.update_running_hash(input.cur_char(i as i32));
+            c.hash_table.update_running_hash(input.cur_char(i as i32));
         }
 
         c
@@ -173,36 +252,17 @@ impl<H: RotatingHashTrait> HashChain<H> {
         checksum.update_slice(&self.hash_table.chain_depth);
         //checksum.update_slice(&self.hash_table.head);
         //checksum.update_slice(&self.hash_table.prev);
-        checksum.update(self.hash_shift);
+        //checksum.update(self.hash_shift);
         //checksum.update(self.running_hash.hash(self.hash_mask));
-        checksum.update(self.total_shift);
-    }
-
-    fn update_running_hash(&mut self, b: u8) {
-        self.running_hash = self.running_hash.append(b, self.hash_shift);
+        //checksum.update(self.total_shift);
     }
 
     fn reshift_if_necessary<const MAINTAIN_DEPTH: bool>(&mut self, input: &PreflateInput) {
         if input.pos() as i32 - self.total_shift >= 0xfe08 {
             const DELTA: usize = 0x7e00;
-            for i in 0..=self.hash_mask as usize {
-                self.hash_table.head[i] = self.hash_table.head[i].saturating_sub(DELTA as u16);
-            }
 
-            for i in DELTA..=65535 {
-                self.hash_table.prev[i - DELTA] =
-                    self.hash_table.prev[i].saturating_sub(DELTA as u16);
-            }
-
-            if MAINTAIN_DEPTH {
-                self.hash_table.chain_depth.copy_within(DELTA..=65535, 0);
-                self.hash_table.chain_depth_v.copy_within(DELTA..=65535, 0);
-            }
+            self.hash_table.reshift::<MAINTAIN_DEPTH, DELTA>();
             self.total_shift += DELTA as i32;
-
-            if MAINTAIN_DEPTH {
-                //self.validate_hash_chains(input);
-            }
         }
     }
 
@@ -305,17 +365,10 @@ impl<H: RotatingHashTrait> HashChain<H> {
         assert!(!mismatch);
     }
 
-    fn get_head(&self, hash: H) -> InternalPosition {
-        let h = hash.hash(self.hash_mask);
-        self.hash_table.head[h]
-    }
-
-    fn get_node_depth(&self, node: InternalPosition) -> i32 {
-        self.hash_table.chain_depth[node.to_index()]
-    }
-
     pub fn iterate_from_current(&self, input: &PreflateInput, max_dist: u32) -> HashIterator {
-        let head = self.get_head(self.calculate_hash(input));
+        let head = self
+            .hash_table
+            .get_head(self.hash_table.calculate_hash(input));
 
         HashIterator::new(
             &self.hash_table.prev,
@@ -331,16 +384,16 @@ impl<H: RotatingHashTrait> HashChain<H> {
     }
 
     pub fn iterate_from_next(&self, input: &PreflateInput, max_dist: u32) -> HashIterator {
-        let curr_hash = self.calculate_hash(input);
-        let next_hash = self.calculate_hash_next(input);
+        let curr_hash = self.hash_table.calculate_hash(input);
+        let next_hash = self.hash_table.calculate_hash_next(input);
 
-        let head = self.get_head(next_hash);
+        let head = self.hash_table.get_head(next_hash);
         HashIterator::new(
             &self.hash_table.prev,
             InternalPosition::from_absolute(input.pos() + 1, self.total_shift),
             max_dist,
             head,
-            if self.hash_equal(curr_hash, next_hash) {
+            if self.hash_table.hash_equal(curr_hash, next_hash) {
                 IteratorState::ValidDist1Match
             } else {
                 if head.is_valid() {
@@ -350,26 +403,6 @@ impl<H: RotatingHashTrait> HashChain<H> {
                 }
             },
         )
-    }
-
-    /// calculate the hash for the current byte in the input stream, which
-    /// consists of the running hash plus the current character
-    fn calculate_hash(&self, input: &PreflateInput) -> H {
-        self.running_hash.append(
-            input.cur_char(H::num_hash_bytes() as i32 - 1),
-            self.hash_shift,
-        )
-    }
-
-    /// calculate the hash for the next byte in the input stream which
-    /// consists of the running hash plus the next 2 characters
-    fn calculate_hash_next(&self, input: &PreflateInput) -> H {
-        self.calculate_hash(input)
-            .append(input.cur_char(H::num_hash_bytes() as i32), self.hash_shift)
-    }
-
-    fn hash_equal(&self, a: H, b: H) -> bool {
-        a.hash(self.hash_mask) == b.hash(self.hash_mask)
     }
 
     pub fn update_hash<const MAINTAIN_DEPTH: bool>(&mut self, length: u32, input: &PreflateInput) {
@@ -385,9 +418,10 @@ impl<H: RotatingHashTrait> HashChain<H> {
 
         let mut pos = InternalPosition::from_absolute(input.pos(), self.total_shift);
         for i in 0..limit {
-            self.update_running_hash(input.cur_char((i + hash_limit) as i32));
+            self.hash_table
+                .update_running_hash(input.cur_char((i + hash_limit) as i32));
 
-            let h = self.running_hash.hash(self.hash_mask);
+            let h = self.hash_table.get_running_hash();
 
             if MAINTAIN_DEPTH {
                 self.hash_table.chain_depth[pos.to_index()] =
@@ -419,10 +453,11 @@ impl<H: RotatingHashTrait> HashChain<H> {
         let mut pos: InternalPosition =
             InternalPosition::from_absolute(input.pos(), self.total_shift);
         for i in 0..limit {
-            self.update_running_hash(input.cur_char((i + hash_limit) as i32));
+            self.hash_table
+                .update_running_hash(input.cur_char((i + hash_limit) as i32));
 
             if i == 0 {
-                let h = self.running_hash.hash(self.hash_mask);
+                let h = self.hash_table.get_running_hash();
 
                 if MAINTAIN_DEPTH {
                     self.hash_table.chain_depth[pos.to_index()] =
@@ -451,11 +486,6 @@ impl<H: RotatingHashTrait> HashChain<H> {
         let cur_pos = input.pos();
         let cur_max_dist = std::cmp::min(cur_pos, window_size);
 
-        let hash = self.calculate_hash(input);
-        let head = self.get_head(hash);
-
-        let start_depth = self.get_node_depth(head);
-
         if target_reference.dist() > cur_max_dist {
             println!("dtl {:?} > {}", target_reference, cur_max_dist);
             return 0xffff;
@@ -464,17 +494,6 @@ impl<H: RotatingHashTrait> HashChain<H> {
         let end_pos =
             InternalPosition::from_absolute(cur_pos - target_reference.dist(), self.total_shift);
 
-        let end_depth = self.get_node_depth(end_pos);
-
-        if start_depth < end_depth {
-            /*assert_eq!(
-                self.hash_table.chain_depth_v[end_pos.to_index()],
-                self.hash_table.chain_depth_v[head.to_index()]
-            );
-            println!("dtl {:?} {} > {}", target_reference, start_depth, end_depth);*/
-            return 0xffff;
-        }
-
-        std::cmp::min(start_depth.wrapping_sub(end_depth) as u32, 0xffff)
+        self.hash_table.match_depth(end_pos, input)
     }
 }

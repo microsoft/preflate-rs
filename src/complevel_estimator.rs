@@ -103,7 +103,7 @@ impl CandidateInfo {
         } else {
             /*if input.pos() == 803428 {
                 let mdepth = self.invoke_match_depth(token, window_size, input);
-            }
+            }*/
 
             println!(
                 "removed candidate sl={:?}, mask={}, pos={}, token={:?} hash={:?}, max_chain={}",
@@ -113,7 +113,7 @@ impl CandidateInfo {
                 token,
                 self.hash_algorithm(),
                 self.max_chain_found,
-            ); */
+            );
             false
         }
     }
