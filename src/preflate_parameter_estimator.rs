@@ -39,7 +39,12 @@ pub struct PreflateParameters {
     pub hash_mask: u16,
     pub max_token_count: u16,
     pub max_dist_3_matches: u16,
+
+    /// if there are matches that have a distance larger than window_size - MAX_MATCH.
+    /// Zlib does not allow these.
     pub very_far_matches_detected: bool,
+
+    /// Zlib does not match to the first
     pub matches_to_start_detected: bool,
     pub is_fast_compressor: bool,
     pub good_length: u32,
@@ -210,9 +215,9 @@ pub fn estimate_preflate_parameters(
         huff_strategy: estimate_preflate_huff_strategy(&info),
         zlib_compatible: cl.zlib_compatible,
         max_dist_3_matches: cl.max_dist_3_matches,
-        very_far_matches_detected: cl.very_far_matches,
-        matches_to_start_detected: cl.match_to_start,
-        is_fast_compressor: cl.fast_compressor,
+        very_far_matches_detected: cl.very_far_matches_detected,
+        matches_to_start_detected: cl.matches_to_start_detected,
+        is_fast_compressor: cl.is_fast_compressor,
         good_length: cl.good_length,
         max_lazy: cl.max_lazy,
         nice_length: cl.nice_length,

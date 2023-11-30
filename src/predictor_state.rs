@@ -19,7 +19,7 @@ pub enum MatchResult {
     Success(PreflateTokenReference),
     DistanceLargerThanHop0(u32, u32),
     NoInput,
-    NoMoreMatchesFound { start_len: u32, last_dist: u32 },
+    NoMoreMatchesFound,
     MaxChainExceeded(u32),
 }
 
@@ -100,18 +100,6 @@ impl<'a, H: RotatingHashTrait> PredictorState<'a, H> {
         self.input.remaining()
     }
 
-    pub fn hash_equal(&self, a: H, b: H) -> bool {
-        self.hash.hash_equal(a, b)
-    }
-
-    pub fn calculate_hash(&self) -> H {
-        self.hash.calculate_hash(&self.input)
-    }
-
-    pub fn calculate_hash_next(&self) -> H {
-        self.hash.calculate_hash_next(&self.input)
-    }
-
     fn prefix_compare(s1: &[u8], s2: &[u8], best_len: u32, max_len: u32) -> u32 {
         assert!(max_len >= 3 && s1.len() >= max_len as usize && s2.len() >= max_len as usize);
 
@@ -133,7 +121,7 @@ impl<'a, H: RotatingHashTrait> PredictorState<'a, H> {
         match_len
     }
 
-    pub fn match_token(&self, hash: H, prev_len: u32, offset: u32, max_depth: u32) -> MatchResult {
+    pub fn match_token(&self, prev_len: u32, offset: u32, max_depth: u32) -> MatchResult {
         let start_pos = self.current_input_pos() + offset;
         let max_len = std::cmp::min(self.total_input_size() - start_pos, MAX_MATCH);
         if max_len < std::cmp::max(prev_len + 1, MIN_MATCH) {
@@ -153,7 +141,7 @@ impl<'a, H: RotatingHashTrait> PredictorState<'a, H> {
             cur_max_dist_hop0 = cmp::min(max_dist_to_start, self.window_size());
             cur_max_dist_hop1_plus = cur_max_dist_hop0;
         } else {
-            let max_dist: u32 = self.window_size() - MIN_LOOKAHEAD;
+            let max_dist: u32 = self.window_size() - MIN_LOOKAHEAD + 1;
             cur_max_dist_hop0 = cmp::min(max_dist_to_start, max_dist);
             cur_max_dist_hop1_plus = cmp::min(max_dist_to_start, max_dist - 1);
         }
@@ -161,28 +149,35 @@ impl<'a, H: RotatingHashTrait> PredictorState<'a, H> {
         let nice_len = std::cmp::min(self.params.nice_length, max_len);
         let mut max_chain = max_depth;
 
-        let mut chain_it = self
-            .hash
-            .iterate_from_head(hash, start_pos, cur_max_dist_hop1_plus);
-        // Handle ZLIB quirk: the very first entry in the hash chain can have a larger
-        // distance than all following entries
-        if chain_it.dist() > cur_max_dist_hop0 {
-            let d = chain_it.dist();
-            return MatchResult::DistanceLargerThanHop0(d, cur_max_dist_hop0);
-        }
+        let mut chain_it = if offset == 0 {
+            self.hash
+                .iterate_from_current(&self.input, cur_max_dist_hop1_plus)
+        } else {
+            self.hash
+                .iterate_from_next(&self.input, cur_max_dist_hop1_plus)
+        };
 
         let mut best_len = prev_len;
         let mut best_match: Option<PreflateTokenReference> = None;
         let input = self.input.cur_chars(offset as i32);
         let mut num_chain_matches = 0;
-        loop {
-            let dist = chain_it.dist();
+
+        let mut first = true;
+        while let Some(dist) = chain_it.next() {
+            // first entry gets a special treatment to make sure it doesn't exceed
+            // the limits we calculated for the first hop
+            if first {
+                first = false;
+                if dist > cur_max_dist_hop0 {
+                    return MatchResult::DistanceLargerThanHop0(dist, cur_max_dist_hop0);
+                }
+            }
 
             let match_start = self.input.cur_chars(offset as i32 - dist as i32);
 
             let match_length = Self::prefix_compare(match_start, input, best_len, max_len);
             if match_length > best_len {
-                let r = PreflateTokenReference::new(match_length, chain_it.dist(), false);
+                let r = PreflateTokenReference::new(match_length, dist, false);
 
                 if match_length >= nice_len {
                     return MatchResult::Success(r);
@@ -190,17 +185,6 @@ impl<'a, H: RotatingHashTrait> PredictorState<'a, H> {
 
                 best_len = match_length;
                 best_match = Some(r);
-            }
-
-            if !chain_it.next() {
-                if let Some(r) = best_match {
-                    return MatchResult::Success(r);
-                } else {
-                    return MatchResult::NoMoreMatchesFound {
-                        start_len: match_length,
-                        last_dist: dist,
-                    };
-                }
             }
 
             max_chain -= 1;
@@ -216,13 +200,17 @@ impl<'a, H: RotatingHashTrait> PredictorState<'a, H> {
                 }
             }
         }
+
+        if let Some(r) = best_match {
+            return MatchResult::Success(r);
+        } else {
+            return MatchResult::NoMoreMatchesFound;
+        }
     }
 
     /// Tries to find the match by continuing on the hash chain, returns how many hops we went
     /// or none if it wasn't found
     pub fn calculate_hops(&self, target_reference: &PreflateTokenReference) -> anyhow::Result<u32> {
-        let hash = self.hash.calculate_hash(&self.input);
-
         let max_len = std::cmp::min(self.available_input_size(), MAX_MATCH);
 
         if max_len < target_reference.len() {
@@ -233,18 +221,15 @@ impl<'a, H: RotatingHashTrait> PredictorState<'a, H> {
         let cur_pos = self.current_input_pos();
         let cur_max_dist = std::cmp::min(cur_pos, max_dist);
 
-        let mut chain_it = self.hash.iterate_from_head(hash, cur_pos, cur_max_dist);
-        if !chain_it.valid() {
-            return Err(anyhow::anyhow!("no valid chain_it"));
-        }
+        let mut chain_it = self.hash.iterate_from_current(&self.input, cur_max_dist);
 
         let max_chain_org = 0xffff; // max hash chain length
         let mut max_chain = max_chain_org; // max hash chain length
         let best_len = target_reference.len();
         let mut hops = 0;
 
-        loop {
-            let match_pos = self.input_cursor_offset(-(chain_it.dist() as i32));
+        while let Some(dist) = chain_it.next() {
+            let match_pos = self.input_cursor_offset(-(dist as i32));
             let match_length =
                 Self::prefix_compare(match_pos, self.input_cursor(), best_len - 1, best_len);
 
@@ -252,15 +237,15 @@ impl<'a, H: RotatingHashTrait> PredictorState<'a, H> {
                 hops += 1;
             }
 
-            if chain_it.dist() >= target_reference.dist() {
-                if chain_it.dist() == target_reference.dist() {
+            if dist >= target_reference.dist() {
+                if dist == target_reference.dist() {
                     return Ok(hops);
                 } else {
                     break;
                 }
             }
 
-            if !chain_it.next() || max_chain <= 1 {
+            if max_chain <= 1 {
                 break;
             }
 
@@ -281,18 +266,13 @@ impl<'a, H: RotatingHashTrait> PredictorState<'a, H> {
         let cur_pos = self.current_input_pos();
         let cur_max_dist = std::cmp::min(cur_pos, self.window_size());
 
-        let hash = self.calculate_hash();
-
-        let mut chain_it = self.hash.iterate_from_head(hash, cur_pos, cur_max_dist);
-        if !chain_it.valid() {
-            return Err(anyhow::anyhow!("no match found"));
-        }
+        let mut chain_it = self.hash.iterate_from_current(&self.input, cur_max_dist);
 
         let mut current_hop = 0;
 
-        loop {
+        while let Some(dist) = chain_it.next() {
             let match_length = Self::prefix_compare(
-                self.input_cursor_offset(-(chain_it.dist() as i32)),
+                self.input_cursor_offset(-(dist as i32)),
                 self.input_cursor(),
                 len - 1,
                 len,
@@ -301,14 +281,11 @@ impl<'a, H: RotatingHashTrait> PredictorState<'a, H> {
             if match_length >= len {
                 current_hop += 1;
                 if current_hop == hops {
-                    return Ok(chain_it.dist());
+                    return Ok(dist);
                 }
             }
-
-            if !chain_it.next() {
-                return Err(anyhow::anyhow!("no match found"));
-            }
         }
+        return Err(anyhow::anyhow!("no match found"));
     }
 
     /// debugging function to verify that the hash chain is correct

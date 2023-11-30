@@ -13,6 +13,8 @@ use crate::{
 
 pub const MAX_UPDATE_HASH_BATCH: u32 = 0x180;
 
+pub trait HashChainTrait {}
+
 #[derive(Default, Copy, Clone, Eq, PartialEq, Debug)]
 struct InternalPosition {
     pos: u16,
@@ -51,8 +53,13 @@ pub struct HashIterator<'a> {
     ref_pos: InternalPosition,
     max_dist: u32,
     cur_pos: InternalPosition,
-    cur_dist: u32,
-    is_valid: bool,
+    state: IteratorState,
+}
+
+enum IteratorState {
+    Nothing,
+    Valid,
+    ValidDist1Match,
 }
 
 impl<'a> HashIterator<'a> {
@@ -61,36 +68,46 @@ impl<'a> HashIterator<'a> {
         ref_pos: InternalPosition,
         max_dist: u32,
         start_pos: InternalPosition,
+        state: IteratorState,
     ) -> Self {
-        let cur_dist = Self::calc_dist(ref_pos, start_pos);
-        let is_valid = cur_dist <= max_dist;
         Self {
             chain,
             ref_pos,
             max_dist,
             cur_pos: start_pos,
-            cur_dist,
-            is_valid,
+            state,
         }
-    }
-
-    pub fn valid(&self) -> bool {
-        self.is_valid
     }
 
     fn calc_dist(p1: InternalPosition, p2: InternalPosition) -> u32 {
         u32::from(p1.pos - p2.pos)
     }
 
-    pub fn dist(&self) -> u32 {
-        self.cur_dist
-    }
+    pub fn next(&mut self) -> Option<u32> {
+        match self.state {
+            IteratorState::Nothing => None,
+            IteratorState::Valid => {
+                let d = Self::calc_dist(self.ref_pos, self.cur_pos);
+                if d > self.max_dist {
+                    self.state = IteratorState::Nothing;
+                    return None;
+                }
 
-    pub fn next(&mut self) -> bool {
-        self.cur_pos = self.chain[self.cur_pos.to_index()];
-        self.cur_dist = Self::calc_dist(self.ref_pos, self.cur_pos);
-        self.is_valid = self.cur_pos.is_valid() && self.cur_dist <= self.max_dist;
-        self.is_valid
+                let next = self.chain[self.cur_pos.to_index()];
+                if next.is_valid() {
+                    self.cur_pos = next;
+                    self.state = IteratorState::Valid;
+                } else {
+                    self.state = IteratorState::Nothing;
+                }
+
+                Some(d)
+            }
+            IteratorState::ValidDist1Match => {
+                self.state = IteratorState::Valid;
+                Some(1)
+            }
+        }
     }
 }
 
@@ -297,19 +314,47 @@ impl<H: RotatingHashTrait> HashChain<H> {
         self.hash_table.chain_depth[node.to_index()]
     }
 
-    pub fn iterate_from_head(&self, hash: H, ref_pos: u32, max_dist: u32) -> HashIterator {
-        let head = self.get_head(hash);
+    pub fn iterate_from_current(&self, input: &PreflateInput, max_dist: u32) -> HashIterator {
+        let head = self.get_head(self.calculate_hash(input));
+
         HashIterator::new(
             &self.hash_table.prev,
-            InternalPosition::from_absolute(ref_pos, self.total_shift),
+            InternalPosition::from_absolute(input.pos(), self.total_shift),
             max_dist,
             head,
+            if head.is_valid() {
+                IteratorState::Valid
+            } else {
+                IteratorState::Nothing
+            },
+        )
+    }
+
+    pub fn iterate_from_next(&self, input: &PreflateInput, max_dist: u32) -> HashIterator {
+        let curr_hash = self.calculate_hash(input);
+        let next_hash = self.calculate_hash_next(input);
+
+        let head = self.get_head(next_hash);
+        HashIterator::new(
+            &self.hash_table.prev,
+            InternalPosition::from_absolute(input.pos() + 1, self.total_shift),
+            max_dist,
+            head,
+            if self.hash_equal(curr_hash, next_hash) {
+                IteratorState::ValidDist1Match
+            } else {
+                if head.is_valid() {
+                    IteratorState::Valid
+                } else {
+                    IteratorState::Nothing
+                }
+            },
         )
     }
 
     /// calculate the hash for the current byte in the input stream, which
     /// consists of the running hash plus the current character
-    pub fn calculate_hash(&self, input: &PreflateInput) -> H {
+    fn calculate_hash(&self, input: &PreflateInput) -> H {
         self.running_hash.append(
             input.cur_char(H::num_hash_bytes() as i32 - 1),
             self.hash_shift,
@@ -318,12 +363,12 @@ impl<H: RotatingHashTrait> HashChain<H> {
 
     /// calculate the hash for the next byte in the input stream which
     /// consists of the running hash plus the next 2 characters
-    pub fn calculate_hash_next(&self, input: &PreflateInput) -> H {
+    fn calculate_hash_next(&self, input: &PreflateInput) -> H {
         self.calculate_hash(input)
             .append(input.cur_char(H::num_hash_bytes() as i32), self.hash_shift)
     }
 
-    pub fn hash_equal(&self, a: H, b: H) -> bool {
+    fn hash_equal(&self, a: H, b: H) -> bool {
         a.hash(self.hash_mask) == b.hash(self.hash_mask)
     }
 

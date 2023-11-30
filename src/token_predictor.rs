@@ -11,7 +11,7 @@ use crate::{
     cabac_codec::{decode_difference, encode_difference},
     hash_algorithm::RotatingHashTrait,
     predictor_state::{MatchResult, PredictorState},
-    preflate_constants::{MAX_MATCH, MIN_MATCH},
+    preflate_constants::MIN_MATCH,
     preflate_parameter_estimator::PreflateParameters,
     preflate_token::{BlockType, PreflateToken, PreflateTokenBlock, PreflateTokenReference},
     statistical_codec::{
@@ -349,12 +349,10 @@ impl<'a, H: RotatingHashTrait> TokenPredictor<'a, H> {
             return PreflateToken::Literal;
         }
 
-        let hash = self.state.calculate_hash();
-
         let m = if let Some(pending) = self.pending_reference {
             MatchResult::Success(pending)
         } else {
-            self.state.match_token(hash, 0, 0, self.params.max_chain)
+            self.state.match_token(0, 0, self.params.max_chain)
         };
 
         self.pending_reference = None;
@@ -379,11 +377,7 @@ impl<'a, H: RotatingHashTrait> TokenPredictor<'a, H> {
             if match_token.len() < self.params.max_lazy
                 && self.state.available_input_size() >= match_token.len() + 2
             {
-                let mut match_next;
-                let hash_next = self.state.calculate_hash_next();
-
                 let mut max_depth = self.params.max_chain;
-                let hash_equal = self.state.hash_equal(hash_next, hash);
 
                 if self.params.zlib_compatible {
                     if match_token.len() >= self.params.good_length {
@@ -391,38 +385,7 @@ impl<'a, H: RotatingHashTrait> TokenPredictor<'a, H> {
                     }
                 }
 
-                // if the hashes are equal, then the match will have already
-                // been added to the dictionary at this point, which means that
-                // the depth with match to should be one less (since this chain
-                // will be one longer with the addition of the hash)
-                if hash_equal {
-                    max_depth -= 1;
-                }
-
-                match_next = self
-                    .state
-                    .match_token(hash_next, match_token.len(), 1, max_depth);
-
-                if hash_equal {
-                    let max_size = std::cmp::min(self.state.available_input_size() - 1, MAX_MATCH);
-                    let mut rle = 0;
-                    let c = self.state.input_cursor();
-                    let b = c[0];
-                    while rle < max_size && c[1 + rle as usize] == b {
-                        rle += 1;
-                    }
-
-                    let match_next_len = if let MatchResult::Success(s) = match_next {
-                        s.len()
-                    } else {
-                        0
-                    };
-
-                    if rle > match_token.len() && rle > match_next_len {
-                        match_next =
-                            MatchResult::Success(PreflateTokenReference::new(rle, 1, false));
-                    }
-                }
+                let match_next = self.state.match_token(match_token.len(), 1, max_depth);
 
                 if let MatchResult::Success(m) = match_next {
                     if m.len() > match_token.len() {
@@ -462,8 +425,7 @@ impl<'a, H: RotatingHashTrait> TokenPredictor<'a, H> {
         }
         */
 
-        let hash = self.state.calculate_hash();
-        let match_token = self.state.match_token(hash, 0, 0, self.params.max_chain);
+        let match_token = self.state.match_token(0, 0, self.params.max_chain);
 
         self.pending_reference = None;
 

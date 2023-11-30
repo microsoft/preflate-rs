@@ -89,7 +89,7 @@ fn test_file(filename: &str) {
     let v = read_file(filename);
 
     // Zlib compression with different compression levels
-    for level in 0..9 {
+    for level in 1..9 {
         println!("zlib level: {}", level);
 
         let output = zlibcompress(&v, level);
@@ -101,6 +101,22 @@ fn test_file(filename: &str) {
         f.write_all(minusheader).unwrap();
 
         verifyresult(minusheader);
+    }
+
+    for level in 0..=9 {
+        println!();
+        println!("libdeflate level: {}", level);
+        let output = libdeflate_compress(&v, level);
+
+        // write to file
+        let mut f = File::create(format!(
+            "c:\\temp\\compressed_libdeflate_level{}.deflate",
+            level
+        ))
+        .unwrap();
+        f.write_all(&output).unwrap();
+
+        //verifyresult(&output);
     }
 
     // Zlib compression with different compression levels
@@ -120,19 +136,6 @@ fn test_file(filename: &str) {
         f.write_all(minusheader).unwrap();
 
         verifyresult(minusheader);
-    }
-
-    for level in 1..=1 {
-        println!();
-        println!("libflate level: {}", level);
-        let output = libflate_compress(&v, level);
-
-        // write to file
-        let mut f =
-            File::create(format!("c:\\temp\\compressed_libflate_level{}.bin", level)).unwrap();
-        f.write_all(&output).unwrap();
-
-        verifyresult(&output);
     }
 }
 
@@ -158,7 +161,7 @@ fn zlibcompress(v: &[u8], level: i32) -> Vec<u8> {
     output
 }
 
-fn libflate_compress(in_data: &[u8], level: i32) -> Vec<u8> {
+fn libdeflate_compress(in_data: &[u8], level: i32) -> Vec<u8> {
     unsafe {
         let mut out_data = vec![0; in_data.len() + 1000];
 
