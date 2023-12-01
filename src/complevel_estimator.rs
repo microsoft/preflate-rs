@@ -86,9 +86,9 @@ impl CandidateInfo {
         let mdepth = self.invoke_match_depth(token, window_size, input);
 
         // remove element if the match was impossible due to matching the
-        // content of references in fast mode, where we only add the beginning
-        // of each reference to the hash table, not every subsequent byte.
-        if mdepth != 0xffff {
+        // the hash depth or because in fast mode we can't match partial words
+        // added to the dictionary.
+        if mdepth < 8196 {
             self.max_chain_found = std::cmp::max(self.max_chain_found, mdepth);
 
             if mdepth == 0 {
@@ -104,6 +104,10 @@ impl CandidateInfo {
             /*if input.pos() == 803428 {
                 let mdepth = self.invoke_match_depth(token, window_size, input);
             }*/
+
+            if self.hash_algorithm() == HashAlgorithm::Libdeflate4 {
+                println!("libflate4");
+            }
 
             println!(
                 "removed candidate sl={:?}, mask={}, pos={}, token={:?} hash={:?}, max_chain={}",
@@ -240,7 +244,6 @@ impl<'a> CompLevelEstimatorState<'a> {
             }));
         }
 
-        /*
         // LibFlate4 candidate
         candidates.push(Box::new(CandidateInfo {
             skip_length: None,
@@ -253,7 +256,6 @@ impl<'a> CompLevelEstimatorState<'a> {
             longest_dist_at_hop_0: 0,
             longest_dist_at_hop_1_plus: 0,
         }));
-        */
 
         CompLevelEstimatorState {
             input,

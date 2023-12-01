@@ -48,6 +48,10 @@ impl InternalPosition {
     fn is_valid(&self) -> bool {
         self.pos > 0
     }
+
+    fn dist(&self, pos: InternalPosition) -> u32 {
+        u32::from(self.pos - pos.pos)
+    }
 }
 
 enum HashIterator<'a> {
@@ -81,10 +85,6 @@ impl<'a> HashIterator<'a> {
             Self::Nothing
         }
     }
-
-    fn calc_dist(p1: InternalPosition, p2: InternalPosition) -> u32 {
-        u32::from(p1.pos - p2.pos)
-    }
 }
 
 impl Iterator for HashIterator<'_> {
@@ -104,7 +104,7 @@ impl Iterator for HashIterator<'_> {
                 max_dist,
                 cur_pos,
             } => {
-                let d = Self::calc_dist(*ref_pos, *cur_pos);
+                let d = ref_pos.dist(*cur_pos);
                 if d > *max_dist {
                     *self = HashIterator::Nothing;
                     return None;
@@ -442,40 +442,48 @@ impl<H: RotatingHashTrait> HashChain<H> {
         let ref_pos = InternalPosition::from_absolute(input.pos() + offset, self.total_shift);
 
         let offset = offset;
+        let first_match;
+        let start_pos;
 
         if offset == 0 {
             let curr_hash = self.hash_table.calculate_hash(input);
-            let start_pos = self.hash_table.get_head(curr_hash);
+            start_pos = self.hash_table.get_head(curr_hash);
 
-            HashIterator::new(&self.hash_table.prev, ref_pos, max_dist, start_pos).chain(
-                if let Some(x) = &self.hash_table_3_len {
-                    let curr_hash = x.calculate_hash(input);
-                    let start_pos = x.get_head(curr_hash);
-                    HashIterator::new(&x.prev, ref_pos, cmp::min(4096, max_dist), start_pos)
+            first_match = if let Some(x) = &self.hash_table_3_len {
+                let curr_hash = x.calculate_hash(input);
+                let start_pos = x.get_head(curr_hash);
+
+                if start_pos.is_valid() {
+                    HashIterator::Single {
+                        dist: ref_pos.dist(start_pos),
+                    }
                 } else {
                     HashIterator::Nothing
-                },
-            )
+                }
+            } else {
+                HashIterator::Nothing
+            };
         } else {
             assert_eq!(offset, 1);
 
             let curr_hash = self.hash_table.calculate_hash(input);
             let next_hash = self.hash_table.calculate_hash_next(input);
 
-            let start_pos = self.hash_table.get_head(next_hash);
+            start_pos = self.hash_table.get_head(next_hash);
 
-            if self.hash_table.hash_equal(curr_hash, next_hash) {
+            first_match = if self.hash_table.hash_equal(curr_hash, next_hash) {
                 HashIterator::Single { dist: 1 }
             } else {
                 HashIterator::Nothing
             }
-            .chain(HashIterator::new(
-                &self.hash_table.prev,
-                ref_pos,
-                max_dist,
-                start_pos,
-            ))
         }
+
+        first_match.chain(HashIterator::new(
+            &self.hash_table.prev,
+            ref_pos,
+            max_dist,
+            start_pos,
+        ))
     }
 
     pub fn update_hash<const MAINTAIN_DEPTH: bool>(&mut self, length: u32, input: &PreflateInput) {
@@ -532,15 +540,26 @@ impl<H: RotatingHashTrait> HashChain<H> {
         let end_pos =
             InternalPosition::from_absolute(cur_pos - target_reference.dist(), self.total_shift);
 
-        let result = self.hash_table.match_depth(end_pos, input);
-        if result != 0xffff {
-            result
-        } else {
-            if let Some(x) = &self.hash_table_3_len {
-                x.match_depth(end_pos, input)
+        if let Some(x) = &self.hash_table_3_len {
+            if target_reference.len() == 3 {
+                // libdeflate uses the 3 byte hash table only for a single match attempt
+                // only legal location for the 3 byte hash is at the beginning of the chain, otherwise
+                // we wouldn't find it using the libdeflate algorithm
+                if x.match_depth(end_pos, input) == 0 {
+                    return 0;
+                } else {
+                    return 0xffff;
+                }
             } else {
-                0xffff
+                let d = self.hash_table.match_depth(end_pos, input);
+                if d < 0xffff {
+                    return d + 1;
+                } else {
+                    return d;
+                }
             }
         }
+
+        self.hash_table.match_depth(end_pos, input)
     }
 }

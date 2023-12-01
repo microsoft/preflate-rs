@@ -437,6 +437,8 @@ impl<'a, H: RotatingHashTrait> TokenPredictor<'a, H> {
 
         //self.state.verify_hash(dist_match);
 
+        let match_token2 = self.state.match_token(0, 0, self.params.max_chain);
+
         Err(anyhow::Error::msg(format!(
             "Didnt find a match {:?}",
             match_token
