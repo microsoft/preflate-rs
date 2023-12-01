@@ -10,7 +10,7 @@ use crate::{
     deflate_reader::DeflateReader,
     deflate_writer::DeflateWriter,
     hash_algorithm::{
-        HashAlgorithm, LibdeflateRotatingHash, MiniZHash, RotatingHashTrait, ZlibRotatingHash,
+        HashAlgorithm, LibdeflateRotatingHash4, MiniZHash, RotatingHashTrait, ZlibRotatingHash,
     },
     huffman_calc::HufftreeBitCalc,
     preflate_error::PreflateError,
@@ -43,7 +43,7 @@ pub fn encode_mispredictions(
         )?,
         HashAlgorithm::Libdeflate4 => predict_blocks(
             &deflate.blocks,
-            TokenPredictor::<LibdeflateRotatingHash>::new(&deflate.plain_text, &params),
+            TokenPredictor::<LibdeflateRotatingHash4>::new(&deflate.plain_text, &params),
             encoder,
         )?,
     }
@@ -140,7 +140,7 @@ pub fn decode_mispredictions(
             &mut deflate_writer,
         )?,
         HashAlgorithm::Libdeflate4 => recreate_blocks(
-            TokenPredictor::<LibdeflateRotatingHash>::new(plain_text, &params),
+            TokenPredictor::<LibdeflateRotatingHash4>::new(plain_text, &params),
             decoder,
             &mut deflate_writer,
         )?,

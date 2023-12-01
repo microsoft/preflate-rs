@@ -4,7 +4,7 @@
  *  This software incorporates material from third parties. See NOTICE.txt for details.
  *--------------------------------------------------------------------------------------------*/
 
-use crate::hash_algorithm::{HashAlgorithm, LibdeflateRotatingHash, MiniZHash, ZlibRotatingHash};
+use crate::hash_algorithm::{HashAlgorithm, LibdeflateRotatingHash4, MiniZHash, ZlibRotatingHash};
 use crate::hash_chain::{HashChain, MAX_UPDATE_HASH_BATCH};
 use crate::preflate_constants;
 use crate::preflate_input::PreflateInput;
@@ -33,7 +33,7 @@ pub struct CompLevelInfo {
 enum HashChainType {
     Zlib(HashChain<ZlibRotatingHash>),
     MiniZ(HashChain<MiniZHash>),
-    LibFlate4(HashChain<LibdeflateRotatingHash>),
+    LibFlate4(HashChain<LibdeflateRotatingHash4>),
 }
 
 struct CandidateInfo {
@@ -240,18 +240,20 @@ impl<'a> CompLevelEstimatorState<'a> {
             }));
         }
 
+        /*
         // LibFlate4 candidate
         candidates.push(Box::new(CandidateInfo {
             skip_length: None,
             hash_shift: 0,
             hash_mask: 0xffff,
-            hash_chain: HashChainType::LibFlate4(HashChain::<LibdeflateRotatingHash>::new(
+            hash_chain: HashChainType::LibFlate4(HashChain::<LibdeflateRotatingHash4>::new(
                 0, 0xffff, &input,
             )),
             max_chain_found: 0,
             longest_dist_at_hop_0: 0,
             longest_dist_at_hop_1_plus: 0,
         }));
+        */
 
         CompLevelEstimatorState {
             input,
