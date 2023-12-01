@@ -286,12 +286,12 @@ pub struct AssertDefaultOnlyEncoder {}
 
 #[cfg(test)]
 impl PredictionEncoder for AssertDefaultOnlyEncoder {
-    fn encode_correction(&mut self, _action: CodecCorrection, value: u32) {
-        assert_eq!(0, value);
+    fn encode_correction(&mut self, action: CodecCorrection, value: u32) {
+        assert_eq!(0, value, "unexpected correction {:?}", action);
     }
 
-    fn encode_misprediction(&mut self, _action: CodecMisprediction, value: bool) {
-        assert_eq!(false, value);
+    fn encode_misprediction(&mut self, action: CodecMisprediction, value: bool) {
+        assert_eq!(false, value, "unexpected misprediction {:?}", action);
     }
 
     fn encode_value(&mut self, _value: u16, _max_bits: u8) {}

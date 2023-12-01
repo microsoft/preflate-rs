@@ -31,6 +31,7 @@ impl<'a> PreflateInput<'a> {
 
     pub fn advance(&mut self, l: u32) {
         self.pos += l as i32;
+        debug_assert!(self.pos <= self.data.len() as i32);
     }
 
     pub fn remaining(&self) -> u32 {

@@ -9,9 +9,9 @@ use anyhow::Context;
 use crate::{
     bit_helper::DebugHash,
     cabac_codec::{decode_difference, encode_difference},
-    hash_chain::RotatingHashTrait,
+    hash_algorithm::RotatingHashTrait,
     predictor_state::{MatchResult, PredictorState},
-    preflate_constants::{MAX_MATCH, MIN_MATCH},
+    preflate_constants::MIN_MATCH,
     preflate_parameter_estimator::PreflateParameters,
     preflate_token::{BlockType, PreflateToken, PreflateTokenBlock, PreflateTokenReference},
     statistical_codec::{
@@ -30,30 +30,19 @@ pub struct TokenPredictor<'a, H: RotatingHashTrait> {
 }
 
 impl<'a, H: RotatingHashTrait> TokenPredictor<'a, H> {
-    pub fn new(uncompressed: &'a [u8], params: &PreflateParameters, offset: u32) -> Self {
+    pub fn new(uncompressed: &'a [u8], params: &PreflateParameters) -> Self {
         // Implement constructor logic for PreflateTokenPredictor
         // Initialize fields as necessary
         // Create and initialize PreflatePredictorState, PreflateHashChainExt, and PreflateSeqChain instances
         // Construct the analysisResults vector
 
-        let mut r = Self {
+        Self {
             state: PredictorState::<'a>::new(uncompressed, params),
             params: *params,
             pending_reference: None,
             current_token_count: 0,
             max_token_count: params.max_token_count.into(),
-        };
-
-        if r.state.available_input_size() >= 2 {
-            let b0 = r.state.input_cursor()[0];
-            let b1 = r.state.input_cursor()[1];
-
-            r.state.update_running_hash(b0);
-            r.state.update_running_hash(b1);
         }
-        r.state.update_hash(offset);
-
-        r
     }
 
     pub fn checksum(&self) -> DebugHash {
@@ -114,10 +103,12 @@ impl<'a, H: RotatingHashTrait> TokenPredictor<'a, H> {
                 },
             );
 
-            /*if i == 15 {
-                println!(
-                    "target = {:?}", target_token
-                )
+            /*
+            if i == 7718
+                && *target_token
+                    == PreflateToken::Reference(PreflateTokenReference::new(7, 17, false))
+            {
+                println!("target = {:?}", target_token)
             }*/
 
             let predicted_token = self.predict_token();
@@ -358,21 +349,10 @@ impl<'a, H: RotatingHashTrait> TokenPredictor<'a, H> {
             return PreflateToken::Literal;
         }
 
-        let hash = self.state.calculate_hash();
-
         let m = if let Some(pending) = self.pending_reference {
             MatchResult::Success(pending)
         } else {
-            self.state.match_token(
-                hash,
-                0,
-                0,
-                if self.params.zlib_compatible {
-                    0
-                } else {
-                    1 << self.params.log2_of_max_chain_depth_m1
-                },
-            )
+            self.state.match_token(0, 0, self.params.max_chain)
         };
 
         self.pending_reference = None;
@@ -397,40 +377,15 @@ impl<'a, H: RotatingHashTrait> TokenPredictor<'a, H> {
             if match_token.len() < self.params.max_lazy
                 && self.state.available_input_size() >= match_token.len() + 2
             {
-                let mut match_next;
-                let hash_next = self.state.calculate_hash_next();
+                let mut max_depth = self.params.max_chain;
 
-                match_next = self.state.match_token(
-                    hash_next,
-                    match_token.len(),
-                    1,
-                    if self.params.zlib_compatible {
-                        0
-                    } else {
-                        2 << self.params.log2_of_max_chain_depth_m1
-                    },
-                );
-
-                if self.state.hash_equal(hash_next, hash) {
-                    let max_size = std::cmp::min(self.state.available_input_size() - 1, MAX_MATCH);
-                    let mut rle = 0;
-                    let c = self.state.input_cursor();
-                    let b = c[0];
-                    while rle < max_size && c[1 + rle as usize] == b {
-                        rle += 1;
-                    }
-
-                    let match_next_len = if let MatchResult::Success(s) = match_next {
-                        s.len()
-                    } else {
-                        0
-                    };
-
-                    if rle > match_token.len() && rle > match_next_len {
-                        match_next =
-                            MatchResult::Success(PreflateTokenReference::new(rle, 1, false));
+                if self.params.zlib_compatible {
+                    if match_token.len() >= self.params.good_length {
+                        max_depth >>= 2;
                     }
                 }
+
+                let match_next = self.state.match_token(match_token.len(), 1, max_depth);
 
                 if let MatchResult::Success(m) = match_next {
                     if m.len() > match_token.len() {
@@ -454,7 +409,7 @@ impl<'a, H: RotatingHashTrait> TokenPredictor<'a, H> {
     /// to find a match for the reference.
     fn repredict_reference(
         &mut self,
-        dist_match: Option<PreflateTokenReference>,
+        _dist_match: Option<PreflateTokenReference>,
     ) -> anyhow::Result<PreflateTokenReference> {
         if self.state.current_input_pos() == 0 || self.state.available_input_size() < MIN_MATCH {
             return Err(anyhow::Error::msg(
@@ -462,16 +417,15 @@ impl<'a, H: RotatingHashTrait> TokenPredictor<'a, H> {
             ));
         }
 
+        /*
         if let Some(x) = dist_match {
             if x.dist() == 32653 {
                 println!("dist_match = {:?}", dist_match);
             }
         }
+        */
 
-        let hash = self.state.calculate_hash();
-        let match_token =
-            self.state
-                .match_token(hash, 0, 0, 2 << self.params.log2_of_max_chain_depth_m1);
+        let match_token = self.state.match_token(0, 0, self.params.max_chain);
 
         self.pending_reference = None;
 
@@ -480,8 +434,6 @@ impl<'a, H: RotatingHashTrait> TokenPredictor<'a, H> {
                 return Ok(m);
             }
         }
-
-        //self.state.verify_hash(dist_match);
 
         Err(anyhow::Error::msg(format!(
             "Didnt find a match {:?}",

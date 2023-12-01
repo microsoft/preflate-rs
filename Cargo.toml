@@ -30,6 +30,7 @@ clap = { version="4.4", features = ["derive"]}
 crc32fast = "1.3"
 libz-sys = "1.1"
 flate2 = "1.0"
+libdeflate-sys = "1.19"
 
 [[bin]]
 name = "preflate_util"
