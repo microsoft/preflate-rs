@@ -33,17 +33,17 @@ pub fn encode_mispredictions(
     match params.hash_algorithm {
         HashAlgorithm::MiniZFast => predict_blocks(
             &deflate.blocks,
-            TokenPredictor::<MiniZHash>::new(&deflate.plain_text, &params),
+            TokenPredictor::<MiniZHash>::new(&deflate.plain_text, params),
             encoder,
         )?,
         HashAlgorithm::Zlib => predict_blocks(
             &deflate.blocks,
-            TokenPredictor::<ZlibRotatingHash>::new(&deflate.plain_text, &params),
+            TokenPredictor::<ZlibRotatingHash>::new(&deflate.plain_text, params),
             encoder,
         )?,
         HashAlgorithm::Libdeflate4 => predict_blocks(
             &deflate.blocks,
-            TokenPredictor::<LibdeflateRotatingHash4>::new(&deflate.plain_text, &params),
+            TokenPredictor::<LibdeflateRotatingHash4>::new(&deflate.plain_text, params),
             encoder,
         )?,
     }
@@ -130,17 +130,17 @@ pub fn decode_mispredictions(
 
     let output_blocks = match params.hash_algorithm {
         HashAlgorithm::MiniZFast => recreate_blocks(
-            TokenPredictor::<MiniZHash>::new(plain_text, &params),
+            TokenPredictor::<MiniZHash>::new(plain_text, params),
             decoder,
             &mut deflate_writer,
         )?,
         HashAlgorithm::Zlib => recreate_blocks(
-            TokenPredictor::<ZlibRotatingHash>::new(plain_text, &params),
+            TokenPredictor::<ZlibRotatingHash>::new(plain_text, params),
             decoder,
             &mut deflate_writer,
         )?,
         HashAlgorithm::Libdeflate4 => recreate_blocks(
-            TokenPredictor::<LibdeflateRotatingHash4>::new(plain_text, &params),
+            TokenPredictor::<LibdeflateRotatingHash4>::new(plain_text, params),
             decoder,
             &mut deflate_writer,
         )?,

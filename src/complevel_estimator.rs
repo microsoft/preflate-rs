@@ -4,6 +4,10 @@
  *  This software incorporates material from third parties. See NOTICE.txt for details.
  *--------------------------------------------------------------------------------------------*/
 
+/// This module is design to detect the appropriate overall parameters for the preflate compressor. 
+/// Getting the parameters correct means that the resulting diff between the deflate stream 
+/// and the predicted deflate stream will be as small as possible.
+
 use crate::hash_algorithm::{HashAlgorithm, LibdeflateRotatingHash4, MiniZHash, ZlibRotatingHash};
 use crate::hash_chain::{HashChain, MAX_UPDATE_HASH_BATCH};
 use crate::preflate_constants;

@@ -379,10 +379,8 @@ impl<'a, H: RotatingHashTrait> TokenPredictor<'a, H> {
             {
                 let mut max_depth = self.params.max_chain;
 
-                if self.params.zlib_compatible {
-                    if match_token.len() >= self.params.good_length {
-                        max_depth >>= 2;
-                    }
+                if self.params.zlib_compatible && match_token.len() >= self.params.good_length {
+                    max_depth >>= 2;
                 }
 
                 let match_next = self.state.match_token(match_token.len(), 1, max_depth);

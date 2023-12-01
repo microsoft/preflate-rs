@@ -107,8 +107,8 @@ impl PreflateParameters {
             zlib_compatible,
             window_bits: window_bits.into(),
             hash_shift: hash_shift.into(),
-            hash_mask: hash_mask,
-            max_token_count: max_token_count,
+            hash_mask,
+            max_token_count,
             max_dist_3_matches,
             very_far_matches_detected,
             matches_to_start_detected,
@@ -133,9 +133,9 @@ impl PreflateParameters {
         encoder.encode_value(u16::try_from(self.zlib_compatible).unwrap(), 1);
         encoder.encode_value(u16::try_from(self.window_bits).unwrap(), 8);
         encoder.encode_value(u16::try_from(self.hash_shift).unwrap(), 8);
-        encoder.encode_value(u16::try_from(self.hash_mask).unwrap(), 16);
-        encoder.encode_value(u16::try_from(self.max_token_count).unwrap(), 16);
-        encoder.encode_value(u16::try_from(self.max_dist_3_matches).unwrap(), 16);
+        encoder.encode_value(self.hash_mask, 16);
+        encoder.encode_value(self.max_token_count, 16);
+        encoder.encode_value(self.max_dist_3_matches, 16);
         encoder.encode_value(u16::try_from(self.very_far_matches_detected).unwrap(), 1);
         encoder.encode_value(u16::try_from(self.matches_to_start_detected).unwrap(), 1);
         encoder.encode_value(u16::try_from(self.is_fast_compressor).unwrap(), 1);
@@ -143,7 +143,7 @@ impl PreflateParameters {
         encoder.encode_value(u16::try_from(self.max_lazy).unwrap(), 16);
         encoder.encode_value(u16::try_from(self.nice_length).unwrap(), 16);
         encoder.encode_value(u16::try_from(self.max_chain).unwrap(), 16);
-        encoder.encode_value(u16::try_from(self.hash_algorithm as u16).unwrap(), 4);
+        encoder.encode_value(self.hash_algorithm as u16, 4);
         encoder.encode_value(u16::try_from(self.min_len).unwrap(), 16);
     }
 }

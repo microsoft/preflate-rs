@@ -31,7 +31,7 @@ impl InternalPosition {
         }
     }
 
-    fn to_index(&self) -> usize {
+    fn to_index(self) -> usize {
         usize::from(self.pos)
     }
 
@@ -226,10 +226,8 @@ impl<H: RotatingHashTrait> HashTable<H> {
 
                 self.prev[pos.to_index()] = self.head[h];
                 self.head[h] = pos;
-            } else {
-                if MAINTAIN_DEPTH {
-                    self.chain_depth[pos.to_index()] = -65535;
-                }
+            } else if MAINTAIN_DEPTH {
+                self.chain_depth[pos.to_index()] = -65535;
             }
 
             pos = pos.inc();
@@ -237,7 +235,7 @@ impl<H: RotatingHashTrait> HashTable<H> {
     }
 
     fn reshift<const MAINTAIN_DEPTH: bool, const DELTA: usize>(&mut self) {
-        for i in 0..=usize::from(self.hash_mask) as usize {
+        for i in 0..=usize::from(self.hash_mask) {
             self.head[i] = self.head[i].saturating_sub(DELTA as u16);
         }
 
@@ -441,7 +439,6 @@ impl<H: RotatingHashTrait> HashChain<H> {
     ) -> impl Iterator<Item = u32> + 'a {
         let ref_pos = InternalPosition::from_absolute(input.pos() + offset, self.total_shift);
 
-        let offset = offset;
         let mut first_match = HashIterator::Nothing;
         let start_pos;
 

@@ -95,11 +95,11 @@ fn is_valid_huffman_code_lengths(code_lengths: &[u8]) -> bool {
 }
 
 /// Calculates Huffman code array given an array of Huffman Code Lengths using the RFC 1951 algorithm
-/// Huffman tree will be returned in rgHuffNodes where:
-/// 1. when N is an even number rgHuffNodes[N] is the array index of the '0' child and
-///		rgHuffNodes[N+1] is the array index of the '1' child
-///	2. If rgHuffNodes[i] is less than zero then it is a leaf and the literal alphabet value is -rgHuffNodes[i] + 1
-///	3. The root node index 'N' is rgHuffNodes.Length - 2. Search should start at that node.
+/// Huffman tree will be returned in rg_huff_nodes where:
+/// 1. when N is an even number rg_huff_nodes[N] is the array index of the '0' child and
+///    rg_huff_nodes[N+1] is the array index of the '1' child
+/// 2. If rg_huff_nodes[i] is less than zero then it is a leaf and the literal alphabet value is -rg_huff_nodes[i] + 1
+/// 3. The root node index 'N' is rg_huff_nodes.len() - 2. Search should start at that node.
 pub fn calculate_huffman_code_tree(code_lengths: &[u8]) -> anyhow::Result<Vec<i32>> {
     if !is_valid_huffman_code_lengths(code_lengths) {
         return Err(anyhow::anyhow!("Invalid Huffman code lengths"));

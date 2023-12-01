@@ -197,9 +197,9 @@ impl<'a, H: RotatingHashTrait> PredictorState<'a, H> {
         }
 
         if let Some(r) = best_match {
-            return MatchResult::Success(r);
+            MatchResult::Success(r)
         } else {
-            return MatchResult::NoMoreMatchesFound;
+            MatchResult::NoMoreMatchesFound
         }
     }
 
@@ -275,7 +275,8 @@ impl<'a, H: RotatingHashTrait> PredictorState<'a, H> {
                 }
             }
         }
-        return Err(anyhow::anyhow!("no match found"));
+
+        Err(anyhow::anyhow!("no match found"))
     }
 
     /// debugging function to verify that the hash chain is correct

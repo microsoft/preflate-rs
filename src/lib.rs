@@ -74,7 +74,7 @@ pub fn decompress_deflate_stream(
     let contents = parse_deflate(compressed_data, 1)?;
 
     let mut writecomp = File::create("c:\\temp\\lastop.deflate").unwrap();
-    writecomp.write_all(&compressed_data).unwrap();
+    writecomp.write_all(compressed_data).unwrap();
 
     let mut writeplaintext = File::create("c:\\temp\\lastop.bin").unwrap();
     writeplaintext.write_all(&contents.plain_text).unwrap();
