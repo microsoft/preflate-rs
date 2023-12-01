@@ -9,6 +9,11 @@ sure that the DEFLATE content is recreated exactly as it was written. This is no
 DEFLATE has a large degree of freedom in choosing both how the distance/length pairs are chose
 and how the Huffman trees are created.
 
+The library tries to detect the following compressors to try to do a reasonable job:
+- [Zlib](https://github.com/madler/zlib): Zlib is more or less perfectly compressed.
+- [MiniZ](https://github.com/richgel999/miniz): The fastest mode uses a different hash function.
+- [Libdeflate](https://github.com/ebiggers/libdeflate): This library uses 4 byte hash-tables, which we try to detect.
+
 The general approach is as follows:
 1. Decompress stream into plaintext and a list of blocks containing tokens that are either literals (bytes) or distance, length pairs.
 2. Estimation scan of content to estimate parameters used for compression. The better the estimation, the less corrections we need when we try to recreate the compression.
