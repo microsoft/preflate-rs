@@ -10,6 +10,7 @@ readme = "README.md"
 repository = "https://github.com/microsoft/preflate-rs"
 
 exclude = [
+    "samples/*",
     "tests/*",
     "util/*",
 ]
