@@ -442,39 +442,42 @@ impl<H: RotatingHashTrait> HashChain<H> {
         let ref_pos = InternalPosition::from_absolute(input.pos() + offset, self.total_shift);
 
         let offset = offset;
-        let first_match;
+        let mut first_match = HashIterator::Nothing;
         let start_pos;
 
         if offset == 0 {
             let curr_hash = self.hash_table.calculate_hash(input);
             start_pos = self.hash_table.get_head(curr_hash);
 
-            first_match = if let Some(x) = &self.hash_table_3_len {
+            // libflate 3
+
+            if let Some(x) = &self.hash_table_3_len {
                 let curr_hash = x.calculate_hash(input);
                 let start_pos = x.get_head(curr_hash);
 
                 if start_pos.is_valid() {
-                    HashIterator::Single {
+                    first_match = HashIterator::Single {
                         dist: ref_pos.dist(start_pos),
                     }
-                } else {
-                    HashIterator::Nothing
                 }
-            } else {
-                HashIterator::Nothing
-            };
+            }
         } else {
             assert_eq!(offset, 1);
+
+            // if we are a lazy match, then we haven't added the last byte to the hash yet
+            // which is a problem if that hash should have been part of this hash chain
+            // (ie the same hash chain).
+            //
+            // In order to fix this, we see if the hashes are the same, and then add
+            // a distance 1 item to the iterator that we return.
 
             let curr_hash = self.hash_table.calculate_hash(input);
             let next_hash = self.hash_table.calculate_hash_next(input);
 
             start_pos = self.hash_table.get_head(next_hash);
 
-            first_match = if self.hash_table.hash_equal(curr_hash, next_hash) {
-                HashIterator::Single { dist: 1 }
-            } else {
-                HashIterator::Nothing
+            if self.hash_table.hash_equal(curr_hash, next_hash) {
+                first_match = HashIterator::Single { dist: 1 }
             }
         }
 
@@ -551,12 +554,18 @@ impl<H: RotatingHashTrait> HashChain<H> {
                     return 0xffff;
                 }
             } else {
-                let d = self.hash_table.match_depth(end_pos, input);
-                if d < 0xffff {
-                    return d + 1;
-                } else {
+                let mut d = self.hash_table.match_depth(end_pos, input);
+                if d == 0xffff {
                     return d;
                 }
+
+                // if there was a valid 3 byte match, then the hash chain will be one larger
+                // than the 4 byte hash chain
+                if x.head[x.calculate_hash(input).hash(x.hash_mask)].is_valid() {
+                    d += 1;
+                }
+
+                return d;
             }
         }
 

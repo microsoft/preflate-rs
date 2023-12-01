@@ -547,13 +547,16 @@ fn verify_miniz_compressed_1() {
 }
 
 #[test]
-fn verify_libdeflate_compressed_2() {
-    let v = read_file(&format!("compressed_libdeflate_level2.deflate"));
+fn verify_libdeflate_compressed() {
+    for i in 0..9 {
+        let filename = format!("compressed_libdeflate_level{}.deflate", i);
+        let v = read_file(&filename);
 
-    //let minusheader = &v[2..v.len() - 4];
-    //let crc = Some(u32::from_le_bytes([v[v.len() - 4], v[v.len() - 3], v[v.len() - 2], v[v.len() - 1]]));
+        //let minusheader = &v[2..v.len() - 4];
+        //let crc = Some(u32::from_le_bytes([v[v.len() - 4], v[v.len() - 3], v[v.len() - 2], v[v.len() - 1]]));
 
-    do_analyze(None, &v, true);
+        do_analyze(None, &v, true);
+    }
 }
 
 #[test]
