@@ -4,6 +4,8 @@
  *  This software incorporates material from third parties. See NOTICE.txt for details.
  *--------------------------------------------------------------------------------------------*/
 
+use anyhow::Result;
+
 use crate::{
     bit_helper::bit_length,
     complevel_estimator::estimate_preflate_comp_level,
@@ -60,7 +62,7 @@ pub struct PreflateParameters {
 const FILE_VERSION: u16 = 1;
 
 impl PreflateParameters {
-    pub fn read<D: PredictionDecoder>(decoder: &mut D) -> Self {
+    pub fn read<D: PredictionDecoder>(decoder: &mut D) -> Result<Self> {
         assert_eq!(FILE_VERSION, decoder.decode_value(8));
         let strategy = decoder.decode_value(4);
         let huff_strategy = decoder.decode_value(4);
@@ -93,7 +95,7 @@ impl PreflateParameters {
         const HASH_ALGORITHM_MINIZ_FAST: u16 = HashAlgorithm::MiniZFast as u16;
         const HASH_ALGORITHM_LIBDEFLATE4: u16 = HashAlgorithm::Libdeflate4 as u16;
 
-        PreflateParameters {
+        Ok(PreflateParameters {
             strategy: match strategy {
                 STRATEGY_DEFAULT => PreflateStrategy::Default,
                 STRATEGY_RLE_ONLY => PreflateStrategy::RleOnly,
@@ -127,7 +129,7 @@ impl PreflateParameters {
                 HASH_ALGORITHM_LIBDEFLATE4 => HashAlgorithm::Libdeflate4,
                 _ => panic!("invalid hash algorithm"),
             },
-        }
+        })
     }
 
     pub fn write<E: PredictionEncoder>(&self, encoder: &mut E) {

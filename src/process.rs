@@ -241,7 +241,7 @@ fn analyze_compressed_data_fast(
     let mut cabac_decoder =
         PredictionDecoderCabac::new(VP8Reader::new(Cursor::new(&buffer)).unwrap());
 
-    let params = PreflateParameters::read(&mut cabac_decoder);
+    let params = PreflateParameters::read(&mut cabac_decoder).unwrap();
 
     let (recompressed, _recreated_blocks) =
         decode_mispredictions(&params, &contents.plain_text, &mut cabac_decoder).unwrap();
@@ -309,7 +309,7 @@ fn analyze_compressed_data_verify(
 
     let mut combined_decoder = (debug_decoder, cabac_decoder);
 
-    let params_reread = PreflateParameters::read(&mut combined_decoder);
+    let params_reread = PreflateParameters::read(&mut combined_decoder).unwrap();
     assert_eq!(params, params_reread);
 
     let (recompressed, recreated_blocks) =

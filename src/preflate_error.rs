@@ -10,6 +10,7 @@ use std::fmt::Display;
 #[derive(Debug)]
 pub enum PreflateError {
     ReadDeflate(anyhow::Error),
+    InvalidPredictionData(anyhow::Error),
     AnalyzeFailed(anyhow::Error),
     RecompressFailed(anyhow::Error),
     Mismatch(anyhow::Error),
@@ -24,6 +25,7 @@ pub enum PreflateError {
 impl Display for PreflateError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            PreflateError::InvalidPredictionData(e) => write!(f, "InvalidPredictionData: {}", e),
             PreflateError::ReadDeflate(e) => write!(f, "ReadDeflate: {}", e),
             PreflateError::Mismatch(e) => write!(f, "Mismatch: {}", e),
             PreflateError::ReadBlock(i, e) => write!(f, "ReadBlock[{}]: {}", i, e),
