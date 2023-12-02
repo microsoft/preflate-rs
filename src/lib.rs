@@ -37,10 +37,7 @@ use cabac::{
 use preflate_error::PreflateError;
 use preflate_parameter_estimator::{estimate_preflate_parameters, PreflateParameters};
 use process::parse_deflate;
-use std::{
-    fs::File,
-    io::{Cursor, Write},
-};
+use std::io::Cursor;
 
 use crate::{
     cabac_codec::{PredictionDecoderCabac, PredictionEncoderCabac},

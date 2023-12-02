@@ -100,8 +100,8 @@ fn test_file(filename: &str) {
         let minusheader = &output[2..output.len() - 4];
 
         // write to file
-        let mut f = File::create(format!("c:\\temp\\compressed_zlib_level{}.bin", level)).unwrap();
-        f.write_all(minusheader).unwrap();
+        //let mut f = File::create(format!("c:\\temp\\compressed_zlib_level{}.bin", level)).unwrap();
+        //.write_all(minusheader).unwrap();
 
         verifyresult(minusheader);
     }
