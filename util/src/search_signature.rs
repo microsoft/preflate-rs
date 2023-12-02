@@ -40,8 +40,8 @@ pub fn add_location(
             return 0;
         }
         Ok(r) => {
-            let mut dumpout = File::create(format!("dumpout-{}.bin", start)).unwrap();
-            dumpout.write_all(&compressed[..r.compressed_size]).unwrap();
+            //let mut dumpout = File::create(format!("dumpout-{}.bin", start)).unwrap();
+            //dumpout.write_all(&compressed[..r.compressed_size]).unwrap();
 
             let mut output = Vec::new();
             let mut encoder = zstd::stream::Encoder::new(&mut output, 9).unwrap();

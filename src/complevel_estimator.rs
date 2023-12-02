@@ -4,10 +4,9 @@
  *  This software incorporates material from third parties. See NOTICE.txt for details.
  *--------------------------------------------------------------------------------------------*/
 
-/// This module is design to detect the appropriate overall parameters for the preflate compressor. 
-/// Getting the parameters correct means that the resulting diff between the deflate stream 
+/// This module is design to detect the appropriate overall parameters for the preflate compressor.
+/// Getting the parameters correct means that the resulting diff between the deflate stream
 /// and the predicted deflate stream will be as small as possible.
-
 use crate::hash_algorithm::{HashAlgorithm, LibdeflateRotatingHash4, MiniZHash, ZlibRotatingHash};
 use crate::hash_chain::{HashChain, MAX_UPDATE_HASH_BATCH};
 use crate::preflate_constants;
@@ -107,7 +106,7 @@ impl CandidateInfo {
         } else {
             /*if input.pos() == 803428 {
                 let mdepth = self.invoke_match_depth(token, window_size, input);
-            }*/
+            }
 
             if self.hash_algorithm() == HashAlgorithm::Libdeflate4 {
                 println!("libflate4");
@@ -121,7 +120,7 @@ impl CandidateInfo {
                 token,
                 self.hash_algorithm(),
                 self.max_chain_found,
-            );
+            );*/
             false
         }
     }

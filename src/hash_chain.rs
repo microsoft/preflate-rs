@@ -533,7 +533,7 @@ impl<H: RotatingHashTrait> HashChain<H> {
         let cur_max_dist = std::cmp::min(cur_pos, window_size);
 
         if target_reference.dist() > cur_max_dist {
-            println!("dtl {:?} > {}", target_reference, cur_max_dist);
+            //println!("dtl {:?} > {}", target_reference, cur_max_dist);
             return 0xffff;
         }
 

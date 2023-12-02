@@ -57,8 +57,11 @@ pub struct PreflateParameters {
     pub min_len: u32,
 }
 
+const FILE_VERSION: u16 = 1;
+
 impl PreflateParameters {
     pub fn read<D: PredictionDecoder>(decoder: &mut D) -> Self {
+        assert_eq!(FILE_VERSION, decoder.decode_value(8));
         let strategy = decoder.decode_value(4);
         let huff_strategy = decoder.decode_value(4);
         let zlib_compatible = decoder.decode_value(1) != 0;
@@ -128,6 +131,7 @@ impl PreflateParameters {
     }
 
     pub fn write<E: PredictionEncoder>(&self, encoder: &mut E) {
+        encoder.encode_value(FILE_VERSION, 8);
         encoder.encode_value(self.strategy as u16, 4);
         encoder.encode_value(self.huff_strategy as u16, 4);
         encoder.encode_value(u16::try_from(self.zlib_compatible).unwrap(), 1);

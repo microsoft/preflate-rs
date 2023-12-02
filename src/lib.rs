@@ -73,16 +73,18 @@ pub fn decompress_deflate_stream(
 
     let contents = parse_deflate(compressed_data, 1)?;
 
+    /*
     let mut writecomp = File::create("c:\\temp\\lastop.deflate").unwrap();
     writecomp.write_all(compressed_data).unwrap();
 
     let mut writeplaintext = File::create("c:\\temp\\lastop.bin").unwrap();
     writeplaintext.write_all(&contents.plain_text).unwrap();
+    */
 
     let params = estimate_preflate_parameters(&contents.plain_text, &contents.blocks)
         .map_err(|e| PreflateError::AnalyzeFailed(e))?;
 
-    println!("params: {:?}", params);
+    //println!("params: {:?}", params);
 
     params.write(&mut cabac_encoder);
     encode_mispredictions(&contents, &params, &mut cabac_encoder)?;
