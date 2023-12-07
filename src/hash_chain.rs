@@ -373,12 +373,10 @@ impl<H: RotatingHashTrait> HashChain<H> {
         // if we have a match that needs to be inserted at the head first before
         // we start walking the chain
         let mut first_match = None;
-        let mut cur_pos;
+
+        let curr_hash;
 
         if offset == 0 {
-            let curr_hash = self.hash_table.calculate_hash(input);
-            cur_pos = self.hash_table.get_head(curr_hash);
-
             // for libflate, we look once at the 3 length hash table for a match
             // and then walk the length 4 hash table
             if let Some(x) = &self.hash_table_3_len {
@@ -389,25 +387,28 @@ impl<H: RotatingHashTrait> HashChain<H> {
                     first_match = Some(ref_pos.dist(start_pos));
                 }
             }
+
+            curr_hash = self.hash_table.calculate_hash(input);
         } else {
             assert_eq!(offset, 1);
 
-            // if we are a lazy match, then we haven't added the last byte to the hash yet
+            // current hash is the next hash since we are starting at offset 1
+            curr_hash = self.hash_table.calculate_hash_next(input);
+
+            // we are a lazy match, then we haven't added the last byte to the hash yet
             // which is a problem if that hash should have been part of this hash chain
-            // (ie the same hash chain).
+            // (ie the same hash chain) and we have a limited number of enumerations
+            // throught the hash chain.
             //
             // In order to fix this, we see if the hashes are the same, and then add
             // a distance 1 item to the iterator that we return.
-
-            let curr_hash = self.hash_table.calculate_hash(input);
-            let next_hash = self.hash_table.calculate_hash_next(input);
-
-            cur_pos = self.hash_table.get_head(next_hash);
-
-            if self.hash_table.hash_equal(curr_hash, next_hash) {
+            let prev_hash = self.hash_table.calculate_hash(input);
+            if self.hash_table.hash_equal(prev_hash, curr_hash) {
                 first_match = Some(1);
             }
         }
+
+        let mut cur_pos = self.hash_table.get_head(curr_hash);
 
         std::iter::from_fn(move || {
             if let Some(d) = first_match {
