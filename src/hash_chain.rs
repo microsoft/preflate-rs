@@ -54,75 +54,6 @@ impl InternalPosition {
     }
 }
 
-enum HashIterator<'a> {
-    Nothing,
-    Single {
-        dist: u32,
-    },
-    Chain {
-        chain: &'a [InternalPosition],
-        ref_pos: InternalPosition,
-        max_dist: u32,
-        cur_pos: InternalPosition,
-    },
-}
-
-impl<'a> HashIterator<'a> {
-    fn new(
-        chain: &'a [InternalPosition],
-        ref_pos: InternalPosition,
-        max_dist: u32,
-        start_pos: InternalPosition,
-    ) -> Self {
-        if start_pos.is_valid() {
-            Self::Chain {
-                chain,
-                ref_pos,
-                max_dist,
-                cur_pos: start_pos,
-            }
-        } else {
-            Self::Nothing
-        }
-    }
-}
-
-impl Iterator for HashIterator<'_> {
-    type Item = u32;
-
-    fn next(&mut self) -> Option<u32> {
-        match self {
-            HashIterator::Nothing => None,
-            HashIterator::Single { dist } => {
-                let d = *dist;
-                *self = HashIterator::Nothing;
-                Some(d)
-            }
-            HashIterator::Chain {
-                chain,
-                ref_pos,
-                max_dist,
-                cur_pos,
-            } => {
-                let d = ref_pos.dist(*cur_pos);
-                if d > *max_dist {
-                    *self = HashIterator::Nothing;
-                    return None;
-                }
-
-                let next = chain[cur_pos.to_index()];
-                if next.is_valid() {
-                    *cur_pos = next;
-                } else {
-                    *self = HashIterator::Nothing;
-                }
-
-                Some(d)
-            }
-        }
-    }
-}
-
 #[derive(DefaultBoxed)]
 struct HashTable<H: RotatingHashTrait> {
     /// Represents the head of the hash chain for a given hash value. In order
@@ -439,23 +370,23 @@ impl<H: RotatingHashTrait> HashChain<H> {
     ) -> impl Iterator<Item = u32> + 'a {
         let ref_pos = InternalPosition::from_absolute(input.pos() + offset, self.total_shift);
 
-        let mut first_match = HashIterator::Nothing;
-        let start_pos;
+        // if we have a match that needs to be inserted at the head first before
+        // we start walking the chain
+        let mut first_match = None;
+        let mut cur_pos;
 
         if offset == 0 {
             let curr_hash = self.hash_table.calculate_hash(input);
-            start_pos = self.hash_table.get_head(curr_hash);
+            cur_pos = self.hash_table.get_head(curr_hash);
 
-            // libflate 3
-
+            // for libflate, we look once at the 3 length hash table for a match
+            // and then walk the length 4 hash table
             if let Some(x) = &self.hash_table_3_len {
                 let curr_hash = x.calculate_hash(input);
                 let start_pos = x.get_head(curr_hash);
 
                 if start_pos.is_valid() {
-                    first_match = HashIterator::Single {
-                        dist: ref_pos.dist(start_pos),
-                    }
+                    first_match = Some(ref_pos.dist(start_pos));
                 }
             }
         } else {
@@ -471,19 +402,33 @@ impl<H: RotatingHashTrait> HashChain<H> {
             let curr_hash = self.hash_table.calculate_hash(input);
             let next_hash = self.hash_table.calculate_hash_next(input);
 
-            start_pos = self.hash_table.get_head(next_hash);
+            cur_pos = self.hash_table.get_head(next_hash);
 
             if self.hash_table.hash_equal(curr_hash, next_hash) {
-                first_match = HashIterator::Single { dist: 1 }
+                first_match = Some(1);
             }
         }
 
-        first_match.chain(HashIterator::new(
-            &self.hash_table.prev,
-            ref_pos,
-            max_dist,
-            start_pos,
-        ))
+        std::iter::from_fn(move || {
+            if let Some(d) = first_match {
+                first_match = None;
+                Some(d)
+            } else {
+                if cur_pos.is_valid() {
+                    let d = ref_pos.dist(cur_pos);
+                    cur_pos = self.hash_table.prev[cur_pos.to_index()];
+
+                    if d > max_dist {
+                        cur_pos = InternalPosition::default();
+                        None
+                    } else {
+                        Some(d)
+                    }
+                } else {
+                    None
+                }
+            }
+        })
     }
 
     pub fn update_hash<const MAINTAIN_DEPTH: bool>(&mut self, length: u32, input: &PreflateInput) {
