@@ -366,7 +366,6 @@ impl<H: RotatingHashTrait> HashChain<H> {
         &'a self,
         input: &PreflateInput,
         offset: u32,
-        max_dist: u32,
     ) -> impl Iterator<Item = u32> + 'a {
         let ref_pos = InternalPosition::from_absolute(input.pos() + offset, self.total_shift);
 
@@ -418,13 +417,7 @@ impl<H: RotatingHashTrait> HashChain<H> {
                 if cur_pos.is_valid() {
                     let d = ref_pos.dist(cur_pos);
                     cur_pos = self.hash_table.prev[cur_pos.to_index()];
-
-                    if d > max_dist {
-                        cur_pos = InternalPosition::default();
-                        None
-                    } else {
-                        Some(d)
-                    }
+                    Some(d)
                 } else {
                     None
                 }
