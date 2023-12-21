@@ -1,6 +1,6 @@
 [package]
 name = "preflate-rs"
-version = "0.5.0"
+version = "0.6.0"
 edition = "2021"
 authors = ["Kristof Roomp <kristofr@microsoft.com>"]
 license = "Apache-2.0"
@@ -25,6 +25,7 @@ anyhow = { version="1.0", features = ["backtrace"]}
 byteorder = "1.4"
 cabac = "0.6.0"
 default-boxed = "0.2"
+zstd = "0.13.0"
 
 [dev-dependencies]
 crc32fast = "1.3"
