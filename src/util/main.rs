@@ -30,7 +30,7 @@ fn visit_dirs(item: &Path, results: &mut Results) {
 
         let comp_plain = zstd::bulk::compress(&contents, 9).unwrap();
 
-        let recreate = decompress_zstd(&comp_preflate, 40 * 1024 * 1024).unwrap();
+        let recreate = decompress_zstd(&comp_preflate).unwrap();
 
         assert_eq!(contents, recreate);
 

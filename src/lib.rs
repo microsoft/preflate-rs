@@ -36,7 +36,7 @@ use preflate_error::PreflateError;
 use preflate_parameter_estimator::{estimate_preflate_parameters, PreflateParameters};
 use process::parse_deflate;
 use scan_deflate::search_for_deflate_streams;
-use std::io::Cursor;
+use std::io::{Cursor, Read};
 
 use crate::{
     cabac_codec::{PredictionDecoderCabac, PredictionEncoderCabac},
@@ -314,8 +314,13 @@ pub fn compress_zstd(zlib_compressed_data: &[u8]) -> Vec<u8> {
 
 /// decompresses the Zstd compressed data and then recompresses the result back
 /// to the original Zlib compressed streams.
-pub fn decompress_zstd(compressed_data: &[u8], capacity: usize) -> Result<Vec<u8>, PreflateError> {
-    let compressed_data = zstd::bulk::decompress(compressed_data, capacity)
+pub fn decompress_zstd(compressed_data: &[u8]) -> Result<Vec<u8>, PreflateError> {
+    let mut reader =
+        zstd::stream::Decoder::new(compressed_data).map_err(|e| PreflateError::ZstdError(e))?;
+
+    let mut compressed_data = Vec::new();
+    reader
+        .read_to_end(&mut compressed_data)
         .map_err(|e| PreflateError::ZstdError(e))?;
 
     recreated_zlib_chunks(&compressed_data)
@@ -383,7 +388,7 @@ fn verify_zip_compress_zstd() {
 
     let compressed = compress_zstd(&v);
 
-    let recreated = decompress_zstd(&compressed, 256 * 1024 * 1024).unwrap();
+    let recreated = decompress_zstd(&compressed).unwrap();
 
     assert!(v == recreated);
     println!(
