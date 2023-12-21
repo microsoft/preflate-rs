@@ -31,10 +31,7 @@ mod token_predictor;
 mod tree_predictor;
 
 use anyhow::{self};
-use cabac::{
-    debug::{DebugReader, DebugWriter},
-    vp8::{VP8Reader, VP8Writer},
-};
+use cabac::vp8::{VP8Reader, VP8Writer};
 use preflate_error::PreflateError;
 use preflate_parameter_estimator::{estimate_preflate_parameters, PreflateParameters};
 use process::parse_deflate;
@@ -145,6 +142,8 @@ pub fn decompress_deflate_stream_assert(
     compressed_data: &[u8],
     verify: bool,
 ) -> Result<DecompressResult, PreflateError> {
+    use cabac::debug::{DebugReader, DebugWriter};
+
     let mut cabac_encoded = Vec::new();
 
     let mut cabac_encoder =
@@ -191,6 +190,8 @@ pub fn recompress_deflate_stream_assert(
     plain_text: &[u8],
     prediction_corrections: &[u8],
 ) -> Result<Vec<u8>, PreflateError> {
+    use cabac::debug::DebugReader;
+
     let mut cabac_decoder = PredictionDecoderCabac::new(
         DebugReader::new(Cursor::new(&prediction_corrections)).unwrap(),
     );
