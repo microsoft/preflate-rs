@@ -20,6 +20,8 @@ pub enum PreflateError {
     RecreateBlock(usize, anyhow::Error),
     RecreateTree(usize, anyhow::Error),
     EncodeBlock(usize, anyhow::Error),
+    InvalidCompressedWrapper,
+    ZstdError(std::io::Error),
 }
 
 impl Display for PreflateError {
@@ -36,6 +38,8 @@ impl Display for PreflateError {
             PreflateError::EncodeBlock(i, e) => write!(f, "EncodeBlock[{}]: {}", i, e),
             PreflateError::RecompressFailed(e) => write!(f, "RecompressFailed: {}", e),
             PreflateError::AnalyzeFailed(e) => write!(f, "AnalyzeFailed: {}", e),
+            PreflateError::InvalidCompressedWrapper => write!(f, "InvalidCompressedWrapper"),
+            PreflateError::ZstdError(e) => write!(f, "ZstdError: {}", e),
         }
     }
 }
