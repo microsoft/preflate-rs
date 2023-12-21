@@ -121,8 +121,11 @@ impl<H: RotatingHashTrait> HashTable<H> {
 
     fn init_running_hash(&mut self, input: &PreflateInput) {
         self.running_hash = H::default();
-        for i in 0..H::num_hash_bytes() - 1 {
-            self.update_running_hash(input.cur_char(i as i32));
+
+        if input.remaining() >= H::num_hash_bytes().into() {
+            for i in 0..H::num_hash_bytes() - 1 {
+                self.update_running_hash(input.cur_char(i as i32));
+            }
         }
     }
 

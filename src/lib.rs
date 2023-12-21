@@ -265,6 +265,8 @@ pub fn expand_zlib_chunks(compressed_data: &[u8]) -> Vec<u8> {
             &mut plain_text,
             &compressed_data[prev.start + prev.data.compressed_size..],
         );
+    } else {
+        append_with_length(&mut plain_text, &compressed_data[..]);
     }
 
     plain_text
@@ -323,6 +325,18 @@ pub fn decompress_zstd(compressed_data: &[u8], capacity: usize) -> Result<Vec<u8
 fn verify_zip_compress() {
     use crate::process::read_file;
     let v = read_file("samplezip.zip");
+
+    let expanded = expand_zlib_chunks(&v);
+
+    let recompressed = recreated_zlib_chunks(&expanded).unwrap();
+
+    assert!(v == recompressed);
+}
+
+#[test]
+fn verify_zip_inv() {
+    use crate::process::read_file;
+    let v = read_file("ara.pdf");
 
     let expanded = expand_zlib_chunks(&v);
 
