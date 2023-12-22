@@ -1,6 +1,6 @@
 [package]
 name = "preflate-rs"
-version = "0.6.0"
+version = "0.7.0"
 edition = "2021"
 authors = ["Kristof Roomp <kristofr@microsoft.com>"]
 license = "Apache-2.0"
@@ -32,3 +32,7 @@ crc32fast = "1.3"
 libz-sys = "1.1"
 flate2 = "1.0"
 libdeflate-sys = "1.19"
+
+[[bin]]
+name = "preflate_util"
+path = "src/util/main.rs"

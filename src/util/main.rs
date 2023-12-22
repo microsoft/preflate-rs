@@ -9,47 +9,57 @@ struct Results {
     original_size: u64,
     preflate_size: u64,
     zstd_size: u64,
-    file_count: u64,
+    file_count_worked: u64,
+    file_count_total: u64,
 }
 
 fn visit_dirs(item: &Path, results: &mut Results) {
     if item.is_dir() {
-        for entry in fs::read_dir(item).unwrap() {
-            let entry = entry.unwrap();
-            let path = entry.path();
-            if entry.metadata().unwrap().len() > 1024 * 1024 * 4 {
-                continue;
-            }
+        if let Ok(dir_entries) = fs::read_dir(item) {
+            for entry in dir_entries {
+                if let Ok(entry) = entry {
+                    let path = entry.path();
+                    if entry.metadata().unwrap().len() > 1024 * 1024 * 4 {
+                        continue;
+                    }
 
-            visit_dirs(&path, results);
+                    visit_dirs(&path, results);
+                }
+            }
         }
     } else {
-        let contents = read_file(item.to_str().unwrap());
+        if let Ok(contents) = read_file(item.to_str().unwrap()) {
+            let comp_preflate = compress_zstd(&contents);
 
-        let comp_preflate = compress_zstd(&contents);
+            let comp_plain_zstd = zstd::bulk::compress(&contents, 9).unwrap();
 
-        let comp_plain = zstd::bulk::compress(&contents, 9).unwrap();
+            let recreate = decompress_zstd(&comp_preflate).unwrap();
 
-        let recreate = decompress_zstd(&comp_preflate).unwrap();
+            assert_eq!(contents, recreate);
 
-        assert_eq!(contents, recreate);
+            // if preflate didn't help, then just use the plain zstd compression size
+            if comp_preflate.len() > comp_plain_zstd.len() {
+                results.preflate_size += comp_plain_zstd.len() as u64;
+            } else {
+                results.file_count_worked += 1;
+                results.preflate_size += comp_preflate.len() as u64;
+            }
 
-        results.original_size += contents.len() as u64;
-        results.preflate_size += comp_preflate.len() as u64;
-        results.zstd_size += comp_plain.len() as u64;
-
-        results.file_count += 1;
+            results.file_count_total += 1;
+            results.zstd_size += comp_plain_zstd.len() as u64;
+            results.original_size += contents.len() as u64;
+        }
     }
 }
 
-fn read_file(filename: &str) -> Vec<u8> {
+fn read_file(filename: &str) -> Result<Vec<u8>, std::io::Error> {
     println!("reading {0}", filename);
-    let mut f = File::open(filename).unwrap();
+    let mut f = File::open(filename)?;
 
     let mut content = Vec::new();
-    f.read_to_end(&mut content).unwrap();
+    f.read_to_end(&mut content)?;
 
-    content
+    Ok(content)
 }
 
 fn main() {
@@ -62,5 +72,5 @@ fn main() {
     println!("original size: {:>10}", results.original_size);
     println!("preflate size: {:>10}", results.preflate_size);
     println!("zstd size:     {:>10}", results.zstd_size);
-    println!("file count:    {:>10}", results.file_count);
+    println!("file count:    {:>10}/{}", results.file_count_worked, results.file_count_total);
 }
