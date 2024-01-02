@@ -124,7 +124,12 @@ impl<'a, H: RotatingHashTrait> PredictorState<'a, H> {
     pub fn match_token(&self, prev_len: u32, offset: u32, max_depth: u32) -> MatchResult {
         let start_pos = self.current_input_pos() + offset;
         let max_len = std::cmp::min(self.total_input_size() - start_pos, MAX_MATCH);
-        if max_len < std::cmp::max(prev_len + 1, MIN_MATCH) {
+        if max_len
+            < std::cmp::max(
+                prev_len + 1,
+                std::cmp::max(H::num_hash_bytes() as u32, MIN_MATCH),
+            )
+        {
             return MatchResult::NoInput;
         }
 

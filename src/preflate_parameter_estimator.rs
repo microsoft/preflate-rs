@@ -94,6 +94,7 @@ impl PreflateParameters {
         const HASH_ALGORITHM_ZLIB: u16 = HashAlgorithm::Zlib as u16;
         const HASH_ALGORITHM_MINIZ_FAST: u16 = HashAlgorithm::MiniZFast as u16;
         const HASH_ALGORITHM_LIBDEFLATE4: u16 = HashAlgorithm::Libdeflate4 as u16;
+        const HASH_ALGORITHM_ZLIBNG: u16 = HashAlgorithm::ZlibNG as u16;
 
         Ok(PreflateParameters {
             strategy: match strategy {
@@ -127,6 +128,7 @@ impl PreflateParameters {
                 HASH_ALGORITHM_ZLIB => HashAlgorithm::Zlib,
                 HASH_ALGORITHM_MINIZ_FAST => HashAlgorithm::MiniZFast,
                 HASH_ALGORITHM_LIBDEFLATE4 => HashAlgorithm::Libdeflate4,
+                HASH_ALGORITHM_ZLIBNG => HashAlgorithm::ZlibNG,
                 _ => panic!("invalid hash algorithm"),
             },
         })

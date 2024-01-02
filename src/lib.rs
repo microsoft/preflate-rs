@@ -57,6 +57,9 @@ pub struct DecompressResult {
     /// the number of bytes that were processed from the compressed stream (this will be exactly the
     /// data that will be recreated using the cabac_encoded data)
     pub compressed_size: usize,
+
+    /// the parameters that were used to compress the stream
+    pub parameters: PreflateParameters,
 }
 
 impl core::fmt::Debug for DecompressResult {
@@ -117,6 +120,7 @@ pub fn decompress_deflate_stream(
         plain_text: contents.plain_text,
         prediction_corrections: cabac_encoded,
         compressed_size: contents.compressed_size,
+        parameters: params,
     })
 }
 
@@ -180,6 +184,7 @@ pub fn decompress_deflate_stream_assert(
         plain_text: contents.plain_text,
         prediction_corrections: cabac_encoded,
         compressed_size: contents.compressed_size,
+        parameters: params,
     })
 }
 
