@@ -5,10 +5,10 @@
  *--------------------------------------------------------------------------------------------*/
 
 use std::fs::File;
-use std::io::{Cursor, Read, Write};
+use std::io::{Read, Write};
 use std::path::Path;
+use std::{mem, ptr};
 
-use flate2::{read::ZlibEncoder, Compression};
 use libdeflate_sys::{libdeflate_alloc_compressor, libdeflate_deflate_compress};
 use preflate_rs::{decompress_deflate_stream, recompress_deflate_stream};
 
@@ -75,6 +75,24 @@ fn test_sample1() {
     test_file("sample1.bin");
 }
 
+#[test]
+fn libzng() {
+    let level = 1;
+
+    let v = read_file("sample1.bin");
+    println!("zlibng level: {}", level);
+
+    let output = libngzsys_compress(&v, level);
+
+    let minusheader = &output[2..output.len() - 4];
+
+    // write to file
+    //let mut f = File::create(format!("c:\\temp\\compressed_zlib_level{}.bin", level)).unwrap();
+    //.write_all(minusheader).unwrap();
+
+    verifyresult(minusheader);
+}
+
 fn verifyresult(compressed_data: &[u8]) {
     let result = decompress_deflate_stream(compressed_data, true).unwrap();
     let recomp =
@@ -85,6 +103,8 @@ fn verifyresult(compressed_data: &[u8]) {
         compressed_data.len(),
         result.prediction_corrections.len()
     );
+    println!("parameters: {:?}", result.parameters);
+
     assert_eq!(compressed_data, recomp);
 }
 
@@ -92,10 +112,24 @@ fn test_file(filename: &str) {
     let v = read_file(filename);
 
     // Zlib compression with different compression levels
-    for level in 1..9 {
+    for level in 1..=9 {
         println!("zlib level: {}", level);
 
-        let output = zlibcompress(&v, level);
+        let output = libzsys_compress(&v, level, Strategy::Default);
+
+        let minusheader = &output[2..output.len() - 4];
+
+        // write to file
+        //let mut f = File::create(format!("c:\\temp\\compressed_zlib_level{}.bin", level)).unwrap();
+        //.write_all(minusheader).unwrap();
+
+        verifyresult(minusheader);
+    }
+
+    for s in [Strategy::HuffmanOnly, Strategy::Rle, Strategy::Fixed].iter() {
+        println!("zlib level: strategy {:?}", s);
+
+        let output = libzsys_compress(&v, 1, *s);
 
         let minusheader = &output[2..output.len() - 4];
 
@@ -107,7 +141,6 @@ fn test_file(filename: &str) {
     }
 
     for level in 0..=9 {
-        println!();
         println!("libdeflate level: {}", level);
         let output = libdeflate_compress(&v, level);
 
@@ -119,47 +152,96 @@ fn test_file(filename: &str) {
         .unwrap();
         f.write_all(&output).unwrap();
 
-        //verifyresult(&output);
+        verifyresult(&output);
     }
 
-    // Zlib compression with different compression levels
-    for level in 1..10 {
-        println!("Flate2 level: {}", level);
-        let mut zlib_encoder: ZlibEncoder<Cursor<&Vec<u8>>> =
-            ZlibEncoder::new(Cursor::new(&v), Compression::new(level));
-        let mut output = Vec::new();
-        zlib_encoder.read_to_end(&mut output).unwrap();
+    // Zlibng compression with different compression levels
+    for level in 1..=2 {
+        println!("zlibng level: {}", level);
 
-        // skip header and final crc
+        let output = libngzsys_compress(&v, level);
+
         let minusheader = &output[2..output.len() - 4];
 
         // write to file
-        let mut f =
-            File::create(format!("c:\\temp\\compressed_flate2_level{}.bin", level)).unwrap();
-        f.write_all(minusheader).unwrap();
+        //let mut f = File::create(format!("c:\\temp\\compressed_zlib_level{}.bin", level)).unwrap();
+        //.write_all(minusheader).unwrap();
 
         verifyresult(minusheader);
     }
+
+    for level in 0..=9 {
+        println!("miniz_oxide level: {}", level);
+        let output = miniz_oxide::deflate::compress_to_vec(&v, level);
+        verifyresult(&output);
+    }
 }
 
-fn zlibcompress(v: &[u8], level: i32) -> Vec<u8> {
+#[derive(Debug, Copy, Clone)]
+enum Strategy {
+    Default,
+    HuffmanOnly,
+    Rle,
+    Fixed,
+}
+
+fn libzsys_compress(input_data: &[u8], level: i32, strategy: Strategy) -> Vec<u8> {
     let mut output = Vec::new();
-    output.resize(v.len() + 1000, 0);
-
-    let mut output_size = output.len() as libz_sys::uLongf;
-
+    use libz_sys::*;
     unsafe {
-        let err = libz_sys::compress2(
-            output.as_mut_ptr(),
-            &mut output_size,
-            v.as_ptr(),
-            v.len() as libz_sys::uLongf,
-            level,
+        let mut z_stream = z_stream {
+            next_in: input_data.as_ptr() as *mut _,
+            avail_in: input_data.len() as u32,
+            next_out: ptr::null_mut(),
+            avail_out: 0,
+            total_in: 0,
+            total_out: 0,
+            msg: std::ptr::null_mut(),
+            state: std::ptr::null_mut(),
+            zalloc: mem::transmute(ptr::null::<u8>()),
+            zfree: mem::transmute(ptr::null::<u8>()),
+            opaque: ptr::null_mut(),
+            data_type: 0,
+            adler: 0,
+            reserved: 0,
+        };
+
+        // Additional options for deflateInit2_
+        let window_bits = 15; // Default window size
+        let mem_level = 8; // Default memory level
+        let version = zlibVersion(); // Use the zlib version defined in the library
+        let stream_size = std::mem::size_of::<z_stream>() as i32;
+
+        // Initialize the zlib stream for compression with deflateInit2_
+
+        assert_eq!(
+            deflateInit2_(
+                &mut z_stream,
+                level,
+                Z_DEFLATED,
+                window_bits,
+                mem_level,
+                match strategy {
+                    Strategy::Default => Z_DEFAULT_STRATEGY,
+                    Strategy::HuffmanOnly => Z_HUFFMAN_ONLY,
+                    Strategy::Rle => Z_RLE,
+                    Strategy::Fixed => Z_FIXED,
+                },
+                version,
+                stream_size
+            ),
+            Z_OK
         );
 
-        assert_eq!(err, 0, "shouldn't fail zlib compression");
+        output.resize(input_data.len() + 1000, 0);
 
-        output.set_len(output_size as usize);
+        z_stream.next_out = output.as_mut_ptr() as *mut _;
+        z_stream.avail_out = output.len() as u32;
+
+        assert_eq!(Z_STREAM_END, deflate(&mut z_stream, Z_FINISH));
+        output.set_len(z_stream.total_out as usize);
+
+        assert_eq!(Z_OK, deflateEnd(&mut z_stream));
     }
     output
 }
@@ -181,4 +263,63 @@ fn libdeflate_compress(in_data: &[u8], level: i32) -> Vec<u8> {
         out_data.resize(sz, 0);
         out_data
     }
+}
+
+fn libngzsys_compress(input_data: &[u8], level: i32) -> Vec<u8> {
+    let mut output = Vec::new();
+    use libz_ng_sys::{
+        deflate, deflateEnd, deflateInit2_, z_stream, zlibVersion, Z_DEFAULT_STRATEGY, Z_DEFLATED,
+        Z_FINISH, Z_OK, Z_STREAM_END,
+    };
+    unsafe {
+        let mut z_stream = z_stream {
+            next_in: input_data.as_ptr() as *mut _,
+            avail_in: input_data.len() as u32,
+            next_out: ptr::null_mut(),
+            avail_out: 0,
+            total_in: 0,
+            total_out: 0,
+            msg: std::ptr::null_mut(),
+            state: std::ptr::null_mut(),
+            zalloc: mem::transmute(ptr::null::<u8>()),
+            zfree: mem::transmute(ptr::null::<u8>()),
+            opaque: ptr::null_mut(),
+            data_type: 0,
+            adler: 0,
+            reserved: 0,
+        };
+
+        // Additional options for deflateInit2_
+        let window_bits = 15; // Default window size
+        let mem_level = 8; // Default memory level
+        let version = zlibVersion(); // Use the zlib version defined in the library
+        let stream_size = std::mem::size_of::<z_stream>() as i32;
+
+        // Initialize the zlib stream for compression with deflateInit2_
+
+        assert_eq!(
+            deflateInit2_(
+                &mut z_stream,
+                level,
+                Z_DEFLATED,
+                window_bits,
+                mem_level,
+                Z_DEFAULT_STRATEGY,
+                version,
+                stream_size
+            ),
+            Z_OK
+        );
+
+        output.resize(input_data.len() + 1000, 0);
+
+        z_stream.next_out = output.as_mut_ptr() as *mut _;
+        z_stream.avail_out = output.len() as u32;
+
+        assert_eq!(Z_STREAM_END, deflate(&mut z_stream, Z_FINISH));
+        output.set_len(z_stream.total_out as usize);
+
+        assert_eq!(Z_OK, deflateEnd(&mut z_stream));
+    }
+    output
 }

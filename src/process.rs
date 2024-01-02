@@ -10,7 +10,8 @@ use crate::{
     deflate_reader::DeflateReader,
     deflate_writer::DeflateWriter,
     hash_algorithm::{
-        HashAlgorithm, LibdeflateRotatingHash4, MiniZHash, RotatingHashTrait, ZlibRotatingHash,
+        HashAlgorithm, LibdeflateRotatingHash4, MiniZHash, RotatingHashTrait, ZlibNGHash,
+        ZlibRotatingHash,
     },
     huffman_calc::HufftreeBitCalc,
     preflate_error::PreflateError,
@@ -44,6 +45,11 @@ pub fn encode_mispredictions(
         HashAlgorithm::Libdeflate4 => predict_blocks(
             &deflate.blocks,
             TokenPredictor::<LibdeflateRotatingHash4>::new(&deflate.plain_text, params),
+            encoder,
+        )?,
+        HashAlgorithm::ZlibNG => predict_blocks(
+            &deflate.blocks,
+            TokenPredictor::<ZlibNGHash>::new(&deflate.plain_text, params),
             encoder,
         )?,
     }
@@ -141,6 +147,11 @@ pub fn decode_mispredictions(
         )?,
         HashAlgorithm::Libdeflate4 => recreate_blocks(
             TokenPredictor::<LibdeflateRotatingHash4>::new(plain_text, params),
+            decoder,
+            &mut deflate_writer,
+        )?,
+        HashAlgorithm::ZlibNG => recreate_blocks(
+            TokenPredictor::<ZlibNGHash>::new(plain_text, params),
             decoder,
             &mut deflate_writer,
         )?,
@@ -516,8 +527,8 @@ fn verify_miniz1_compressed_perfect() {
         huff_strategy: PreflateHuffStrategy::Dynamic,
         zlib_compatible: true,
         window_bits: 15,
-        hash_shift: 5,
-        hash_mask: 0x7fff,
+        hash_shift: 0,
+        hash_mask: crate::hash_algorithm::MINIZ_LEVEL1_HASH_SIZE_MASK,
         max_token_count: 16383,
         max_dist_3_matches: 8192,
         very_far_matches_detected: false,

@@ -4,6 +4,7 @@ pub enum HashAlgorithm {
     Zlib,
     MiniZFast,
     Libdeflate4,
+    ZlibNG,
 }
 pub trait RotatingHashTrait: Default + Copy + Clone {
     fn hash(&self, mask: u16) -> usize;
@@ -42,10 +43,13 @@ pub struct MiniZHash {
     hash: u32,
 }
 
+/// Size of hash chain for fast compression mode.
+pub const MINIZ_LEVEL1_HASH_SIZE_MASK: u16 = 4095;
+
 impl RotatingHashTrait for MiniZHash {
     fn hash(&self, mask: u16) -> usize {
-        debug_assert!(mask == 0x7fff);
-        ((self.hash ^ (self.hash >> 17)) & 0x7fff) as usize
+        debug_assert!(mask == MINIZ_LEVEL1_HASH_SIZE_MASK);
+        ((self.hash ^ (self.hash >> 17)) & u32::from(MINIZ_LEVEL1_HASH_SIZE_MASK)) as usize
     }
 
     fn append(&self, c: u8, _hash_shift: u32) -> Self {
@@ -115,5 +119,31 @@ impl RotatingHashTrait for LibdeflateRotatingHash3 {
 
     fn num_hash_bytes() -> u16 {
         3
+    }
+}
+
+#[derive(Default, Copy, Clone)]
+pub struct ZlibNGHash {
+    hash: u32,
+}
+
+impl RotatingHashTrait for ZlibNGHash {
+    fn hash(&self, mask: u16) -> usize {
+        debug_assert!(mask == 0xffff);
+        (self.hash.wrapping_mul(2654435761) >> 16) as usize
+    }
+
+    fn append(&self, c: u8, _hash_shift: u32) -> Self {
+        Self {
+            hash: ((c as u32) << 24) | (self.hash >> 8),
+        }
+    }
+
+    fn hash_algorithm() -> HashAlgorithm {
+        HashAlgorithm::ZlibNG
+    }
+
+    fn num_hash_bytes() -> u16 {
+        4
     }
 }

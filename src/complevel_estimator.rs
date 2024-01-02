@@ -7,7 +7,10 @@
 /// This module is design to detect the appropriate overall parameters for the preflate compressor.
 /// Getting the parameters correct means that the resulting diff between the deflate stream
 /// and the predicted deflate stream will be as small as possible.
-use crate::hash_algorithm::{HashAlgorithm, LibdeflateRotatingHash4, MiniZHash, ZlibRotatingHash};
+use crate::hash_algorithm::{
+    HashAlgorithm, LibdeflateRotatingHash4, MiniZHash, ZlibNGHash, ZlibRotatingHash,
+    MINIZ_LEVEL1_HASH_SIZE_MASK,
+};
 use crate::hash_chain::{HashChain, MAX_UPDATE_HASH_BATCH};
 use crate::preflate_constants;
 use crate::preflate_input::PreflateInput;
@@ -37,6 +40,7 @@ enum HashChainType {
     Zlib(HashChain<ZlibRotatingHash>),
     MiniZ(HashChain<MiniZHash>),
     LibFlate4(HashChain<LibdeflateRotatingHash4>),
+    ZlibNG(HashChain<ZlibNGHash>),
 }
 
 struct CandidateInfo {
@@ -51,11 +55,45 @@ struct CandidateInfo {
 }
 
 impl CandidateInfo {
+    fn new(
+        hash_mask: u16,
+        hash_shift: u32,
+        skip_length: Option<u32>,
+        hash_algorithm: HashAlgorithm,
+        input: &PreflateInput,
+    ) -> Self {
+        CandidateInfo {
+            hash_mask,
+            hash_shift,
+            skip_length,
+            hash_chain: match hash_algorithm {
+                HashAlgorithm::Zlib => HashChainType::Zlib(HashChain::<ZlibRotatingHash>::new(
+                    hash_shift, hash_mask, &input,
+                )),
+                HashAlgorithm::MiniZFast => {
+                    HashChainType::MiniZ(HashChain::<MiniZHash>::new(hash_shift, hash_mask, &input))
+                }
+                HashAlgorithm::Libdeflate4 => {
+                    HashChainType::LibFlate4(HashChain::<LibdeflateRotatingHash4>::new(
+                        hash_shift, hash_mask, &input,
+                    ))
+                }
+                HashAlgorithm::ZlibNG => HashChainType::ZlibNG(HashChain::<ZlibNGHash>::new(
+                    hash_shift, hash_mask, &input,
+                )),
+            },
+            longest_dist_at_hop_0: 0,
+            longest_dist_at_hop_1_plus: 0,
+            max_chain_found: 0,
+        }
+    }
+
     fn invoke_update_hash(&mut self, len: u32, input: &PreflateInput) {
         match self.hash_chain {
             HashChainType::Zlib(ref mut h) => h.update_hash::<true>(len, input),
             HashChainType::MiniZ(ref mut h) => h.update_hash::<true>(len, input),
             HashChainType::LibFlate4(ref mut h) => h.update_hash::<true>(len, input),
+            HashChainType::ZlibNG(ref mut h) => h.update_hash::<true>(len, input),
         }
     }
 
@@ -64,6 +102,7 @@ impl CandidateInfo {
             HashChainType::Zlib(ref mut h) => h.skip_hash::<true>(len, input),
             HashChainType::MiniZ(ref mut h) => h.skip_hash::<true>(len, input),
             HashChainType::LibFlate4(ref mut h) => h.skip_hash::<true>(len, input),
+            HashChainType::ZlibNG(ref mut h) => h.skip_hash::<true>(len, input),
         }
     }
 
@@ -77,6 +116,7 @@ impl CandidateInfo {
             HashChainType::Zlib(ref mut h) => h.match_depth(token, window_size, input),
             HashChainType::MiniZ(ref mut h) => h.match_depth(token, window_size, input),
             HashChainType::LibFlate4(ref mut h) => h.match_depth(token, window_size, input),
+            HashChainType::ZlibNG(ref mut h) => h.match_depth(token, window_size, input),
         }
     }
 
@@ -158,6 +198,7 @@ impl CandidateInfo {
             HashChainType::Zlib(_) => HashAlgorithm::Zlib,
             HashChainType::MiniZ(_) => HashAlgorithm::MiniZFast,
             HashChainType::LibFlate4(_) => HashAlgorithm::Libdeflate4,
+            HashChainType::ZlibNG(_) => HashAlgorithm::ZlibNG,
         }
     }
 }
@@ -208,57 +249,52 @@ impl<'a> CompLevelEstimatorState<'a> {
         // add the ZlibRotatingHash candidates
         for config in &FAST_PREFLATE_PARSER_SETTINGS {
             for &(hash_shift, hash_mask) in hashparameters.iter() {
-                candidates.push(Box::new(CandidateInfo {
-                    skip_length: Some(config.max_lazy),
+                candidates.push(Box::new(CandidateInfo::new(
                     hash_mask,
                     hash_shift,
-                    hash_chain: HashChainType::Zlib(HashChain::<ZlibRotatingHash>::new(
-                        hash_shift, hash_mask, &input,
-                    )),
-                    max_chain_found: 0,
-                    longest_dist_at_hop_0: 0,
-                    longest_dist_at_hop_1_plus: 0,
-                }));
+                    Some(config.max_lazy),
+                    HashAlgorithm::Zlib,
+                    &input,
+                )));
             }
         }
 
-        candidates.push(Box::new(CandidateInfo {
-            skip_length: Some(2),
-            hash_shift: 5,
-            hash_mask: 32767,
-            hash_chain: HashChainType::MiniZ(HashChain::<MiniZHash>::new(5, 32767, &input)),
-            max_chain_found: 0,
-            longest_dist_at_hop_0: 0,
-            longest_dist_at_hop_1_plus: 0,
-        }));
+        candidates.push(Box::new(CandidateInfo::new(
+            MINIZ_LEVEL1_HASH_SIZE_MASK,
+            0,
+            Some(2),
+            HashAlgorithm::MiniZFast,
+            &input,
+        )));
 
         // slow compressor candidates
         for (hash_shift, hash_mask) in [(5, 32767), (4, 2047)] {
-            candidates.push(Box::new(CandidateInfo {
-                skip_length: None,
-                hash_shift,
+            candidates.push(Box::new(CandidateInfo::new(
                 hash_mask,
-                hash_chain: HashChainType::Zlib(HashChain::<ZlibRotatingHash>::new(
-                    hash_shift, hash_mask, &input,
-                )),
-                max_chain_found: 0,
-                longest_dist_at_hop_0: 0,
-                longest_dist_at_hop_1_plus: 0,
-            }));
+                hash_shift,
+                None,
+                HashAlgorithm::Zlib,
+                &input,
+            )));
         }
 
         // LibFlate4 candidate
-        candidates.push(Box::new(CandidateInfo {
-            skip_length: None,
-            hash_shift: 0,
-            hash_mask: 0xffff,
-            hash_chain: HashChainType::LibFlate4(HashChain::<LibdeflateRotatingHash4>::new(
-                0, 0xffff, &input,
-            )),
-            max_chain_found: 0,
-            longest_dist_at_hop_0: 0,
-            longest_dist_at_hop_1_plus: 0,
-        }));
+        candidates.push(Box::new(CandidateInfo::new(
+            0xffff,
+            0,
+            None,
+            HashAlgorithm::Libdeflate4,
+            &input,
+        )));
+
+        // ZlibNG slow candidate
+        candidates.push(Box::new(CandidateInfo::new(
+            0xffff,
+            0,
+            None,
+            HashAlgorithm::ZlibNG,
+            &input,
+        )));
 
         CompLevelEstimatorState {
             input,
