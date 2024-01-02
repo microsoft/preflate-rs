@@ -16,6 +16,7 @@ use crate::preflate_constants;
 use crate::preflate_input::PreflateInput;
 use crate::preflate_parse_config::{FAST_PREFLATE_PARSER_SETTINGS, SLOW_PREFLATE_PARSER_SETTINGS};
 use crate::preflate_token::{BlockType, PreflateToken, PreflateTokenBlock, PreflateTokenReference};
+use crate::skip_length_estimator::estimate_skip_length;
 
 #[derive(Default)]
 pub struct CompLevelInfo {
@@ -26,9 +27,9 @@ pub struct CompLevelInfo {
     pub very_far_matches_detected: bool,
     pub max_dist_3_matches: u16,
     pub min_len: u32,
+    pub skip_length: Option<u32>,
     pub hash_mask: u16,
     pub hash_shift: u32,
-    pub is_fast_compressor: bool,
     pub hash_algorithm: HashAlgorithm,
     pub good_length: u32,
     pub max_lazy: u32,
@@ -229,6 +230,14 @@ impl<'a> CompLevelEstimatorState<'a> {
         plain_text: &'a [u8],
         blocks: &'a Vec<PreflateTokenBlock>,
     ) -> Self {
+        let max_distance = estimate_skip_length(blocks);
+
+        let skip_length = if max_distance < 255 {
+            Some(max_distance)
+        } else {
+            None
+        };
+
         let hash_bits = mem_level + 7;
         let mem_hash_shift = (hash_bits + 2) / 3;
         let mem_hash_mask = ((1u32 << hash_bits) - 1) as u16;
@@ -246,33 +255,19 @@ impl<'a> CompLevelEstimatorState<'a> {
 
         let mut candidates: Vec<Box<CandidateInfo>> = Vec::new();
 
-        // add the ZlibRotatingHash candidates
-        for config in &FAST_PREFLATE_PARSER_SETTINGS {
-            for &(hash_shift, hash_mask) in hashparameters.iter() {
-                candidates.push(Box::new(CandidateInfo::new(
-                    hash_mask,
-                    hash_shift,
-                    Some(config.max_lazy),
-                    HashAlgorithm::Zlib,
-                    &input,
-                )));
-            }
-        }
-
         candidates.push(Box::new(CandidateInfo::new(
             MINIZ_LEVEL1_HASH_SIZE_MASK,
             0,
-            Some(2),
+            skip_length,
             HashAlgorithm::MiniZFast,
             &input,
         )));
 
-        // slow compressor candidates
         for (hash_shift, hash_mask) in [(5, 32767), (4, 2047)] {
             candidates.push(Box::new(CandidateInfo::new(
                 hash_mask,
                 hash_shift,
-                None,
+                skip_length,
                 HashAlgorithm::Zlib,
                 &input,
             )));
@@ -282,16 +277,16 @@ impl<'a> CompLevelEstimatorState<'a> {
         candidates.push(Box::new(CandidateInfo::new(
             0xffff,
             0,
-            None,
+            skip_length,
             HashAlgorithm::Libdeflate4,
             &input,
         )));
 
-        // ZlibNG slow candidate
+        // ZlibNG candidate
         candidates.push(Box::new(CandidateInfo::new(
             0xffff,
             0,
-            None,
+            skip_length,
             HashAlgorithm::ZlibNG,
             &input,
         )));
@@ -396,28 +391,24 @@ impl<'a> CompLevelEstimatorState<'a> {
 
         let hash_mask = candidate.hash_mask();
         let hash_shift = candidate.hash_shift();
+        let skip_length = candidate.skip_length;
         let max_chain = candidate.max_chain_found() + 1;
         let hash_algorithm = candidate.hash_algorithm();
         let longest_dist_at_hop_0 = candidate.longest_dist_at_hop_0;
         let longest_dist_at_hop_1_plus = candidate.longest_dist_at_hop_1_plus;
-        let fast_compressor;
 
         match candidate.skip_length() {
-            Some(skip_length) => {
-                max_lazy = skip_length;
-                fast_compressor = true;
-
+            Some(_skip_length) => {
                 for config in &FAST_PREFLATE_PARSER_SETTINGS {
                     if candidate.max_chain_found() < config.max_chain {
                         good_length = config.good_length;
                         nice_length = config.nice_length;
+                        max_lazy = 0;
                         break;
                     }
                 }
             }
             None => {
-                fast_compressor = false;
-
                 for config in &SLOW_PREFLATE_PARSER_SETTINGS {
                     if candidate.max_chain_found() < config.max_chain {
                         good_length = config.good_length;
@@ -448,7 +439,7 @@ impl<'a> CompLevelEstimatorState<'a> {
             max_dist_3_matches: self.longest_len_3_dist as u16,
             hash_mask,
             hash_shift,
-            is_fast_compressor: fast_compressor,
+            skip_length,
             good_length,
             max_lazy,
             nice_length,
@@ -457,7 +448,7 @@ impl<'a> CompLevelEstimatorState<'a> {
             hash_algorithm,
             zlib_compatible: !self.match_to_start
                 && !very_far_matches
-                && (self.longest_len_3_dist < 4096 || fast_compressor),
+                && (self.longest_len_3_dist < 4096 || skip_length.is_some()),
         })
     }
 

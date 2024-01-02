@@ -26,6 +26,7 @@ mod preflate_stream_info;
 mod preflate_token;
 mod process;
 mod scan_deflate;
+mod skip_length_estimator;
 mod statistical_codec;
 mod token_predictor;
 mod tree_predictor;

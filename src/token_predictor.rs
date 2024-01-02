@@ -362,7 +362,7 @@ impl<'a, H: RotatingHashTrait> TokenPredictor<'a, H> {
                 return PreflateToken::Literal;
             }
 
-            if self.params.is_fast_compressor {
+            if self.params.skip_length.is_some() {
                 return PreflateToken::Reference(match_token);
             }
 
@@ -455,8 +455,12 @@ impl<'a, H: RotatingHashTrait> TokenPredictor<'a, H> {
 
                 // max_lazy is reused by the fast compressor to mean that if a match is larger than a
                 // certain size it should not be added to the dictionary in order to save on speed.
-                if self.params.is_fast_compressor && t.len() > self.params.max_lazy {
-                    self.state.skip_hash(t.len());
+                if let Some(skip) = self.params.skip_length {
+                    if t.len() > skip {
+                        self.state.skip_hash(t.len());
+                    } else {
+                        self.state.update_hash(t.len());
+                    }
                 } else {
                     self.state.update_hash(t.len());
                 }

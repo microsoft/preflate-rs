@@ -9,7 +9,7 @@ use crate::hash_algorithm::RotatingHashTrait;
 use crate::hash_chain::{HashChain, MAX_UPDATE_HASH_BATCH};
 use crate::preflate_constants::{MAX_MATCH, MIN_LOOKAHEAD, MIN_MATCH};
 use crate::preflate_input::PreflateInput;
-use crate::preflate_parameter_estimator::PreflateParameters;
+use crate::preflate_parameter_estimator::{PreflateParameters, PreflateStrategy};
 use crate::preflate_token::PreflateTokenReference;
 use std::cmp;
 use std::sync::atomic;
@@ -146,9 +146,20 @@ impl<'a, H: RotatingHashTrait> PredictorState<'a, H> {
             cur_max_dist_hop0 = cmp::min(max_dist_to_start, self.window_size());
             cur_max_dist_hop1_plus = cur_max_dist_hop0;
         } else {
-            let max_dist: u32 = self.window_size() - MIN_LOOKAHEAD + 1;
-            cur_max_dist_hop0 = cmp::min(max_dist_to_start, max_dist);
-            cur_max_dist_hop1_plus = cmp::min(max_dist_to_start, max_dist - 1);
+            match self.params.strategy {
+                PreflateStrategy::HuffOnly | PreflateStrategy::Store => {
+                    return MatchResult::NoMoreMatchesFound;
+                }
+                PreflateStrategy::RleOnly => {
+                    cur_max_dist_hop0 = 1;
+                    cur_max_dist_hop1_plus = 1;
+                }
+                _ => {
+                    let max_dist: u32 = self.window_size() - MIN_LOOKAHEAD + 1;
+                    cur_max_dist_hop0 = cmp::min(max_dist_to_start, max_dist);
+                    cur_max_dist_hop1_plus = cmp::min(max_dist_to_start, max_dist - 1);
+                }
+            }
         }
 
         let nice_len = std::cmp::min(self.params.nice_length, max_len);
