@@ -13,6 +13,7 @@ use crate::{
     preflate_constants::{self},
     preflate_stream_info::{extract_preflate_info, PreflateStreamInfo},
     preflate_token::PreflateTokenBlock,
+    skip_length_estimator::DictionaryAddPolicy,
     statistical_codec::{PredictionDecoder, PredictionEncoder},
 };
 
@@ -58,7 +59,7 @@ pub struct PreflateParameters {
 
     /// if something, then we use the "fast" compressor, which only adds smaller substrings
     /// to the dictionary
-    pub skip_length: Option<u32>,
+    pub add_policy: DictionaryAddPolicy,
 }
 
 const FILE_VERSION: u16 = 1;
@@ -83,10 +84,11 @@ impl PreflateParameters {
         let hash_algorithm = decoder.decode_value(4);
         let min_len = decoder.decode_value(16);
 
-        let skip_length = if decoder.decode_value(1) == 0 {
-            None
-        } else {
-            Some(u32::from(decoder.decode_value(8)))
+        let add_policy = match decoder.decode_value(2) {
+            0 => DictionaryAddPolicy::AddAll,
+            1 => DictionaryAddPolicy::AddFirst(u16::from(decoder.decode_value(8))),
+            2 => DictionaryAddPolicy::AddFirstAndLast(u16::from(decoder.decode_value(8))),
+            _ => panic!("invalid add policy"),
         };
 
         const STRATEGY_DEFAULT: u16 = PreflateStrategy::Default as u16;
@@ -130,7 +132,7 @@ impl PreflateParameters {
             nice_length: nice_length.into(),
             max_chain: max_chain.into(),
             min_len: min_len.into(),
-            skip_length: skip_length,
+            add_policy,
             hash_algorithm: match hash_algorithm {
                 HASH_ALGORITHM_ZLIB => HashAlgorithm::Zlib,
                 HASH_ALGORITHM_MINIZ_FAST => HashAlgorithm::MiniZFast,
@@ -159,11 +161,17 @@ impl PreflateParameters {
         encoder.encode_value(u16::try_from(self.max_chain).unwrap(), 16);
         encoder.encode_value(self.hash_algorithm as u16, 4);
         encoder.encode_value(u16::try_from(self.min_len).unwrap(), 16);
-        if let Some(v) = self.skip_length {
-            encoder.encode_value(1, 1);
-            encoder.encode_value(v as u16, 8);
-        } else {
-            encoder.encode_value(0, 1);
+
+        match self.add_policy {
+            DictionaryAddPolicy::AddAll => encoder.encode_value(0, 2),
+            DictionaryAddPolicy::AddFirst(v) => {
+                encoder.encode_value(1, 2);
+                encoder.encode_value(v as u16, 8);
+            }
+            DictionaryAddPolicy::AddFirstAndLast(v) => {
+                encoder.encode_value(2, 2);
+                encoder.encode_value(v as u16, 8);
+            }
         }
     }
 }
@@ -245,7 +253,7 @@ pub fn estimate_preflate_parameters(
         max_chain: cl.max_chain,
         hash_algorithm: cl.hash_algorithm,
         min_len: cl.min_len,
-        skip_length: cl.skip_length,
+        add_policy: cl.add_policy,
     })
 }
 
@@ -268,7 +276,10 @@ fn verify_zlib_recognition() {
         } else if i >= 1 && i < 4 {
             let config = &FAST_PREFLATE_PARSER_SETTINGS[i as usize - 1];
             assert_eq!(params.good_length, config.good_length);
-            assert_eq!(params.skip_length, Some(config.max_lazy));
+            assert_eq!(
+                params.add_policy,
+                DictionaryAddPolicy::AddFirst(config.max_lazy as u16)
+            );
             assert_eq!(params.nice_length, config.nice_length);
             assert!(params.max_chain <= config.max_chain);
             assert_eq!(params.strategy, PreflateStrategy::Default);
@@ -277,7 +288,7 @@ fn verify_zlib_recognition() {
             assert_eq!(params.good_length, config.good_length);
             assert_eq!(params.max_lazy, config.max_lazy);
             assert_eq!(params.nice_length, config.nice_length);
-            assert_eq!(params.skip_length, None);
+            assert_eq!(params.add_policy, DictionaryAddPolicy::AddAll);
             assert!(params.max_chain <= config.max_chain);
             assert_eq!(params.strategy, PreflateStrategy::Default);
         }

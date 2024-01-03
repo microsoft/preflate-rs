@@ -14,6 +14,7 @@ use crate::{
     preflate_constants::MIN_MATCH,
     preflate_parameter_estimator::PreflateParameters,
     preflate_token::{BlockType, PreflateToken, PreflateTokenBlock, PreflateTokenReference},
+    skip_length_estimator::DictionaryAddPolicy,
     statistical_codec::{
         CodecCorrection, CodecMisprediction, PredictionDecoder, PredictionEncoder,
     },
@@ -362,10 +363,6 @@ impl<'a, H: RotatingHashTrait> TokenPredictor<'a, H> {
                 return PreflateToken::Literal;
             }
 
-            if self.params.skip_length.is_some() {
-                return PreflateToken::Reference(match_token);
-            }
-
             // match is too small and far way to be worth encoding as a distance/length pair.
             if match_token.len() == 3 && match_token.dist() > self.params.max_dist_3_matches.into()
             {
@@ -455,14 +452,24 @@ impl<'a, H: RotatingHashTrait> TokenPredictor<'a, H> {
 
                 // max_lazy is reused by the fast compressor to mean that if a match is larger than a
                 // certain size it should not be added to the dictionary in order to save on speed.
-                if let Some(skip) = self.params.skip_length {
-                    if t.len() > skip {
-                        self.state.skip_hash(t.len());
-                    } else {
+                match self.params.add_policy {
+                    DictionaryAddPolicy::AddAll => {
                         self.state.update_hash(t.len());
                     }
-                } else {
-                    self.state.update_hash(t.len());
+                    DictionaryAddPolicy::AddFirst(limit) => {
+                        if t.len() > limit.into() {
+                            self.state.skip_hash(t.len());
+                        } else {
+                            self.state.update_hash(t.len());
+                        }
+                    }
+                    DictionaryAddPolicy::AddFirstAndLast(limit) => {
+                        if t.len() > limit.into() {
+                            self.state.skip_hash(t.len());
+                        } else {
+                            self.state.update_hash(t.len());
+                        }
+                    }
                 }
             }
         }

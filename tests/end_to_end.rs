@@ -77,7 +77,7 @@ fn test_sample1() {
 
 #[test]
 fn libzng() {
-    let level = 1;
+    let level = 3;
 
     let v = read_file("sample1.bin");
     println!("zlibng level: {}", level);

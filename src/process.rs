@@ -454,6 +454,7 @@ fn verify_zlib_compressed_perfect() {
         preflate_parameter_estimator::PreflateHuffStrategy,
         preflate_parameter_estimator::PreflateStrategy,
         preflate_parse_config::{FAST_PREFLATE_PARSER_SETTINGS, SLOW_PREFLATE_PARSER_SETTINGS},
+        skip_length_estimator::DictionaryAddPolicy,
         statistical_codec::{AssertDefaultOnlyDecoder, AssertDefaultOnlyEncoder},
     };
 
@@ -464,17 +465,18 @@ fn verify_zlib_compressed_perfect() {
         let v = read_file(&format!("compressed_zlib_level{}.deflate", i));
 
         let config;
-        let skip_length;
+        let add_policy;
         let max_dist_3_matches;
         let max_lazy;
         if i < 4 {
             config = &FAST_PREFLATE_PARSER_SETTINGS[i as usize - 1];
-            skip_length = Some(config.max_lazy);
+            add_policy =
+                crate::skip_length_estimator::DictionaryAddPolicy::AddFirst(config.max_lazy as u16);
             max_dist_3_matches = 32768;
             max_lazy = 0;
         } else {
             config = &SLOW_PREFLATE_PARSER_SETTINGS[i as usize - 4];
-            skip_length = None;
+            add_policy = DictionaryAddPolicy::AddAll;
             max_dist_3_matches = 4096;
             max_lazy = config.max_lazy;
         }
@@ -496,7 +498,7 @@ fn verify_zlib_compressed_perfect() {
             max_chain: config.max_chain,
             hash_algorithm: HashAlgorithm::Zlib,
             min_len: 3,
-            skip_length,
+            add_policy,
         };
 
         let contents = parse_deflate(&v, 1).unwrap();
@@ -515,6 +517,7 @@ fn verify_miniz1_compressed_perfect() {
     use crate::{
         cabac_codec::{PredictionDecoderCabac, PredictionEncoderCabac},
         preflate_parameter_estimator::{PreflateHuffStrategy, PreflateStrategy},
+        skip_length_estimator::DictionaryAddPolicy,
     };
     use cabac::vp8::{VP8Reader, VP8Writer};
 
@@ -542,7 +545,7 @@ fn verify_miniz1_compressed_perfect() {
         max_chain: 2,
         hash_algorithm: HashAlgorithm::MiniZFast,
         min_len: 3,
-        skip_length: Some(0),
+        add_policy: DictionaryAddPolicy::AddFirst(0),
     };
 
     encode_mispredictions(&contents, &params, &mut cabac_encoder).unwrap();

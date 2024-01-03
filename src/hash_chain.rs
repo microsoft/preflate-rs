@@ -130,7 +130,9 @@ impl<H: RotatingHashTrait> HashTable<H> {
         self.running_hash = self.running_hash.append(b, self.hash_shift);
     }
 
-    fn update_chain<const MAINTAIN_DEPTH: bool, const IS_FAST_COMPRESSOR: bool>(
+    fn update_chain<const MAINTAIN_DEPTH: bool, 
+        const ONLY_FIRST : bool,
+        const INCLUDE_LAST : bool>(
         &mut self,
         chars: &[u8],
         mut pos: InternalPosition,
@@ -143,10 +145,11 @@ impl<H: RotatingHashTrait> HashTable<H> {
             return;
         }
 
-        for i in 0..cmp::min(length as usize, chars.len() - offset) {
+        let last = cmp::min(length as usize, chars.len() - offset);
+        for i in 0.. last {
             self.update_running_hash(chars[i + offset]);
 
-            if !IS_FAST_COMPRESSOR || i == 0 {
+            if !ONLY_FIRST || i == 0 || (INCLUDE_LAST && i == last - 1) {
                 let h = self.get_running_hash();
 
                 if MAINTAIN_DEPTH {

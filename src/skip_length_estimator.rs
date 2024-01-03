@@ -19,10 +19,23 @@ pub struct SkipLengthEstimator {
     pub max_distance: u32,
 }
 
-pub fn estimate_skip_length(token_blocks: &[PreflateTokenBlock]) -> u32 {
-    let mut current_window = vec![0u8; 32768];
+#[derive(Default, Eq, PartialEq, Debug, Clone, Copy)]
+pub enum DictionaryAddPolicy {
+    /// Add all substrings of a match to the dictionary
+    #[default]
+    AddAll,
+    /// Add only the first substring of a match to the dictionary that are larger than the limit
+    AddFirst(u16),
+    /// Add only the first and last substring of a match to the dictionary that are larger than the limit
+    AddFirstAndLast(u16),
+}
+
+pub fn estimate_skip_length(token_blocks: &[PreflateTokenBlock]) -> DictionaryAddPolicy {
+    let mut current_window = vec![0u16; 32768];
     let mut max_distance: u32 = 0;
+    let mut max_distance_last_add = 0;
     let mut current_offset: u32 = 0;
+    let mut counters = [0u32; 259];
 
     for token_block in token_blocks {
         for token in token_block.tokens.iter() {
@@ -35,19 +48,32 @@ pub fn estimate_skip_length(token_blocks: &[PreflateTokenBlock]) -> u32 {
                     let match_length =
                         u32::from(current_window[((current_offset - r.dist()) & 0x7fff) as usize]);
 
-                    max_distance = std::cmp::max(max_distance, match_length);
+                    counters[(match_length & 0x7fff) as usize] += 1;
 
-                    let l = std::cmp::min(r.len(), 255);
+                    max_distance = std::cmp::max(max_distance, match_length & 0x7fff);
+                    if (match_length & 0x8000) == 0 {
+                        max_distance_last_add =
+                            std::cmp::max(max_distance_last_add, match_length & 0x7fff);
+                    }
+
                     current_window[(current_offset & 0x7fff) as usize] = 0;
                     current_offset += 1;
 
-                    for _i in 1..r.len() {
-                        current_window[(current_offset & 0x7fff) as usize] = l as u8;
+                    for i in 1..r.len() {
+                        current_window[(current_offset & 0x7fff) as usize] =
+                            r.len() as u16 | if i == r.len() - 1 { 0x8000 } else { 0 };
                         current_offset += 1;
                     }
                 }
             }
         }
     }
-    max_distance
+
+    if max_distance_last_add < max_distance {
+        DictionaryAddPolicy::AddFirstAndLast(max_distance_last_add as u16)
+    } else if max_distance < 258 {
+        DictionaryAddPolicy::AddFirst(max_distance as u16)
+    } else {
+        DictionaryAddPolicy::AddAll
+    }
 }
