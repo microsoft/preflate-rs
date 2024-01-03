@@ -6,12 +6,11 @@
 
 use crate::bit_helper::DebugHash;
 use crate::hash_algorithm::RotatingHashTrait;
-use crate::hash_chain::{HashChain, MAX_UPDATE_HASH_BATCH};
+use crate::hash_chain::{DictionaryAddPolicy, HashChain, MAX_UPDATE_HASH_BATCH};
 use crate::preflate_constants::{MAX_MATCH, MIN_LOOKAHEAD, MIN_MATCH};
 use crate::preflate_input::PreflateInput;
 use crate::preflate_parameter_estimator::{PreflateParameters, PreflateStrategy};
 use crate::preflate_token::PreflateTokenReference;
-use crate::skip_length_estimator::DictionaryAddPolicy;
 use std::cmp;
 use std::sync::atomic;
 
@@ -56,62 +55,21 @@ impl<'a, H: RotatingHashTrait> PredictorState<'a, H> {
         self.hash.checksum(checksum);
     }
 
-    pub fn update_hash_with_policy( &mut self, mut length : u32, add_policy : DictionaryAddPolicy)
-    {
-        match add_policy {
-            DictionaryAddPolicy::AddAll => {
-                self.update_hash(length);
-            }
-            DictionaryAddPolicy::AddFirst(limit) => {
-                if length > limit.into()
-                {
-                    self.update_hash(length);
-                } else {
-                    while length > 0 {
-                        let batch_len = cmp::min(length, MAX_UPDATE_HASH_BATCH);
-                        self.hash.skip_hash::<true>(batch_len, &self.input);
-            
-                        self.input.advance(batch_len);
-                        length -= batch_len;
-                    }
-                }
-            }
-            DictionaryAddPolicy::AddFirstAndLast(limit) => {
-                if length > limit.into()
-                {
-                    self.update_hash(length);
-                } else {
-                    length -= 1;
-                    while length > 0 {
-                        let batch_len = cmp::min(length, MAX_UPDATE_HASH_BATCH);
-                        self.hash.skip_hash::<true>(batch_len, &self.input);
-            
-                        self.input.advance(batch_len);
-                        length -= batch_len;
-                    }                   
-                    self.hash.update_hash::<true>(1, &self.input);
-                    self.input.advance(1);
-                }
-            }
-        }
+    pub fn update_hash_with_policy(&mut self, length: u32, add_policy: DictionaryAddPolicy) {
+        self.hash
+            .update_hash_with_policy::<false>(length, &self.input, add_policy);
+        self.input.advance(length);
     }
 
-    pub fn update_hash(&mut self, mut length: u32) {
+    pub fn update_hash_batch(&mut self, mut length: u32) {
         while length > 0 {
             let batch_len = cmp::min(length, MAX_UPDATE_HASH_BATCH);
 
-            self.hash.update_hash::<true>(batch_len, &self.input);
-
-            self.input.advance(batch_len);
-            length -= batch_len;
-        }
-    }
-
-    pub fn skip_hash(&mut self, mut length: u32) {
-        while length > 0 {
-            let batch_len = cmp::min(length, MAX_UPDATE_HASH_BATCH);
-            self.hash.skip_hash::<true>(batch_len, &self.input);
-
+            self.hash.update_hash_with_policy::<false>(
+                batch_len,
+                &self.input,
+                DictionaryAddPolicy::AddAll,
+            );
             self.input.advance(batch_len);
             length -= batch_len;
         }

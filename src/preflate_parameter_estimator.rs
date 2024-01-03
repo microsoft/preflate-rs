@@ -10,10 +10,10 @@ use crate::{
     bit_helper::bit_length,
     complevel_estimator::estimate_preflate_comp_level,
     hash_algorithm::HashAlgorithm,
+    hash_chain::DictionaryAddPolicy,
     preflate_constants::{self},
     preflate_stream_info::{extract_preflate_info, PreflateStreamInfo},
     preflate_token::PreflateTokenBlock,
-    skip_length_estimator::DictionaryAddPolicy,
     statistical_codec::{PredictionDecoder, PredictionEncoder},
 };
 

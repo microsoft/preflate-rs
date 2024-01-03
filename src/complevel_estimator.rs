@@ -11,12 +11,12 @@ use crate::hash_algorithm::{
     HashAlgorithm, LibdeflateRotatingHash4, MiniZHash, ZlibNGHash, ZlibRotatingHash,
     MINIZ_LEVEL1_HASH_SIZE_MASK,
 };
-use crate::hash_chain::{HashChain, MAX_UPDATE_HASH_BATCH};
+use crate::hash_chain::{DictionaryAddPolicy, HashChain, MAX_UPDATE_HASH_BATCH};
 use crate::preflate_constants;
 use crate::preflate_input::PreflateInput;
 use crate::preflate_parse_config::{FAST_PREFLATE_PARSER_SETTINGS, SLOW_PREFLATE_PARSER_SETTINGS};
 use crate::preflate_token::{BlockType, PreflateToken, PreflateTokenBlock, PreflateTokenReference};
-use crate::skip_length_estimator::{estimate_skip_length, DictionaryAddPolicy};
+use crate::skip_length_estimator::estimate_skip_length;
 
 #[derive(Default)]
 pub struct CompLevelInfo {
@@ -89,21 +89,25 @@ impl CandidateInfo {
         }
     }
 
-    fn invoke_update_hash(&mut self, len: u32, input: &PreflateInput, add_policy : DictionaryAddPolicy) {
+    fn invoke_update_hash(
+        &mut self,
+        len: u32,
+        input: &PreflateInput,
+        add_policy: DictionaryAddPolicy,
+    ) {
         match self.hash_chain {
-            HashChainType::Zlib(ref mut h) => h.update_hash::<true>(len, input),
-            HashChainType::MiniZ(ref mut h) => h.update_hash::<true>(len, input),
-            HashChainType::LibFlate4(ref mut h) => h.update_hash::<true>(len, input),
-            HashChainType::ZlibNG(ref mut h) => h.update_hash::<true>(len, input),
-        }
-    }
-
-    fn invoke_skip_hash(&mut self, len: u32, input: &PreflateInput) {
-        match self.hash_chain {
-            HashChainType::Zlib(ref mut h) => h.skip_hash::<true>(len, input),
-            HashChainType::MiniZ(ref mut h) => h.skip_hash::<true>(len, input),
-            HashChainType::LibFlate4(ref mut h) => h.skip_hash::<true>(len, input),
-            HashChainType::ZlibNG(ref mut h) => h.skip_hash::<true>(len, input),
+            HashChainType::Zlib(ref mut h) => {
+                h.update_hash_with_policy::<true>(len, input, add_policy)
+            }
+            HashChainType::MiniZ(ref mut h) => {
+                h.update_hash_with_policy::<true>(len, input, add_policy)
+            }
+            HashChainType::LibFlate4(ref mut h) => {
+                h.update_hash_with_policy::<true>(len, input, add_policy)
+            }
+            HashChainType::ZlibNG(ref mut h) => {
+                h.update_hash_with_policy::<true>(len, input, add_policy)
+            }
         }
     }
 
@@ -287,7 +291,7 @@ impl<'a> CompLevelEstimatorState<'a> {
             let batch_len = std::cmp::min(length, MAX_UPDATE_HASH_BATCH);
 
             for i in &mut self.candidates {
-                i.invoke_update_hash(batch_len, &self.input);
+                i.invoke_update_hash(batch_len, &self.input, DictionaryAddPolicy::AddAll);
             }
 
             self.input.advance(batch_len);
@@ -332,7 +336,7 @@ impl<'a> CompLevelEstimatorState<'a> {
                     }
                     PreflateToken::Reference(r) => {
                         self.check_match(r);
-                        self.skip_or_update_hash(r.len());
+                        self.update_hash(r.len());
                     }
                 }
             }

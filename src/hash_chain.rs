@@ -17,6 +17,21 @@ use crate::{
 
 pub const MAX_UPDATE_HASH_BATCH: u32 = 0x180;
 
+pub const UPDATE_MODE_ALL: u32 = 0;
+pub const UPDATE_MODE_FIRST: u32 = 1;
+pub const UPDATE_MODE_FIRST_AND_LAST: u32 = 2;
+
+#[derive(Default, Eq, PartialEq, Debug, Clone, Copy)]
+pub enum DictionaryAddPolicy {
+    /// Add all substrings of a match to the dictionary
+    #[default]
+    AddAll,
+    /// Add only the first substring of a match to the dictionary that are larger than the limit
+    AddFirst(u16),
+    /// Add only the first and last substring of a match to the dictionary that are larger than the limit
+    AddFirstAndLast(u16),
+}
+
 pub trait HashChainTrait: Default {}
 
 #[derive(Default, Copy, Clone, Eq, PartialEq, Debug)]
@@ -130,9 +145,7 @@ impl<H: RotatingHashTrait> HashTable<H> {
         self.running_hash = self.running_hash.append(b, self.hash_shift);
     }
 
-    fn update_chain<const MAINTAIN_DEPTH: bool, 
-        const ONLY_FIRST : bool,
-        const INCLUDE_LAST : bool>(
+    fn update_chain<const MAINTAIN_DEPTH: bool, const UPDATE_MODE: u32>(
         &mut self,
         chars: &[u8],
         mut pos: InternalPosition,
@@ -146,10 +159,13 @@ impl<H: RotatingHashTrait> HashTable<H> {
         }
 
         let last = cmp::min(length as usize, chars.len() - offset);
-        for i in 0.. last {
+        for i in 0..last {
             self.update_running_hash(chars[i + offset]);
 
-            if !ONLY_FIRST || i == 0 || (INCLUDE_LAST && i == last - 1) {
+            if UPDATE_MODE == UPDATE_MODE_ALL
+                || (UPDATE_MODE == UPDATE_MODE_FIRST && i == 0)
+                || (UPDATE_MODE == UPDATE_MODE_FIRST_AND_LAST && (i == 0 || i == last - 1))
+            {
                 let h = self.get_running_hash();
 
                 if MAINTAIN_DEPTH {
@@ -428,7 +444,38 @@ impl<H: RotatingHashTrait> HashChain<H> {
         })
     }
 
-    pub fn update_hash<const MAINTAIN_DEPTH: bool>(&mut self, length: u32, input: &PreflateInput) {
+    pub fn update_hash_with_policy<const MAINTAIN_DEPTH: bool>(
+        &mut self,
+        length: u32,
+        input: &PreflateInput,
+        add_policy: DictionaryAddPolicy,
+    ) {
+        match add_policy {
+            DictionaryAddPolicy::AddAll => {
+                self.update_hash::<MAINTAIN_DEPTH, UPDATE_MODE_ALL>(length, input);
+            }
+            DictionaryAddPolicy::AddFirst(limit) => {
+                if length > limit.into() {
+                    self.update_hash::<MAINTAIN_DEPTH, UPDATE_MODE_FIRST>(length, input);
+                } else {
+                    self.update_hash::<MAINTAIN_DEPTH, UPDATE_MODE_ALL>(length, input);
+                }
+            }
+            DictionaryAddPolicy::AddFirstAndLast(limit) => {
+                if length > limit.into() {
+                    self.update_hash::<MAINTAIN_DEPTH, UPDATE_MODE_FIRST_AND_LAST>(length, input);
+                } else {
+                    self.update_hash::<MAINTAIN_DEPTH, UPDATE_MODE_ALL>(length, input);
+                }
+            }
+        }
+    }
+
+    fn update_hash<const MAINTAIN_DEPTH: bool, const UPDATE_MODE: u32>(
+        &mut self,
+        length: u32,
+        input: &PreflateInput,
+    ) {
         assert!(length <= MAX_UPDATE_HASH_BATCH);
 
         self.reshift_if_necessary::<MAINTAIN_DEPTH>(input);
@@ -437,32 +484,15 @@ impl<H: RotatingHashTrait> HashChain<H> {
         let chars = input.cur_chars(0);
 
         self.hash_table
-            .update_chain::<MAINTAIN_DEPTH, false>(chars, pos, length);
+            .update_chain::<MAINTAIN_DEPTH, UPDATE_MODE>(chars, pos, length);
 
         // maintain the extra 3 length chain if we have it
         if let Some(x) = self.hash_table_3_len.as_mut() {
-            x.update_chain::<MAINTAIN_DEPTH, false>(chars, pos, length);
+            x.update_chain::<MAINTAIN_DEPTH, UPDATE_MODE>(chars, pos, length);
         }
 
         //let c = self.checksum_whole_struct();
         //println!("u {} = {}", length, c);
-    }
-
-    pub fn skip_hash<const MAINTAIN_DEPTH: bool>(&mut self, length: u32, input: &PreflateInput) {
-        assert!(length <= MAX_UPDATE_HASH_BATCH);
-
-        self.reshift_if_necessary::<MAINTAIN_DEPTH>(input);
-
-        let pos = InternalPosition::from_absolute(input.pos(), self.total_shift);
-        let chars = input.cur_chars(0);
-
-        self.hash_table
-            .update_chain::<MAINTAIN_DEPTH, true>(chars, pos, length);
-
-        // maintain the extra 3 length chain if we have it
-        if let Some(x) = self.hash_table_3_len.as_mut() {
-            x.update_chain::<MAINTAIN_DEPTH, true>(chars, pos, length);
-        }
     }
 
     pub fn match_depth(

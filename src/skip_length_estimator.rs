@@ -8,27 +8,10 @@
 ///
 /// This will be the limit that we use when we decide whether to
 /// use skip_hash or update_hash.
-use default_boxed::DefaultBoxed;
-
-use crate::preflate_token::{PreflateToken, PreflateTokenBlock};
-
-#[derive(DefaultBoxed)]
-pub struct SkipLengthEstimator {
-    pub current_window: [u8; 32768],
-    pub current_offset: u32,
-    pub max_distance: u32,
-}
-
-#[derive(Default, Eq, PartialEq, Debug, Clone, Copy)]
-pub enum DictionaryAddPolicy {
-    /// Add all substrings of a match to the dictionary
-    #[default]
-    AddAll,
-    /// Add only the first substring of a match to the dictionary that are larger than the limit
-    AddFirst(u16),
-    /// Add only the first and last substring of a match to the dictionary that are larger than the limit
-    AddFirstAndLast(u16),
-}
+use crate::{
+    hash_chain::DictionaryAddPolicy,
+    preflate_token::{PreflateToken, PreflateTokenBlock},
+};
 
 pub fn estimate_skip_length(token_blocks: &[PreflateTokenBlock]) -> DictionaryAddPolicy {
     let mut current_window = vec![0u16; 32768];
