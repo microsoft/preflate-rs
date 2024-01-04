@@ -464,16 +464,19 @@ fn verify_zlib_compressed_perfect() {
         let v = read_file(&format!("compressed_zlib_level{}.deflate", i));
 
         let config;
-        let is_fast_compressor;
+        let add_policy;
         let max_dist_3_matches;
+        let max_lazy;
         if i < 4 {
             config = &FAST_PREFLATE_PARSER_SETTINGS[i as usize - 1];
-            is_fast_compressor = true;
+            add_policy = crate::hash_chain::DictionaryAddPolicy::AddFirst(config.max_lazy as u16);
             max_dist_3_matches = 32768;
+            max_lazy = 0;
         } else {
             config = &SLOW_PREFLATE_PARSER_SETTINGS[i as usize - 4];
-            is_fast_compressor = false;
+            add_policy = crate::hash_chain::DictionaryAddPolicy::AddAll;
             max_dist_3_matches = 4096;
+            max_lazy = config.max_lazy;
         }
 
         let params = PreflateParameters {
@@ -487,13 +490,13 @@ fn verify_zlib_compressed_perfect() {
             max_dist_3_matches,
             very_far_matches_detected: false,
             matches_to_start_detected: false,
-            is_fast_compressor,
             good_length: config.good_length,
-            max_lazy: config.max_lazy,
+            max_lazy: max_lazy,
             nice_length: config.nice_length,
             max_chain: config.max_chain,
             hash_algorithm: HashAlgorithm::Zlib,
             min_len: 3,
+            add_policy,
         };
 
         let contents = parse_deflate(&v, 1).unwrap();
@@ -533,13 +536,13 @@ fn verify_miniz1_compressed_perfect() {
         max_dist_3_matches: 8192,
         very_far_matches_detected: false,
         matches_to_start_detected: false,
-        is_fast_compressor: true,
         good_length: 258,
-        max_lazy: 2,
+        max_lazy: 0,
         nice_length: 258,
         max_chain: 2,
         hash_algorithm: HashAlgorithm::MiniZFast,
         min_len: 3,
+        add_policy: crate::hash_chain::DictionaryAddPolicy::AddFirst(0),
     };
 
     encode_mispredictions(&contents, &params, &mut cabac_encoder).unwrap();

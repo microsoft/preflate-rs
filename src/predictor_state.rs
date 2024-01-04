@@ -6,10 +6,10 @@
 
 use crate::bit_helper::DebugHash;
 use crate::hash_algorithm::RotatingHashTrait;
-use crate::hash_chain::{HashChain, MAX_UPDATE_HASH_BATCH};
+use crate::hash_chain::{DictionaryAddPolicy, HashChain, MAX_UPDATE_HASH_BATCH};
 use crate::preflate_constants::{MAX_MATCH, MIN_LOOKAHEAD, MIN_MATCH};
 use crate::preflate_input::PreflateInput;
-use crate::preflate_parameter_estimator::PreflateParameters;
+use crate::preflate_parameter_estimator::{PreflateParameters, PreflateStrategy};
 use crate::preflate_token::PreflateTokenReference;
 use std::cmp;
 use std::sync::atomic;
@@ -55,22 +55,21 @@ impl<'a, H: RotatingHashTrait> PredictorState<'a, H> {
         self.hash.checksum(checksum);
     }
 
-    pub fn update_hash(&mut self, mut length: u32) {
-        while length > 0 {
-            let batch_len = cmp::min(length, MAX_UPDATE_HASH_BATCH);
-
-            self.hash.update_hash::<true>(batch_len, &self.input);
-
-            self.input.advance(batch_len);
-            length -= batch_len;
-        }
+    pub fn update_hash_with_policy(&mut self, length: u32, add_policy: DictionaryAddPolicy) {
+        self.hash
+            .update_hash_with_policy::<false>(length, &self.input, add_policy);
+        self.input.advance(length);
     }
 
-    pub fn skip_hash(&mut self, mut length: u32) {
+    pub fn update_hash_batch(&mut self, mut length: u32) {
         while length > 0 {
             let batch_len = cmp::min(length, MAX_UPDATE_HASH_BATCH);
-            self.hash.skip_hash::<true>(batch_len, &self.input);
 
+            self.hash.update_hash_with_policy::<false>(
+                batch_len,
+                &self.input,
+                DictionaryAddPolicy::AddAll,
+            );
             self.input.advance(batch_len);
             length -= batch_len;
         }
@@ -146,9 +145,20 @@ impl<'a, H: RotatingHashTrait> PredictorState<'a, H> {
             cur_max_dist_hop0 = cmp::min(max_dist_to_start, self.window_size());
             cur_max_dist_hop1_plus = cur_max_dist_hop0;
         } else {
-            let max_dist: u32 = self.window_size() - MIN_LOOKAHEAD + 1;
-            cur_max_dist_hop0 = cmp::min(max_dist_to_start, max_dist);
-            cur_max_dist_hop1_plus = cmp::min(max_dist_to_start, max_dist - 1);
+            match self.params.strategy {
+                PreflateStrategy::HuffOnly | PreflateStrategy::Store => {
+                    return MatchResult::NoMoreMatchesFound;
+                }
+                PreflateStrategy::RleOnly => {
+                    cur_max_dist_hop0 = 1;
+                    cur_max_dist_hop1_plus = 1;
+                }
+                _ => {
+                    let max_dist: u32 = self.window_size() - MIN_LOOKAHEAD + 1;
+                    cur_max_dist_hop0 = cmp::min(max_dist_to_start, max_dist);
+                    cur_max_dist_hop1_plus = cmp::min(max_dist_to_start, max_dist - 1);
+                }
+            }
         }
 
         let nice_len = std::cmp::min(self.params.nice_length, max_len);

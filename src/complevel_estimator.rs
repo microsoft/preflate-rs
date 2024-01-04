@@ -11,11 +11,12 @@ use crate::hash_algorithm::{
     HashAlgorithm, LibdeflateRotatingHash4, MiniZHash, ZlibNGHash, ZlibRotatingHash,
     MINIZ_LEVEL1_HASH_SIZE_MASK,
 };
-use crate::hash_chain::{HashChain, MAX_UPDATE_HASH_BATCH};
+use crate::hash_chain::{DictionaryAddPolicy, HashChain, MAX_UPDATE_HASH_BATCH};
 use crate::preflate_constants;
 use crate::preflate_input::PreflateInput;
 use crate::preflate_parse_config::{FAST_PREFLATE_PARSER_SETTINGS, SLOW_PREFLATE_PARSER_SETTINGS};
 use crate::preflate_token::{BlockType, PreflateToken, PreflateTokenBlock, PreflateTokenReference};
+use crate::skip_length_estimator::estimate_skip_length;
 
 #[derive(Default)]
 pub struct CompLevelInfo {
@@ -26,9 +27,9 @@ pub struct CompLevelInfo {
     pub very_far_matches_detected: bool,
     pub max_dist_3_matches: u16,
     pub min_len: u32,
+    pub add_policy: DictionaryAddPolicy,
     pub hash_mask: u16,
     pub hash_shift: u32,
-    pub is_fast_compressor: bool,
     pub hash_algorithm: HashAlgorithm,
     pub good_length: u32,
     pub max_lazy: u32,
@@ -46,7 +47,7 @@ enum HashChainType {
 struct CandidateInfo {
     hash_mask: u16,
     hash_shift: u32,
-    skip_length: Option<u32>,
+    add_policy: DictionaryAddPolicy,
     hash_chain: HashChainType,
 
     longest_dist_at_hop_0: u32,
@@ -58,14 +59,14 @@ impl CandidateInfo {
     fn new(
         hash_mask: u16,
         hash_shift: u32,
-        skip_length: Option<u32>,
+        add_policy: DictionaryAddPolicy,
         hash_algorithm: HashAlgorithm,
         input: &PreflateInput,
     ) -> Self {
         CandidateInfo {
             hash_mask,
             hash_shift,
-            skip_length,
+            add_policy,
             hash_chain: match hash_algorithm {
                 HashAlgorithm::Zlib => HashChainType::Zlib(HashChain::<ZlibRotatingHash>::new(
                     hash_shift, hash_mask, &input,
@@ -88,21 +89,25 @@ impl CandidateInfo {
         }
     }
 
-    fn invoke_update_hash(&mut self, len: u32, input: &PreflateInput) {
+    fn invoke_update_hash(
+        &mut self,
+        len: u32,
+        input: &PreflateInput,
+        add_policy: DictionaryAddPolicy,
+    ) {
         match self.hash_chain {
-            HashChainType::Zlib(ref mut h) => h.update_hash::<true>(len, input),
-            HashChainType::MiniZ(ref mut h) => h.update_hash::<true>(len, input),
-            HashChainType::LibFlate4(ref mut h) => h.update_hash::<true>(len, input),
-            HashChainType::ZlibNG(ref mut h) => h.update_hash::<true>(len, input),
-        }
-    }
-
-    fn invoke_skip_hash(&mut self, len: u32, input: &PreflateInput) {
-        match self.hash_chain {
-            HashChainType::Zlib(ref mut h) => h.skip_hash::<true>(len, input),
-            HashChainType::MiniZ(ref mut h) => h.skip_hash::<true>(len, input),
-            HashChainType::LibFlate4(ref mut h) => h.skip_hash::<true>(len, input),
-            HashChainType::ZlibNG(ref mut h) => h.skip_hash::<true>(len, input),
+            HashChainType::Zlib(ref mut h) => {
+                h.update_hash_with_policy::<true>(len, input, add_policy)
+            }
+            HashChainType::MiniZ(ref mut h) => {
+                h.update_hash_with_policy::<true>(len, input, add_policy)
+            }
+            HashChainType::LibFlate4(ref mut h) => {
+                h.update_hash_with_policy::<true>(len, input, add_policy)
+            }
+            HashChainType::ZlibNG(ref mut h) => {
+                h.update_hash_with_policy::<true>(len, input, add_policy)
+            }
         }
     }
 
@@ -165,18 +170,6 @@ impl CandidateInfo {
         }
     }
 
-    fn skip_or_update_hash(&mut self, len: u32, input: &PreflateInput) {
-        if let Some(skip_length) = self.skip_length {
-            if len <= skip_length {
-                self.invoke_update_hash(len, input);
-            } else {
-                self.invoke_skip_hash(len, input);
-            }
-        } else {
-            self.invoke_update_hash(len, input);
-        }
-    }
-
     fn max_chain_found(&self) -> u32 {
         self.max_chain_found
     }
@@ -187,10 +180,6 @@ impl CandidateInfo {
 
     fn hash_shift(&self) -> u32 {
         self.hash_shift
-    }
-
-    fn skip_length(&self) -> Option<u32> {
-        self.skip_length
     }
 
     fn hash_algorithm(&self) -> HashAlgorithm {
@@ -229,6 +218,8 @@ impl<'a> CompLevelEstimatorState<'a> {
         plain_text: &'a [u8],
         blocks: &'a Vec<PreflateTokenBlock>,
     ) -> Self {
+        let add_policy = estimate_skip_length(blocks);
+
         let hash_bits = mem_level + 7;
         let mem_hash_shift = (hash_bits + 2) / 3;
         let mem_hash_mask = ((1u32 << hash_bits) - 1) as u16;
@@ -246,33 +237,19 @@ impl<'a> CompLevelEstimatorState<'a> {
 
         let mut candidates: Vec<Box<CandidateInfo>> = Vec::new();
 
-        // add the ZlibRotatingHash candidates
-        for config in &FAST_PREFLATE_PARSER_SETTINGS {
-            for &(hash_shift, hash_mask) in hashparameters.iter() {
-                candidates.push(Box::new(CandidateInfo::new(
-                    hash_mask,
-                    hash_shift,
-                    Some(config.max_lazy),
-                    HashAlgorithm::Zlib,
-                    &input,
-                )));
-            }
-        }
-
         candidates.push(Box::new(CandidateInfo::new(
             MINIZ_LEVEL1_HASH_SIZE_MASK,
             0,
-            Some(2),
+            add_policy,
             HashAlgorithm::MiniZFast,
             &input,
         )));
 
-        // slow compressor candidates
         for (hash_shift, hash_mask) in [(5, 32767), (4, 2047)] {
             candidates.push(Box::new(CandidateInfo::new(
                 hash_mask,
                 hash_shift,
-                None,
+                add_policy,
                 HashAlgorithm::Zlib,
                 &input,
             )));
@@ -282,16 +259,16 @@ impl<'a> CompLevelEstimatorState<'a> {
         candidates.push(Box::new(CandidateInfo::new(
             0xffff,
             0,
-            None,
+            add_policy,
             HashAlgorithm::Libdeflate4,
             &input,
         )));
 
-        // ZlibNG slow candidate
+        // ZlibNG candidate
         candidates.push(Box::new(CandidateInfo::new(
             0xffff,
             0,
-            None,
+            add_policy,
             HashAlgorithm::ZlibNG,
             &input,
         )));
@@ -309,25 +286,20 @@ impl<'a> CompLevelEstimatorState<'a> {
         }
     }
 
-    fn update_hash(&mut self, mut length: u32) {
+    fn update_hash(&mut self, mut length: u32, override_add_policy: bool) {
         while length > 0 {
             let batch_len = std::cmp::min(length, MAX_UPDATE_HASH_BATCH);
 
             for i in &mut self.candidates {
-                i.invoke_update_hash(batch_len, &self.input);
-            }
-
-            self.input.advance(batch_len);
-            length -= batch_len;
-        }
-    }
-
-    fn skip_or_update_hash(&mut self, mut length: u32) {
-        while length > 0 {
-            let batch_len = std::cmp::min(length, MAX_UPDATE_HASH_BATCH);
-
-            for c in &mut self.candidates {
-                c.skip_or_update_hash(batch_len, &self.input);
+                i.invoke_update_hash(
+                    batch_len,
+                    &self.input,
+                    if override_add_policy {
+                        DictionaryAddPolicy::AddAll
+                    } else {
+                        i.add_policy
+                    },
+                );
             }
 
             self.input.advance(batch_len);
@@ -362,17 +334,17 @@ impl<'a> CompLevelEstimatorState<'a> {
     fn check_dump(&mut self) {
         for (_i, b) in self.blocks.iter().enumerate() {
             if b.block_type == BlockType::Stored {
-                self.update_hash(b.uncompressed_len);
+                self.update_hash(b.uncompressed_len, true);
                 continue;
             }
             for (_j, t) in b.tokens.iter().enumerate() {
                 match t {
                     PreflateToken::Literal => {
-                        self.update_hash(1);
+                        self.update_hash(1, true);
                     }
                     PreflateToken::Reference(r) => {
                         self.check_match(r);
-                        self.skip_or_update_hash(r.len());
+                        self.update_hash(r.len(), false);
                     }
                 }
             }
@@ -396,28 +368,24 @@ impl<'a> CompLevelEstimatorState<'a> {
 
         let hash_mask = candidate.hash_mask();
         let hash_shift = candidate.hash_shift();
+        let add_policy = candidate.add_policy;
         let max_chain = candidate.max_chain_found() + 1;
         let hash_algorithm = candidate.hash_algorithm();
         let longest_dist_at_hop_0 = candidate.longest_dist_at_hop_0;
         let longest_dist_at_hop_1_plus = candidate.longest_dist_at_hop_1_plus;
-        let fast_compressor;
 
-        match candidate.skip_length() {
-            Some(skip_length) => {
-                max_lazy = skip_length;
-                fast_compressor = true;
-
+        match candidate.add_policy {
+            DictionaryAddPolicy::AddFirst(_) | DictionaryAddPolicy::AddFirstAndLast(_) => {
                 for config in &FAST_PREFLATE_PARSER_SETTINGS {
                     if candidate.max_chain_found() < config.max_chain {
                         good_length = config.good_length;
                         nice_length = config.nice_length;
+                        max_lazy = 0;
                         break;
                     }
                 }
             }
-            None => {
-                fast_compressor = false;
-
+            DictionaryAddPolicy::AddAll => {
                 for config in &SLOW_PREFLATE_PARSER_SETTINGS {
                     if candidate.max_chain_found() < config.max_chain {
                         good_length = config.good_length;
@@ -448,7 +416,7 @@ impl<'a> CompLevelEstimatorState<'a> {
             max_dist_3_matches: self.longest_len_3_dist as u16,
             hash_mask,
             hash_shift,
-            is_fast_compressor: fast_compressor,
+            add_policy,
             good_length,
             max_lazy,
             nice_length,
@@ -457,7 +425,7 @@ impl<'a> CompLevelEstimatorState<'a> {
             hash_algorithm,
             zlib_compatible: !self.match_to_start
                 && !very_far_matches
-                && (self.longest_len_3_dist < 4096 || fast_compressor),
+                && (self.longest_len_3_dist < 4096 || add_policy != DictionaryAddPolicy::AddAll),
         })
     }
 

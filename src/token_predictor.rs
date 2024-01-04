@@ -71,7 +71,7 @@ impl<'a, H: RotatingHashTrait> TokenPredictor<'a, H> {
             codec.encode_value(block.uncompressed_len as u16, 16);
 
             codec.encode_correction(CodecCorrection::NonZeroPadding, block.padding_bits.into());
-            self.state.update_hash(block.uncompressed_len);
+            self.state.update_hash_batch(block.uncompressed_len);
 
             return Ok(());
         }
@@ -234,7 +234,7 @@ impl<'a, H: RotatingHashTrait> TokenPredictor<'a, H> {
                 block.uncompressed_len = codec.decode_value(16).into();
                 block.padding_bits = codec.decode_correction(CodecCorrection::NonZeroPadding) as u8;
 
-                self.state.update_hash(block.uncompressed_len);
+                self.state.update_hash_batch(block.uncompressed_len);
                 return Ok(block);
             }
             BT_STATICHUFF => {
@@ -362,10 +362,6 @@ impl<'a, H: RotatingHashTrait> TokenPredictor<'a, H> {
                 return PreflateToken::Literal;
             }
 
-            if self.params.is_fast_compressor {
-                return PreflateToken::Reference(match_token);
-            }
-
             // match is too small and far way to be worth encoding as a distance/length pair.
             if match_token.len() == 3 && match_token.dist() > self.params.max_dist_3_matches.into()
             {
@@ -446,20 +442,15 @@ impl<'a, H: RotatingHashTrait> TokenPredictor<'a, H> {
                     block.add_literal(self.state.input_cursor()[0]);
                 }
 
-                self.state.update_hash(1);
+                self.state.update_hash_batch(1);
             }
             PreflateToken::Reference(t) => {
                 if let Some(block) = block {
                     block.add_reference(t.len(), t.dist(), t.get_irregular258());
                 }
 
-                // max_lazy is reused by the fast compressor to mean that if a match is larger than a
-                // certain size it should not be added to the dictionary in order to save on speed.
-                if self.params.is_fast_compressor && t.len() > self.params.max_lazy {
-                    self.state.skip_hash(t.len());
-                } else {
-                    self.state.update_hash(t.len());
-                }
+                self.state
+                    .update_hash_with_policy(t.len(), self.params.add_policy);
             }
         }
 
