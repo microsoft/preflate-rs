@@ -286,12 +286,20 @@ impl<'a> CompLevelEstimatorState<'a> {
         }
     }
 
-    fn update_hash(&mut self, mut length: u32) {
+    fn update_hash(&mut self, mut length: u32, override_add_policy: bool) {
         while length > 0 {
             let batch_len = std::cmp::min(length, MAX_UPDATE_HASH_BATCH);
 
             for i in &mut self.candidates {
-                i.invoke_update_hash(batch_len, &self.input, DictionaryAddPolicy::AddAll);
+                i.invoke_update_hash(
+                    batch_len,
+                    &self.input,
+                    if override_add_policy {
+                        DictionaryAddPolicy::AddAll
+                    } else {
+                        i.add_policy
+                    },
+                );
             }
 
             self.input.advance(batch_len);
@@ -326,17 +334,17 @@ impl<'a> CompLevelEstimatorState<'a> {
     fn check_dump(&mut self) {
         for (_i, b) in self.blocks.iter().enumerate() {
             if b.block_type == BlockType::Stored {
-                self.update_hash(b.uncompressed_len);
+                self.update_hash(b.uncompressed_len, true);
                 continue;
             }
             for (_j, t) in b.tokens.iter().enumerate() {
                 match t {
                     PreflateToken::Literal => {
-                        self.update_hash(1);
+                        self.update_hash(1, true);
                     }
                     PreflateToken::Reference(r) => {
                         self.check_match(r);
-                        self.update_hash(r.len());
+                        self.update_hash(r.len(), false);
                     }
                 }
             }

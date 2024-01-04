@@ -19,6 +19,7 @@ pub fn estimate_skip_length(token_blocks: &[PreflateTokenBlock]) -> DictionaryAd
     let mut max_distance_last_add = 0;
     let mut current_offset: u32 = 0;
     let mut counters = [0u32; 259];
+    let mut counters_b = [0u32; 259];
 
     for token_block in token_blocks {
         for token in token_block.tokens.iter() {
@@ -35,6 +36,8 @@ pub fn estimate_skip_length(token_blocks: &[PreflateTokenBlock]) -> DictionaryAd
 
                     max_distance = std::cmp::max(max_distance, match_length & 0x7fff);
                     if (match_length & 0x8000) == 0 {
+                        counters_b[(match_length & 0x7fff) as usize] += 1;
+
                         max_distance_last_add =
                             std::cmp::max(max_distance_last_add, match_length & 0x7fff);
                     }

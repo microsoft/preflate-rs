@@ -275,21 +275,31 @@ fn verify_zlib_recognition() {
             assert_eq!(params.strategy, PreflateStrategy::Store);
         } else if i >= 1 && i < 4 {
             let config = &FAST_PREFLATE_PARSER_SETTINGS[i as usize - 1];
+            assert!(
+                params.max_chain <= config.max_chain,
+                "max_chain mismatch {} should be <= {}",
+                params.max_chain,
+                config.max_chain
+            );
             assert_eq!(params.good_length, config.good_length);
             assert_eq!(
                 params.add_policy,
                 DictionaryAddPolicy::AddFirst(config.max_lazy as u16)
             );
             assert_eq!(params.nice_length, config.nice_length);
-            assert!(params.max_chain <= config.max_chain);
             assert_eq!(params.strategy, PreflateStrategy::Default);
         } else if i >= 4 {
             let config = &SLOW_PREFLATE_PARSER_SETTINGS[i as usize - 4];
+            assert!(
+                params.max_chain <= config.max_chain,
+                "max_chain mismatch {} should be <= {}",
+                params.max_chain,
+                config.max_chain
+            );
             assert_eq!(params.good_length, config.good_length);
             assert_eq!(params.max_lazy, config.max_lazy);
             assert_eq!(params.nice_length, config.nice_length);
             assert_eq!(params.add_policy, DictionaryAddPolicy::AddAll);
-            assert!(params.max_chain <= config.max_chain);
             assert_eq!(params.strategy, PreflateStrategy::Default);
         }
     }
