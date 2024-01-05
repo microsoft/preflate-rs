@@ -32,8 +32,6 @@ pub enum DictionaryAddPolicy {
     AddFirstAndLast(u16),
 }
 
-pub trait HashChainTrait: Default {}
-
 #[derive(Default, Copy, Clone, Eq, PartialEq, Debug)]
 struct InternalPosition {
     pos: u16,
