@@ -7,16 +7,18 @@
 /// This module is design to detect the appropriate overall parameters for the preflate compressor.
 /// Getting the parameters correct means that the resulting diff between the deflate stream
 /// and the predicted deflate stream will be as small as possible.
-use crate::hash_algorithm::{
-    HashAlgorithm, LibdeflateRotatingHash4, MiniZHash, RotatingHashTrait, ZlibNGHash,
-    ZlibRotatingHash, MINIZ_LEVEL1_HASH_SIZE_MASK,
+use crate::{
+    hash_algorithm::{
+        HashAlgorithm, LibdeflateRotatingHash4, MiniZHash, RotatingHashTrait, ZlibNGHash,
+        ZlibRotatingHash, MINIZ_LEVEL1_HASH_SIZE_MASK,
+    },
+    hash_chain::{DictionaryAddPolicy, HashChain, MAX_UPDATE_HASH_BATCH},
+    preflate_constants,
+    preflate_input::PreflateInput,
+    preflate_parse_config::{FAST_PREFLATE_PARSER_SETTINGS, SLOW_PREFLATE_PARSER_SETTINGS},
+    preflate_token::{BlockType, PreflateToken, PreflateTokenBlock, PreflateTokenReference},
+    skip_length_estimator::estimate_skip_length,
 };
-use crate::hash_chain::{DictionaryAddPolicy, HashChain, MAX_UPDATE_HASH_BATCH};
-use crate::preflate_constants;
-use crate::preflate_input::PreflateInput;
-use crate::preflate_parse_config::{FAST_PREFLATE_PARSER_SETTINGS, SLOW_PREFLATE_PARSER_SETTINGS};
-use crate::preflate_token::{BlockType, PreflateToken, PreflateTokenBlock, PreflateTokenReference};
-use crate::skip_length_estimator::estimate_skip_length;
 
 #[derive(Default)]
 pub struct CompLevelInfo {
