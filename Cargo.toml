@@ -33,3 +33,6 @@ libz-sys = "1.1"
 libdeflate-sys = "1.19"
 libz-ng-sys="1.1.12"
 miniz_oxide="0.7.1"
+
+[lib]
+crate-type = ["cdylib","lib"]

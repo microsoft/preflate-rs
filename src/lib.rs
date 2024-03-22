@@ -37,7 +37,7 @@ use preflate_error::PreflateError;
 use preflate_parameter_estimator::{estimate_preflate_parameters, PreflateParameters};
 use process::parse_deflate;
 use scan_deflate::search_for_deflate_streams;
-use std::io::Cursor;
+use std::{io::Cursor, panic::catch_unwind};
 
 use crate::{
     cabac_codec::{PredictionDecoderCabac, PredictionEncoderCabac},
@@ -323,6 +323,115 @@ pub fn decompress_zstd(compressed_data: &[u8], capacity: usize) -> Result<Vec<u8
         .map_err(|e| PreflateError::ZstdError(e))?;
 
     recreated_zlib_chunks(&compressed_data)
+}
+
+/// C ABI interface for compressing Zip file, exposed from DLL.
+#[no_mangle]
+pub unsafe extern "C" fn WrapperCompressZip(
+    input_buffer: *const u8,
+    input_buffer_size: u64,
+    output_buffer: *mut u8,
+    output_buffer_size: u64,
+    result_size: *mut u64,
+) -> i32 {
+    match catch_unwind(|| {
+        let input_buffer = std::slice::from_raw_parts(input_buffer, input_buffer_size as usize);
+        let output_buffer =
+            std::slice::from_raw_parts_mut(output_buffer, output_buffer_size as usize);
+
+        let plain_text = expand_zlib_chunks(&input_buffer);
+
+        *result_size = zstd::bulk::compress_to_buffer(&plain_text, output_buffer, 9)? as u64;
+
+        std::io::Result::Ok(())
+    }) {
+        Ok(x) => {
+            if let Err(_) = x {
+                return -1;
+            }
+            return 0;
+        }
+        Err(_) => {
+            return -2;
+        }
+    }
+}
+
+/// C ABI interface for decompressing Zip, exposed from DLL
+#[no_mangle]
+pub unsafe extern "C" fn WrapperDecompressZip(
+    input_buffer: *const u8,
+    input_buffer_size: u64,
+    output_buffer: *mut u8,
+    output_buffer_size: u64,
+    result_size: *mut u64,
+) -> i32 {
+    match catch_unwind(|| {
+        let input = std::slice::from_raw_parts(input_buffer, input_buffer_size as usize);
+        let output = std::slice::from_raw_parts_mut(output_buffer, output_buffer_size as usize);
+
+        let compressed_data = zstd::bulk::decompress(input, 1024 * 1024 * 128)
+            .map_err(|e| PreflateError::ZstdError(e))?;
+
+        recreated_zlib_chunks(&compressed_data).map(|v| {
+            output[0..v.len()].copy_from_slice(&v);
+            *result_size = v.len() as u64;
+        })?;
+
+        Result::<(), PreflateError>::Ok(())
+    }) {
+        Ok(x) => {
+            if let Err(_) = x {
+                return -1;
+            }
+            return 0;
+        }
+        Err(_) => {
+            return -2;
+        }
+    }
+}
+
+#[test]
+fn extern_interface() {
+    use crate::process::read_file;
+    let input = read_file("samplezip.zip");
+
+    let mut compressed = Vec::new();
+
+    compressed.resize(input.len() + 10000, 0);
+
+    let mut result_size: u64 = 0;
+
+    unsafe {
+        let retval = WrapperCompressZip(
+            input[..].as_ptr(),
+            input.len() as u64,
+            compressed[..].as_mut_ptr(),
+            compressed.len() as u64,
+            (&mut result_size) as *mut u64,
+        );
+
+        assert_eq!(retval, 0);
+    }
+
+    let mut original = Vec::new();
+    original.resize(input.len() + 10000, 0);
+
+    let mut original_size: u64 = 0;
+    unsafe {
+        let retval = WrapperDecompressZip(
+            compressed[..].as_ptr(),
+            result_size,
+            original[..].as_mut_ptr(),
+            original.len() as u64,
+            (&mut original_size) as *mut u64,
+        );
+
+        assert_eq!(retval, 0);
+    }
+    assert_eq!(input.len() as u64, original_size);
+    assert_eq!(input[..], original[..(original_size as usize)]);
 }
 
 #[test]
