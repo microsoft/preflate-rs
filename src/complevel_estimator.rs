@@ -4,13 +4,15 @@
  *  This software incorporates material from third parties. See NOTICE.txt for details.
  *--------------------------------------------------------------------------------------------*/
 
+use std::hash::Hash;
+
 /// This module is design to detect the appropriate overall parameters for the preflate compressor.
 /// Getting the parameters correct means that the resulting diff between the deflate stream
 /// and the predicted deflate stream will be as small as possible.
 use crate::{
     hash_algorithm::{
-        HashAlgorithm, LibdeflateRotatingHash4, MiniZHash, RotatingHashTrait, ZlibNGHash,
-        ZlibRotatingHash, MINIZ_LEVEL1_HASH_SIZE_MASK,
+        HashAlgorithm, LibdeflateRotatingHash4, MiniZHash, RandomVectorHash, RotatingHashTrait,
+        ZlibNGHash, ZlibRotatingHash, MINIZ_LEVEL1_HASH_SIZE_MASK,
     },
     hash_chain::{DictionaryAddPolicy, HashChain, MAX_UPDATE_HASH_BATCH},
     preflate_constants,
@@ -59,13 +61,13 @@ trait HashChainInvoke {
 
 /// holds the hashchain for a specific hash algorithm
 struct HashChainHolder<H: RotatingHashTrait> {
-    hash_chain: HashChain<H>,
+    hash_chain: H::HashChainType,
 }
 
 impl<H: RotatingHashTrait + 'static> HashChainHolder<H> {
     fn new(hash_shift: u32, hash_mask: u16, input: &PreflateInput<'_>) -> Box<dyn HashChainInvoke> {
         Box::new(HashChainHolder::<H> {
-            hash_chain: HashChain::<H>::new(hash_shift, hash_mask, input),
+            hash_chain: H::HashChainType::new(hash_shift, hash_mask, input),
         })
     }
 }
@@ -128,6 +130,9 @@ impl CandidateInfo {
                 }
                 HashAlgorithm::ZlibNG => {
                     HashChainHolder::<ZlibNGHash>::new(hash_shift, hash_mask, input)
+                }
+                HashAlgorithm::RandomVector => {
+                    HashChainHolder::<RandomVectorHash>::new(hash_shift, hash_mask, input)
                 }
             },
             longest_dist_at_hop_0: 0,

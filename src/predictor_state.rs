@@ -9,8 +9,9 @@ use crate::hash_algorithm::RotatingHashTrait;
 use crate::hash_chain::{DictionaryAddPolicy, HashChain, MAX_UPDATE_HASH_BATCH};
 use crate::preflate_constants::{MAX_MATCH, MIN_LOOKAHEAD, MIN_MATCH};
 use crate::preflate_input::PreflateInput;
-use crate::preflate_parameter_estimator::{PreflateParameters, PreflateStrategy};
+use crate::preflate_parameter_estimator::PreflateStrategy;
 use crate::preflate_token::PreflateTokenReference;
+use crate::token_predictor::TokenPredictorParameters;
 use std::cmp;
 use std::sync::atomic;
 
@@ -23,22 +24,16 @@ pub enum MatchResult {
     MaxChainExceeded(u32),
 }
 
-#[derive(Default)]
-pub struct PreflateRematchInfo {
-    pub requested_match_depth: u32,
-    pub condensed_hops: u32,
-}
-
 pub struct PredictorState<'a, H: RotatingHashTrait> {
-    hash: HashChain<H>,
+    hash: H::HashChainType,
     input: PreflateInput<'a>,
-    params: PreflateParameters,
+    params: TokenPredictorParameters,
     window_bytes: u32,
     last_chain: atomic::AtomicU32,
 }
 
 impl<'a, H: RotatingHashTrait> PredictorState<'a, H> {
-    pub fn new(uncompressed: &'a [u8], params: &PreflateParameters) -> Self {
+    pub fn new(uncompressed: &'a [u8], params: &TokenPredictorParameters) -> Self {
         let input = PreflateInput::new(uncompressed);
 
         Self {
@@ -55,9 +50,9 @@ impl<'a, H: RotatingHashTrait> PredictorState<'a, H> {
         self.hash.checksum(checksum);
     }
 
-    pub fn update_hash_with_policy(&mut self, length: u32, add_policy: DictionaryAddPolicy) {
+    pub fn update_hash_with_policy(&mut self, length: u32) {
         self.hash
-            .update_hash_with_policy::<false>(length, &self.input, add_policy);
+            .update_hash_with_policy::<false>(length, &self.input, self.params.add_policy);
         self.input.advance(length);
     }
 

@@ -10,9 +10,10 @@ use crate::{
     bit_helper::DebugHash,
     cabac_codec::{decode_difference, encode_difference},
     hash_algorithm::RotatingHashTrait,
+    hash_chain::DictionaryAddPolicy,
     predictor_state::{MatchResult, PredictorState},
     preflate_constants::MIN_MATCH,
-    preflate_parameter_estimator::PreflateParameters,
+    preflate_parameter_estimator::{PreflateParameters, PreflateStrategy},
     preflate_token::{BlockType, PreflateToken, PreflateTokenBlock, PreflateTokenReference},
     statistical_codec::{
         CodecCorrection, CodecMisprediction, PredictionDecoder, PredictionEncoder,
@@ -23,14 +24,43 @@ const VERIFY: bool = false;
 
 pub struct TokenPredictor<'a, H: RotatingHashTrait> {
     state: PredictorState<'a, H>,
-    params: PreflateParameters,
+    params: TokenPredictorParameters,
     pending_reference: Option<PreflateTokenReference>,
     current_token_count: u32,
     max_token_count: u32,
 }
 
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub struct TokenPredictorParameters {
+    /// Zlib does not match to first byte of a file in order to reserve 0 for the end of chain
+    pub matches_to_start_detected: bool,
+
+    /// if there are matches that have a distance larger than window_size - MAX_MATCH.
+    /// Zlib does not allow these.
+    pub very_far_matches_detected: bool,
+    pub window_bits: u32,
+    pub hash_shift: u32,
+    pub hash_mask: u16,
+
+    pub strategy: PreflateStrategy,
+    pub nice_length: u32,
+
+    /// if something, then we use the "fast" compressor, which only adds smaller substrings
+    /// to the dictionary
+    pub add_policy: DictionaryAddPolicy,
+
+    pub max_token_count: u16,
+
+    pub zlib_compatible: bool,
+    pub max_dist_3_matches: u16,
+    pub good_length: u32,
+    pub max_lazy: u32,
+    pub max_chain: u32,
+    pub min_len: u32,
+}
+
 impl<'a, H: RotatingHashTrait> TokenPredictor<'a, H> {
-    pub fn new(uncompressed: &'a [u8], params: &PreflateParameters) -> Self {
+    pub fn new(uncompressed: &'a [u8], params: &TokenPredictorParameters) -> Self {
         // Implement constructor logic for PreflateTokenPredictor
         // Initialize fields as necessary
         // Create and initialize PreflatePredictorState, PreflateHashChainExt, and PreflateSeqChain instances
@@ -376,6 +406,7 @@ impl<'a, H: RotatingHashTrait> TokenPredictor<'a, H> {
                 let mut max_depth = self.params.max_chain;
 
                 if self.params.zlib_compatible && match_token.len() >= self.params.good_length {
+                    // zlib shortens the amount we search by half if the match is "good" enough
                     max_depth >>= 2;
                 }
 
@@ -449,8 +480,7 @@ impl<'a, H: RotatingHashTrait> TokenPredictor<'a, H> {
                     block.add_reference(t.len(), t.dist(), t.get_irregular258());
                 }
 
-                self.state
-                    .update_hash_with_policy(t.len(), self.params.add_policy);
+                self.state.update_hash_with_policy(t.len());
             }
         }
 

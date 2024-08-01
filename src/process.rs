@@ -4,14 +4,14 @@
  *  This software incorporates material from third parties. See NOTICE.txt for details.
  *--------------------------------------------------------------------------------------------*/
 
-use std::io::Cursor;
+use std::{hash::RandomState, io::Cursor};
 
 use crate::{
     deflate_reader::DeflateReader,
     deflate_writer::DeflateWriter,
     hash_algorithm::{
-        HashAlgorithm, LibdeflateRotatingHash4, MiniZHash, RotatingHashTrait, ZlibNGHash,
-        ZlibRotatingHash,
+        HashAlgorithm, LibdeflateRotatingHash4, MiniZHash, RandomVectorHash, RotatingHashTrait,
+        ZlibNGHash, ZlibRotatingHash,
     },
     huffman_calc::HufftreeBitCalc,
     preflate_error::PreflateError,
@@ -20,7 +20,7 @@ use crate::{
     statistical_codec::{
         CodecCorrection, CodecMisprediction, PredictionDecoder, PredictionEncoder,
     },
-    token_predictor::TokenPredictor,
+    token_predictor::{TokenPredictor, TokenPredictorParameters},
     tree_predictor::{predict_tree_for_block, recreate_tree_for_block},
 };
 
@@ -34,22 +34,27 @@ pub fn encode_mispredictions(
     match params.hash_algorithm {
         HashAlgorithm::MiniZFast => predict_blocks(
             &deflate.blocks,
-            TokenPredictor::<MiniZHash>::new(&deflate.plain_text, params),
+            TokenPredictor::<MiniZHash>::new(&deflate.plain_text, &params.predictor),
             encoder,
         )?,
         HashAlgorithm::Zlib => predict_blocks(
             &deflate.blocks,
-            TokenPredictor::<ZlibRotatingHash>::new(&deflate.plain_text, params),
+            TokenPredictor::<ZlibRotatingHash>::new(&deflate.plain_text, &params.predictor),
             encoder,
         )?,
         HashAlgorithm::Libdeflate4 => predict_blocks(
             &deflate.blocks,
-            TokenPredictor::<LibdeflateRotatingHash4>::new(&deflate.plain_text, params),
+            TokenPredictor::<LibdeflateRotatingHash4>::new(&deflate.plain_text, &params.predictor),
             encoder,
         )?,
         HashAlgorithm::ZlibNG => predict_blocks(
             &deflate.blocks,
-            TokenPredictor::<ZlibNGHash>::new(&deflate.plain_text, params),
+            TokenPredictor::<ZlibNGHash>::new(&deflate.plain_text, &params.predictor),
+            encoder,
+        )?,
+        HashAlgorithm::RandomVector => predict_blocks(
+            &deflate.blocks,
+            TokenPredictor::<RandomVectorHash>::new(&deflate.plain_text, &params.predictor),
             encoder,
         )?,
     }
@@ -136,22 +141,27 @@ pub fn decode_mispredictions(
 
     let output_blocks = match params.hash_algorithm {
         HashAlgorithm::MiniZFast => recreate_blocks(
-            TokenPredictor::<MiniZHash>::new(plain_text, params),
+            TokenPredictor::<MiniZHash>::new(plain_text, &params.predictor),
             decoder,
             &mut deflate_writer,
         )?,
         HashAlgorithm::Zlib => recreate_blocks(
-            TokenPredictor::<ZlibRotatingHash>::new(plain_text, params),
+            TokenPredictor::<ZlibRotatingHash>::new(plain_text, &params.predictor),
             decoder,
             &mut deflate_writer,
         )?,
         HashAlgorithm::Libdeflate4 => recreate_blocks(
-            TokenPredictor::<LibdeflateRotatingHash4>::new(plain_text, params),
+            TokenPredictor::<LibdeflateRotatingHash4>::new(plain_text, &params.predictor),
             decoder,
             &mut deflate_writer,
         )?,
         HashAlgorithm::ZlibNG => recreate_blocks(
-            TokenPredictor::<ZlibNGHash>::new(plain_text, params),
+            TokenPredictor::<ZlibNGHash>::new(plain_text, &params.predictor),
+            decoder,
+            &mut deflate_writer,
+        )?,
+        HashAlgorithm::RandomVector => recreate_blocks(
+            TokenPredictor::<RandomVectorHash>::new(plain_text, &params.predictor),
             decoder,
             &mut deflate_writer,
         )?,
@@ -404,7 +414,66 @@ fn verify_longmatch() {
 #[test]
 #[ignore = "doesn't work yet due to excessive hash chain length"]
 fn test_treepngdeflate() {
-    do_analyze(None, &read_file("treepng.deflate"), true);
+    use crate::hash_chain::HashChain;
+
+    let compressed_data: &[u8] = &read_file("treepng.deflate");
+
+    let contents = parse_deflate(compressed_data, 1).unwrap();
+
+    let mut input = crate::preflate_input::PreflateInput::new(&contents.plain_text);
+    let mut chain = <RandomVectorHash as RotatingHashTrait>::HashChainType::new(0, 0xffff, &input);
+
+    let mut r = RandomVectorHash::default();
+
+    r = r.append(contents.plain_text[0], 0);
+    r = r.append(contents.plain_text[1], 0);
+    r = r.append(contents.plain_text[2], 0);
+
+    println!("hashx: {:?}", r.hash(0x7fff));
+
+    let mut maxdepth = 0;
+
+    for b in &contents.blocks {
+        for i in 0..b.tokens.len() {
+            let t = &b.tokens[i];
+            match t {
+                crate::preflate_token::PreflateToken::Literal => {
+                    chain.update_hash_with_policy::<true>(
+                        1,
+                        &input,
+                        crate::hash_chain::DictionaryAddPolicy::AddAll,
+                    );
+                    input.advance(1);
+                }
+                crate::preflate_token::PreflateToken::Reference(r) => {
+                    let depth = chain.match_depth(&r, 32768, &input);
+                    if depth > 5 {
+                        println!("reference: {:?}", r);
+
+                        println!("back: {:?}", &input.cur_chars(-82)[0..82]);
+
+                        println!(
+                            "depth: {}, {}, {:?}",
+                            depth,
+                            input.pos(),
+                            &input.cur_chars(0)[0..16]
+                        );
+                        chain.match_depth(&r, 32768, &input);
+                        return;
+                    }
+
+                    chain.update_hash_with_policy::<true>(
+                        r.len(),
+                        &input,
+                        crate::hash_chain::DictionaryAddPolicy::AddAll,
+                    );
+                    input.advance(r.len());
+                }
+            }
+        }
+    }
+
+    //do_analyze(None, &read_file("treepng.deflate"), true);
 }
 
 #[test]
@@ -482,23 +551,25 @@ fn verify_zlib_compressed_perfect() {
         }
 
         let params = PreflateParameters {
-            strategy: PreflateStrategy::Default,
             huff_strategy: PreflateHuffStrategy::Dynamic,
-            zlib_compatible: true,
-            window_bits: 15,
-            hash_shift: 5,
-            hash_mask: 0x7fff,
-            max_token_count: 16383,
-            max_dist_3_matches,
-            very_far_matches_detected: false,
-            matches_to_start_detected: false,
-            good_length: config.good_length,
-            max_lazy: max_lazy,
-            nice_length: config.nice_length,
-            max_chain: config.max_chain,
+            predictor: TokenPredictorParameters {
+                strategy: PreflateStrategy::Default,
+                window_bits: 15,
+                hash_shift: 5,
+                hash_mask: 0x7fff,
+                very_far_matches_detected: false,
+                matches_to_start_detected: false,
+                nice_length: config.nice_length,
+                add_policy,
+                max_token_count: 16383,
+                zlib_compatible: true,
+                max_dist_3_matches,
+                good_length: config.good_length,
+                max_lazy: max_lazy,
+                max_chain: config.max_chain,
+                min_len: 3,
+            },
             hash_algorithm: HashAlgorithm::Zlib,
-            min_len: 3,
-            add_policy,
         };
 
         let contents = parse_deflate(&v, 1).unwrap();
@@ -528,23 +599,25 @@ fn verify_miniz1_compressed_perfect() {
     let mut cabac_encoder = PredictionEncoderCabac::new(VP8Writer::new(&mut buffer).unwrap());
 
     let params = PreflateParameters {
-        strategy: PreflateStrategy::Default,
+        predictor: TokenPredictorParameters {
+            strategy: PreflateStrategy::Default,
+            window_bits: 15,
+            hash_shift: 0,
+            hash_mask: crate::hash_algorithm::MINIZ_LEVEL1_HASH_SIZE_MASK,
+            very_far_matches_detected: false,
+            matches_to_start_detected: false,
+            nice_length: 258,
+            add_policy: crate::hash_chain::DictionaryAddPolicy::AddFirst(0),
+            max_token_count: 16383,
+            zlib_compatible: true,
+            max_dist_3_matches: 8192,
+            good_length: 258,
+            max_lazy: 0,
+            max_chain: 2,
+            min_len: 3,
+        },
         huff_strategy: PreflateHuffStrategy::Dynamic,
-        zlib_compatible: true,
-        window_bits: 15,
-        hash_shift: 0,
-        hash_mask: crate::hash_algorithm::MINIZ_LEVEL1_HASH_SIZE_MASK,
-        max_token_count: 16383,
-        max_dist_3_matches: 8192,
-        very_far_matches_detected: false,
-        matches_to_start_detected: false,
-        good_length: 258,
-        max_lazy: 0,
-        nice_length: 258,
-        max_chain: 2,
         hash_algorithm: HashAlgorithm::MiniZFast,
-        min_len: 3,
-        add_policy: crate::hash_chain::DictionaryAddPolicy::AddFirst(0),
     };
 
     encode_mispredictions(&contents, &params, &mut cabac_encoder).unwrap();

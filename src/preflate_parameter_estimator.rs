@@ -15,6 +15,7 @@ use crate::{
     preflate_stream_info::{extract_preflate_info, PreflateStreamInfo},
     preflate_token::PreflateTokenBlock,
     statistical_codec::{PredictionDecoder, PredictionEncoder},
+    token_predictor::TokenPredictorParameters,
 };
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
@@ -34,38 +35,17 @@ pub enum PreflateHuffStrategy {
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub struct PreflateParameters {
-    pub strategy: PreflateStrategy,
     pub huff_strategy: PreflateHuffStrategy,
-    pub zlib_compatible: bool,
-    pub window_bits: u32,
-    pub hash_shift: u32,
-    pub hash_mask: u16,
-    pub max_token_count: u16,
-    pub max_dist_3_matches: u16,
 
-    /// if there are matches that have a distance larger than window_size - MAX_MATCH.
-    /// Zlib does not allow these.
-    pub very_far_matches_detected: bool,
+    pub predictor: TokenPredictorParameters,
 
-    /// Zlib does not match to first byte of a file in order to reserve 0 for the end of chain
-    pub matches_to_start_detected: bool,
-
-    pub good_length: u32,
-    pub max_lazy: u32,
-    pub nice_length: u32,
-    pub max_chain: u32,
     pub hash_algorithm: HashAlgorithm,
-    pub min_len: u32,
-
-    /// if something, then we use the "fast" compressor, which only adds smaller substrings
-    /// to the dictionary
-    pub add_policy: DictionaryAddPolicy,
 }
 
 const FILE_VERSION: u16 = 1;
 
 impl PreflateParameters {
-    pub fn read<D: PredictionDecoder>(decoder: &mut D) -> Result<Self> {
+    pub fn read(decoder: &mut impl PredictionDecoder) -> Result<Self> {
         assert_eq!(FILE_VERSION, decoder.decode_value(8));
         let strategy = decoder.decode_value(4);
         let huff_strategy = decoder.decode_value(4);
@@ -106,12 +86,28 @@ impl PreflateParameters {
         const HASH_ALGORITHM_ZLIBNG: u16 = HashAlgorithm::ZlibNG as u16;
 
         Ok(PreflateParameters {
-            strategy: match strategy {
-                STRATEGY_DEFAULT => PreflateStrategy::Default,
-                STRATEGY_RLE_ONLY => PreflateStrategy::RleOnly,
-                STRATEGY_HUFF_ONLY => PreflateStrategy::HuffOnly,
-                STRATEGY_STORE => PreflateStrategy::Store,
-                _ => panic!("invalid strategy"),
+            predictor: TokenPredictorParameters {
+                strategy: match strategy {
+                    STRATEGY_DEFAULT => PreflateStrategy::Default,
+                    STRATEGY_RLE_ONLY => PreflateStrategy::RleOnly,
+                    STRATEGY_HUFF_ONLY => PreflateStrategy::HuffOnly,
+                    STRATEGY_STORE => PreflateStrategy::Store,
+                    _ => panic!("invalid strategy"),
+                },
+                window_bits: window_bits.into(),
+                hash_shift: hash_shift.into(),
+                hash_mask,
+                very_far_matches_detected,
+                matches_to_start_detected,
+                nice_length: nice_length.into(),
+                add_policy,
+                max_token_count,
+                zlib_compatible,
+                max_dist_3_matches,
+                good_length: good_length.into(),
+                max_lazy: max_lazy.into(),
+                max_chain: max_chain.into(),
+                min_len: min_len.into(),
             },
             huff_strategy: match huff_strategy {
                 HUFF_STRATEGY_DYNAMIC => PreflateHuffStrategy::Dynamic,
@@ -119,20 +115,6 @@ impl PreflateParameters {
                 HUFF_STRATEGY_STATIC => PreflateHuffStrategy::Static,
                 _ => panic!("invalid huff strategy"),
             },
-            zlib_compatible,
-            window_bits: window_bits.into(),
-            hash_shift: hash_shift.into(),
-            hash_mask,
-            max_token_count,
-            max_dist_3_matches,
-            very_far_matches_detected,
-            matches_to_start_detected,
-            good_length: good_length.into(),
-            max_lazy: max_lazy.into(),
-            nice_length: nice_length.into(),
-            max_chain: max_chain.into(),
-            min_len: min_len.into(),
-            add_policy,
             hash_algorithm: match hash_algorithm {
                 HASH_ALGORITHM_ZLIB => HashAlgorithm::Zlib,
                 HASH_ALGORITHM_MINIZ_FAST => HashAlgorithm::MiniZFast,
@@ -145,24 +127,30 @@ impl PreflateParameters {
 
     pub fn write<E: PredictionEncoder>(&self, encoder: &mut E) {
         encoder.encode_value(FILE_VERSION, 8);
-        encoder.encode_value(self.strategy as u16, 4);
+        encoder.encode_value(self.predictor.strategy as u16, 4);
         encoder.encode_value(self.huff_strategy as u16, 4);
-        encoder.encode_value(u16::try_from(self.zlib_compatible).unwrap(), 1);
-        encoder.encode_value(u16::try_from(self.window_bits).unwrap(), 8);
-        encoder.encode_value(u16::try_from(self.hash_shift).unwrap(), 8);
-        encoder.encode_value(self.hash_mask, 16);
-        encoder.encode_value(self.max_token_count, 16);
-        encoder.encode_value(self.max_dist_3_matches, 16);
-        encoder.encode_value(u16::try_from(self.very_far_matches_detected).unwrap(), 1);
-        encoder.encode_value(u16::try_from(self.matches_to_start_detected).unwrap(), 1);
-        encoder.encode_value(u16::try_from(self.good_length).unwrap(), 16);
-        encoder.encode_value(u16::try_from(self.max_lazy).unwrap(), 16);
-        encoder.encode_value(u16::try_from(self.nice_length).unwrap(), 16);
-        encoder.encode_value(u16::try_from(self.max_chain).unwrap(), 16);
+        encoder.encode_value(u16::try_from(self.predictor.zlib_compatible).unwrap(), 1);
+        encoder.encode_value(u16::try_from(self.predictor.window_bits).unwrap(), 8);
+        encoder.encode_value(u16::try_from(self.predictor.hash_shift).unwrap(), 8);
+        encoder.encode_value(self.predictor.hash_mask, 16);
+        encoder.encode_value(self.predictor.max_token_count, 16);
+        encoder.encode_value(self.predictor.max_dist_3_matches, 16);
+        encoder.encode_value(
+            u16::try_from(self.predictor.very_far_matches_detected).unwrap(),
+            1,
+        );
+        encoder.encode_value(
+            u16::try_from(self.predictor.matches_to_start_detected).unwrap(),
+            1,
+        );
+        encoder.encode_value(u16::try_from(self.predictor.good_length).unwrap(), 16);
+        encoder.encode_value(u16::try_from(self.predictor.max_lazy).unwrap(), 16);
+        encoder.encode_value(u16::try_from(self.predictor.nice_length).unwrap(), 16);
+        encoder.encode_value(u16::try_from(self.predictor.max_chain).unwrap(), 16);
         encoder.encode_value(self.hash_algorithm as u16, 4);
-        encoder.encode_value(u16::try_from(self.min_len).unwrap(), 16);
+        encoder.encode_value(u16::try_from(self.predictor.min_len).unwrap(), 16);
 
-        match self.add_policy {
+        match self.predictor.add_policy {
             DictionaryAddPolicy::AddAll => encoder.encode_value(0, 2),
             DictionaryAddPolicy::AddFirst(v) => {
                 encoder.encode_value(1, 2);
@@ -237,23 +225,25 @@ pub fn estimate_preflate_parameters(
     let hash_mask = cl.hash_mask;
 
     Ok(PreflateParameters {
-        window_bits,
-        hash_shift,
-        hash_mask,
-        max_token_count,
-        strategy: estimate_preflate_strategy(&info),
+        predictor: TokenPredictorParameters {
+            window_bits,
+            hash_shift,
+            hash_mask,
+            very_far_matches_detected: cl.very_far_matches_detected,
+            matches_to_start_detected: cl.matches_to_start_detected,
+            strategy: estimate_preflate_strategy(&info),
+            nice_length: cl.nice_length,
+            add_policy: cl.add_policy,
+            max_token_count,
+            zlib_compatible: cl.zlib_compatible,
+            max_dist_3_matches: cl.max_dist_3_matches,
+            good_length: cl.good_length,
+            max_lazy: cl.max_lazy,
+            max_chain: cl.max_chain,
+            min_len: cl.min_len,
+        },
         huff_strategy: estimate_preflate_huff_strategy(&info),
-        zlib_compatible: cl.zlib_compatible,
-        max_dist_3_matches: cl.max_dist_3_matches,
-        very_far_matches_detected: cl.very_far_matches_detected,
-        matches_to_start_detected: cl.matches_to_start_detected,
-        good_length: cl.good_length,
-        max_lazy: cl.max_lazy,
-        nice_length: cl.nice_length,
-        max_chain: cl.max_chain,
         hash_algorithm: cl.hash_algorithm,
-        min_len: cl.min_len,
-        add_policy: cl.add_policy,
     })
 }
 
@@ -270,37 +260,37 @@ fn verify_zlib_recognition() {
 
         let params = estimate_preflate_parameters(&contents.plain_text, &contents.blocks).unwrap();
 
-        assert_eq!(params.zlib_compatible, true);
+        assert_eq!(params.predictor.zlib_compatible, true);
         if i == 0 {
-            assert_eq!(params.strategy, PreflateStrategy::Store);
+            assert_eq!(params.predictor.strategy, PreflateStrategy::Store);
         } else if i >= 1 && i < 4 {
             let config = &FAST_PREFLATE_PARSER_SETTINGS[i as usize - 1];
             assert!(
-                params.max_chain <= config.max_chain,
+                params.predictor.max_chain <= config.max_chain,
                 "max_chain mismatch {} should be <= {}",
-                params.max_chain,
+                params.predictor.max_chain,
                 config.max_chain
             );
-            assert_eq!(params.good_length, config.good_length);
+            assert_eq!(params.predictor.good_length, config.good_length);
             assert_eq!(
-                params.add_policy,
+                params.predictor.add_policy,
                 DictionaryAddPolicy::AddFirst(config.max_lazy as u16)
             );
-            assert_eq!(params.nice_length, config.nice_length);
-            assert_eq!(params.strategy, PreflateStrategy::Default);
+            assert_eq!(params.predictor.nice_length, config.nice_length);
+            assert_eq!(params.predictor.strategy, PreflateStrategy::Default);
         } else if i >= 4 {
             let config = &SLOW_PREFLATE_PARSER_SETTINGS[i as usize - 4];
             assert!(
-                params.max_chain <= config.max_chain,
+                params.predictor.max_chain <= config.max_chain,
                 "max_chain mismatch {} should be <= {}",
-                params.max_chain,
+                params.predictor.max_chain,
                 config.max_chain
             );
-            assert_eq!(params.good_length, config.good_length);
-            assert_eq!(params.max_lazy, config.max_lazy);
-            assert_eq!(params.nice_length, config.nice_length);
-            assert_eq!(params.add_policy, DictionaryAddPolicy::AddAll);
-            assert_eq!(params.strategy, PreflateStrategy::Default);
+            assert_eq!(params.predictor.good_length, config.good_length);
+            assert_eq!(params.predictor.max_lazy, config.max_lazy);
+            assert_eq!(params.predictor.nice_length, config.nice_length);
+            assert_eq!(params.predictor.add_policy, DictionaryAddPolicy::AddAll);
+            assert_eq!(params.predictor.strategy, PreflateStrategy::Default);
         }
     }
 }
@@ -316,7 +306,7 @@ fn verify_miniz_recognition() {
         let params = estimate_preflate_parameters(&contents.plain_text, &contents.blocks).unwrap();
 
         if i == 0 {
-            assert_eq!(params.strategy, PreflateStrategy::Store);
+            assert_eq!(params.predictor.strategy, PreflateStrategy::Store);
         } else if i == 1 {
             println!("{:?}", params);
         } else {
