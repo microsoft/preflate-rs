@@ -13,7 +13,7 @@ use crate::{
     hash_chain::DictionaryAddPolicy,
     predictor_state::{MatchResult, PredictorState},
     preflate_constants::MIN_MATCH,
-    preflate_parameter_estimator::{PreflateParameters, PreflateStrategy},
+    preflate_parameter_estimator::PreflateStrategy,
     preflate_token::{BlockType, PreflateToken, PreflateTokenBlock, PreflateTokenReference},
     statistical_codec::{
         CodecCorrection, CodecMisprediction, PredictionDecoder, PredictionEncoder,

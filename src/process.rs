@@ -4,7 +4,7 @@
  *  This software incorporates material from third parties. See NOTICE.txt for details.
  *--------------------------------------------------------------------------------------------*/
 
-use std::{hash::RandomState, io::Cursor};
+use std::io::Cursor;
 
 use crate::{
     deflate_reader::DeflateReader,

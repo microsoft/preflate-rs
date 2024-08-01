@@ -4,8 +4,6 @@
  *  This software incorporates material from third parties. See NOTICE.txt for details.
  *--------------------------------------------------------------------------------------------*/
 
-use std::hash::Hash;
-
 /// This module is design to detect the appropriate overall parameters for the preflate compressor.
 /// Getting the parameters correct means that the resulting diff between the deflate stream
 /// and the predicted deflate stream will be as small as possible.
