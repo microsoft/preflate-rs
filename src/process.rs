@@ -425,11 +425,11 @@ fn test_treepngdeflate() {
 
     let mut r = RandomVectorHash::default();
 
-    r = r.append(contents.plain_text[0], 0);
-    r = r.append(contents.plain_text[1], 0);
-    r = r.append(contents.plain_text[2], 0);
+    r.append(contents.plain_text[0]);
+    r.append(contents.plain_text[1]);
+    r.append(contents.plain_text[2]);
 
-    println!("hashx: {:?}", r.hash(0x7fff));
+    println!("hashx: {:?}", r.get_hash());
 
     let mut maxdepth = 0;
 

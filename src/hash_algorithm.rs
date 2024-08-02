@@ -1,4 +1,7 @@
-use crate::hash_chain::{HashChain, HashChainNormalize};
+use crate::{
+    hash_chain::{HashChain, HashChainNormalize},
+    preflate_input::PreflateInput,
+};
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Default)]
 pub enum HashAlgorithm {
@@ -12,28 +15,62 @@ pub enum HashAlgorithm {
 pub trait RotatingHashTrait: Default + Copy + Clone {
     type HashChainType: HashChain;
 
-    fn hash(&self, mask: u16) -> usize;
-    fn append(&self, c: u8, hash_shift: u32) -> Self;
+    fn get_hash(&self) -> usize;
+    fn append(&mut self, c: u8);
     fn hash_algorithm() -> HashAlgorithm;
     fn num_hash_bytes() -> u16;
+    fn new(hash_shift: u32, hash_mask: u16) -> Self;
+
+    fn init(input: &PreflateInput, hash_shift: u32, hash_mask: u16) -> Self {
+        let mut running_hash = Self::new(hash_shift, hash_mask);
+        for i in 0..Self::num_hash_bytes() - 1 {
+            running_hash.append(input.cur_char(i as i32));
+        }
+
+        running_hash
+    }
+
+    /// calculate the hash for the current byte in the input stream, which
+    /// consists of the running hash plus the current character
+    fn calculate_hash(&self, input: &PreflateInput) -> Self {
+        let mut h = *self;
+        h.append(input.cur_char(Self::num_hash_bytes() as i32 - 1));
+        h
+    }
+
+    /// calculate the hash for the next byte in the input stream which
+    /// consists of the running hash plus the next 2 characters
+    fn calculate_hash_next(&self, input: &PreflateInput) -> Self {
+        let mut h = self.calculate_hash(input);
+        h.append(input.cur_char(Self::num_hash_bytes() as i32));
+        h
+    }
 }
 
 #[derive(Default, Debug, Copy, Clone)]
 pub struct ZlibRotatingHash {
     hash: u16,
+    hash_mask: u16,
+    hash_shift: u32,
 }
 
 impl RotatingHashTrait for ZlibRotatingHash {
     type HashChainType = crate::hash_chain::HashChainNormalize<ZlibRotatingHash>;
 
-    fn hash(&self, mask: u16) -> usize {
-        usize::from(self.hash & mask)
+    fn get_hash(&self) -> usize {
+        usize::from(self.hash & self.hash_mask)
     }
 
-    fn append(&self, c: u8, hash_shift: u32) -> ZlibRotatingHash {
-        ZlibRotatingHash {
-            hash: (self.hash << hash_shift) ^ u16::from(c),
+    fn new(hash_shift: u32, hash_mask: u16) -> Self {
+        Self {
+            hash: 0,
+            hash_mask,
+            hash_shift,
         }
+    }
+
+    fn append(&mut self, c: u8) {
+        self.hash = (self.hash << self.hash_shift) ^ u16::from(c);
     }
 
     fn hash_algorithm() -> HashAlgorithm {
@@ -56,15 +93,16 @@ pub const MINIZ_LEVEL1_HASH_SIZE_MASK: u16 = 4095;
 impl RotatingHashTrait for MiniZHash {
     type HashChainType = crate::hash_chain::HashChainNormalize<MiniZHash>;
 
-    fn hash(&self, mask: u16) -> usize {
-        debug_assert!(mask == MINIZ_LEVEL1_HASH_SIZE_MASK);
+    fn new(_hash_shift: u32, _hash_mask: u16) -> Self {
+        Self { hash: 0 }
+    }
+
+    fn get_hash(&self) -> usize {
         ((self.hash ^ (self.hash >> 17)) & u32::from(MINIZ_LEVEL1_HASH_SIZE_MASK)) as usize
     }
 
-    fn append(&self, c: u8, _hash_shift: u32) -> Self {
-        MiniZHash {
-            hash: (c as u32) << 16 | (self.hash >> 8),
-        }
+    fn append(&mut self, c: u8) {
+        self.hash = (c as u32) << 16 | (self.hash >> 8);
     }
 
     fn hash_algorithm() -> HashAlgorithm {
@@ -84,15 +122,18 @@ pub struct LibdeflateRotatingHash4 {
 impl RotatingHashTrait for LibdeflateRotatingHash4 {
     type HashChainType = HashChainNormalize<LibdeflateRotatingHash4>;
 
-    fn hash(&self, mask: u16) -> usize {
-        debug_assert!(mask == 0xffff);
+    fn new(hash_shift: u32, hash_mask: u16) -> Self {
+        assert_eq!(hash_shift, 0);
+        assert_eq!(hash_mask, 0xffff);
+        Self { hash: 0 }
+    }
+
+    fn get_hash(&self) -> usize {
         (self.hash.wrapping_mul(0x1E35A7BD) >> 16) as usize
     }
 
-    fn append(&self, c: u8, _hash_shift: u32) -> Self {
-        Self {
-            hash: ((c as u32) << 24) | (self.hash >> 8),
-        }
+    fn append(&mut self, c: u8) {
+        self.hash = ((c as u32) << 24) | (self.hash >> 8);
     }
 
     fn hash_algorithm() -> HashAlgorithm {
@@ -115,15 +156,18 @@ pub struct LibdeflateRotatingHash3 {
 impl RotatingHashTrait for LibdeflateRotatingHash3 {
     type HashChainType = HashChainNormalize<LibdeflateRotatingHash3>;
 
-    fn hash(&self, mask: u16) -> usize {
-        debug_assert!(mask == 0x7fff);
+    fn new(hash_shift: u32, hash_mask: u16) -> Self {
+        assert_eq!(hash_shift, 0);
+        assert_eq!(hash_mask, 0x7fff);
+        Self { hash: 0 }
+    }
+
+    fn get_hash(&self) -> usize {
         (self.hash.wrapping_mul(0x1E35A7BD) >> 17) as usize
     }
 
-    fn append(&self, c: u8, _hash_shift: u32) -> Self {
-        Self {
-            hash: (c as u32) << 16 | (self.hash >> 8),
-        }
+    fn append(&mut self, c: u8) {
+        self.hash = (c as u32) << 16 | (self.hash >> 8);
     }
 
     fn hash_algorithm() -> HashAlgorithm {
@@ -143,15 +187,18 @@ pub struct ZlibNGHash {
 impl RotatingHashTrait for ZlibNGHash {
     type HashChainType = HashChainNormalize<ZlibNGHash>;
 
-    fn hash(&self, mask: u16) -> usize {
-        debug_assert!(mask == 0xffff);
+    fn new(hash_shift: u32, hash_mask: u16) -> Self {
+        assert_eq!(hash_shift, 0);
+        assert_eq!(hash_mask, 0xffff);
+        Self { hash: 0 }
+    }
+
+    fn get_hash(&self) -> usize {
         (self.hash.wrapping_mul(2654435761) >> 16) as usize
     }
 
-    fn append(&self, c: u8, _hash_shift: u32) -> Self {
-        Self {
-            hash: ((c as u32) << 24) | (self.hash >> 8),
-        }
+    fn append(&mut self, c: u8) {
+        self.hash = ((c as u32) << 24) | (self.hash >> 8);
     }
 
     fn hash_algorithm() -> HashAlgorithm {
@@ -241,17 +288,18 @@ const RANDOM_VECTOR: [u16; 768] = [
 impl RotatingHashTrait for RandomVectorHash {
     type HashChainType = HashChainNormalize<RandomVectorHash>;
 
-    fn hash(&self, mask: u16) -> usize {
-        ((RANDOM_VECTOR[(self.characters & 0xff) as usize]
-            ^ RANDOM_VECTOR[((self.characters >> 8) & 0xff) as usize + 256]
-            ^ RANDOM_VECTOR[(self.characters >> 16) as usize + 512])
-            & mask) as usize
+    fn new(_hash_shift: u32, _hash_mask: u16) -> Self {
+        Self { characters: 0 }
     }
 
-    fn append(&self, c: u8, _hash_shift: u32) -> Self {
-        Self {
-            characters: (c as u32) << 16 | (self.characters >> 8),
-        }
+    fn get_hash(&self) -> usize {
+        (RANDOM_VECTOR[(self.characters & 0xff) as usize]
+            ^ RANDOM_VECTOR[((self.characters >> 8) & 0xff) as usize + 256]
+            ^ RANDOM_VECTOR[(self.characters >> 16) as usize + 512]) as usize
+    }
+
+    fn append(&mut self, c: u8) {
+        self.characters = (c as u32) << 16 | (self.characters >> 8);
     }
 
     fn hash_algorithm() -> HashAlgorithm {
