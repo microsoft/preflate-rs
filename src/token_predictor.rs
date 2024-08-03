@@ -14,6 +14,7 @@ use crate::{
         ZlibNGHash, ZlibRotatingHash,
     },
     hash_chain::DictionaryAddPolicy,
+    hash_chain_holder::{new_hash_chain_holder, HashChainHolderTrait, MatchResult},
     preflate_constants::MIN_MATCH,
     preflate_input::PreflateInput,
     preflate_parameter_estimator::PreflateStrategy,
@@ -21,13 +22,12 @@ use crate::{
     statistical_codec::{
         CodecCorrection, CodecMisprediction, PredictionDecoder, PredictionEncoder,
     },
-    token_predictor_state::{MatchResult, TokenPredictorState, TokenPredictorStateTrait},
 };
 
 const VERIFY: bool = false;
 
 pub struct TokenPredictor<'a> {
-    state: Box<dyn TokenPredictorStateTrait>,
+    state: Box<dyn HashChainHolderTrait>,
     params: TokenPredictorParameters,
     pending_reference: Option<PreflateTokenReference>,
     current_token_count: u32,
@@ -44,8 +44,6 @@ pub struct TokenPredictorParameters {
     /// Zlib does not allow these.
     pub very_far_matches_detected: bool,
     pub window_bits: u32,
-    pub hash_shift: u32,
-    pub hash_mask: u16,
 
     pub strategy: PreflateStrategy,
     pub nice_length: u32,
@@ -73,31 +71,7 @@ impl<'a> TokenPredictor<'a> {
         // Create and initialize PreflatePredictorState, PreflateHashChainExt, and PreflateSeqChain instances
         // Construct the analysisResults vector
 
-        let predictor_state: Box<dyn TokenPredictorStateTrait>;
-        match params.hash_algorithm {
-            HashAlgorithm::Zlib => {
-                predictor_state = Box::new(TokenPredictorState::new(
-                    params,
-                    ZlibRotatingHash {
-                        hash_mask: params.hash_mask,
-                        hash_shift: params.hash_shift,
-                    },
-                ))
-            }
-            HashAlgorithm::MiniZFast => {
-                predictor_state = Box::new(TokenPredictorState::new(params, MiniZHash {}))
-            }
-            HashAlgorithm::Libdeflate4 => {
-                predictor_state =
-                    Box::new(TokenPredictorState::new(params, LibdeflateRotatingHash4 {}))
-            }
-            HashAlgorithm::ZlibNG => {
-                predictor_state = Box::new(TokenPredictorState::new(params, ZlibNGHash {}))
-            }
-            HashAlgorithm::RandomVector => {
-                predictor_state = Box::new(TokenPredictorState::new(params, RandomVectorHash {}))
-            }
-        }
+        let predictor_state = new_hash_chain_holder(params);
 
         Self {
             state: predictor_state,
@@ -136,7 +110,7 @@ impl<'a> TokenPredictor<'a> {
 
             codec.encode_correction(CodecCorrection::NonZeroPadding, block.padding_bits.into());
             self.state
-                .update_hash_batch(block.uncompressed_len, &mut self.input);
+                .update_hash(block.uncompressed_len, &mut self.input, true);
 
             return Ok(());
         }
@@ -306,7 +280,7 @@ impl<'a> TokenPredictor<'a> {
                 block.padding_bits = codec.decode_correction(CodecCorrection::NonZeroPadding) as u8;
 
                 self.state
-                    .update_hash_batch(block.uncompressed_len, &mut self.input);
+                    .update_hash(block.uncompressed_len, &mut self.input, true);
                 return Ok(block);
             }
             BT_STATICHUFF => {
@@ -520,14 +494,14 @@ impl<'a> TokenPredictor<'a> {
                     block.add_literal(self.input.cur_char(0));
                 }
 
-                self.state.update_hash_batch(1, &mut self.input);
+                self.state.update_hash(1, &mut self.input, true);
             }
             PreflateToken::Reference(t) => {
                 if let Some(block) = block {
                     block.add_reference(t.len(), t.dist(), t.get_irregular258());
                 }
 
-                self.state.update_hash_with_policy(t.len(), &mut self.input);
+                self.state.update_hash(t.len(), &mut self.input, false);
             }
         }
 

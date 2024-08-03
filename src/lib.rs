@@ -13,6 +13,7 @@ mod deflate_reader;
 mod deflate_writer;
 mod hash_algorithm;
 mod hash_chain;
+mod hash_chain_holder;
 mod huffman_calc;
 mod huffman_encoding;
 mod huffman_helper;
@@ -28,7 +29,6 @@ mod scan_deflate;
 mod skip_length_estimator;
 mod statistical_codec;
 mod token_predictor;
-mod token_predictor_state;
 mod tree_predictor;
 
 use anyhow::{self};

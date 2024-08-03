@@ -42,6 +42,12 @@ pub struct PreflateParameters {
 
 const FILE_VERSION: u16 = 1;
 
+const HASH_ALGORITHM_ZLIB: u16 = 0;
+const HASH_ALGORITHM_MINIZ_FAST: u16 = 1;
+const HASH_ALGORITHM_LIBDEFLATE4: u16 = 2;
+const HASH_ALGORITHM_ZLIBNG: u16 = 3;
+const HASH_ALGORITHM_RANDOMVECTOR: u16 = 4;
+
 impl PreflateParameters {
     pub fn read(decoder: &mut impl PredictionDecoder) -> Result<Self> {
         assert_eq!(FILE_VERSION, decoder.decode_value(8));
@@ -49,8 +55,18 @@ impl PreflateParameters {
         let huff_strategy = decoder.decode_value(4);
         let zlib_compatible = decoder.decode_value(1) != 0;
         let window_bits = decoder.decode_value(8);
-        let hash_shift = decoder.decode_value(8);
-        let hash_mask = decoder.decode_value(16);
+        let hash_algorithm = decoder.decode_value(4);
+
+        let hash_shift;
+        let hash_mask;
+        if hash_algorithm == HASH_ALGORITHM_ZLIB {
+            hash_shift = decoder.decode_value(8);
+            hash_mask = decoder.decode_value(16);
+        } else {
+            hash_shift = 0;
+            hash_mask = 0;
+        }
+
         let max_token_count = decoder.decode_value(16);
         let max_dist_3_matches = decoder.decode_value(16);
         let very_far_matches_detected = decoder.decode_value(1) != 0;
@@ -59,7 +75,6 @@ impl PreflateParameters {
         let max_lazy = decoder.decode_value(16);
         let nice_length = decoder.decode_value(16);
         let max_chain = decoder.decode_value(16);
-        let hash_algorithm = decoder.decode_value(4);
         let min_len = decoder.decode_value(16);
 
         let add_policy = match decoder.decode_value(2) {
@@ -78,11 +93,6 @@ impl PreflateParameters {
         const HUFF_STRATEGY_MIXED: u16 = PreflateHuffStrategy::Mixed as u16;
         const HUFF_STRATEGY_STATIC: u16 = PreflateHuffStrategy::Static as u16;
 
-        const HASH_ALGORITHM_ZLIB: u16 = HashAlgorithm::Zlib as u16;
-        const HASH_ALGORITHM_MINIZ_FAST: u16 = HashAlgorithm::MiniZFast as u16;
-        const HASH_ALGORITHM_LIBDEFLATE4: u16 = HashAlgorithm::Libdeflate4 as u16;
-        const HASH_ALGORITHM_ZLIBNG: u16 = HashAlgorithm::ZlibNG as u16;
-
         Ok(PreflateParameters {
             predictor: TokenPredictorParameters {
                 strategy: match strategy {
@@ -93,8 +103,6 @@ impl PreflateParameters {
                     _ => panic!("invalid strategy"),
                 },
                 window_bits: window_bits.into(),
-                hash_shift: hash_shift.into(),
-                hash_mask,
                 very_far_matches_detected,
                 matches_to_start_detected,
                 nice_length: nice_length.into(),
@@ -107,7 +115,10 @@ impl PreflateParameters {
                 max_chain: max_chain.into(),
                 min_len: min_len.into(),
                 hash_algorithm: match hash_algorithm {
-                    HASH_ALGORITHM_ZLIB => HashAlgorithm::Zlib,
+                    HASH_ALGORITHM_ZLIB => HashAlgorithm::Zlib {
+                        hash_shift: hash_shift.into(),
+                        hash_mask,
+                    },
                     HASH_ALGORITHM_MINIZ_FAST => HashAlgorithm::MiniZFast,
                     HASH_ALGORITHM_LIBDEFLATE4 => HashAlgorithm::Libdeflate4,
                     HASH_ALGORITHM_ZLIBNG => HashAlgorithm::ZlibNG,
@@ -129,8 +140,30 @@ impl PreflateParameters {
         encoder.encode_value(self.huff_strategy as u16, 4);
         encoder.encode_value(u16::try_from(self.predictor.zlib_compatible).unwrap(), 1);
         encoder.encode_value(u16::try_from(self.predictor.window_bits).unwrap(), 8);
-        encoder.encode_value(u16::try_from(self.predictor.hash_shift).unwrap(), 8);
-        encoder.encode_value(self.predictor.hash_mask, 16);
+
+        match self.predictor.hash_algorithm {
+            HashAlgorithm::Zlib {
+                hash_shift,
+                hash_mask,
+            } => {
+                encoder.encode_value(HASH_ALGORITHM_ZLIB, 4);
+                encoder.encode_value(u16::try_from(hash_shift).unwrap(), 8);
+                encoder.encode_value(hash_mask, 16);
+            }
+            HashAlgorithm::MiniZFast => {
+                encoder.encode_value(HASH_ALGORITHM_MINIZ_FAST, 4);
+            }
+            HashAlgorithm::Libdeflate4 => {
+                encoder.encode_value(HASH_ALGORITHM_LIBDEFLATE4, 4);
+            }
+            HashAlgorithm::ZlibNG => {
+                encoder.encode_value(HASH_ALGORITHM_ZLIBNG, 4);
+            }
+            HashAlgorithm::RandomVector => {
+                encoder.encode_value(HASH_ALGORITHM_RANDOMVECTOR, 4);
+            }
+        }
+
         encoder.encode_value(self.predictor.max_token_count, 16);
         encoder.encode_value(self.predictor.max_dist_3_matches, 16);
         encoder.encode_value(
@@ -145,7 +178,6 @@ impl PreflateParameters {
         encoder.encode_value(u16::try_from(self.predictor.max_lazy).unwrap(), 16);
         encoder.encode_value(u16::try_from(self.predictor.nice_length).unwrap(), 16);
         encoder.encode_value(u16::try_from(self.predictor.max_chain).unwrap(), 16);
-        encoder.encode_value(self.predictor.hash_algorithm as u16, 4);
         encoder.encode_value(u16::try_from(self.predictor.min_len).unwrap(), 16);
 
         match self.predictor.add_policy {
@@ -219,14 +251,9 @@ pub fn estimate_preflate_parameters(
 
     let cl = estimate_preflate_comp_level(window_bits, mem_level, unpacked_output, blocks)?;
 
-    let hash_shift = cl.hash_shift;
-    let hash_mask = cl.hash_mask;
-
     Ok(PreflateParameters {
         predictor: TokenPredictorParameters {
             window_bits,
-            hash_shift,
-            hash_mask,
             very_far_matches_detected: cl.very_far_matches_detected,
             matches_to_start_detected: cl.matches_to_start_detected,
             strategy: estimate_preflate_strategy(&info),

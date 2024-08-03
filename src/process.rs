@@ -509,8 +509,6 @@ fn verify_zlib_compressed_perfect() {
             predictor: crate::token_predictor::TokenPredictorParameters {
                 strategy: PreflateStrategy::Default,
                 window_bits: 15,
-                hash_shift: 5,
-                hash_mask: 0x7fff,
                 very_far_matches_detected: false,
                 matches_to_start_detected: false,
                 nice_length: config.nice_length,
@@ -522,7 +520,10 @@ fn verify_zlib_compressed_perfect() {
                 max_lazy: max_lazy,
                 max_chain: config.max_chain,
                 min_len: 3,
-                hash_algorithm: HashAlgorithm::Zlib,
+                hash_algorithm: HashAlgorithm::Zlib {
+                    hash_shift: 5,
+                    hash_mask: 0x7fff,
+                },
             },
         };
 
@@ -556,8 +557,6 @@ fn verify_miniz1_compressed_perfect() {
         predictor: crate::token_predictor::TokenPredictorParameters {
             strategy: PreflateStrategy::Default,
             window_bits: 15,
-            hash_shift: 0,
-            hash_mask: crate::hash_algorithm::MINIZ_LEVEL1_HASH_SIZE_MASK,
             very_far_matches_detected: false,
             matches_to_start_detected: false,
             nice_length: 258,

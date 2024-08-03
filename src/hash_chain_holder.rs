@@ -5,7 +5,10 @@
  *--------------------------------------------------------------------------------------------*/
 
 use crate::bit_helper::DebugHash;
-use crate::hash_algorithm::HashImplementation;
+use crate::hash_algorithm::{
+    HashAlgorithm, HashImplementation, LibdeflateRotatingHash4, MiniZHash, RandomVectorHash,
+    ZlibNGHash, ZlibRotatingHash,
+};
 use crate::hash_chain::{DictionaryAddPolicy, HashChain, MAX_UPDATE_HASH_BATCH};
 use crate::preflate_constants::{MAX_MATCH, MIN_LOOKAHEAD, MIN_MATCH};
 use crate::preflate_input::PreflateInput;
@@ -23,18 +26,49 @@ pub enum MatchResult {
     MaxChainExceeded(u32),
 }
 
-pub struct TokenPredictorState<H: HashImplementation> {
+struct HashChainHolder<H: HashImplementation> {
     hash: H::HashChainType,
     params: TokenPredictorParameters,
     window_bytes: u32,
 }
 
+/// Factory function to create a new HashChainHolder based on the parameters and returns
+/// a boxed trait object. The reason for this is that this lets the compiler optimize the
+pub fn new_hash_chain_holder(params: &TokenPredictorParameters) -> Box<dyn HashChainHolderTrait> {
+    let predictor_state: Box<dyn HashChainHolderTrait>;
+    match params.hash_algorithm {
+        HashAlgorithm::Zlib {
+            hash_mask,
+            hash_shift,
+        } => {
+            predictor_state = Box::new(HashChainHolder::new(
+                params,
+                ZlibRotatingHash {
+                    hash_mask,
+                    hash_shift,
+                },
+            ))
+        }
+        HashAlgorithm::MiniZFast => {
+            predictor_state = Box::new(HashChainHolder::new(params, MiniZHash {}))
+        }
+        HashAlgorithm::Libdeflate4 => {
+            predictor_state = Box::new(HashChainHolder::new(params, LibdeflateRotatingHash4 {}))
+        }
+        HashAlgorithm::ZlibNG => {
+            predictor_state = Box::new(HashChainHolder::new(params, ZlibNGHash {}))
+        }
+        HashAlgorithm::RandomVector => {
+            predictor_state = Box::new(HashChainHolder::new(params, RandomVectorHash {}))
+        }
+    }
+    predictor_state
+}
+
 /// trait that is not dependent on the HashImplementation so it can
 /// be used in a boxed type by the TokenPredictor
-pub trait TokenPredictorStateTrait {
-    fn update_hash_with_policy(&mut self, length: u32, input: &mut PreflateInput);
-
-    fn update_hash_batch(&mut self, length: u32, input: &mut PreflateInput);
+pub trait HashChainHolderTrait {
+    fn update_hash(&mut self, length: u32, input: &mut PreflateInput, override_policy: bool);
 
     fn match_token(
         &self,
@@ -55,30 +89,47 @@ pub trait TokenPredictorStateTrait {
     /// Does the inverse of calculate_hops, where we start from the predicted token and
     /// get the new distance based on the number of hops
     fn hop_match(&self, len: u32, hops: u32, input: &PreflateInput) -> anyhow::Result<u32>;
+
+    /// Returns the depth of the match, which refers to the number of hops in the hashtable
+    fn match_depth(
+        &self,
+        token: PreflateTokenReference,
+        window_size: u32,
+        input: &PreflateInput,
+    ) -> u32;
+
     /// debugging function to verify that the hash chain is correct
     fn verify_hash(&self, _dist: Option<PreflateTokenReference>);
+
     fn checksum(&self, checksum: &mut DebugHash);
 }
 
-impl<H: HashImplementation> TokenPredictorStateTrait for TokenPredictorState<H> {
-    fn update_hash_with_policy(&mut self, length: u32, input: &mut PreflateInput) {
-        self.hash
-            .update_hash_with_policy::<false>(length, input, self.params.add_policy);
-        input.advance(length);
-    }
-
-    fn update_hash_batch(&mut self, mut length: u32, input: &mut PreflateInput) {
+impl<H: HashImplementation> HashChainHolderTrait for HashChainHolder<H> {
+    fn update_hash(&mut self, mut length: u32, input: &mut PreflateInput, is_literal: bool) {
         while length > 0 {
             let batch_len = cmp::min(length, MAX_UPDATE_HASH_BATCH);
 
             self.hash.update_hash_with_policy::<false>(
                 batch_len,
                 input,
-                DictionaryAddPolicy::AddAll,
+                if is_literal {
+                    DictionaryAddPolicy::AddAll
+                } else {
+                    self.params.add_policy
+                },
             );
             input.advance(batch_len);
             length -= batch_len;
         }
+    }
+
+    fn match_depth(
+        &self,
+        token: PreflateTokenReference,
+        window_size: u32,
+        input: &PreflateInput,
+    ) -> u32 {
+        self.hash.match_depth(&token, window_size, input)
     }
 
     fn match_token(
@@ -281,7 +332,7 @@ impl<H: HashImplementation> TokenPredictorStateTrait for TokenPredictorState<H> 
     }
 }
 
-impl<H: HashImplementation> TokenPredictorState<H> {
+impl<H: HashImplementation> HashChainHolder<H> {
     pub fn new(params: &TokenPredictorParameters, hash: H) -> Self {
         Self {
             hash: hash.new_hash_chain(),

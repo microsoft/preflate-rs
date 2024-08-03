@@ -2,8 +2,11 @@ use crate::hash_chain::{HashChain, HashChainNormalize, HashChainNormalizeLibflat
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Default)]
 pub enum HashAlgorithm {
+    Zlib {
+        hash_mask: u16,
+        hash_shift: u32,
+    },
     #[default]
-    Zlib,
     MiniZFast,
     Libdeflate4,
     ZlibNG,

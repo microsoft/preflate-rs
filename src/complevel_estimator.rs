@@ -30,8 +30,6 @@ pub struct CompLevelInfo {
     pub max_dist_3_matches: u16,
     pub min_len: u32,
     pub add_policy: DictionaryAddPolicy,
-    pub hash_mask: u16,
-    pub hash_shift: u32,
     pub hash_algorithm: HashAlgorithm,
     pub good_length: u32,
     pub max_lazy: u32,
@@ -93,8 +91,6 @@ impl<H: HashImplementation> HashChainInvoke for HashChainHolder<H> {
 
 struct CandidateInfo {
     hash_algorithm: HashAlgorithm,
-    hash_mask: u16,
-    hash_shift: u32,
     add_policy: DictionaryAddPolicy,
     hash_chain: Box<dyn HashChainInvoke>,
 
@@ -105,19 +101,18 @@ struct CandidateInfo {
 
 impl CandidateInfo {
     fn new(
-        hash_mask: u16,
-        hash_shift: u32,
         add_policy: DictionaryAddPolicy,
         hash_algorithm: HashAlgorithm,
         input: &PreflateInput,
     ) -> Self {
         CandidateInfo {
-            hash_mask,
-            hash_shift,
             add_policy,
             hash_algorithm,
             hash_chain: match hash_algorithm {
-                HashAlgorithm::Zlib => HashChainHolder::new(ZlibRotatingHash {
+                HashAlgorithm::Zlib {
+                    hash_mask,
+                    hash_shift,
+                } => HashChainHolder::new(ZlibRotatingHash {
                     hash_shift,
                     hash_mask,
                 }),
@@ -183,14 +178,6 @@ impl CandidateInfo {
         self.max_chain_found
     }
 
-    fn hash_mask(&self) -> u16 {
-        self.hash_mask
-    }
-
-    fn hash_shift(&self) -> u32 {
-        self.hash_shift
-    }
-
     fn hash_algorithm(&self) -> HashAlgorithm {
         self.hash_algorithm
     }
@@ -239,8 +226,6 @@ impl<'a> CompLevelEstimatorState<'a> {
         let mut candidates: Vec<Box<CandidateInfo>> = Vec::new();
 
         candidates.push(Box::new(CandidateInfo::new(
-            MINIZ_LEVEL1_HASH_SIZE_MASK,
-            0,
             add_policy,
             HashAlgorithm::MiniZFast,
             &input,
@@ -248,18 +233,17 @@ impl<'a> CompLevelEstimatorState<'a> {
 
         for (hash_shift, hash_mask) in [(5, 32767), (4, 2047)] {
             candidates.push(Box::new(CandidateInfo::new(
-                hash_mask,
-                hash_shift,
                 add_policy,
-                HashAlgorithm::Zlib,
+                HashAlgorithm::Zlib {
+                    hash_mask,
+                    hash_shift,
+                },
                 &input,
             )));
         }
 
         // LibFlate4 candidate
         candidates.push(Box::new(CandidateInfo::new(
-            0xffff,
-            0,
             add_policy,
             HashAlgorithm::Libdeflate4,
             &input,
@@ -267,8 +251,6 @@ impl<'a> CompLevelEstimatorState<'a> {
 
         // ZlibNG candidate
         candidates.push(Box::new(CandidateInfo::new(
-            0xffff,
-            0,
             add_policy,
             HashAlgorithm::ZlibNG,
             &input,
@@ -367,8 +349,6 @@ impl<'a> CompLevelEstimatorState<'a> {
         let mut max_lazy = 258;
         let mut nice_length = 258;
 
-        let hash_mask = candidate.hash_mask();
-        let hash_shift = candidate.hash_shift();
         let add_policy = candidate.add_policy;
         let max_chain = candidate.max_chain_found() + 1;
         let hash_algorithm = candidate.hash_algorithm();
@@ -415,8 +395,6 @@ impl<'a> CompLevelEstimatorState<'a> {
             matches_to_start_detected: self.match_to_start,
             very_far_matches_detected: very_far_matches,
             max_dist_3_matches: self.longest_len_3_dist as u16,
-            hash_mask,
-            hash_shift,
             add_policy,
             good_length,
             max_lazy,
