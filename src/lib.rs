@@ -16,7 +16,6 @@ mod hash_chain;
 mod huffman_calc;
 mod huffman_encoding;
 mod huffman_helper;
-mod predictor_state;
 mod preflate_constants;
 pub mod preflate_error;
 mod preflate_input;
@@ -29,6 +28,7 @@ mod scan_deflate;
 mod skip_length_estimator;
 mod statistical_codec;
 mod token_predictor;
+mod token_predictor_state;
 mod tree_predictor;
 
 use anyhow::{self};

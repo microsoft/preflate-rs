@@ -9,9 +9,11 @@ use anyhow::Context;
 use crate::{
     bit_helper::DebugHash,
     cabac_codec::{decode_difference, encode_difference},
-    hash_algorithm::HashImplementation,
+    hash_algorithm::{
+        HashAlgorithm, HashImplementation, LibdeflateRotatingHash4, MiniZHash, RandomVectorHash,
+        ZlibNGHash, ZlibRotatingHash,
+    },
     hash_chain::DictionaryAddPolicy,
-    predictor_state::{MatchResult, PredictorState},
     preflate_constants::MIN_MATCH,
     preflate_input::PreflateInput,
     preflate_parameter_estimator::PreflateStrategy,
@@ -19,31 +21,18 @@ use crate::{
     statistical_codec::{
         CodecCorrection, CodecMisprediction, PredictionDecoder, PredictionEncoder,
     },
+    token_predictor_state::{MatchResult, TokenPredictorState, TokenPredictorStateTrait},
 };
 
 const VERIFY: bool = false;
 
-pub struct TokenPredictor<'a, H: HashImplementation> {
-    state: PredictorState<H>,
+pub struct TokenPredictor<'a> {
+    state: Box<dyn TokenPredictorStateTrait>,
     params: TokenPredictorParameters,
     pending_reference: Option<PreflateTokenReference>,
     current_token_count: u32,
     max_token_count: u32,
     input: PreflateInput<'a>,
-}
-
-trait TokenPredictorTrait {
-    fn predict_block(
-        &mut self,
-        block: &PreflateTokenBlock,
-        last_block: bool,
-        codec: &mut dyn PredictionEncoder,
-    ) -> anyhow::Result<Vec<u8>>;
-
-    fn recreate_block(
-        &mut self,
-        codec: &mut dyn PredictionDecoder,
-    ) -> anyhow::Result<PreflateTokenBlock>;
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
@@ -73,17 +62,45 @@ pub struct TokenPredictorParameters {
     pub max_lazy: u32,
     pub max_chain: u32,
     pub min_len: u32,
+
+    pub hash_algorithm: HashAlgorithm,
 }
 
-impl<'a, H: HashImplementation> TokenPredictor<'a, H> {
-    pub fn new(uncompressed: &'a [u8], params: &TokenPredictorParameters, hash: H) -> Self {
+impl<'a> TokenPredictor<'a> {
+    pub fn new(uncompressed: &'a [u8], params: &TokenPredictorParameters) -> Self {
         // Implement constructor logic for PreflateTokenPredictor
         // Initialize fields as necessary
         // Create and initialize PreflatePredictorState, PreflateHashChainExt, and PreflateSeqChain instances
         // Construct the analysisResults vector
 
+        let predictor_state: Box<dyn TokenPredictorStateTrait>;
+        match params.hash_algorithm {
+            HashAlgorithm::Zlib => {
+                predictor_state = Box::new(TokenPredictorState::new(
+                    params,
+                    ZlibRotatingHash {
+                        hash_mask: params.hash_mask,
+                        hash_shift: params.hash_shift,
+                    },
+                ))
+            }
+            HashAlgorithm::MiniZFast => {
+                predictor_state = Box::new(TokenPredictorState::new(params, MiniZHash {}))
+            }
+            HashAlgorithm::Libdeflate4 => {
+                predictor_state =
+                    Box::new(TokenPredictorState::new(params, LibdeflateRotatingHash4 {}))
+            }
+            HashAlgorithm::ZlibNG => {
+                predictor_state = Box::new(TokenPredictorState::new(params, ZlibNGHash {}))
+            }
+            HashAlgorithm::RandomVector => {
+                predictor_state = Box::new(TokenPredictorState::new(params, RandomVectorHash {}))
+            }
+        }
+
         Self {
-            state: PredictorState::new(params, hash),
+            state: predictor_state,
             params: *params,
             pending_reference: None,
             current_token_count: 0,

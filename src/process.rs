@@ -31,52 +31,11 @@ pub fn encode_mispredictions(
     params: &PreflateParameters,
     encoder: &mut impl PredictionEncoder,
 ) -> Result<(), PreflateError> {
-    match params.hash_algorithm {
-        HashAlgorithm::MiniZFast => predict_blocks(
-            &deflate.blocks,
-            TokenPredictor::<MiniZHash>::new(&deflate.plain_text, &params.predictor, MiniZHash {}),
-            encoder,
-        )?,
-        HashAlgorithm::Zlib => predict_blocks(
-            &deflate.blocks,
-            TokenPredictor::<ZlibRotatingHash>::new(
-                &deflate.plain_text,
-                &params.predictor,
-                ZlibRotatingHash {
-                    hash_mask: params.predictor.hash_mask,
-                    hash_shift: params.predictor.hash_shift,
-                },
-            ),
-            encoder,
-        )?,
-        HashAlgorithm::Libdeflate4 => predict_blocks(
-            &deflate.blocks,
-            TokenPredictor::<LibdeflateRotatingHash4>::new(
-                &deflate.plain_text,
-                &params.predictor,
-                LibdeflateRotatingHash4 {},
-            ),
-            encoder,
-        )?,
-        HashAlgorithm::ZlibNG => predict_blocks(
-            &deflate.blocks,
-            TokenPredictor::<ZlibNGHash>::new(
-                &deflate.plain_text,
-                &params.predictor,
-                ZlibNGHash {},
-            ),
-            encoder,
-        )?,
-        HashAlgorithm::RandomVector => predict_blocks(
-            &deflate.blocks,
-            TokenPredictor::<RandomVectorHash>::new(
-                &deflate.plain_text,
-                &params.predictor,
-                RandomVectorHash {},
-            ),
-            encoder,
-        )?,
-    }
+    predict_blocks(
+        &deflate.blocks,
+        TokenPredictor::new(&deflate.plain_text, &params.predictor),
+        encoder,
+    )?;
 
     encoder.encode_misprediction(CodecMisprediction::EOFMisprediction, false);
 
@@ -123,9 +82,9 @@ pub fn parse_deflate(
     })
 }
 
-fn predict_blocks<H: HashImplementation>(
+fn predict_blocks(
     blocks: &[PreflateTokenBlock],
-    mut token_predictor_in: TokenPredictor<H>,
+    mut token_predictor_in: TokenPredictor,
     encoder: &mut impl PredictionEncoder,
 ) -> Result<(), PreflateError> {
     for i in 0..blocks.len() {
@@ -158,40 +117,11 @@ pub fn decode_mispredictions(
 ) -> Result<(Vec<u8>, Vec<PreflateTokenBlock>), PreflateError> {
     let mut deflate_writer: DeflateWriter<'_> = DeflateWriter::new(plain_text);
 
-    let output_blocks = match params.hash_algorithm {
-        HashAlgorithm::MiniZFast => recreate_blocks(
-            TokenPredictor::new(plain_text, &params.predictor, MiniZHash {}),
-            decoder,
-            &mut deflate_writer,
-        )?,
-        HashAlgorithm::Zlib => recreate_blocks(
-            TokenPredictor::new(
-                plain_text,
-                &params.predictor,
-                ZlibRotatingHash {
-                    hash_mask: params.predictor.hash_mask,
-                    hash_shift: params.predictor.hash_shift,
-                },
-            ),
-            decoder,
-            &mut deflate_writer,
-        )?,
-        HashAlgorithm::Libdeflate4 => recreate_blocks(
-            TokenPredictor::new(plain_text, &params.predictor, LibdeflateRotatingHash4 {}),
-            decoder,
-            &mut deflate_writer,
-        )?,
-        HashAlgorithm::ZlibNG => recreate_blocks(
-            TokenPredictor::new(plain_text, &params.predictor, ZlibNGHash {}),
-            decoder,
-            &mut deflate_writer,
-        )?,
-        HashAlgorithm::RandomVector => recreate_blocks(
-            TokenPredictor::new(plain_text, &params.predictor, RandomVectorHash {}),
-            decoder,
-            &mut deflate_writer,
-        )?,
-    };
+    let output_blocks = recreate_blocks(
+        TokenPredictor::new(plain_text, &params.predictor),
+        decoder,
+        &mut deflate_writer,
+    )?;
 
     // flush the last byte, which may be incomplete and normally
     // padded with zeros, but maybe not
@@ -201,8 +131,8 @@ pub fn decode_mispredictions(
     Ok((deflate_writer.detach_output(), output_blocks))
 }
 
-fn recreate_blocks<H: HashImplementation, D: PredictionDecoder>(
-    mut token_predictor: TokenPredictor<H>,
+fn recreate_blocks<D: PredictionDecoder>(
+    mut token_predictor: TokenPredictor,
     decoder: &mut D,
     deflate_writer: &mut DeflateWriter,
 ) -> Result<Vec<PreflateTokenBlock>, PreflateError> {
@@ -592,8 +522,8 @@ fn verify_zlib_compressed_perfect() {
                 max_lazy: max_lazy,
                 max_chain: config.max_chain,
                 min_len: 3,
+                hash_algorithm: HashAlgorithm::Zlib,
             },
-            hash_algorithm: HashAlgorithm::Zlib,
         };
 
         let contents = parse_deflate(&v, 1).unwrap();
@@ -639,9 +569,9 @@ fn verify_miniz1_compressed_perfect() {
             max_lazy: 0,
             max_chain: 2,
             min_len: 3,
+            hash_algorithm: HashAlgorithm::MiniZFast,
         },
         huff_strategy: PreflateHuffStrategy::Dynamic,
-        hash_algorithm: HashAlgorithm::MiniZFast,
     };
 
     encode_mispredictions(&contents, &params, &mut cabac_encoder).unwrap();

@@ -23,33 +23,51 @@ pub enum MatchResult {
     MaxChainExceeded(u32),
 }
 
-pub struct PredictorState<H: HashImplementation> {
+pub struct TokenPredictorState<H: HashImplementation> {
     hash: H::HashChainType,
     params: TokenPredictorParameters,
     window_bytes: u32,
 }
 
-impl<H: HashImplementation> PredictorState<H> {
-    pub fn new(params: &TokenPredictorParameters, hash: H) -> Self {
-        Self {
-            hash: hash.new_hash_chain(),
-            window_bytes: 1 << params.window_bits,
-            params: *params,
-        }
-    }
+/// trait that is not dependent on the HashImplementation so it can
+/// be used in a boxed type by the TokenPredictor
+pub trait TokenPredictorStateTrait {
+    fn update_hash_with_policy(&mut self, length: u32, input: &mut PreflateInput);
 
-    #[allow(dead_code)]
-    pub fn checksum(&self, checksum: &mut DebugHash) {
-        self.hash.checksum(checksum);
-    }
+    fn update_hash_batch(&mut self, length: u32, input: &mut PreflateInput);
 
-    pub fn update_hash_with_policy(&mut self, length: u32, input: &mut PreflateInput) {
+    fn match_token(
+        &self,
+        prev_len: u32,
+        offset: u32,
+        max_depth: u32,
+        input: &PreflateInput,
+    ) -> MatchResult;
+
+    /// Tries to find the match by continuing on the hash chain, returns how many hops we went
+    /// or none if it wasn't found
+    fn calculate_hops(
+        &self,
+        target_reference: &PreflateTokenReference,
+        input: &PreflateInput,
+    ) -> anyhow::Result<u32>;
+
+    /// Does the inverse of calculate_hops, where we start from the predicted token and
+    /// get the new distance based on the number of hops
+    fn hop_match(&self, len: u32, hops: u32, input: &PreflateInput) -> anyhow::Result<u32>;
+    /// debugging function to verify that the hash chain is correct
+    fn verify_hash(&self, _dist: Option<PreflateTokenReference>);
+    fn checksum(&self, checksum: &mut DebugHash);
+}
+
+impl<H: HashImplementation> TokenPredictorStateTrait for TokenPredictorState<H> {
+    fn update_hash_with_policy(&mut self, length: u32, input: &mut PreflateInput) {
         self.hash
             .update_hash_with_policy::<false>(length, input, self.params.add_policy);
         input.advance(length);
     }
 
-    pub fn update_hash_batch(&mut self, mut length: u32, input: &mut PreflateInput) {
+    fn update_hash_batch(&mut self, mut length: u32, input: &mut PreflateInput) {
         while length > 0 {
             let batch_len = cmp::min(length, MAX_UPDATE_HASH_BATCH);
 
@@ -63,32 +81,7 @@ impl<H: HashImplementation> PredictorState<H> {
         }
     }
 
-    pub fn window_size(&self) -> u32 {
-        self.window_bytes
-    }
-
-    fn prefix_compare(s1: &[u8], s2: &[u8], best_len: u32, max_len: u32) -> u32 {
-        assert!(max_len >= 3 && s1.len() >= max_len as usize && s2.len() >= max_len as usize);
-
-        if s1[best_len as usize] != s2[best_len as usize] {
-            return 0;
-        }
-        if s1[0] != s2[0] || s1[1] != s2[1] || s1[2] != s2[2] {
-            return 0;
-        }
-
-        let mut match_len = 3; // Initialize with the length of the fixed prefix
-        for i in 3..max_len {
-            if s1[i as usize] != s2[i as usize] {
-                break;
-            }
-            match_len = i + 1;
-        }
-
-        match_len
-    }
-
-    pub fn match_token(
+    fn match_token(
         &self,
         prev_len: u32,
         offset: u32,
@@ -116,7 +109,7 @@ impl<H: HashImplementation> PredictorState<H> {
         let cur_max_dist_hop0;
         let cur_max_dist_hop1_plus;
         if self.params.very_far_matches_detected {
-            cur_max_dist_hop0 = cmp::min(max_dist_to_start, self.window_size());
+            cur_max_dist_hop0 = cmp::min(max_dist_to_start, self.window_bytes);
             cur_max_dist_hop1_plus = cur_max_dist_hop0;
         } else {
             match self.params.strategy {
@@ -128,7 +121,7 @@ impl<H: HashImplementation> PredictorState<H> {
                     cur_max_dist_hop1_plus = 1;
                 }
                 _ => {
-                    let max_dist: u32 = self.window_size() - MIN_LOOKAHEAD + 1;
+                    let max_dist: u32 = self.window_bytes - MIN_LOOKAHEAD + 1;
                     cur_max_dist_hop0 = cmp::min(max_dist_to_start, max_dist);
                     cur_max_dist_hop1_plus = cmp::min(max_dist_to_start, max_dist - 1);
                 }
@@ -193,7 +186,7 @@ impl<H: HashImplementation> PredictorState<H> {
 
     /// Tries to find the match by continuing on the hash chain, returns how many hops we went
     /// or none if it wasn't found
-    pub fn calculate_hops(
+    fn calculate_hops(
         &self,
         target_reference: &PreflateTokenReference,
         input: &PreflateInput,
@@ -209,7 +202,7 @@ impl<H: HashImplementation> PredictorState<H> {
         let best_len = target_reference.len();
         let mut hops = 0;
 
-        let cur_max_dist = std::cmp::min(input.pos(), self.window_size());
+        let cur_max_dist = std::cmp::min(input.pos(), self.window_bytes);
 
         for dist in self.hash.iterate(input, 0) {
             if dist > cur_max_dist {
@@ -244,13 +237,13 @@ impl<H: HashImplementation> PredictorState<H> {
 
     /// Does the inverse of calculate_hops, where we start from the predicted token and
     /// get the new distance based on the number of hops
-    pub fn hop_match(&self, len: u32, hops: u32, input: &PreflateInput) -> anyhow::Result<u32> {
+    fn hop_match(&self, len: u32, hops: u32, input: &PreflateInput) -> anyhow::Result<u32> {
         let max_len = std::cmp::min(input.remaining(), MAX_MATCH);
         if max_len < len {
             return Err(anyhow::anyhow!("not enough data left to match"));
         }
 
-        let cur_max_dist = std::cmp::min(input.pos(), self.window_size());
+        let cur_max_dist = std::cmp::min(input.pos(), self.window_bytes);
         let mut current_hop = 0;
 
         for dist in self.hash.iterate(input, 0) {
@@ -278,7 +271,43 @@ impl<H: HashImplementation> PredictorState<H> {
 
     /// debugging function to verify that the hash chain is correct
     #[allow(dead_code)]
-    pub fn verify_hash(&self, _dist: Option<PreflateTokenReference>) {
+    fn verify_hash(&self, _dist: Option<PreflateTokenReference>) {
         //self.hash.verify_hash(dist, &self.input);
+    }
+
+    #[allow(dead_code)]
+    fn checksum(&self, checksum: &mut DebugHash) {
+        self.hash.checksum(checksum);
+    }
+}
+
+impl<H: HashImplementation> TokenPredictorState<H> {
+    pub fn new(params: &TokenPredictorParameters, hash: H) -> Self {
+        Self {
+            hash: hash.new_hash_chain(),
+            window_bytes: 1 << params.window_bits,
+            params: *params,
+        }
+    }
+
+    fn prefix_compare(s1: &[u8], s2: &[u8], best_len: u32, max_len: u32) -> u32 {
+        assert!(max_len >= 3 && s1.len() >= max_len as usize && s2.len() >= max_len as usize);
+
+        if s1[best_len as usize] != s2[best_len as usize] {
+            return 0;
+        }
+        if s1[0] != s2[0] || s1[1] != s2[1] || s1[2] != s2[2] {
+            return 0;
+        }
+
+        let mut match_len = 3; // Initialize with the length of the fixed prefix
+        for i in 3..max_len {
+            if s1[i as usize] != s2[i as usize] {
+                break;
+            }
+            match_len = i + 1;
+        }
+
+        match_len
     }
 }

@@ -38,8 +38,6 @@ pub struct PreflateParameters {
     pub huff_strategy: PreflateHuffStrategy,
 
     pub predictor: TokenPredictorParameters,
-
-    pub hash_algorithm: HashAlgorithm,
 }
 
 const FILE_VERSION: u16 = 1;
@@ -108,19 +106,19 @@ impl PreflateParameters {
                 max_lazy: max_lazy.into(),
                 max_chain: max_chain.into(),
                 min_len: min_len.into(),
+                hash_algorithm: match hash_algorithm {
+                    HASH_ALGORITHM_ZLIB => HashAlgorithm::Zlib,
+                    HASH_ALGORITHM_MINIZ_FAST => HashAlgorithm::MiniZFast,
+                    HASH_ALGORITHM_LIBDEFLATE4 => HashAlgorithm::Libdeflate4,
+                    HASH_ALGORITHM_ZLIBNG => HashAlgorithm::ZlibNG,
+                    _ => panic!("invalid hash algorithm"),
+                },
             },
             huff_strategy: match huff_strategy {
                 HUFF_STRATEGY_DYNAMIC => PreflateHuffStrategy::Dynamic,
                 HUFF_STRATEGY_MIXED => PreflateHuffStrategy::Mixed,
                 HUFF_STRATEGY_STATIC => PreflateHuffStrategy::Static,
                 _ => panic!("invalid huff strategy"),
-            },
-            hash_algorithm: match hash_algorithm {
-                HASH_ALGORITHM_ZLIB => HashAlgorithm::Zlib,
-                HASH_ALGORITHM_MINIZ_FAST => HashAlgorithm::MiniZFast,
-                HASH_ALGORITHM_LIBDEFLATE4 => HashAlgorithm::Libdeflate4,
-                HASH_ALGORITHM_ZLIBNG => HashAlgorithm::ZlibNG,
-                _ => panic!("invalid hash algorithm"),
             },
         })
     }
@@ -147,7 +145,7 @@ impl PreflateParameters {
         encoder.encode_value(u16::try_from(self.predictor.max_lazy).unwrap(), 16);
         encoder.encode_value(u16::try_from(self.predictor.nice_length).unwrap(), 16);
         encoder.encode_value(u16::try_from(self.predictor.max_chain).unwrap(), 16);
-        encoder.encode_value(self.hash_algorithm as u16, 4);
+        encoder.encode_value(self.predictor.hash_algorithm as u16, 4);
         encoder.encode_value(u16::try_from(self.predictor.min_len).unwrap(), 16);
 
         match self.predictor.add_policy {
@@ -241,9 +239,9 @@ pub fn estimate_preflate_parameters(
             max_lazy: cl.max_lazy,
             max_chain: cl.max_chain,
             min_len: cl.min_len,
+            hash_algorithm: cl.hash_algorithm,
         },
         huff_strategy: estimate_preflate_huff_strategy(&info),
-        hash_algorithm: cl.hash_algorithm,
     })
 }
 
