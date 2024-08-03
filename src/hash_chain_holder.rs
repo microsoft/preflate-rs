@@ -68,8 +68,22 @@ pub fn new_hash_chain_holder(params: &TokenPredictorParameters) -> Box<dyn HashC
 /// trait that is not dependent on the HashImplementation so it can
 /// be used in a boxed type by the TokenPredictor
 pub trait HashChainHolderTrait {
-    fn update_hash(&mut self, length: u32, input: &mut PreflateInput, override_policy: bool);
+    /// updates the hash dictionary for a given length of matches.
+    ///
+    /// If this is a literal, then the update policy is to add all the bytes to the dictionary.
+    fn update_hash(&mut self, length: u32, input: &mut PreflateInput, is_literal: bool);
 
+    /// updates the hash dictionary for a given length of matches, and also updates the depth
+    /// map of the hash chain.
+    ///
+    /// If this is a literal, then the update policy is to add all the bytes to the dictionary.
+    fn update_hash_with_depth(&mut self, length: u32, input: &mut PreflateInput, is_literal: bool);
+
+    /// searches the hash chain for a given match, returns the longest result found if any
+    ///
+    /// prev_len is the length of the previous match. We won't match anything shorter than that.
+    /// offset is the offset from the current position in the input (can be 0 for current or 1 for lazy matches)
+    /// max_depth is the maximum number of hops we will take in the hash chain
     fn match_token(
         &self,
         prev_len: u32,
@@ -110,6 +124,29 @@ impl<H: HashImplementation> HashChainHolderTrait for HashChainHolder<H> {
             let batch_len = cmp::min(length, MAX_UPDATE_HASH_BATCH);
 
             self.hash.update_hash_with_policy::<false>(
+                batch_len,
+                input,
+                if is_literal {
+                    DictionaryAddPolicy::AddAll
+                } else {
+                    self.params.add_policy
+                },
+            );
+            input.advance(batch_len);
+            length -= batch_len;
+        }
+    }
+
+    fn update_hash_with_depth(
+        &mut self,
+        mut length: u32,
+        input: &mut PreflateInput,
+        is_literal: bool,
+    ) {
+        while length > 0 {
+            let batch_len = cmp::min(length, MAX_UPDATE_HASH_BATCH);
+
+            self.hash.update_hash_with_policy::<true>(
                 batch_len,
                 input,
                 if is_literal {

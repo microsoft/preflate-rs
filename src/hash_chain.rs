@@ -362,13 +362,11 @@ impl HashChainNormalizeLibflate4 {
         // Important: total_shift starts at -8 since 0 indicates the end of the hash chain
         // so this means that all valid values will be >= 8, otherwise the very first hash
         // offset would be zero and so it would get missed
-        let mut c = HashChainNormalizeLibflate4 {
+        HashChainNormalizeLibflate4 {
             total_shift: -8,
             hash_table: HashTable::default_boxed(),
             hash_table_3: HashTable::default_boxed(),
-        };
-
-        c
+        }
     }
 }
 
