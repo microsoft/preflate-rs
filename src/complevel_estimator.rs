@@ -10,7 +10,7 @@
 use crate::{
     hash_algorithm::{
         HashAlgorithm, HashImplementation, LibdeflateRotatingHash4, MiniZHash, RandomVectorHash,
-        ZlibNGHash, ZlibRotatingHash, MINIZ_LEVEL1_HASH_SIZE_MASK,
+        ZlibNGHash, ZlibRotatingHash,
     },
     hash_chain::{DictionaryAddPolicy, HashChain, MAX_UPDATE_HASH_BATCH},
     preflate_constants,

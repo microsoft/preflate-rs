@@ -9,10 +9,6 @@ use std::io::Cursor;
 use crate::{
     deflate_reader::DeflateReader,
     deflate_writer::DeflateWriter,
-    hash_algorithm::{
-        HashAlgorithm, HashImplementation, LibdeflateRotatingHash4, MiniZHash, RandomVectorHash,
-        ZlibNGHash, ZlibRotatingHash,
-    },
     huffman_calc::HufftreeBitCalc,
     preflate_error::PreflateError,
     preflate_parameter_estimator::PreflateParameters,
@@ -370,6 +366,7 @@ fn verify_longmatch() {
 #[test]
 #[ignore = "doesn't work yet due to excessive hash chain length"]
 fn test_treepngdeflate() {
+    use crate::hash_algorithm::{HashImplementation, RandomVectorHash};
     use crate::hash_chain::HashChain;
 
     let compressed_data: &[u8] = &read_file("treepng.deflate");
@@ -379,7 +376,7 @@ fn test_treepngdeflate() {
     let mut input = crate::preflate_input::PreflateInput::new(&contents.plain_text);
     let mut chain = RandomVectorHash::new_hash_chain(RandomVectorHash {});
 
-    let mut r = RandomVectorHash::default();
+    let r = RandomVectorHash::default();
 
     let h = r.get_hash(&contents.plain_text);
 
@@ -476,6 +473,7 @@ fn verify_zlib_compressed() {
 #[test]
 fn verify_zlib_compressed_perfect() {
     use crate::{
+        hash_algorithm::HashAlgorithm,
         preflate_parameter_estimator::PreflateHuffStrategy,
         preflate_parameter_estimator::PreflateStrategy,
         preflate_parse_config::{FAST_PREFLATE_PARSER_SETTINGS, SLOW_PREFLATE_PARSER_SETTINGS},
@@ -542,6 +540,7 @@ fn verify_zlib_compressed_perfect() {
 fn verify_miniz1_compressed_perfect() {
     use crate::{
         cabac_codec::{PredictionDecoderCabac, PredictionEncoderCabac},
+        hash_algorithm::HashAlgorithm,
         preflate_parameter_estimator::{PreflateHuffStrategy, PreflateStrategy},
     };
     use cabac::vp8::{VP8Reader, VP8Writer};
