@@ -13,6 +13,7 @@ use crate::{
     hash_chain::DictionaryAddPolicy,
     predictor_state::{MatchResult, PredictorState},
     preflate_constants::MIN_MATCH,
+    preflate_input::PreflateInput,
     preflate_parameter_estimator::PreflateStrategy,
     preflate_token::{BlockType, PreflateToken, PreflateTokenBlock, PreflateTokenReference},
     statistical_codec::{
@@ -23,11 +24,12 @@ use crate::{
 const VERIFY: bool = false;
 
 pub struct TokenPredictor<'a, H: HashImplementation> {
-    state: PredictorState<'a, H>,
+    state: PredictorState<H>,
     params: TokenPredictorParameters,
     pending_reference: Option<PreflateTokenReference>,
     current_token_count: u32,
     max_token_count: u32,
+    input: PreflateInput<'a>,
 }
 
 trait TokenPredictorTrait {
@@ -81,11 +83,12 @@ impl<'a, H: HashImplementation> TokenPredictor<'a, H> {
         // Construct the analysisResults vector
 
         Self {
-            state: PredictorState::<'a>::new(uncompressed, params, hash),
+            state: PredictorState::new(params, hash),
             params: *params,
             pending_reference: None,
             current_token_count: 0,
             max_token_count: params.max_token_count.into(),
+            input: PreflateInput::new(uncompressed),
         }
     }
 
@@ -115,7 +118,8 @@ impl<'a, H: HashImplementation> TokenPredictor<'a, H> {
             codec.encode_value(block.uncompressed_len as u16, 16);
 
             codec.encode_correction(CodecCorrection::NonZeroPadding, block.padding_bits.into());
-            self.state.update_hash_batch(block.uncompressed_len);
+            self.state
+                .update_hash_batch(block.uncompressed_len, &mut self.input);
 
             return Ok(());
         }
@@ -224,14 +228,20 @@ impl<'a, H: HashImplementation> TokenPredictor<'a, H> {
                     );
 
                     if predicted_ref.len() != target_ref.len() {
-                        let rematch = self.state.calculate_hops(target_ref).with_context(|| {
-                            format!("calculate_hops p={:?}, t={:?}", predicted_ref, target_ref)
-                        })?;
+                        let rematch = self
+                            .state
+                            .calculate_hops(target_ref, &self.input)
+                            .with_context(|| {
+                                format!("calculate_hops p={:?}, t={:?}", predicted_ref, target_ref)
+                            })?;
                         codec.encode_correction(CodecCorrection::DistAfterLenCorrection, rematch);
                     } else if target_ref.dist() != predicted_ref.dist() {
-                        let rematch = self.state.calculate_hops(target_ref).with_context(|| {
-                            format!("calculate_hops p={:?}, t={:?}", predicted_ref, target_ref)
-                        })?;
+                        let rematch = self
+                            .state
+                            .calculate_hops(target_ref, &self.input)
+                            .with_context(|| {
+                                format!("calculate_hops p={:?}, t={:?}", predicted_ref, target_ref)
+                            })?;
                         codec.encode_correction(CodecCorrection::DistOnlyCorrection, rematch);
                     } else {
                         codec.encode_correction(CodecCorrection::DistOnlyCorrection, 0);
@@ -278,7 +288,8 @@ impl<'a, H: HashImplementation> TokenPredictor<'a, H> {
                 block.uncompressed_len = codec.decode_value(16).into();
                 block.padding_bits = codec.decode_correction(CodecCorrection::NonZeroPadding) as u8;
 
-                self.state.update_hash_batch(block.uncompressed_len);
+                self.state
+                    .update_hash_batch(block.uncompressed_len, &mut self.input);
                 return Ok(block);
             }
             BT_STATICHUFF => {
@@ -352,7 +363,7 @@ impl<'a, H: HashImplementation> TokenPredictor<'a, H> {
                 predicted_ref = PreflateTokenReference::new(
                     new_len,
                     self.state
-                        .hop_match(new_len, hops)
+                        .hop_match(new_len, hops, &self.input)
                         .with_context(|| format!("hop_match l={} {:?}", new_len, predicted_ref))?,
                     false,
                 );
@@ -361,7 +372,7 @@ impl<'a, H: HashImplementation> TokenPredictor<'a, H> {
                 if hops != 0 {
                     let new_dist = self
                         .state
-                        .hop_match(predicted_ref.len(), hops)
+                        .hop_match(predicted_ref.len(), hops, &self.input)
                         .with_context(|| {
                             format!("recalculate_distance token {}", self.current_token_count)
                         })?;
@@ -385,18 +396,19 @@ impl<'a, H: HashImplementation> TokenPredictor<'a, H> {
 
     pub fn input_eof(&self) -> bool {
         // Return a boolean indicating whether input has reached EOF
-        self.state.available_input_size() == 0
+        self.input.remaining() == 0
     }
 
     fn predict_token(&mut self) -> PreflateToken {
-        if self.state.current_input_pos() == 0 || self.state.available_input_size() < MIN_MATCH {
+        if self.input.pos() == 0 || self.input.remaining() < MIN_MATCH {
             return PreflateToken::Literal;
         }
 
         let m = if let Some(pending) = self.pending_reference {
             MatchResult::Success(pending)
         } else {
-            self.state.match_token(0, 0, self.params.max_chain)
+            self.state
+                .match_token(0, 0, self.params.max_chain, &self.input)
         };
 
         self.pending_reference = None;
@@ -415,7 +427,7 @@ impl<'a, H: HashImplementation> TokenPredictor<'a, H> {
             // Check for a longer match that starts at the next byte, in which case we should
             // just emit a literal instead of a distance/length pair.
             if match_token.len() < self.params.max_lazy
-                && self.state.available_input_size() >= match_token.len() + 2
+                && self.input.remaining() >= match_token.len() + 2
             {
                 let mut max_depth = self.params.max_chain;
 
@@ -424,7 +436,9 @@ impl<'a, H: HashImplementation> TokenPredictor<'a, H> {
                     max_depth >>= 2;
                 }
 
-                let match_next = self.state.match_token(match_token.len(), 1, max_depth);
+                let match_next =
+                    self.state
+                        .match_token(match_token.len(), 1, max_depth, &self.input);
 
                 if let MatchResult::Success(m) = match_next {
                     if m.len() > match_token.len() {
@@ -450,7 +464,7 @@ impl<'a, H: HashImplementation> TokenPredictor<'a, H> {
         &mut self,
         _dist_match: Option<PreflateTokenReference>,
     ) -> anyhow::Result<PreflateTokenReference> {
-        if self.state.current_input_pos() == 0 || self.state.available_input_size() < MIN_MATCH {
+        if self.input.pos() == 0 || self.input.remaining() < MIN_MATCH {
             return Err(anyhow::Error::msg(
                 "Not enough space left to find a reference",
             ));
@@ -464,7 +478,9 @@ impl<'a, H: HashImplementation> TokenPredictor<'a, H> {
         }
         */
 
-        let match_token = self.state.match_token(0, 0, self.params.max_chain);
+        let match_token = self
+            .state
+            .match_token(0, 0, self.params.max_chain, &self.input);
 
         self.pending_reference = None;
 
@@ -484,17 +500,17 @@ impl<'a, H: HashImplementation> TokenPredictor<'a, H> {
         match token {
             PreflateToken::Literal => {
                 if let Some(block) = block {
-                    block.add_literal(self.state.input_cursor()[0]);
+                    block.add_literal(self.input.cur_char(0));
                 }
 
-                self.state.update_hash_batch(1);
+                self.state.update_hash_batch(1, &mut self.input);
             }
             PreflateToken::Reference(t) => {
                 if let Some(block) = block {
                     block.add_reference(t.len(), t.dist(), t.get_irregular258());
                 }
 
-                self.state.update_hash_with_policy(t.len());
+                self.state.update_hash_with_policy(t.len(), &mut self.input);
             }
         }
 

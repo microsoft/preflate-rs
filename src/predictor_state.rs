@@ -13,7 +13,6 @@ use crate::preflate_parameter_estimator::PreflateStrategy;
 use crate::preflate_token::PreflateTokenReference;
 use crate::token_predictor::TokenPredictorParameters;
 use std::cmp;
-use std::sync::atomic;
 
 #[derive(Debug, Copy, Clone)]
 pub enum MatchResult {
@@ -24,24 +23,18 @@ pub enum MatchResult {
     MaxChainExceeded(u32),
 }
 
-pub struct PredictorState<'a, H: HashImplementation> {
+pub struct PredictorState<H: HashImplementation> {
     hash: H::HashChainType,
-    input: PreflateInput<'a>,
     params: TokenPredictorParameters,
     window_bytes: u32,
-    last_chain: atomic::AtomicU32,
 }
 
-impl<'a, H: HashImplementation> PredictorState<'a, H> {
-    pub fn new(uncompressed: &'a [u8], params: &TokenPredictorParameters, hash: H) -> Self {
-        let input = PreflateInput::new(uncompressed);
-
+impl<H: HashImplementation> PredictorState<H> {
+    pub fn new(params: &TokenPredictorParameters, hash: H) -> Self {
         Self {
             hash: hash.new_hash_chain(),
             window_bytes: 1 << params.window_bits,
             params: *params,
-            input,
-            last_chain: atomic::AtomicU32::new(0),
         }
     }
 
@@ -50,48 +43,28 @@ impl<'a, H: HashImplementation> PredictorState<'a, H> {
         self.hash.checksum(checksum);
     }
 
-    pub fn update_hash_with_policy(&mut self, length: u32) {
+    pub fn update_hash_with_policy(&mut self, length: u32, input: &mut PreflateInput) {
         self.hash
-            .update_hash_with_policy::<false>(length, &self.input, self.params.add_policy);
-        self.input.advance(length);
+            .update_hash_with_policy::<false>(length, input, self.params.add_policy);
+        input.advance(length);
     }
 
-    pub fn update_hash_batch(&mut self, mut length: u32) {
+    pub fn update_hash_batch(&mut self, mut length: u32, input: &mut PreflateInput) {
         while length > 0 {
             let batch_len = cmp::min(length, MAX_UPDATE_HASH_BATCH);
 
             self.hash.update_hash_with_policy::<false>(
                 batch_len,
-                &self.input,
+                input,
                 DictionaryAddPolicy::AddAll,
             );
-            self.input.advance(batch_len);
+            input.advance(batch_len);
             length -= batch_len;
         }
     }
 
-    pub fn current_input_pos(&self) -> u32 {
-        self.input.pos()
-    }
-
-    pub fn input_cursor(&self) -> &[u8] {
-        self.input.cur_chars(0)
-    }
-
-    pub fn input_cursor_offset(&self, offset: i32) -> &[u8] {
-        self.input.cur_chars(offset)
-    }
-
     pub fn window_size(&self) -> u32 {
         self.window_bytes
-    }
-
-    fn total_input_size(&self) -> u32 {
-        self.input.size()
-    }
-
-    pub fn available_input_size(&self) -> u32 {
-        self.input.remaining()
     }
 
     fn prefix_compare(s1: &[u8], s2: &[u8], best_len: u32, max_len: u32) -> u32 {
@@ -115,9 +88,15 @@ impl<'a, H: HashImplementation> PredictorState<'a, H> {
         match_len
     }
 
-    pub fn match_token(&self, prev_len: u32, offset: u32, max_depth: u32) -> MatchResult {
-        let start_pos = self.current_input_pos() + offset;
-        let max_len = std::cmp::min(self.total_input_size() - start_pos, MAX_MATCH);
+    pub fn match_token(
+        &self,
+        prev_len: u32,
+        offset: u32,
+        max_depth: u32,
+        input: &PreflateInput,
+    ) -> MatchResult {
+        let start_pos = input.pos() + offset;
+        let max_len = std::cmp::min(input.size() - start_pos, MAX_MATCH);
         if max_len
             < std::cmp::max(
                 prev_len + 1,
@@ -159,13 +138,13 @@ impl<'a, H: HashImplementation> PredictorState<'a, H> {
         let nice_len = std::cmp::min(self.params.nice_length, max_len);
         let mut max_chain = max_depth;
 
-        let input = self.input.cur_chars(offset as i32);
+        let input_chars = input.cur_chars(offset as i32);
         let mut best_len = prev_len;
         let mut best_match: Option<PreflateTokenReference> = None;
         let mut num_chain_matches = 0;
         let mut first = true;
 
-        for dist in self.hash.iterate(&self.input, offset) {
+        for dist in self.hash.iterate(input, offset) {
             // first entry gets a special treatment to make sure it doesn't exceed
             // the limits we calculated for the first hop
             if first {
@@ -179,9 +158,9 @@ impl<'a, H: HashImplementation> PredictorState<'a, H> {
                 }
             }
 
-            let match_start = self.input.cur_chars(offset as i32 - dist as i32);
+            let match_start = input.cur_chars(offset as i32 - dist as i32);
 
-            let match_length = Self::prefix_compare(match_start, input, best_len, max_len);
+            let match_length = Self::prefix_compare(match_start, input_chars, best_len, max_len);
             if match_length > best_len {
                 let r = PreflateTokenReference::new(match_length, dist, false);
 
@@ -198,8 +177,6 @@ impl<'a, H: HashImplementation> PredictorState<'a, H> {
 
             if max_chain == 0 {
                 if let Some(r) = best_match {
-                    self.last_chain
-                        .store(num_chain_matches, atomic::Ordering::Relaxed);
                     return MatchResult::Success(r);
                 } else {
                     return MatchResult::MaxChainExceeded(max_depth);
@@ -216,8 +193,12 @@ impl<'a, H: HashImplementation> PredictorState<'a, H> {
 
     /// Tries to find the match by continuing on the hash chain, returns how many hops we went
     /// or none if it wasn't found
-    pub fn calculate_hops(&self, target_reference: &PreflateTokenReference) -> anyhow::Result<u32> {
-        let max_len = std::cmp::min(self.available_input_size(), MAX_MATCH);
+    pub fn calculate_hops(
+        &self,
+        target_reference: &PreflateTokenReference,
+        input: &PreflateInput,
+    ) -> anyhow::Result<u32> {
+        let max_len = std::cmp::min(input.remaining(), MAX_MATCH);
 
         if max_len < target_reference.len() {
             return Err(anyhow::anyhow!("max_len < target_reference.len()"));
@@ -228,16 +209,16 @@ impl<'a, H: HashImplementation> PredictorState<'a, H> {
         let best_len = target_reference.len();
         let mut hops = 0;
 
-        let cur_max_dist = std::cmp::min(self.current_input_pos(), self.window_size());
+        let cur_max_dist = std::cmp::min(input.pos(), self.window_size());
 
-        for dist in self.hash.iterate(&self.input, 0) {
+        for dist in self.hash.iterate(input, 0) {
             if dist > cur_max_dist {
                 break;
             }
 
-            let match_pos = self.input_cursor_offset(-(dist as i32));
+            let match_pos = input.cur_chars(-(dist as i32));
             let match_length =
-                Self::prefix_compare(match_pos, self.input_cursor(), best_len - 1, best_len);
+                Self::prefix_compare(match_pos, input.cur_chars(0), best_len - 1, best_len);
 
             if match_length >= best_len {
                 hops += 1;
@@ -263,23 +244,23 @@ impl<'a, H: HashImplementation> PredictorState<'a, H> {
 
     /// Does the inverse of calculate_hops, where we start from the predicted token and
     /// get the new distance based on the number of hops
-    pub fn hop_match(&self, len: u32, hops: u32) -> anyhow::Result<u32> {
-        let max_len = std::cmp::min(self.available_input_size(), MAX_MATCH);
+    pub fn hop_match(&self, len: u32, hops: u32, input: &PreflateInput) -> anyhow::Result<u32> {
+        let max_len = std::cmp::min(input.remaining(), MAX_MATCH);
         if max_len < len {
             return Err(anyhow::anyhow!("not enough data left to match"));
         }
 
-        let cur_max_dist = std::cmp::min(self.current_input_pos(), self.window_size());
+        let cur_max_dist = std::cmp::min(input.pos(), self.window_size());
         let mut current_hop = 0;
 
-        for dist in self.hash.iterate(&self.input, 0) {
+        for dist in self.hash.iterate(input, 0) {
             if dist > cur_max_dist {
                 break;
             }
 
             let match_length = Self::prefix_compare(
-                self.input_cursor_offset(-(dist as i32)),
-                self.input_cursor(),
+                input.cur_chars(-(dist as i32)),
+                input.cur_chars(0),
                 len - 1,
                 len,
             );
