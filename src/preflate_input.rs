@@ -3,6 +3,8 @@
  *  Licensed under the Apache License, Version 2.0. See LICENSE.txt in the project root for license information.
  *  This software incorporates material from third parties. See NOTICE.txt for details.
  *--------------------------------------------------------------------------------------------*/
+
+#[derive(Clone)]
 pub struct PreflateInput<'a> {
     data: &'a [u8],
     pos: i32,

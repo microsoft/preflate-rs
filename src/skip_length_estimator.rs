@@ -21,7 +21,8 @@ pub fn estimate_skip_length(token_blocks: &[PreflateTokenBlock]) -> DictionaryAd
     let mut counters = [0u32; 259];
     let mut counters_b = [0u32; 259];
 
-    for token_block in token_blocks {
+    for i in 0..token_blocks.len() {
+        let token_block = &token_blocks[i];
         for token in token_block.tokens.iter() {
             match token {
                 PreflateToken::Literal => {
