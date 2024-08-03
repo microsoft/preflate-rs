@@ -9,7 +9,7 @@ use anyhow::Context;
 use crate::{
     bit_helper::DebugHash,
     cabac_codec::{decode_difference, encode_difference},
-    hash_algorithm::RotatingHashTrait,
+    hash_algorithm::HashImplementation,
     hash_chain::DictionaryAddPolicy,
     predictor_state::{MatchResult, PredictorState},
     preflate_constants::MIN_MATCH,
@@ -22,12 +22,26 @@ use crate::{
 
 const VERIFY: bool = false;
 
-pub struct TokenPredictor<'a, H: RotatingHashTrait> {
+pub struct TokenPredictor<'a, H: HashImplementation> {
     state: PredictorState<'a, H>,
     params: TokenPredictorParameters,
     pending_reference: Option<PreflateTokenReference>,
     current_token_count: u32,
     max_token_count: u32,
+}
+
+trait TokenPredictorTrait {
+    fn predict_block(
+        &mut self,
+        block: &PreflateTokenBlock,
+        last_block: bool,
+        codec: &mut dyn PredictionEncoder,
+    ) -> anyhow::Result<Vec<u8>>;
+
+    fn recreate_block(
+        &mut self,
+        codec: &mut dyn PredictionDecoder,
+    ) -> anyhow::Result<PreflateTokenBlock>;
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
@@ -59,15 +73,15 @@ pub struct TokenPredictorParameters {
     pub min_len: u32,
 }
 
-impl<'a, H: RotatingHashTrait> TokenPredictor<'a, H> {
-    pub fn new(uncompressed: &'a [u8], params: &TokenPredictorParameters) -> Self {
+impl<'a, H: HashImplementation> TokenPredictor<'a, H> {
+    pub fn new(uncompressed: &'a [u8], params: &TokenPredictorParameters, hash: H) -> Self {
         // Implement constructor logic for PreflateTokenPredictor
         // Initialize fields as necessary
         // Create and initialize PreflatePredictorState, PreflateHashChainExt, and PreflateSeqChain instances
         // Construct the analysisResults vector
 
         Self {
-            state: PredictorState::<'a>::new(uncompressed, params),
+            state: PredictorState::<'a>::new(uncompressed, params, hash),
             params: *params,
             pending_reference: None,
             current_token_count: 0,

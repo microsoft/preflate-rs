@@ -10,7 +10,7 @@ use crate::{
     deflate_reader::DeflateReader,
     deflate_writer::DeflateWriter,
     hash_algorithm::{
-        HashAlgorithm, LibdeflateRotatingHash4, MiniZHash, RandomVectorHash, RotatingHashTrait,
+        HashAlgorithm, HashImplementation, LibdeflateRotatingHash4, MiniZHash, RandomVectorHash,
         ZlibNGHash, ZlibRotatingHash,
     },
     huffman_calc::HufftreeBitCalc,
@@ -20,7 +20,7 @@ use crate::{
     statistical_codec::{
         CodecCorrection, CodecMisprediction, PredictionDecoder, PredictionEncoder,
     },
-    token_predictor::{TokenPredictor, TokenPredictorParameters},
+    token_predictor::TokenPredictor,
     tree_predictor::{predict_tree_for_block, recreate_tree_for_block},
 };
 
@@ -34,27 +34,46 @@ pub fn encode_mispredictions(
     match params.hash_algorithm {
         HashAlgorithm::MiniZFast => predict_blocks(
             &deflate.blocks,
-            TokenPredictor::<MiniZHash>::new(&deflate.plain_text, &params.predictor),
+            TokenPredictor::<MiniZHash>::new(&deflate.plain_text, &params.predictor, MiniZHash {}),
             encoder,
         )?,
         HashAlgorithm::Zlib => predict_blocks(
             &deflate.blocks,
-            TokenPredictor::<ZlibRotatingHash>::new(&deflate.plain_text, &params.predictor),
+            TokenPredictor::<ZlibRotatingHash>::new(
+                &deflate.plain_text,
+                &params.predictor,
+                ZlibRotatingHash {
+                    hash_mask: params.predictor.hash_mask,
+                    hash_shift: params.predictor.hash_shift,
+                },
+            ),
             encoder,
         )?,
         HashAlgorithm::Libdeflate4 => predict_blocks(
             &deflate.blocks,
-            TokenPredictor::<LibdeflateRotatingHash4>::new(&deflate.plain_text, &params.predictor),
+            TokenPredictor::<LibdeflateRotatingHash4>::new(
+                &deflate.plain_text,
+                &params.predictor,
+                LibdeflateRotatingHash4 {},
+            ),
             encoder,
         )?,
         HashAlgorithm::ZlibNG => predict_blocks(
             &deflate.blocks,
-            TokenPredictor::<ZlibNGHash>::new(&deflate.plain_text, &params.predictor),
+            TokenPredictor::<ZlibNGHash>::new(
+                &deflate.plain_text,
+                &params.predictor,
+                ZlibNGHash {},
+            ),
             encoder,
         )?,
         HashAlgorithm::RandomVector => predict_blocks(
             &deflate.blocks,
-            TokenPredictor::<RandomVectorHash>::new(&deflate.plain_text, &params.predictor),
+            TokenPredictor::<RandomVectorHash>::new(
+                &deflate.plain_text,
+                &params.predictor,
+                RandomVectorHash {},
+            ),
             encoder,
         )?,
     }
@@ -104,7 +123,7 @@ pub fn parse_deflate(
     })
 }
 
-fn predict_blocks<H: RotatingHashTrait>(
+fn predict_blocks<H: HashImplementation>(
     blocks: &[PreflateTokenBlock],
     mut token_predictor_in: TokenPredictor<H>,
     encoder: &mut impl PredictionEncoder,
@@ -141,27 +160,34 @@ pub fn decode_mispredictions(
 
     let output_blocks = match params.hash_algorithm {
         HashAlgorithm::MiniZFast => recreate_blocks(
-            TokenPredictor::<MiniZHash>::new(plain_text, &params.predictor),
+            TokenPredictor::new(plain_text, &params.predictor, MiniZHash {}),
             decoder,
             &mut deflate_writer,
         )?,
         HashAlgorithm::Zlib => recreate_blocks(
-            TokenPredictor::<ZlibRotatingHash>::new(plain_text, &params.predictor),
+            TokenPredictor::new(
+                plain_text,
+                &params.predictor,
+                ZlibRotatingHash {
+                    hash_mask: params.predictor.hash_mask,
+                    hash_shift: params.predictor.hash_shift,
+                },
+            ),
             decoder,
             &mut deflate_writer,
         )?,
         HashAlgorithm::Libdeflate4 => recreate_blocks(
-            TokenPredictor::<LibdeflateRotatingHash4>::new(plain_text, &params.predictor),
+            TokenPredictor::new(plain_text, &params.predictor, LibdeflateRotatingHash4 {}),
             decoder,
             &mut deflate_writer,
         )?,
         HashAlgorithm::ZlibNG => recreate_blocks(
-            TokenPredictor::<ZlibNGHash>::new(plain_text, &params.predictor),
+            TokenPredictor::new(plain_text, &params.predictor, ZlibNGHash {}),
             decoder,
             &mut deflate_writer,
         )?,
         HashAlgorithm::RandomVector => recreate_blocks(
-            TokenPredictor::<RandomVectorHash>::new(plain_text, &params.predictor),
+            TokenPredictor::new(plain_text, &params.predictor, RandomVectorHash {}),
             decoder,
             &mut deflate_writer,
         )?,
@@ -175,7 +201,7 @@ pub fn decode_mispredictions(
     Ok((deflate_writer.detach_output(), output_blocks))
 }
 
-fn recreate_blocks<H: RotatingHashTrait, D: PredictionDecoder>(
+fn recreate_blocks<H: HashImplementation, D: PredictionDecoder>(
     mut token_predictor: TokenPredictor<H>,
     decoder: &mut D,
     deflate_writer: &mut DeflateWriter,
@@ -421,15 +447,13 @@ fn test_treepngdeflate() {
     let contents = parse_deflate(compressed_data, 1).unwrap();
 
     let mut input = crate::preflate_input::PreflateInput::new(&contents.plain_text);
-    let mut chain = <RandomVectorHash as RotatingHashTrait>::HashChainType::new(0, 0xffff, &input);
+    let mut chain = RandomVectorHash::new_hash_chain(RandomVectorHash {});
 
     let mut r = RandomVectorHash::default();
 
-    r.append(contents.plain_text[0]);
-    r.append(contents.plain_text[1]);
-    r.append(contents.plain_text[2]);
+    let h = r.get_hash(&contents.plain_text);
 
-    println!("hashx: {:?}", r.get_hash());
+    println!("hashx: {:?}", h);
 
     let mut maxdepth = 0;
 
@@ -552,7 +576,7 @@ fn verify_zlib_compressed_perfect() {
 
         let params = PreflateParameters {
             huff_strategy: PreflateHuffStrategy::Dynamic,
-            predictor: TokenPredictorParameters {
+            predictor: crate::token_predictor::TokenPredictorParameters {
                 strategy: PreflateStrategy::Default,
                 window_bits: 15,
                 hash_shift: 5,
@@ -599,7 +623,7 @@ fn verify_miniz1_compressed_perfect() {
     let mut cabac_encoder = PredictionEncoderCabac::new(VP8Writer::new(&mut buffer).unwrap());
 
     let params = PreflateParameters {
-        predictor: TokenPredictorParameters {
+        predictor: crate::token_predictor::TokenPredictorParameters {
             strategy: PreflateStrategy::Default,
             window_bits: 15,
             hash_shift: 0,

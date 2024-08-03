@@ -9,7 +9,7 @@
 /// and the predicted deflate stream will be as small as possible.
 use crate::{
     hash_algorithm::{
-        HashAlgorithm, LibdeflateRotatingHash4, MiniZHash, RandomVectorHash, RotatingHashTrait,
+        HashAlgorithm, HashImplementation, LibdeflateRotatingHash4, MiniZHash, RandomVectorHash,
         ZlibNGHash, ZlibRotatingHash, MINIZ_LEVEL1_HASH_SIZE_MASK,
     },
     hash_chain::{DictionaryAddPolicy, HashChain, MAX_UPDATE_HASH_BATCH},
@@ -58,19 +58,19 @@ trait HashChainInvoke {
 }
 
 /// holds the hashchain for a specific hash algorithm
-struct HashChainHolder<H: RotatingHashTrait> {
+struct HashChainHolder<H: HashImplementation> {
     hash_chain: H::HashChainType,
 }
 
-impl<H: RotatingHashTrait + 'static> HashChainHolder<H> {
-    fn new(hash_shift: u32, hash_mask: u16, input: &PreflateInput<'_>) -> Box<dyn HashChainInvoke> {
+impl<H: HashImplementation + 'static> HashChainHolder<H> {
+    fn new(hash: H) -> Box<dyn HashChainInvoke> {
         Box::new(HashChainHolder::<H> {
-            hash_chain: H::HashChainType::new(hash_shift, hash_mask, input),
+            hash_chain: hash.new_hash_chain(),
         })
     }
 }
 
-impl<H: RotatingHashTrait> HashChainInvoke for HashChainHolder<H> {
+impl<H: HashImplementation> HashChainInvoke for HashChainHolder<H> {
     fn invoke_update_hash(
         &mut self,
         len: u32,
@@ -117,21 +117,14 @@ impl CandidateInfo {
             add_policy,
             hash_algorithm,
             hash_chain: match hash_algorithm {
-                HashAlgorithm::Zlib => {
-                    HashChainHolder::<ZlibRotatingHash>::new(hash_shift, hash_mask, input)
-                }
-                HashAlgorithm::MiniZFast => {
-                    HashChainHolder::<MiniZHash>::new(hash_shift, hash_mask, input)
-                }
-                HashAlgorithm::Libdeflate4 => {
-                    HashChainHolder::<LibdeflateRotatingHash4>::new(hash_shift, hash_mask, input)
-                }
-                HashAlgorithm::ZlibNG => {
-                    HashChainHolder::<ZlibNGHash>::new(hash_shift, hash_mask, input)
-                }
-                HashAlgorithm::RandomVector => {
-                    HashChainHolder::<RandomVectorHash>::new(hash_shift, hash_mask, input)
-                }
+                HashAlgorithm::Zlib => HashChainHolder::new(ZlibRotatingHash {
+                    hash_shift,
+                    hash_mask,
+                }),
+                HashAlgorithm::MiniZFast => HashChainHolder::new(MiniZHash {}),
+                HashAlgorithm::Libdeflate4 => HashChainHolder::new(LibdeflateRotatingHash4 {}),
+                HashAlgorithm::ZlibNG => HashChainHolder::new(ZlibNGHash {}),
+                HashAlgorithm::RandomVector => HashChainHolder::new(RandomVectorHash {}),
             },
             longest_dist_at_hop_0: 0,
             longest_dist_at_hop_1_plus: 0,

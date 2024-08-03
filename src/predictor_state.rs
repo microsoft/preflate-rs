@@ -5,7 +5,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 use crate::bit_helper::DebugHash;
-use crate::hash_algorithm::RotatingHashTrait;
+use crate::hash_algorithm::HashImplementation;
 use crate::hash_chain::{DictionaryAddPolicy, HashChain, MAX_UPDATE_HASH_BATCH};
 use crate::preflate_constants::{MAX_MATCH, MIN_LOOKAHEAD, MIN_MATCH};
 use crate::preflate_input::PreflateInput;
@@ -24,7 +24,7 @@ pub enum MatchResult {
     MaxChainExceeded(u32),
 }
 
-pub struct PredictorState<'a, H: RotatingHashTrait> {
+pub struct PredictorState<'a, H: HashImplementation> {
     hash: H::HashChainType,
     input: PreflateInput<'a>,
     params: TokenPredictorParameters,
@@ -32,12 +32,12 @@ pub struct PredictorState<'a, H: RotatingHashTrait> {
     last_chain: atomic::AtomicU32,
 }
 
-impl<'a, H: RotatingHashTrait> PredictorState<'a, H> {
-    pub fn new(uncompressed: &'a [u8], params: &TokenPredictorParameters) -> Self {
+impl<'a, H: HashImplementation> PredictorState<'a, H> {
+    pub fn new(uncompressed: &'a [u8], params: &TokenPredictorParameters, hash: H) -> Self {
         let input = PreflateInput::new(uncompressed);
 
         Self {
-            hash: HashChain::new(params.hash_shift, params.hash_mask, &input),
+            hash: hash.new_hash_chain(),
             window_bytes: 1 << params.window_bits,
             params: *params,
             input,
