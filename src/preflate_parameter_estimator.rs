@@ -122,6 +122,7 @@ impl PreflateParameters {
                     HASH_ALGORITHM_MINIZ_FAST => HashAlgorithm::MiniZFast,
                     HASH_ALGORITHM_LIBDEFLATE4 => HashAlgorithm::Libdeflate4,
                     HASH_ALGORITHM_ZLIBNG => HashAlgorithm::ZlibNG,
+                    HASH_ALGORITHM_RANDOMVECTOR => HashAlgorithm::RandomVector,
                     _ => panic!("invalid hash algorithm"),
                 },
             },

@@ -11,7 +11,7 @@ use crate::{
     cabac_codec::{decode_difference, encode_difference},
     hash_algorithm::HashAlgorithm,
     hash_chain::DictionaryAddPolicy,
-    hash_chain_holder::{new_hash_chain_holder, HashChainHolderTrait, MatchResult},
+    hash_chain_holder::{new_hash_chain_holder, HashChainHolder, MatchResult},
     preflate_constants::MIN_MATCH,
     preflate_input::PreflateInput,
     preflate_parameter_estimator::PreflateStrategy,
@@ -24,7 +24,7 @@ use crate::{
 const VERIFY: bool = false;
 
 pub struct TokenPredictor<'a> {
-    state: Box<dyn HashChainHolderTrait>,
+    state: Box<dyn HashChainHolder>,
     params: TokenPredictorParameters,
     pending_reference: Option<PreflateTokenReference>,
     current_token_count: u32,

@@ -10,7 +10,7 @@
 use crate::{
     hash_algorithm::HashAlgorithm,
     hash_chain::DictionaryAddPolicy,
-    hash_chain_holder::{new_hash_chain_holder, HashChainHolderTrait},
+    hash_chain_holder::{new_hash_chain_holder, HashChainHolder},
     preflate_constants,
     preflate_input::PreflateInput,
     preflate_parameter_estimator::PreflateStrategy,
@@ -40,7 +40,7 @@ pub struct CompLevelInfo {
 struct CandidateInfo {
     hash_algorithm: HashAlgorithm,
     add_policy: DictionaryAddPolicy,
-    hash_chain: Box<dyn HashChainHolderTrait>,
+    hash_chain: Box<dyn HashChainHolder>,
 
     longest_dist_at_hop_0: u32,
     longest_dist_at_hop_1_plus: u32,
@@ -204,6 +204,13 @@ impl<'a> CompLevelEstimatorState<'a> {
         candidates.push(Box::new(CandidateInfo::new(
             add_policy,
             HashAlgorithm::ZlibNG,
+            wbits,
+        )));
+
+        // RandomVector candidate
+        candidates.push(Box::new(CandidateInfo::new(
+            add_policy,
+            HashAlgorithm::RandomVector,
             wbits,
         )));
 
