@@ -375,13 +375,14 @@ fn test_treepngdeflate() {
     let contents = parse_deflate(compressed_data, 1).unwrap();
 
     let mut input = crate::preflate_input::PreflateInput::new(&contents.plain_text);
-    let mut chain = RandomVectorHash::new_hash_chain(RandomVectorHash {});
+    let mut chain: crate::hash_chain::HashChainAbs<RandomVectorHash> =
+        RandomVectorHash::new_hash_chain(RandomVectorHash {});
 
     let r = RandomVectorHash::default();
 
     let h = r.get_hash(&contents.plain_text);
 
-    println!("hashx: {:?}", h);
+    //println!("hashx: {:?}", h);
 
     let mut maxdepth = 0;
 
@@ -396,18 +397,17 @@ fn test_treepngdeflate() {
                 crate::preflate_token::PreflateToken::Reference(r) => {
                     let depth = chain.match_depth(&r, 32768, &input);
                     if depth > 5 {
-                        println!("reference: {:?}", r);
+                        println!("token: {}, depth {} reference: {:?}", i, depth, r);
 
-                        println!("back: {:?}", &input.cur_chars(-82)[0..82]);
+                        //println!("back: {:?}", &input.cur_chars(-82)[0..82]);
 
-                        println!(
+                        /*println!(
                             "depth: {}, {}, {:?}",
                             depth,
                             input.pos(),
                             &input.cur_chars(0)[0..16]
                         );
-                        chain.match_depth(&r, 32768, &input);
-                        return;
+                        chain.match_depth(&r, 32768, &input);*/
                     }
 
                     chain.update_hash::<true, UPDATE_MODE_ALL>(r.len(), &input);
