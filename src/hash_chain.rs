@@ -16,6 +16,7 @@ use crate::{
 };
 
 pub const MAX_UPDATE_HASH_BATCH: u32 = 0x180;
+pub const BAD_DEPTH: u32 = 0xffff;
 
 pub const UPDATE_MODE_ALL: u32 = 0;
 pub const UPDATE_MODE_FIRST: u32 = 1;
@@ -33,10 +34,9 @@ pub enum DictionaryAddPolicy {
 }
 
 trait InternalPosition: Copy + Clone + Eq + PartialEq + Default + std::fmt::Debug {
-    fn saturating_sub(&self, other: u16) -> Self;
+    fn reshift(&self, delta: u16) -> Self;
     fn to_index(self) -> usize;
     fn inc(&self) -> Self;
-    fn from_absolute(pos: u32, total_shift: i32) -> Self;
     fn is_valid(&self) -> bool;
     fn dist(&self, pos: Self) -> u32;
 }
@@ -47,7 +47,7 @@ struct InternalPositionRel {
 }
 
 impl InternalPosition for InternalPositionRel {
-    fn saturating_sub(&self, other: u16) -> Self {
+    fn reshift(&self, other: u16) -> Self {
         Self {
             pos: self.pos.saturating_sub(other),
         }
@@ -61,12 +61,6 @@ impl InternalPosition for InternalPositionRel {
         Self { pos: self.pos + 1 }
     }
 
-    fn from_absolute(pos: u32, total_shift: i32) -> Self {
-        Self {
-            pos: u16::try_from(pos as i32 - total_shift).unwrap(),
-        }
-    }
-
     fn is_valid(&self) -> bool {
         self.pos > 0
     }
@@ -76,13 +70,21 @@ impl InternalPosition for InternalPositionRel {
     }
 }
 
+impl InternalPositionRel {
+    fn from_absolute(pos: u32, total_shift: i32) -> Self {
+        Self {
+            pos: u16::try_from(pos as i32 - total_shift).unwrap(),
+        }
+    }
+}
+
 #[derive(Default, Copy, Clone, Eq, PartialEq, Debug)]
 struct InternalPositionAbs {
     pos: u32,
 }
 
 impl InternalPosition for InternalPositionAbs {
-    fn saturating_sub(&self, _other: u16) -> Self {
+    fn reshift(&self, _other: u16) -> Self {
         unimplemented!()
     }
 
@@ -94,16 +96,18 @@ impl InternalPosition for InternalPositionAbs {
         Self { pos: self.pos + 1 }
     }
 
-    fn from_absolute(pos: u32, _total_shift: i32) -> Self {
-        Self { pos }
-    }
-
     fn is_valid(&self) -> bool {
         self.pos > 0
     }
 
     fn dist(&self, pos: Self) -> u32 {
         u32::from(self.pos - pos.pos)
+    }
+}
+
+impl InternalPositionAbs {
+    fn new(pos: u32) -> Self {
+        Self { pos }
     }
 }
 
@@ -125,7 +129,10 @@ struct HashTable<H: HashImplementation, I: InternalPosition> {
     /// to generate the deflate data.
     chain_depth: [i32; 65536],
 
-    chain_depth_v: [usize; 65536],
+    /// the hash at this particular position. This is verified to make sure that it
+    /// is part of the same hash chain, if not, we know that this was not the correct
+    /// hash function to use.
+    chain_depth_hash_verify: [u16; 65536],
 
     /// Represents the prev chain for a given position. This is used to find
     /// all the potential matches for a given hash. The value points to previous
@@ -138,14 +145,21 @@ struct HashTable<H: HashImplementation, I: InternalPosition> {
 }
 
 impl<H: HashImplementation, I: InternalPosition> HashTable<H, I> {
-    fn get_head(&self, h: usize) -> I {
-        self.head[h]
+    #[inline]
+    fn get_head(&self, h: u16) -> I {
+        self.head[usize::from(h)]
     }
 
-    fn get_node_depth(&self, node: I) -> i32 {
+    /// depth is the number of matches we need to walk to reach the match_pos. This
+    /// is only valid if this was part of the same hash chain
+    #[inline]
+    fn get_node_depth(&self, node: I, expected_hash: u16) -> i32 {
+        assert_eq!(self.chain_depth_hash_verify[node.to_index()], expected_hash);
+
         self.chain_depth[node.to_index()]
     }
 
+    #[inline]
     fn update_chain<const MAINTAIN_DEPTH: bool, const UPDATE_MODE: u32>(
         &mut self,
         chars: &[u8],
@@ -169,12 +183,12 @@ impl<H: HashImplementation, I: InternalPosition> HashTable<H, I> {
 
                 if MAINTAIN_DEPTH {
                     self.chain_depth[pos.to_index()] =
-                        self.chain_depth[self.head[h].to_index()] + 1;
-                    self.chain_depth_v[pos.to_index()] = h;
+                        self.chain_depth[self.head[usize::from(h)].to_index()] + 1;
+                    self.chain_depth_hash_verify[pos.to_index()] = h;
                 }
 
-                self.prev[pos.to_index()] = self.head[h];
-                self.head[h] = pos;
+                self.prev[pos.to_index()] = self.head[usize::from(h)];
+                self.head[usize::from(h)] = pos;
             } else if MAINTAIN_DEPTH {
                 self.chain_depth[pos.to_index()] = -65535;
             }
@@ -185,37 +199,46 @@ impl<H: HashImplementation, I: InternalPosition> HashTable<H, I> {
 
     fn reshift<const MAINTAIN_DEPTH: bool, const DELTA: usize>(&mut self) {
         for i in 0..=65535 {
-            self.head[i] = self.head[i].saturating_sub(DELTA as u16);
+            self.head[i] = self.head[i].reshift(DELTA as u16);
         }
 
         for i in DELTA..=65535 {
-            self.prev[i - DELTA] = self.prev[i].saturating_sub(DELTA as u16);
+            self.prev[i - DELTA] = self.prev[i].reshift(DELTA as u16);
         }
 
         if MAINTAIN_DEPTH {
             self.chain_depth.copy_within(DELTA..=65535, 0);
-            self.chain_depth_v.copy_within(DELTA..=65535, 0);
+            self.chain_depth_hash_verify.copy_within(DELTA..=65535, 0);
         }
     }
 
-    pub fn match_depth(&self, end_pos: I, input: &PreflateInput) -> u32 {
+    /// sees how many matches we need to walk to reach match_pos, which we
+    /// do by subtracting the depth of the current node from the depth of the
+    /// match node.
+    pub fn match_depth(&self, match_pos: I, input: &PreflateInput) -> u32 {
         let h = self.hash.get_hash(input.cur_chars(0));
         let head = self.get_head(h);
 
-        let start_depth = self.get_node_depth(head);
-
-        let end_depth = self.get_node_depth(end_pos);
-
-        if start_depth < end_depth {
-            /*assert_eq!(
-                self.hash_table.chain_depth_v[end_pos.to_index()],
-                self.hash_table.chain_depth_v[head.to_index()]
-            );
-            println!("dtl {:?} {} > {}", target_reference, start_depth, end_depth);*/
-            return 0xffff;
+        // If match was not found, what happened was that it didn't get added
+        // to the dictionary due to the dictionary add policy. In this case,
+        // we know for sure that this was not the right compression setting
+        // and we will filter this out of the possible candidates.
+        if !head.is_valid() {
+            return BAD_DEPTH;
         }
 
-        std::cmp::min(start_depth.wrapping_sub(end_depth) as u32, 0xffff)
+        let cur_depth = self.get_node_depth(head, h);
+
+        let match_depth = self.get_node_depth(match_pos, h);
+
+        // if we have a match, then we can calculate the depth
+        debug_assert!(
+            cur_depth >= match_depth,
+            "current match should be >= to previous c: {} m: {}",
+            cur_depth,
+            match_depth
+        );
+        (cur_depth - match_depth) as u32
     }
 }
 
@@ -319,9 +342,11 @@ impl<H: HashImplementation> HashChain for HashChainNormalize<H> {
         let cur_pos = input.pos();
         let cur_max_dist = std::cmp::min(cur_pos, window_size);
 
-        if target_reference.dist() > cur_max_dist {
+        if (target_reference.len() as usize) < H::num_hash_bytes()
+            || target_reference.dist() > cur_max_dist
+        {
             //println!("dtl {:?} > {}", target_reference, cur_max_dist);
-            return 0xffff;
+            return BAD_DEPTH;
         }
 
         let end_pos =
@@ -454,7 +479,7 @@ impl HashChain for HashChainNormalizeLibflate4 {
 
         if target_reference.dist() > cur_max_dist {
             //println!("dtl {:?} > {}", target_reference, cur_max_dist);
-            return 0xffff;
+            return BAD_DEPTH;
         }
 
         let end_pos =
@@ -467,18 +492,19 @@ impl HashChain for HashChainNormalizeLibflate4 {
             if self.hash_table_3.match_depth(end_pos, input) == 0 {
                 return 0;
             } else {
-                return 0xffff;
+                return BAD_DEPTH;
             }
         } else {
             let mut d = self.hash_table.match_depth(end_pos, input);
-            if d == 0xffff {
+            if d == BAD_DEPTH {
                 return d;
             }
 
             // if there was a valid 3 byte match, then the hash chain will be one larger
             // than the 4 byte hash chain
-            if self.hash_table_3.head[self.hash_table_3.hash.get_hash(input.cur_chars(0))]
-                .is_valid()
+            if self.hash_table_3.head
+                [usize::from(self.hash_table_3.hash.get_hash(input.cur_chars(0)))]
+            .is_valid()
             {
                 d += 1;
             }
@@ -602,7 +628,7 @@ impl<H: RotatingHashTrait> HashChain for HashChainAbs<H> {
 
         if target_reference.dist() > cur_max_dist {
             //println!("dtl {:?} > {}", target_reference, cur_max_dist);
-            return 0xffff;
+            return BAD_DEPTH;
         }
 
         let end_pos =
@@ -648,7 +674,6 @@ impl<H: RotatingHashTrait> HashChain for HashChainAbs<H> {
 /// This hash chain algorithm periodically normalizes the hash table
 pub struct HashChainAbs<H: HashImplementation> {
     hash_table: Box<HashTable<H, InternalPositionAbs>>,
-    total_shift: i32,
 }
 
 impl<H: HashImplementation> HashChainAbs<H> {
@@ -657,7 +682,6 @@ impl<H: HashImplementation> HashChainAbs<H> {
         // so this means that all valid values will be >= 8, otherwise the very first hash
         // offset would be zero and so it would get missed
         let mut c = HashChainAbs {
-            total_shift: -8,
             hash_table: HashTable::default_boxed(),
         };
 
@@ -669,7 +693,7 @@ impl<H: HashImplementation> HashChainAbs<H> {
 
 impl<H: HashImplementation> HashChain for HashChainAbs<H> {
     fn iterate<'a>(&'a self, input: &PreflateInput, offset: u32) -> impl Iterator<Item = u32> + 'a {
-        let ref_pos = InternalPositionAbs::from_absolute(input.pos() + offset, self.total_shift);
+        let ref_pos = InternalPositionAbs::new(input.pos() + offset);
 
         // if we have a match that needs to be inserted at the head first before
         // we start walking the chain
@@ -728,11 +752,10 @@ impl<H: HashImplementation> HashChain for HashChainAbs<H> {
 
         if target_reference.dist() > cur_max_dist {
             //println!("dtl {:?} > {}", target_reference, cur_max_dist);
-            return 0xffff;
+            return BAD_DEPTH;
         }
 
-        let end_pos =
-            InternalPositionAbs::from_absolute(cur_pos - target_reference.dist(), self.total_shift);
+        let end_pos = InternalPositionAbs::new(cur_pos - target_reference.dist());
 
         self.hash_table.match_depth(end_pos, input)
     }
@@ -754,7 +777,7 @@ impl<H: HashImplementation> HashChain for HashChainAbs<H> {
     ) {
         assert!(length <= MAX_UPDATE_HASH_BATCH);
 
-        let pos = InternalPositionAbs::from_absolute(input.pos(), self.total_shift);
+        let pos = InternalPositionAbs::new(input.pos());
         let chars = input.cur_chars(0);
 
         self.hash_table

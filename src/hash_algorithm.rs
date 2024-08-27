@@ -15,8 +15,8 @@ pub enum HashAlgorithm {
 pub trait HashImplementation: Default + Copy + Clone {
     type HashChainType: HashChain;
 
-    fn get_hash(&self, b: &[u8]) -> usize;
-    fn num_hash_bytes() -> u16;
+    fn get_hash(&self, b: &[u8]) -> u16;
+    fn num_hash_bytes() -> usize;
     fn new_hash_chain(self) -> Self::HashChainType;
 }
 
@@ -29,14 +29,14 @@ pub struct ZlibRotatingHash {
 impl HashImplementation for ZlibRotatingHash {
     type HashChainType = HashChainNormalize<ZlibRotatingHash>;
 
-    fn get_hash(&self, b: &[u8]) -> usize {
+    fn get_hash(&self, b: &[u8]) -> u16 {
         let c = u16::from(b[0]);
         let c = (c << self.hash_shift) ^ u16::from(b[1]);
         let c = (c << self.hash_shift) ^ u16::from(b[2]);
-        usize::from(c & self.hash_mask)
+        c & self.hash_mask
     }
 
-    fn num_hash_bytes() -> u16 {
+    fn num_hash_bytes() -> usize {
         3
     }
 
@@ -54,13 +54,13 @@ pub const MINIZ_LEVEL1_HASH_SIZE_MASK: u16 = 4095;
 impl HashImplementation for MiniZHash {
     type HashChainType = HashChainNormalize<MiniZHash>;
 
-    fn get_hash(&self, b: &[u8]) -> usize {
+    fn get_hash(&self, b: &[u8]) -> u16 {
         let hash = u32::from(b[0]) | (u32::from(b[1]) << 8) | (u32::from(b[2]) << 16);
 
-        ((hash ^ (hash >> 17)) & u32::from(MINIZ_LEVEL1_HASH_SIZE_MASK)) as usize
+        ((hash ^ (hash >> 17)) & u32::from(MINIZ_LEVEL1_HASH_SIZE_MASK)) as u16
     }
 
-    fn num_hash_bytes() -> u16 {
+    fn num_hash_bytes() -> usize {
         3
     }
 
@@ -75,13 +75,13 @@ pub struct LibdeflateRotatingHash4 {}
 impl HashImplementation for LibdeflateRotatingHash4 {
     type HashChainType = HashChainNormalizeLibflate4;
 
-    fn get_hash(&self, b: &[u8]) -> usize {
+    fn get_hash(&self, b: &[u8]) -> u16 {
         let hash = u32::from_le_bytes([b[0], b[1], b[2], b[3]]);
 
-        (hash.wrapping_mul(0x1E35A7BD) >> 16) as usize
+        (hash.wrapping_mul(0x1E35A7BD) >> 16) as u16
     }
 
-    fn num_hash_bytes() -> u16 {
+    fn num_hash_bytes() -> usize {
         4
     }
 
@@ -99,13 +99,13 @@ pub struct LibdeflateRotatingHash3 {}
 impl HashImplementation for LibdeflateRotatingHash3 {
     type HashChainType = HashChainNormalize<LibdeflateRotatingHash3>;
 
-    fn get_hash(&self, b: &[u8]) -> usize {
+    fn get_hash(&self, b: &[u8]) -> u16 {
         let hash = u32::from(b[0]) | (u32::from(b[1]) << 8) | (u32::from(b[2]) << 16);
 
-        (hash.wrapping_mul(0x1E35A7BD) >> 17) as usize
+        (hash.wrapping_mul(0x1E35A7BD) >> 17) as u16
     }
 
-    fn num_hash_bytes() -> u16 {
+    fn num_hash_bytes() -> usize {
         3
     }
 
@@ -120,13 +120,13 @@ pub struct ZlibNGHash {}
 impl HashImplementation for ZlibNGHash {
     type HashChainType = HashChainNormalize<ZlibNGHash>;
 
-    fn get_hash(&self, b: &[u8]) -> usize {
+    fn get_hash(&self, b: &[u8]) -> u16 {
         let hash = u32::from_le_bytes([b[0], b[1], b[2], b[3]]);
 
-        (hash.wrapping_mul(2654435761) >> 16) as usize
+        (hash.wrapping_mul(2654435761) >> 16) as u16
     }
 
-    fn num_hash_bytes() -> u16 {
+    fn num_hash_bytes() -> usize {
         4
     }
 
@@ -209,17 +209,17 @@ const RANDOM_VECTOR: [u16; 768] = [
 impl HashImplementation for RandomVectorHash {
     type HashChainType = HashChainAbs<RandomVectorHash>;
 
-    fn get_hash(&self, b: &[u8]) -> usize {
-        (RANDOM_VECTOR[b[0] as usize]
+    fn get_hash(&self, b: &[u8]) -> u16 {
+        RANDOM_VECTOR[b[0] as usize]
             ^ RANDOM_VECTOR[b[1] as usize + 256]
-            ^ RANDOM_VECTOR[b[2] as usize + 512]) as usize
+            ^ RANDOM_VECTOR[b[2] as usize + 512]
     }
 
-    fn num_hash_bytes() -> u16 {
+    fn num_hash_bytes() -> usize {
         3
     }
 
     fn new_hash_chain(self) -> Self::HashChainType {
-        crate::hash_chain::HashChainAbs::<RandomVectorHash>::new(self)
+        Self::HashChainType::new(self)
     }
 }
