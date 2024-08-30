@@ -12,7 +12,7 @@ use crate::{
     huffman_calc::HufftreeBitCalc,
     preflate_error::PreflateError,
     preflate_parameter_estimator::PreflateParameters,
-    preflate_token::{BlockType, PreflateTokenBlock},
+    preflate_token::{BlockType, PreflateToken, PreflateTokenBlock},
     statistical_codec::{
         CodecCorrection, CodecMisprediction, PredictionDecoder, PredictionEncoder,
     },
@@ -70,6 +70,12 @@ pub fn parse_deflate(
     let eof_padding = block_decoder.read_eof_padding();
     let plain_text = block_decoder.move_plain_text();
     let compressed_size = input_stream.position() as usize;
+
+    /*// write to file
+     let mut f = std::fs::File::create("c:\\temp\\treegdi.deflate")
+    .unwrap();
+    std::io::Write::write_all(&mut f, &compressed_data[0..compressed_size]).unwrap();*/
+
     Ok(DeflateContents {
         compressed_size,
         plain_text,
@@ -370,9 +376,12 @@ fn test_treepngdeflate() {
     use crate::hash_chain::HashChain;
     use crate::hash_chain::UPDATE_MODE_ALL;
 
-    let compressed_data: &[u8] = &read_file("treepng.deflate");
+    let compressed_data: &[u8] = &read_file("treegdi.deflate");
 
     let contents = parse_deflate(compressed_data, 1).unwrap();
+
+    let decoder = miniz_oxide::inflate::decompress_to_vec(compressed_data).unwrap();
+    assert_eq!(&decoder[..], &contents.plain_text[..]);
 
     let mut input = crate::preflate_input::PreflateInput::new(&contents.plain_text);
     let mut chain: crate::hash_chain::HashChainAbs<RandomVectorHash> =
@@ -382,22 +391,52 @@ fn test_treepngdeflate() {
 
     let h = r.get_hash(&contents.plain_text);
 
-    //println!("hashx: {:?}", h);
+    println!("hashx: {:?}", h);
 
     let mut maxdepth = 0;
+    let mut mismatches = 0;
+    let mut prev = PreflateToken::Literal;
 
-    for b in &contents.blocks {
+    /*let mut o = 0;
+    for i in 0..20
+    {
+        let t = &contents.blocks[0].tokens[i];
+        println!("{} token: {}, {:?}", o, i, t);
+        match t {
+            crate::preflate_token::PreflateToken::Literal => o += 1,
+            crate::preflate_token::PreflateToken::Reference(r) => {
+                o += r.len();
+            }
+        }
+    }*/
+
+    for block_no in 0..contents.blocks.len() {
+        let b = &contents.blocks[block_no];
+        println!("block: {} {}", block_no, b.tokens.len());
+
         for i in 0..b.tokens.len() {
             let t = &b.tokens[i];
+
+            let pos = input.pos();
+            let chars = input.cur_chars(0);
+            let depth;
+            let mut chars = chars[0..chars.len().min(10)].to_vec();
+
             match t {
                 crate::preflate_token::PreflateToken::Literal => {
                     chain.update_hash::<true, UPDATE_MODE_ALL>(1, &input);
                     input.advance(1);
+                    depth = 0;
+                    chars.resize(1, 0);
                 }
                 crate::preflate_token::PreflateToken::Reference(r) => {
-                    let depth = chain.match_depth(&r, 32768, &input);
+                    depth = chain.match_depth(&r, 32768, &input);
+                    chars.resize(r.len().min(10) as usize, 0);
                     if depth > 5 {
-                        println!("token: {}, depth {} reference: {:?}", i, depth, r);
+                        mismatches += 1;
+                        if mismatches > 20 {
+                            return;
+                        }
 
                         //println!("back: {:?}", &input.cur_chars(-82)[0..82]);
 
@@ -406,8 +445,8 @@ fn test_treepngdeflate() {
                             depth,
                             input.pos(),
                             &input.cur_chars(0)[0..16]
-                        );
-                        chain.match_depth(&r, 32768, &input);*/
+                        );*/
+                        chain.match_depth(&r, 32768, &input);
                     }
 
                     chain.update_hash::<true, UPDATE_MODE_ALL>(r.len(), &input);
@@ -415,6 +454,15 @@ fn test_treepngdeflate() {
                     input.advance(r.len());
                 }
             }
+
+            if (block_no == 1 && i > 6900 && i < 7100) {
+                println!(
+                    "offset: {} token: {}/{}, depth {} reference: {:?} chars {:?}",
+                    pos, block_no, i, depth, t, chars
+                );
+            }
+
+            prev = t.clone();
         }
     }
 

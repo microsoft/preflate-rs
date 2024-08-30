@@ -78,7 +78,7 @@ impl InternalPositionRel {
     }
 }
 
-#[derive(Default, Copy, Clone, Eq, PartialEq, Debug)]
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
 struct InternalPositionAbs {
     pos: u32,
 }
@@ -97,11 +97,17 @@ impl InternalPosition for InternalPositionAbs {
     }
 
     fn is_valid(&self) -> bool {
-        self.pos > 0
+        self.pos != 0xffffffff
     }
 
     fn dist(&self, pos: Self) -> u32 {
         u32::from(self.pos - pos.pos)
+    }
+}
+
+impl Default for InternalPositionAbs {
+    fn default() -> Self {
+        Self { pos: 0xffffffff }
     }
 }
 

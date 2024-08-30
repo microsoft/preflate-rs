@@ -5,11 +5,15 @@ use crate::{decompress_deflate_stream, DecompressResult};
 use byteorder::{LittleEndian, ReadBytesExt};
 use std::io::{Read, Seek, SeekFrom};
 
-#[derive(Hash, Eq, PartialEq, Copy, Clone, Debug)]
+use anyhow::Result;
+
+#[derive(Hash, Eq, PartialEq, Clone, Debug)]
 pub enum Signature {
     Zlib(u8),
     ZipLocalFileHeader,
     Gzip,
+    /// PNG IDAT, which is a concatenated Zlib stream of IDAT chunks, each of the size given in the Vec.
+    IDAT,
 }
 
 fn next_signature(src: &[u8], index: &mut usize) -> Option<Signature> {
@@ -27,6 +31,7 @@ fn next_signature(src: &[u8], index: &mut usize) -> Option<Signature> {
             0xDA78 => Signature::Zlib(8),
             0x4B50 => Signature::ZipLocalFileHeader,
             0x8B1F => Signature::Gzip,
+            0x4449 => Signature::IDAT,
             _ => continue,
         };
 
@@ -58,18 +63,116 @@ pub fn search_for_deflate_streams(src: &[u8], locations_found: &mut Vec<DeflateS
                         start,
                         data: res,
                     });
-                } else {
-                    index += 2;
+                    continue;
                 }
             }
 
             Signature::ZipLocalFileHeader => {
-                if find_zip_stream(src, &mut index, locations_found).is_err() {
-                    index += 2;
+                if find_zip_stream(src, &mut index, locations_found).is_ok() {
+                    continue;
+                }
+            }
+
+            Signature::IDAT => {
+                if index >= 4 {
+                    if let Ok(r) = parse_idat(&src[index - 4..], 0) {
+                        if let Ok(res) = decompress_deflate_stream(&r.payload[2..], true) {
+                            println!("success! {:?}", r.idat_boundaries);
+                            println!(
+                                "results {:?}, {}, {:?}",
+                                res.compressed_size,
+                                res.prediction_corrections.len(),
+                                res.parameters
+                            );
+
+                            println!(
+                                "recompressed: {}",
+                                zstd::bulk::compress(&res.plain_text, 9).unwrap().len()
+                            );
+                        }
+                    }
                 }
             }
         }
+
+        // wasn't able to match any of the known signatures, so skip the current byte
+        index += 1;
     }
+}
+
+struct IdatContents {
+    payload: Vec<u8>,
+    idat_boundaries: Vec<u32>,
+}
+
+fn parse_idat(compressed_data: &[u8], deflate_info_dump_level: u32) -> Result<IdatContents> {
+    if compressed_data.len() < 12 || &compressed_data[4..8] != b"IDAT" {
+        return Err(anyhow::Error::msg("No IDAT chunk found"));
+    }
+
+    let mut payload = Vec::new();
+
+    // PNG file
+    let mut idat_boundaries = Vec::new();
+    let mut pos = 0;
+
+    while pos < compressed_data.len() {
+        // png chunks start with the length of the chunk
+        let chunk_len = u32::from_be_bytes([
+            compressed_data[pos],
+            compressed_data[pos + 1],
+            compressed_data[pos + 2],
+            compressed_data[pos + 3],
+        ]) as usize;
+
+        // now look at the chunk type. We only want IDAT chunks
+        // and they have to be consecutive, so stop once we see
+        // something weird
+        let chunk_type = &compressed_data[pos + 4..pos + 8];
+        if chunk_type != b"IDAT" || pos + chunk_len + 12 > compressed_data.len() {
+            break;
+        }
+
+        let chunk = &compressed_data[pos + 8..pos + chunk_len + 8];
+        payload.extend_from_slice(chunk);
+
+        let mut crc = crc32fast::Hasher::new();
+        crc.update(&chunk_type);
+        crc.update(chunk);
+
+        if crc.finalize()
+            != u32::from_be_bytes([
+                compressed_data[pos + chunk_len + 8],
+                compressed_data[pos + chunk_len + 9],
+                compressed_data[pos + chunk_len + 10],
+                compressed_data[pos + chunk_len + 11],
+            ])
+        {
+            return Err(anyhow::Error::msg("CRC mismatch"));
+        }
+
+        idat_boundaries.push(pos as u32);
+        pos += chunk_len + 12;
+    }
+
+    if deflate_info_dump_level > 0 {
+        println!("IDAT boundaries: {:?}", idat_boundaries);
+    }
+
+    Ok(IdatContents {
+        payload,
+        idat_boundaries,
+    })
+}
+
+#[test]
+fn parse_png() {
+    let f = crate::process::read_file("treegdi.png");
+
+    let mut locations_found = Vec::new();
+    search_for_deflate_streams(&f, &mut locations_found);
+
+    println!("locations found: {:?}", locations_found);
 }
 
 const ZIP_LOCAL_FILE_HEADER_SIGNATURE: u32 = 0x04034b50;

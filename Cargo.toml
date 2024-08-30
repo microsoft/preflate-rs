@@ -26,9 +26,9 @@ byteorder = "1.4"
 cabac = "0.6.0"
 default-boxed = "0.2"
 zstd = "0.13.0"
+crc32fast = "1.3"
 
 [dev-dependencies]
-crc32fast = "1.3"
 libz-sys = "1.1"
 libdeflate-sys = "1.19"
 libz-ng-sys="1.1.12"
