@@ -68,13 +68,13 @@ pub trait HashChainHolder {
     /// updates the hash dictionary for a given length of matches.
     ///
     /// If this is a literal, then the update policy is to add all the bytes to the dictionary.
-    fn update_hash(&mut self, length: u32, input: &mut PreflateInput, is_literal: bool);
+    fn update_hash(&mut self, length: u32, input: &PreflateInput);
 
     /// updates the hash dictionary for a given length of matches, and also updates the depth
     /// map of the hash chain.
     ///
     /// If this is a literal, then the update policy is to add all the bytes to the dictionary.
-    fn update_hash_with_depth(&mut self, length: u32, input: &mut PreflateInput, is_literal: bool);
+    fn update_hash_with_depth(&mut self, length: u32, input: &PreflateInput);
 
     /// searches the hash chain for a given match, returns the longest result found if any
     ///
@@ -123,11 +123,11 @@ struct HashChainHolderImpl<H: HashImplementation> {
 }
 
 impl<H: HashImplementation> HashChainHolder for HashChainHolderImpl<H> {
-    fn update_hash(&mut self, length: u32, input: &mut PreflateInput, is_literal: bool) {
+    fn update_hash(&mut self, length: u32, input: &PreflateInput) {
         self.update_hash_with_policy::<false>(
             length,
             input,
-            if is_literal {
+            if length == 1 {
                 DictionaryAddPolicy::AddAll
             } else {
                 self.params.add_policy
@@ -135,11 +135,11 @@ impl<H: HashImplementation> HashChainHolder for HashChainHolderImpl<H> {
         );
     }
 
-    fn update_hash_with_depth(&mut self, length: u32, input: &mut PreflateInput, is_literal: bool) {
+    fn update_hash_with_depth(&mut self, length: u32, input: &PreflateInput) {
         self.update_hash_with_policy::<true>(
             length,
             input,
-            if is_literal {
+            if length == 1 {
                 DictionaryAddPolicy::AddAll
             } else {
                 self.params.add_policy
@@ -373,7 +373,7 @@ impl<H: HashImplementation> HashChainHolderImpl<H> {
     fn update_hash_with_policy<const MAINTAIN_DEPTH: bool>(
         &mut self,
         length: u32,
-        input: &mut PreflateInput,
+        input: &PreflateInput,
         add_policy: DictionaryAddPolicy,
     ) {
         debug_assert!(length <= MAX_UPDATE_HASH_BATCH);
@@ -402,8 +402,6 @@ impl<H: HashImplementation> HashChainHolderImpl<H> {
                 }
             }
         }
-
-        input.advance(length);
     }
 
     fn prefix_compare(s1: &[u8], s2: &[u8], best_len: u32, max_len: u32) -> u32 {

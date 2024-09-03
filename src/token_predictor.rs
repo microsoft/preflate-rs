@@ -108,7 +108,8 @@ impl<'a> TokenPredictor<'a> {
             codec.encode_correction(CodecCorrection::NonZeroPadding, block.padding_bits.into());
 
             for _i in 0..block.uncompressed_len {
-                self.state.update_hash(1, &mut self.input, true);
+                self.state.update_hash(1, &self.input);
+                self.input.advance(1);
             }
 
             return Ok(());
@@ -279,7 +280,8 @@ impl<'a> TokenPredictor<'a> {
                 block.padding_bits = codec.decode_correction(CodecCorrection::NonZeroPadding) as u8;
 
                 for _i in 0..block.uncompressed_len {
-                    self.state.update_hash(1, &mut self.input, true);
+                    self.state.update_hash(1, &mut self.input);
+                    self.input.advance(1);
                 }
                 return Ok(block);
             }
@@ -500,14 +502,16 @@ impl<'a> TokenPredictor<'a> {
                     block.add_literal(self.input.cur_char(0));
                 }
 
-                self.state.update_hash(1, &mut self.input, true);
+                self.state.update_hash(1, &self.input);
+                self.input.advance(1);
             }
             PreflateToken::Reference(t) => {
                 if let Some(block) = block {
                     block.add_reference(t.len(), t.dist(), t.get_irregular258());
                 }
 
-                self.state.update_hash(t.len(), &mut self.input, false);
+                self.state.update_hash(t.len(), &mut self.input);
+                self.input.advance(t.len());
             }
         }
 

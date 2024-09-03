@@ -227,11 +227,9 @@ impl<'a> CompLevelEstimatorState<'a> {
         }
     }
 
-    fn update_hash(&mut self, length: u32, override_add_policy: bool) {
+    fn update_hash(&mut self, length: u32) {
         for i in &mut self.candidates {
-            let mut inputc = self.input.clone();
-            i.hash_chain
-                .update_hash_with_depth(length, &mut inputc, override_add_policy);
+            i.hash_chain.update_hash_with_depth(length, &self.input);
         }
 
         self.input.advance(length);
@@ -265,18 +263,18 @@ impl<'a> CompLevelEstimatorState<'a> {
         for (_i, b) in self.blocks.iter().enumerate() {
             if b.block_type == BlockType::Stored {
                 for _i in 0..b.uncompressed_len {
-                    self.update_hash(1, true);
+                    self.update_hash(1);
                 }
                 continue;
             }
             for (_j, t) in b.tokens.iter().enumerate() {
                 match t {
                     PreflateToken::Literal => {
-                        self.update_hash(1, true);
+                        self.update_hash(1);
                     }
                     &PreflateToken::Reference(r) => {
                         self.check_match(r);
-                        self.update_hash(r.len(), false);
+                        self.update_hash(r.len());
                     }
                 }
             }
