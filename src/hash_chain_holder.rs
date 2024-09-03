@@ -203,7 +203,8 @@ impl<H: HashImplementation> HashChainHolder for HashChainHolderImpl<H> {
             }
         }
 
-        let nice_len = std::cmp::min(self.params.nice_length, max_len);
+        let nice_length = std::cmp::min(self.params.nice_length, max_len);
+        let max_dist_3_matches = u32::from(self.params.max_dist_3_matches);
         let mut max_chain = max_depth;
 
         let input_chars = input.cur_chars(offset as i32);
@@ -211,6 +212,10 @@ impl<H: HashImplementation> HashChainHolder for HashChainHolderImpl<H> {
         let mut best_match: Option<PreflateTokenReference> = None;
         let mut num_chain_matches = 0;
         let mut first = true;
+
+        if start_pos == 4095 {
+            println!("start_pos: {}", start_pos);
+        }
 
         for dist in self.hash.iterate(input, offset) {
             // first entry gets a special treatment to make sure it doesn't exceed
@@ -232,7 +237,7 @@ impl<H: HashImplementation> HashChainHolder for HashChainHolderImpl<H> {
             if match_length > best_len {
                 let r = PreflateTokenReference::new(match_length, dist, false);
 
-                if match_length >= nice_len {
+                if match_length >= nice_length && (match_length > 3 || dist <= max_dist_3_matches) {
                     return MatchResult::Success(r);
                 }
 

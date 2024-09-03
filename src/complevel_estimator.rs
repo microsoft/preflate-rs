@@ -14,7 +14,9 @@ use crate::{
     preflate_constants,
     preflate_input::PreflateInput,
     preflate_parameter_estimator::PreflateStrategy,
-    preflate_parse_config::{FAST_PREFLATE_PARSER_SETTINGS, SLOW_PREFLATE_PARSER_SETTINGS},
+    preflate_parse_config::{
+        MatchingType, SLOW_PREFLATE_PARSER_SETTINGS, ZLIB_PREFLATE_PARSER_SETTINGS,
+    },
     preflate_token::{BlockType, PreflateToken, PreflateTokenBlock, PreflateTokenReference},
     skip_length_estimator::estimate_skip_length,
     token_predictor::TokenPredictorParameters,
@@ -31,8 +33,7 @@ pub struct CompLevelInfo {
     pub min_len: u32,
     pub add_policy: DictionaryAddPolicy,
     pub hash_algorithm: HashAlgorithm,
-    pub good_length: u32,
-    pub max_lazy: u32,
+    pub match_type: MatchingType,
     pub nice_length: u32,
     pub max_chain: u32,
 }
@@ -64,8 +65,7 @@ impl CandidateInfo {
             max_token_count: 0,
             zlib_compatible: false,
             max_dist_3_matches: 0,
-            good_length: 0,
-            max_lazy: 0,
+            matching_type: MatchingType::Greedy,
             max_chain: 0,
             min_len: 0,
         };
@@ -292,8 +292,7 @@ impl<'a> CompLevelEstimatorState<'a> {
             .min_by(|&a, &b| a.max_chain_found().cmp(&b.max_chain_found()))
             .unwrap();
 
-        let mut good_length = 32;
-        let mut max_lazy = 258;
+        let mut match_type = MatchingType::Greedy;
         let mut nice_length = 258;
 
         let add_policy = candidate.add_policy;
@@ -304,11 +303,10 @@ impl<'a> CompLevelEstimatorState<'a> {
 
         match candidate.add_policy {
             DictionaryAddPolicy::AddFirst(_) | DictionaryAddPolicy::AddFirstAndLast(_) => {
-                for config in &FAST_PREFLATE_PARSER_SETTINGS {
+                for config in &ZLIB_PREFLATE_PARSER_SETTINGS {
                     if candidate.max_chain_found() < config.max_chain {
-                        good_length = config.good_length;
+                        match_type = config.match_type;
                         nice_length = config.nice_length;
-                        max_lazy = 0;
                         break;
                     }
                 }
@@ -316,8 +314,7 @@ impl<'a> CompLevelEstimatorState<'a> {
             DictionaryAddPolicy::AddAll => {
                 for config in &SLOW_PREFLATE_PARSER_SETTINGS {
                     if candidate.max_chain_found() < config.max_chain {
-                        good_length = config.good_length;
-                        max_lazy = config.max_lazy;
+                        match_type = config.match_type;
                         nice_length = config.nice_length;
                         break;
                     }
@@ -343,8 +340,7 @@ impl<'a> CompLevelEstimatorState<'a> {
             very_far_matches_detected: very_far_matches,
             max_dist_3_matches: self.longest_len_3_dist as u16,
             add_policy,
-            good_length,
-            max_lazy,
+            match_type,
             nice_length,
             max_chain,
             min_len: self.min_len,
