@@ -264,7 +264,9 @@ impl<'a> CompLevelEstimatorState<'a> {
     fn check_dump(&mut self) {
         for (_i, b) in self.blocks.iter().enumerate() {
             if b.block_type == BlockType::Stored {
-                self.update_hash(b.uncompressed_len, true);
+                for _i in 0..b.uncompressed_len {
+                    self.update_hash(1, true);
+                }
                 continue;
             }
             for (_j, t) in b.tokens.iter().enumerate() {

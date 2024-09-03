@@ -106,8 +106,10 @@ impl<'a> TokenPredictor<'a> {
             codec.encode_value(block.uncompressed_len as u16, 16);
 
             codec.encode_correction(CodecCorrection::NonZeroPadding, block.padding_bits.into());
-            self.state
-                .update_hash(block.uncompressed_len, &mut self.input, true);
+
+            for _i in 0..block.uncompressed_len {
+                self.state.update_hash(1, &mut self.input, true);
+            }
 
             return Ok(());
         }
@@ -276,8 +278,9 @@ impl<'a> TokenPredictor<'a> {
                 block.uncompressed_len = codec.decode_value(16).into();
                 block.padding_bits = codec.decode_correction(CodecCorrection::NonZeroPadding) as u8;
 
-                self.state
-                    .update_hash(block.uncompressed_len, &mut self.input, true);
+                for _i in 0..block.uncompressed_len {
+                    self.state.update_hash(1, &mut self.input, true);
+                }
                 return Ok(block);
             }
             BT_STATICHUFF => {

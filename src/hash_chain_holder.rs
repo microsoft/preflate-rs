@@ -372,45 +372,38 @@ impl<H: HashImplementation> HashChainHolderImpl<H> {
 
     fn update_hash_with_policy<const MAINTAIN_DEPTH: bool>(
         &mut self,
-        mut length: u32,
+        length: u32,
         input: &mut PreflateInput,
         add_policy: DictionaryAddPolicy,
     ) {
-        while length > 0 {
-            let batch_len = cmp::min(length, MAX_UPDATE_HASH_BATCH);
+        debug_assert!(length <= MAX_UPDATE_HASH_BATCH);
 
-            match add_policy {
-                DictionaryAddPolicy::AddAll => {
+        match add_policy {
+            DictionaryAddPolicy::AddAll => {
+                self.hash
+                    .update_hash::<MAINTAIN_DEPTH, UPDATE_MODE_ALL>(length, input);
+            }
+            DictionaryAddPolicy::AddFirst(limit) => {
+                if length > limit.into() {
                     self.hash
-                        .update_hash::<MAINTAIN_DEPTH, UPDATE_MODE_ALL>(batch_len, input);
-                }
-                DictionaryAddPolicy::AddFirst(limit) => {
-                    debug_assert_eq!(batch_len, length);
-                    if length > limit.into() {
-                        self.hash
-                            .update_hash::<MAINTAIN_DEPTH, UPDATE_MODE_FIRST>(batch_len, input);
-                    } else {
-                        self.hash
-                            .update_hash::<MAINTAIN_DEPTH, UPDATE_MODE_ALL>(batch_len, input);
-                    }
-                }
-                DictionaryAddPolicy::AddFirstAndLast(limit) => {
-                    debug_assert_eq!(batch_len, length);
-                    if length > limit.into() {
-                        self.hash
-                            .update_hash::<MAINTAIN_DEPTH, UPDATE_MODE_FIRST_AND_LAST>(
-                                batch_len, input,
-                            );
-                    } else {
-                        self.hash
-                            .update_hash::<MAINTAIN_DEPTH, UPDATE_MODE_ALL>(batch_len, input);
-                    }
+                        .update_hash::<MAINTAIN_DEPTH, UPDATE_MODE_FIRST>(length, input);
+                } else {
+                    self.hash
+                        .update_hash::<MAINTAIN_DEPTH, UPDATE_MODE_ALL>(length, input);
                 }
             }
-
-            input.advance(batch_len);
-            length -= batch_len;
+            DictionaryAddPolicy::AddFirstAndLast(limit) => {
+                if length > limit.into() {
+                    self.hash
+                        .update_hash::<MAINTAIN_DEPTH, UPDATE_MODE_FIRST_AND_LAST>(length, input);
+                } else {
+                    self.hash
+                        .update_hash::<MAINTAIN_DEPTH, UPDATE_MODE_ALL>(length, input);
+                }
+            }
         }
+
+        input.advance(length);
     }
 
     fn prefix_compare(s1: &[u8], s2: &[u8], best_len: u32, max_len: u32) -> u32 {
