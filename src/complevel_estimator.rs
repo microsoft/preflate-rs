@@ -18,7 +18,7 @@ use crate::{
         MatchingType, SLOW_PREFLATE_PARSER_SETTINGS, ZLIB_PREFLATE_PARSER_SETTINGS,
     },
     preflate_token::{BlockType, PreflateToken, PreflateTokenBlock, PreflateTokenReference},
-    skip_length_estimator::estimate_skip_length,
+    skip_length_estimator::estimate_add_policy,
     token_predictor::TokenPredictorParameters,
 };
 
@@ -157,7 +157,7 @@ impl<'a> CompLevelEstimatorState<'a> {
         plain_text: &'a [u8],
         blocks: &'a Vec<PreflateTokenBlock>,
     ) -> Self {
-        let add_policy = estimate_skip_length(blocks);
+        let add_policy = estimate_add_policy(blocks);
 
         let hash_bits = mem_level + 7;
         let mem_hash_shift = (hash_bits + 2) / 3;
@@ -177,7 +177,7 @@ impl<'a> CompLevelEstimatorState<'a> {
         let mut candidates: Vec<Box<CandidateInfo>> = Vec::new();
 
         candidates.push(Box::new(CandidateInfo::new(
-            add_policy,
+            DictionaryAddPolicy::AddFirst(0),
             HashAlgorithm::MiniZFast,
             wbits,
         )));
@@ -227,7 +227,8 @@ impl<'a> CompLevelEstimatorState<'a> {
         }
     }
 
-    fn update_hash(&mut self, length: u32) {
+    /// updates all the active candidates with the current hash and advance it
+    fn update_candidate_hashes(&mut self, length: u32) {
         for i in &mut self.candidates {
             i.hash_chain.update_hash_with_depth(length, &self.input);
         }
@@ -263,18 +264,18 @@ impl<'a> CompLevelEstimatorState<'a> {
         for (_i, b) in self.blocks.iter().enumerate() {
             if b.block_type == BlockType::Stored {
                 for _i in 0..b.uncompressed_len {
-                    self.update_hash(1);
+                    self.update_candidate_hashes(1);
                 }
                 continue;
             }
             for (_j, t) in b.tokens.iter().enumerate() {
                 match t {
                     PreflateToken::Literal => {
-                        self.update_hash(1);
+                        self.update_candidate_hashes(1);
                     }
                     &PreflateToken::Reference(r) => {
                         self.check_match(r);
-                        self.update_hash(r.len());
+                        self.update_candidate_hashes(r.len());
                     }
                 }
             }
@@ -302,7 +303,9 @@ impl<'a> CompLevelEstimatorState<'a> {
         let longest_dist_at_hop_1_plus = candidate.longest_dist_at_hop_1_plus;
 
         match candidate.add_policy {
-            DictionaryAddPolicy::AddFirst(_) | DictionaryAddPolicy::AddFirstAndLast(_) => {
+            DictionaryAddPolicy::AddFirst(_)
+            | DictionaryAddPolicy::AddFirstAndLast(_)
+            | DictionaryAddPolicy::AddFirstExcept4kBoundary => {
                 for config in &ZLIB_PREFLATE_PARSER_SETTINGS {
                     if candidate.max_chain_found() < config.max_chain {
                         match_type = config.match_type;

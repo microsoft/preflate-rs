@@ -12,7 +12,7 @@ use crate::{
     huffman_calc::HufftreeBitCalc,
     preflate_error::PreflateError,
     preflate_parameter_estimator::PreflateParameters,
-    preflate_token::{BlockType, PreflateToken, PreflateTokenBlock},
+    preflate_token::{BlockType, PreflateTokenBlock},
     statistical_codec::{
         CodecCorrection, CodecMisprediction, PredictionDecoder, PredictionEncoder,
     },
@@ -393,9 +393,7 @@ fn test_treepngdeflate() {
 
     println!("hashx: {:?}", h);
 
-    let mut maxdepth = 0;
     let mut mismatches = 0;
-    let mut prev = PreflateToken::Literal;
 
     /*let mut o = 0;
     for i in 0..20
@@ -455,14 +453,12 @@ fn test_treepngdeflate() {
                 }
             }
 
-            if (block_no == 1 && i > 6900 && i < 7100) {
+            if block_no == 1 && i > 6900 && i < 7100 {
                 println!(
                     "offset: {} token: {}/{}, depth {} reference: {:?} chars {:?}",
                     pos, block_no, i, depth, t, chars
                 );
             }
-
-            prev = t.clone();
         }
     }
 
@@ -607,7 +603,7 @@ fn verify_miniz1_compressed_perfect() {
             very_far_matches_detected: false,
             matches_to_start_detected: false,
             nice_length: 3,
-            add_policy: crate::hash_chain::DictionaryAddPolicy::AddFirst(0),
+            add_policy: crate::hash_chain::DictionaryAddPolicy::AddFirstExcept4kBoundary,
             max_token_count: 16383,
             zlib_compatible: true,
             max_dist_3_matches: 8192,
@@ -624,6 +620,8 @@ fn verify_miniz1_compressed_perfect() {
     cabac_encoder.finish();
 
     cabac_encoder.print();
+
+    println!("buffer size: {}", buffer.len());
 
     let mut cabac_decoder =
         PredictionDecoderCabac::new(VP8Reader::new(Cursor::new(&buffer)).unwrap());

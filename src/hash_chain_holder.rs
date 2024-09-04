@@ -124,27 +124,11 @@ struct HashChainHolderImpl<H: HashImplementation> {
 
 impl<H: HashImplementation> HashChainHolder for HashChainHolderImpl<H> {
     fn update_hash(&mut self, length: u32, input: &PreflateInput) {
-        self.update_hash_with_policy::<false>(
-            length,
-            input,
-            if length == 1 {
-                DictionaryAddPolicy::AddAll
-            } else {
-                self.params.add_policy
-            },
-        );
+        self.update_hash_with_policy::<false>(length, input, self.params.add_policy);
     }
 
     fn update_hash_with_depth(&mut self, length: u32, input: &PreflateInput) {
-        self.update_hash_with_policy::<true>(
-            length,
-            input,
-            if length == 1 {
-                DictionaryAddPolicy::AddAll
-            } else {
-                self.params.add_policy
-            },
-        );
+        self.update_hash_with_policy::<true>(length, input, self.params.add_policy);
     }
 
     fn match_depth(
@@ -210,12 +194,7 @@ impl<H: HashImplementation> HashChainHolder for HashChainHolderImpl<H> {
         let input_chars = input.cur_chars(offset as i32);
         let mut best_len = prev_len;
         let mut best_match: Option<PreflateTokenReference> = None;
-        let mut num_chain_matches = 0;
         let mut first = true;
-
-        if start_pos == 4095 {
-            println!("start_pos: {}", start_pos);
-        }
 
         for dist in self.hash.iterate(input, offset) {
             // first entry gets a special treatment to make sure it doesn't exceed
@@ -246,7 +225,6 @@ impl<H: HashImplementation> HashChainHolder for HashChainHolderImpl<H> {
             }
 
             max_chain -= 1;
-            num_chain_matches += 1;
 
             if max_chain == 0 {
                 if let Some(r) = best_match {
@@ -399,6 +377,12 @@ impl<H: HashImplementation> HashChainHolderImpl<H> {
                 } else {
                     self.hash
                         .update_hash::<MAINTAIN_DEPTH, UPDATE_MODE_ALL>(length, input);
+                }
+            }
+            DictionaryAddPolicy::AddFirstExcept4kBoundary => {
+                if length > 1 || (input.pos() % 4096) < 4093 {
+                    self.hash
+                        .update_hash::<MAINTAIN_DEPTH, UPDATE_MODE_FIRST>(length, input);
                 }
             }
         }

@@ -5,7 +5,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 use std::fs::File;
-use std::io::{Read, Write};
+use std::io::Read;
 use std::path::Path;
 use std::{mem, ptr};
 
@@ -145,18 +145,18 @@ fn test_file(filename: &str) {
         let output = libdeflate_compress(&v, level);
 
         // write to file
-        let mut f = File::create(format!(
+        /*let mut f = File::create(format!(
             "c:\\temp\\compressed_libdeflate_level{}.deflate",
             level
         ))
         .unwrap();
-        f.write_all(&output).unwrap();
+        f.write_all(&output).unwrap();*/
 
         verifyresult(&output);
     }
 
     // Zlibng compression with different compression levels
-    for level in 1..=2 {
+    for level in 1..=8 {
         println!("zlibng level: {}", level);
 
         let output = libngzsys_compress(&v, level);
@@ -164,8 +164,12 @@ fn test_file(filename: &str) {
         let minusheader = &output[2..output.len() - 4];
 
         // write to file
-        //let mut f = File::create(format!("c:\\temp\\compressed_zlib_level{}.bin", level)).unwrap();
-        //.write_all(minusheader).unwrap();
+        /*let mut f = File::create(format!(
+            "c:\\temp\\compressed_zlibng_level{}.deflate",
+            level
+        ))
+        .unwrap();
+        f.write_all(minusheader).unwrap();*/
 
         verifyresult(minusheader);
     }

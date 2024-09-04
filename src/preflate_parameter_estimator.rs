@@ -82,6 +82,7 @@ impl PreflateParameters {
             0 => DictionaryAddPolicy::AddAll,
             1 => DictionaryAddPolicy::AddFirst(u16::from(decoder.decode_value(8))),
             2 => DictionaryAddPolicy::AddFirstAndLast(u16::from(decoder.decode_value(8))),
+            3 => DictionaryAddPolicy::AddFirstExcept4kBoundary,
             _ => panic!("invalid add policy"),
         };
 
@@ -214,6 +215,9 @@ impl PreflateParameters {
             DictionaryAddPolicy::AddFirstAndLast(v) => {
                 encoder.encode_value(2, 2);
                 encoder.encode_value(v as u16, 8);
+            }
+            DictionaryAddPolicy::AddFirstExcept4kBoundary => {
+                encoder.encode_value(3, 2);
             }
         }
     }
