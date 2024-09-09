@@ -10,7 +10,9 @@ use std::path::Path;
 use std::{mem, ptr};
 
 use libdeflate_sys::{libdeflate_alloc_compressor, libdeflate_deflate_compress};
-use preflate_rs::{decompress_deflate_stream, recompress_deflate_stream};
+use preflate_rs::{
+    compress_zstd, decompress_deflate_stream, decompress_zstd, recompress_deflate_stream,
+};
 
 #[cfg(test)]
 pub fn read_file(filename: &str) -> Vec<u8> {
@@ -48,31 +50,39 @@ fn test_pptxplaintext() {
 }
 
 #[test]
-#[ignore = "chain length too long"]
-fn test_dumpout() {
-    verifyresult(&read_file("dumpout-29473.deflate"));
-}
-
-#[test]
-#[ignore = "chain length too long"]
-fn test_dumpout2() {
-    verifyresult(&read_file("dumpout-355865.deflate"));
-}
-
-#[test]
 fn test_nomatch() {
     test_file("sample2.bin");
 }
 
 #[test]
-#[ignore = "chain length too long"]
-fn test_treedeflate() {
-    verifyresult(&read_file("treepng.deflate"));
+fn test_sample1() {
+    test_file("sample1.bin");
 }
 
 #[test]
-fn test_sample1() {
-    test_file("sample1.bin");
+fn test_samplezip() {
+    test_container("samplezip.zip");
+}
+
+#[test]
+fn test_docx() {
+    test_container("samplepptx.pptx");
+}
+
+fn test_container(filename: &str) {
+    let v = read_file(filename);
+    let c = compress_zstd(&v).unwrap();
+
+    let r = decompress_zstd(&c, 1024 * 1024 * 128).unwrap();
+    assert!(v == r);
+
+    println!(
+        "file {} original size: {}, compressed size: {} (plaintext={})",
+        filename,
+        v.len(),
+        c.len(),
+        r.len()
+    );
 }
 
 #[test]
