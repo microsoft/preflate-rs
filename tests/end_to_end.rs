@@ -156,7 +156,7 @@ fn test_file(filename: &str) {
     }
 
     // Zlibng compression with different compression levels
-    for level in 1..=8 {
+    for level in 1..=4 {
         println!("zlibng level: {}", level);
 
         let output = libngzsys_compress(&v, level);

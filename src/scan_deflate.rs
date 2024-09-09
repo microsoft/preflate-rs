@@ -1,4 +1,4 @@
-use std::{io::Cursor, thread::panicking};
+use std::io::Cursor;
 
 use crate::{
     decompress_deflate_stream,
@@ -123,7 +123,7 @@ pub fn split_into_deflate_streams(src: &[u8], locations_found: &mut Vec<BlockChu
 
                             locations_found.push(BlockChunk::IDATDeflate(r, res));
 
-                            index += length;
+                            index = real_start + length;
                             prev_index = index;
                             continue;
                         }

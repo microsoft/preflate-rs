@@ -1,15 +1,11 @@
-use anyhow::Result;
 use byteorder::ReadBytesExt;
-use std::io::{Cursor, Read, Write};
+use std::io::{Read, Write};
 
 use crate::{
     idat_parse::{recreate_idat, IdatContents},
     preflate_error::PreflateError,
-    preflate_parameter_estimator::PreflateParameters,
-    process::DeflateContents,
     recompress_deflate_stream,
     scan_deflate::{split_into_deflate_streams, BlockChunk},
-    DecompressResult,
 };
 
 const COMPRESSED_WRAPPER_VERSION_1: u8 = 1;
@@ -75,11 +71,11 @@ fn test_variant_roundtrip() {
 }
 
 fn write_chunk_block(
-    signature: BlockChunk,
+    block: BlockChunk,
     literal_data: &[u8],
     destination: &mut impl Write,
 ) -> std::io::Result<usize> {
-    match signature {
+    match block {
         BlockChunk::Literal(content_size) => {
             destination.write_all(&[LITERAL_CHUNK])?;
             write_varint(destination, content_size as u32)?;
@@ -106,7 +102,7 @@ fn write_chunk_block(
             write_varint(destination, res.prediction_corrections.len() as u32)?;
             destination.write_all(&res.prediction_corrections)?;
 
-            Ok(res.compressed_size)
+            Ok(idat.total_chunk_length)
         }
     }
 }
@@ -152,7 +148,7 @@ fn read_chunk_block(
 
             if let Some(idat) = idat {
                 recreate_idat(&idat, &recompressed[..], destination)
-                    .map_err(|e| PreflateError::InvalidCompressedWrapper)?;
+                    .map_err(|_e| PreflateError::InvalidCompressedWrapper)?;
             } else {
                 destination.write_all(&recompressed)?;
             }
@@ -168,7 +164,7 @@ fn roundtrip_chunk_block_literal() {
 
     write_chunk_block(BlockChunk::Literal(5), b"hello", &mut buffer).unwrap();
 
-    let mut read_cursor = Cursor::new(buffer);
+    let mut read_cursor = std::io::Cursor::new(buffer);
     let mut destination = Vec::new();
     read_chunk_block(&mut read_cursor, &mut destination).unwrap();
 
@@ -184,7 +180,7 @@ fn roundtrip_chunk_block_deflate() {
 
     write_chunk_block(BlockChunk::DeflateStream(results), &[], &mut buffer).unwrap();
 
-    let mut read_cursor = Cursor::new(buffer);
+    let mut read_cursor = std::io::Cursor::new(buffer);
     let mut destination = Vec::new();
     read_chunk_block(&mut read_cursor, &mut destination).unwrap();
 
@@ -210,7 +206,7 @@ fn roundtrip_chunk_block_png() {
     )
     .unwrap();
 
-    let mut read_cursor = Cursor::new(buffer);
+    let mut read_cursor = std::io::Cursor::new(buffer);
     let mut destination = Vec::new();
     read_chunk_block(&mut read_cursor, &mut destination).unwrap();
 
@@ -224,6 +220,7 @@ pub fn expand_zlib_chunks(compressed_data: &[u8]) -> std::result::Result<Vec<u8>
     let mut locations_found = Vec::new();
 
     split_into_deflate_streams(compressed_data, &mut locations_found);
+    println!("locations found: {:?}", locations_found);
 
     let mut plain_text = Vec::new();
     plain_text.push(COMPRESSED_WRAPPER_VERSION_1); // version 1 of format. Definitely will improved.
@@ -254,4 +251,42 @@ pub fn recreated_zlib_chunks(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+fn roundtrip_deflate_chunks(filename: &str) {
+    let f = crate::process::read_file(filename);
+
+    let expanded = expand_zlib_chunks(&f).unwrap();
+
+    let mut read_cursor = std::io::Cursor::new(expanded);
+
+    let mut destination = Vec::new();
+    recreated_zlib_chunks(&mut read_cursor, &mut destination).unwrap();
+
+    assert_eq!(destination.len(), f.len());
+    for i in 0..destination.len() {
+        assert_eq!(destination[i], f[i], "Mismatch at index {}", i);
+    }
+    assert!(destination == f);
+}
+
+#[test]
+fn roundtrip_png_chunks() {
+    roundtrip_deflate_chunks("treegdi.png");
+}
+
+#[test]
+fn roundtrip_zip_chunks() {
+    roundtrip_deflate_chunks("samplezip.zip");
+}
+
+#[test]
+fn roundtrip_gz_chunks() {
+    roundtrip_deflate_chunks("sample1.bin.gz");
+}
+
+#[test]
+fn roundtrip_pdf_chunks() {
+    roundtrip_deflate_chunks("starcontrol.samplesave");
 }

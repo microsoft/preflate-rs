@@ -60,7 +60,7 @@ pub struct DecompressResult {
     pub compressed_size: usize,
 
     /// the parameters that were used to compress the stream (informational)
-    pub parameters: Option<PreflateParameters>,
+    pub parameters: PreflateParameters,
 }
 
 impl core::fmt::Debug for DecompressResult {
@@ -116,7 +116,7 @@ pub fn decompress_deflate_stream(
         plain_text: contents.plain_text,
         prediction_corrections: cabac_encoded,
         compressed_size: contents.compressed_size,
-        parameters: Some(params),
+        parameters: params,
     })
 }
 
@@ -180,7 +180,7 @@ pub fn decompress_deflate_stream_assert(
         plain_text: contents.plain_text,
         prediction_corrections: cabac_encoded,
         compressed_size: contents.compressed_size,
-        parameters: Some(params),
+        parameters: params,
     })
 }
 

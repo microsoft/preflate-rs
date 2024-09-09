@@ -164,11 +164,8 @@ fn recreate_blocks<D: PredictionDecoder>(
     Ok(output_blocks)
 }
 
+#[allow(dead_code)]
 pub fn write_file(filename: &str, data: &[u8]) {
-    use std::fs::File;
-    use std::io::Write;
-    use std::path::Path;
-
     let mut writecomp = std::fs::File::create(filename).unwrap();
     std::io::Write::write_all(&mut writecomp, &data).unwrap();
 }
