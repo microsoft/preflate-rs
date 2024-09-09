@@ -12,7 +12,7 @@ use crate::{
     huffman_calc::HufftreeBitCalc,
     preflate_error::PreflateError,
     preflate_parameter_estimator::PreflateParameters,
-    preflate_token::{BlockType, PreflateToken, PreflateTokenBlock},
+    preflate_token::{BlockType, PreflateTokenBlock},
     statistical_codec::{
         CodecCorrection, CodecMisprediction, PredictionDecoder, PredictionEncoder,
     },
@@ -162,6 +162,12 @@ fn recreate_blocks<D: PredictionDecoder>(
         output_blocks.push(block);
     }
     Ok(output_blocks)
+}
+
+#[allow(dead_code)]
+pub fn write_file(filename: &str, data: &[u8]) {
+    let mut writecomp = std::fs::File::create(filename).unwrap();
+    std::io::Write::write_all(&mut writecomp, &data).unwrap();
 }
 
 #[cfg(test)]
@@ -393,9 +399,7 @@ fn test_treepngdeflate() {
 
     println!("hashx: {:?}", h);
 
-    let mut maxdepth = 0;
     let mut mismatches = 0;
-    let mut prev = PreflateToken::Literal;
 
     /*let mut o = 0;
     for i in 0..20
@@ -455,14 +459,12 @@ fn test_treepngdeflate() {
                 }
             }
 
-            if (block_no == 1 && i > 6900 && i < 7100) {
+            if block_no == 1 && i > 6900 && i < 7100 {
                 println!(
                     "offset: {} token: {}/{}, depth {} reference: {:?} chars {:?}",
                     pos, block_no, i, depth, t, chars
                 );
             }
-
-            prev = t.clone();
         }
     }
 
@@ -524,7 +526,7 @@ fn verify_zlib_compressed_perfect() {
         hash_algorithm::HashAlgorithm,
         preflate_parameter_estimator::PreflateHuffStrategy,
         preflate_parameter_estimator::PreflateStrategy,
-        preflate_parse_config::{FAST_PREFLATE_PARSER_SETTINGS, SLOW_PREFLATE_PARSER_SETTINGS},
+        preflate_parse_config::{SLOW_PREFLATE_PARSER_SETTINGS, ZLIB_PREFLATE_PARSER_SETTINGS},
         statistical_codec::{AssertDefaultOnlyDecoder, AssertDefaultOnlyEncoder},
     };
 
@@ -537,17 +539,17 @@ fn verify_zlib_compressed_perfect() {
         let config;
         let add_policy;
         let max_dist_3_matches;
-        let max_lazy;
+        let matching_type;
         if i < 4 {
-            config = &FAST_PREFLATE_PARSER_SETTINGS[i as usize - 1];
-            add_policy = crate::hash_chain::DictionaryAddPolicy::AddFirst(config.max_lazy as u16);
+            config = &ZLIB_PREFLATE_PARSER_SETTINGS[i as usize - 1];
+            add_policy = config.dictionary_add_policy;
             max_dist_3_matches = 32768;
-            max_lazy = 0;
+            matching_type = config.match_type;
         } else {
             config = &SLOW_PREFLATE_PARSER_SETTINGS[i as usize - 4];
-            add_policy = crate::hash_chain::DictionaryAddPolicy::AddAll;
+            add_policy = config.dictionary_add_policy;
             max_dist_3_matches = 4096;
-            max_lazy = config.max_lazy;
+            matching_type = config.match_type;
         }
 
         let params = PreflateParameters {
@@ -562,8 +564,7 @@ fn verify_zlib_compressed_perfect() {
                 max_token_count: 16383,
                 zlib_compatible: true,
                 max_dist_3_matches,
-                good_length: config.good_length,
-                max_lazy: max_lazy,
+                matching_type,
                 max_chain: config.max_chain,
                 min_len: 3,
                 hash_algorithm: HashAlgorithm::Zlib {
@@ -593,7 +594,8 @@ fn verify_miniz1_compressed_perfect() {
     };
     use cabac::vp8::{VP8Reader, VP8Writer};
 
-    let v = read_file("compressed_flate2_level1.deflate");
+    let f = read_file("sample1.bin");
+    let v = miniz_oxide::deflate::compress_to_vec(&f, 1);
 
     let contents = parse_deflate(&v, 1).unwrap();
 
@@ -606,14 +608,13 @@ fn verify_miniz1_compressed_perfect() {
             window_bits: 15,
             very_far_matches_detected: false,
             matches_to_start_detected: false,
-            nice_length: 258,
-            add_policy: crate::hash_chain::DictionaryAddPolicy::AddFirst(0),
+            nice_length: 3,
+            add_policy: crate::hash_chain::DictionaryAddPolicy::AddFirstExcept4kBoundary,
             max_token_count: 16383,
             zlib_compatible: true,
             max_dist_3_matches: 8192,
-            good_length: 258,
-            max_lazy: 0,
-            max_chain: 2,
+            matching_type: crate::preflate_parse_config::MatchingType::Greedy,
+            max_chain: 1,
             min_len: 3,
             hash_algorithm: HashAlgorithm::MiniZFast,
         },
@@ -626,6 +627,8 @@ fn verify_miniz1_compressed_perfect() {
 
     cabac_encoder.print();
 
+    println!("buffer size: {}", buffer.len());
+
     let mut cabac_decoder =
         PredictionDecoderCabac::new(VP8Reader::new(Cursor::new(&buffer)).unwrap());
 
@@ -635,6 +638,16 @@ fn verify_miniz1_compressed_perfect() {
 #[test]
 fn verify_miniz_compressed_1() {
     let v = read_file(&format!("compressed_flate2_level1.deflate"));
+
+    //let minusheader = &v[2..v.len() - 4];
+    //let crc = Some(u32::from_le_bytes([v[v.len() - 4], v[v.len() - 3], v[v.len() - 2], v[v.len() - 1]]));
+
+    do_analyze(None, &v, false);
+}
+
+#[test]
+fn verify_zlibng_compressed_1() {
+    let v = read_file(&format!("zlibng.deflate"));
 
     //let minusheader = &v[2..v.len() - 4];
     //let crc = Some(u32::from_le_bytes([v[v.len() - 4], v[v.len() - 3], v[v.len() - 2], v[v.len() - 1]]));

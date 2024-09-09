@@ -12,6 +12,7 @@ use crate::{
     hash_algorithm::HashAlgorithm,
     hash_chain::DictionaryAddPolicy,
     preflate_constants::{self},
+    preflate_parse_config::MatchingType,
     preflate_stream_info::{extract_preflate_info, PreflateStreamInfo},
     preflate_token::PreflateTokenBlock,
     statistical_codec::{PredictionDecoder, PredictionEncoder},
@@ -47,6 +48,7 @@ const HASH_ALGORITHM_MINIZ_FAST: u16 = 1;
 const HASH_ALGORITHM_LIBDEFLATE4: u16 = 2;
 const HASH_ALGORITHM_ZLIBNG: u16 = 3;
 const HASH_ALGORITHM_RANDOMVECTOR: u16 = 4;
+const HASH_ALGORITHM_CRC32C: u16 = 5;
 
 impl PreflateParameters {
     pub fn read(decoder: &mut impl PredictionDecoder) -> Result<Self> {
@@ -81,6 +83,7 @@ impl PreflateParameters {
             0 => DictionaryAddPolicy::AddAll,
             1 => DictionaryAddPolicy::AddFirst(u16::from(decoder.decode_value(8))),
             2 => DictionaryAddPolicy::AddFirstAndLast(u16::from(decoder.decode_value(8))),
+            3 => DictionaryAddPolicy::AddFirstExcept4kBoundary,
             _ => panic!("invalid add policy"),
         };
 
@@ -110,8 +113,14 @@ impl PreflateParameters {
                 max_token_count,
                 zlib_compatible,
                 max_dist_3_matches,
-                good_length: good_length.into(),
-                max_lazy: max_lazy.into(),
+                matching_type: if max_lazy > 0 {
+                    MatchingType::Lazy {
+                        good_length,
+                        max_lazy,
+                    }
+                } else {
+                    MatchingType::Greedy
+                },
                 max_chain: max_chain.into(),
                 min_len: min_len.into(),
                 hash_algorithm: match hash_algorithm {
@@ -123,6 +132,7 @@ impl PreflateParameters {
                     HASH_ALGORITHM_LIBDEFLATE4 => HashAlgorithm::Libdeflate4,
                     HASH_ALGORITHM_ZLIBNG => HashAlgorithm::ZlibNG,
                     HASH_ALGORITHM_RANDOMVECTOR => HashAlgorithm::RandomVector,
+                    HASH_ALGORITHM_CRC32C => HashAlgorithm::Crc32cHash,
                     _ => panic!("invalid hash algorithm"),
                 },
             },
@@ -163,6 +173,9 @@ impl PreflateParameters {
             HashAlgorithm::RandomVector => {
                 encoder.encode_value(HASH_ALGORITHM_RANDOMVECTOR, 4);
             }
+            HashAlgorithm::Crc32cHash => {
+                encoder.encode_value(HASH_ALGORITHM_CRC32C, 4);
+            }
         }
 
         encoder.encode_value(self.predictor.max_token_count, 16);
@@ -175,8 +188,25 @@ impl PreflateParameters {
             u16::try_from(self.predictor.matches_to_start_detected).unwrap(),
             1,
         );
-        encoder.encode_value(u16::try_from(self.predictor.good_length).unwrap(), 16);
-        encoder.encode_value(u16::try_from(self.predictor.max_lazy).unwrap(), 16);
+
+        let good_length;
+        let max_lazy;
+        match self.predictor.matching_type {
+            MatchingType::Greedy => {
+                good_length = 0;
+                max_lazy = 0;
+            }
+            MatchingType::Lazy {
+                good_length: gl,
+                max_lazy: ml,
+            } => {
+                good_length = gl;
+                max_lazy = ml;
+            }
+        }
+
+        encoder.encode_value(u16::try_from(good_length).unwrap(), 16);
+        encoder.encode_value(u16::try_from(max_lazy).unwrap(), 16);
         encoder.encode_value(u16::try_from(self.predictor.nice_length).unwrap(), 16);
         encoder.encode_value(u16::try_from(self.predictor.max_chain).unwrap(), 16);
         encoder.encode_value(u16::try_from(self.predictor.min_len).unwrap(), 16);
@@ -190,6 +220,9 @@ impl PreflateParameters {
             DictionaryAddPolicy::AddFirstAndLast(v) => {
                 encoder.encode_value(2, 2);
                 encoder.encode_value(v as u16, 8);
+            }
+            DictionaryAddPolicy::AddFirstExcept4kBoundary => {
+                encoder.encode_value(3, 2);
             }
         }
     }
@@ -263,8 +296,7 @@ pub fn estimate_preflate_parameters(
             max_token_count,
             zlib_compatible: cl.zlib_compatible,
             max_dist_3_matches: cl.max_dist_3_matches,
-            good_length: cl.good_length,
-            max_lazy: cl.max_lazy,
+            matching_type: cl.match_type,
             max_chain: cl.max_chain,
             min_len: cl.min_len,
             hash_algorithm: cl.hash_algorithm,
@@ -276,7 +308,7 @@ pub fn estimate_preflate_parameters(
 #[test]
 fn verify_zlib_recognition() {
     use crate::{
-        preflate_parse_config::{FAST_PREFLATE_PARSER_SETTINGS, SLOW_PREFLATE_PARSER_SETTINGS},
+        preflate_parse_config::{SLOW_PREFLATE_PARSER_SETTINGS, ZLIB_PREFLATE_PARSER_SETTINGS},
         process::{parse_deflate, read_file},
     };
 
@@ -290,18 +322,15 @@ fn verify_zlib_recognition() {
         if i == 0 {
             assert_eq!(params.predictor.strategy, PreflateStrategy::Store);
         } else if i >= 1 && i < 4 {
-            let config = &FAST_PREFLATE_PARSER_SETTINGS[i as usize - 1];
+            let config = &ZLIB_PREFLATE_PARSER_SETTINGS[i as usize - 1];
             assert!(
                 params.predictor.max_chain <= config.max_chain,
                 "max_chain mismatch {} should be <= {}",
                 params.predictor.max_chain,
                 config.max_chain
             );
-            assert_eq!(params.predictor.good_length, config.good_length);
-            assert_eq!(
-                params.predictor.add_policy,
-                DictionaryAddPolicy::AddFirst(config.max_lazy as u16)
-            );
+            assert_eq!(params.predictor.matching_type, config.match_type);
+            assert_eq!(params.predictor.add_policy, config.dictionary_add_policy);
             assert_eq!(params.predictor.nice_length, config.nice_length);
             assert_eq!(params.predictor.strategy, PreflateStrategy::Default);
         } else if i >= 4 {
@@ -312,10 +341,9 @@ fn verify_zlib_recognition() {
                 params.predictor.max_chain,
                 config.max_chain
             );
-            assert_eq!(params.predictor.good_length, config.good_length);
-            assert_eq!(params.predictor.max_lazy, config.max_lazy);
+            assert_eq!(params.predictor.matching_type, config.match_type);
+            assert_eq!(params.predictor.add_policy, config.dictionary_add_policy);
             assert_eq!(params.predictor.nice_length, config.nice_length);
-            assert_eq!(params.predictor.add_policy, DictionaryAddPolicy::AddAll);
             assert_eq!(params.predictor.strategy, PreflateStrategy::Default);
         }
     }
@@ -327,6 +355,26 @@ fn verify_miniz_recognition() {
 
     for i in 0..=9 {
         let v = read_file(&format!("compressed_flate2_level{}.deflate", i));
+        let contents = parse_deflate(&v, 1).unwrap();
+
+        let params = estimate_preflate_parameters(&contents.plain_text, &contents.blocks).unwrap();
+
+        if i == 0 {
+            assert_eq!(params.predictor.strategy, PreflateStrategy::Store);
+        } else if i == 1 {
+            println!("{:?}", params);
+        } else {
+            println!("{:?}", params);
+        }
+    }
+}
+
+#[test]
+fn verify_zlibng_recognition() {
+    use crate::process::{parse_deflate, read_file};
+
+    for i in 1..=2 {
+        let v = read_file(&format!("compressed_zlibng_level{}.deflate", i));
         let contents = parse_deflate(&v, 1).unwrap();
 
         let params = estimate_preflate_parameters(&contents.plain_text, &contents.blocks).unwrap();

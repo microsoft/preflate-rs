@@ -5,12 +5,14 @@
  *--------------------------------------------------------------------------------------------*/
 
 use std::fs::File;
-use std::io::{Read, Write};
+use std::io::Read;
 use std::path::Path;
 use std::{mem, ptr};
 
 use libdeflate_sys::{libdeflate_alloc_compressor, libdeflate_deflate_compress};
-use preflate_rs::{decompress_deflate_stream, recompress_deflate_stream};
+use preflate_rs::{
+    compress_zstd, decompress_deflate_stream, decompress_zstd, recompress_deflate_stream,
+};
 
 #[cfg(test)]
 pub fn read_file(filename: &str) -> Vec<u8> {
@@ -48,26 +50,8 @@ fn test_pptxplaintext() {
 }
 
 #[test]
-#[ignore = "chain length too long"]
-fn test_dumpout() {
-    verifyresult(&read_file("dumpout-29473.deflate"));
-}
-
-#[test]
-#[ignore = "chain length too long"]
-fn test_dumpout2() {
-    verifyresult(&read_file("dumpout-355865.deflate"));
-}
-
-#[test]
 fn test_nomatch() {
     test_file("sample2.bin");
-}
-
-#[test]
-#[ignore = "chain length too long"]
-fn test_treedeflate() {
-    verifyresult(&read_file("treepng.deflate"));
 }
 
 #[test]
@@ -76,10 +60,36 @@ fn test_sample1() {
 }
 
 #[test]
+fn test_samplezip() {
+    test_container("samplezip.zip");
+}
+
+#[test]
+fn test_docx() {
+    test_container("samplepptx.pptx");
+}
+
+fn test_container(filename: &str) {
+    let v = read_file(filename);
+    let c = compress_zstd(&v).unwrap();
+
+    let r = decompress_zstd(&c, 1024 * 1024 * 128).unwrap();
+    assert!(v == r);
+
+    println!(
+        "file {} original size: {}, compressed size: {} (plaintext={})",
+        filename,
+        v.len(),
+        c.len(),
+        r.len()
+    );
+}
+
+#[test]
 fn libzng() {
     let level = 1;
 
-    let v = read_file("sample1.bin");
+    let v = read_file("pptxplaintext.bin");
     println!("zlibng level: {}", level);
 
     let output = libngzsys_compress(&v, level);
@@ -145,18 +155,18 @@ fn test_file(filename: &str) {
         let output = libdeflate_compress(&v, level);
 
         // write to file
-        let mut f = File::create(format!(
+        /*let mut f = File::create(format!(
             "c:\\temp\\compressed_libdeflate_level{}.deflate",
             level
         ))
         .unwrap();
-        f.write_all(&output).unwrap();
+        f.write_all(&output).unwrap();*/
 
         verifyresult(&output);
     }
 
     // Zlibng compression with different compression levels
-    for level in 1..=2 {
+    for level in 1..=4 {
         println!("zlibng level: {}", level);
 
         let output = libngzsys_compress(&v, level);
@@ -164,8 +174,12 @@ fn test_file(filename: &str) {
         let minusheader = &output[2..output.len() - 4];
 
         // write to file
-        //let mut f = File::create(format!("c:\\temp\\compressed_zlib_level{}.bin", level)).unwrap();
-        //.write_all(minusheader).unwrap();
+        /*let mut f = File::create(format!(
+            "c:\\temp\\compressed_zlibng_level{}.deflate",
+            level
+        ))
+        .unwrap();
+        f.write_all(minusheader).unwrap();*/
 
         verifyresult(minusheader);
     }

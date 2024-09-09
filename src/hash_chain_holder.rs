@@ -6,8 +6,8 @@
 
 use crate::bit_helper::DebugHash;
 use crate::hash_algorithm::{
-    HashAlgorithm, HashImplementation, LibdeflateRotatingHash4, MiniZHash, RandomVectorHash,
-    ZlibNGHash, ZlibRotatingHash,
+    Crc32cHash, HashAlgorithm, HashImplementation, LibdeflateRotatingHash4, MiniZHash,
+    RandomVectorHash, ZlibNGHash, ZlibRotatingHash,
 };
 use crate::hash_chain::{
     DictionaryAddPolicy, HashChain, MAX_UPDATE_HASH_BATCH, UPDATE_MODE_ALL, UPDATE_MODE_FIRST,
@@ -58,6 +58,9 @@ pub fn new_hash_chain_holder(params: &TokenPredictorParameters) -> Box<dyn HashC
         HashAlgorithm::RandomVector => {
             predictor_state = Box::new(HashChainHolderImpl::new(params, RandomVectorHash {}))
         }
+        HashAlgorithm::Crc32cHash => {
+            predictor_state = Box::new(HashChainHolderImpl::new(params, Crc32cHash {}))
+        }
     }
     predictor_state
 }
@@ -68,13 +71,13 @@ pub trait HashChainHolder {
     /// updates the hash dictionary for a given length of matches.
     ///
     /// If this is a literal, then the update policy is to add all the bytes to the dictionary.
-    fn update_hash(&mut self, length: u32, input: &mut PreflateInput, is_literal: bool);
+    fn update_hash(&mut self, length: u32, input: &PreflateInput);
 
     /// updates the hash dictionary for a given length of matches, and also updates the depth
     /// map of the hash chain.
     ///
     /// If this is a literal, then the update policy is to add all the bytes to the dictionary.
-    fn update_hash_with_depth(&mut self, length: u32, input: &mut PreflateInput, is_literal: bool);
+    fn update_hash_with_depth(&mut self, length: u32, input: &PreflateInput);
 
     /// searches the hash chain for a given match, returns the longest result found if any
     ///
@@ -123,28 +126,12 @@ struct HashChainHolderImpl<H: HashImplementation> {
 }
 
 impl<H: HashImplementation> HashChainHolder for HashChainHolderImpl<H> {
-    fn update_hash(&mut self, length: u32, input: &mut PreflateInput, is_literal: bool) {
-        self.update_hash_with_policy::<false>(
-            length,
-            input,
-            if is_literal {
-                DictionaryAddPolicy::AddAll
-            } else {
-                self.params.add_policy
-            },
-        );
+    fn update_hash(&mut self, length: u32, input: &PreflateInput) {
+        self.update_hash_with_policy::<false>(length, input, self.params.add_policy);
     }
 
-    fn update_hash_with_depth(&mut self, length: u32, input: &mut PreflateInput, is_literal: bool) {
-        self.update_hash_with_policy::<true>(
-            length,
-            input,
-            if is_literal {
-                DictionaryAddPolicy::AddAll
-            } else {
-                self.params.add_policy
-            },
-        );
+    fn update_hash_with_depth(&mut self, length: u32, input: &PreflateInput) {
+        self.update_hash_with_policy::<true>(length, input, self.params.add_policy);
     }
 
     fn match_depth(
@@ -203,13 +190,13 @@ impl<H: HashImplementation> HashChainHolder for HashChainHolderImpl<H> {
             }
         }
 
-        let nice_len = std::cmp::min(self.params.nice_length, max_len);
+        let nice_length = std::cmp::min(self.params.nice_length, max_len);
+        let max_dist_3_matches = u32::from(self.params.max_dist_3_matches);
         let mut max_chain = max_depth;
 
         let input_chars = input.cur_chars(offset as i32);
         let mut best_len = prev_len;
         let mut best_match: Option<PreflateTokenReference> = None;
-        let mut num_chain_matches = 0;
         let mut first = true;
 
         for dist in self.hash.iterate(input, offset) {
@@ -232,7 +219,7 @@ impl<H: HashImplementation> HashChainHolder for HashChainHolderImpl<H> {
             if match_length > best_len {
                 let r = PreflateTokenReference::new(match_length, dist, false);
 
-                if match_length >= nice_len {
+                if match_length >= nice_length && (match_length > 3 || dist <= max_dist_3_matches) {
                     return MatchResult::Success(r);
                 }
 
@@ -241,7 +228,6 @@ impl<H: HashImplementation> HashChainHolder for HashChainHolderImpl<H> {
             }
 
             max_chain -= 1;
-            num_chain_matches += 1;
 
             if max_chain == 0 {
                 if let Some(r) = best_match {
@@ -367,44 +353,41 @@ impl<H: HashImplementation> HashChainHolderImpl<H> {
 
     fn update_hash_with_policy<const MAINTAIN_DEPTH: bool>(
         &mut self,
-        mut length: u32,
-        input: &mut PreflateInput,
+        length: u32,
+        input: &PreflateInput,
         add_policy: DictionaryAddPolicy,
     ) {
-        while length > 0 {
-            let batch_len = cmp::min(length, MAX_UPDATE_HASH_BATCH);
+        debug_assert!(length <= MAX_UPDATE_HASH_BATCH);
 
-            match add_policy {
-                DictionaryAddPolicy::AddAll => {
+        match add_policy {
+            DictionaryAddPolicy::AddAll => {
+                self.hash
+                    .update_hash::<MAINTAIN_DEPTH, UPDATE_MODE_ALL>(length, input);
+            }
+            DictionaryAddPolicy::AddFirst(limit) => {
+                if length > limit.into() {
                     self.hash
-                        .update_hash::<MAINTAIN_DEPTH, UPDATE_MODE_ALL>(batch_len, input);
-                }
-                DictionaryAddPolicy::AddFirst(limit) => {
-                    debug_assert_eq!(batch_len, length);
-                    if length > limit.into() {
-                        self.hash
-                            .update_hash::<MAINTAIN_DEPTH, UPDATE_MODE_FIRST>(batch_len, input);
-                    } else {
-                        self.hash
-                            .update_hash::<MAINTAIN_DEPTH, UPDATE_MODE_ALL>(batch_len, input);
-                    }
-                }
-                DictionaryAddPolicy::AddFirstAndLast(limit) => {
-                    debug_assert_eq!(batch_len, length);
-                    if length > limit.into() {
-                        self.hash
-                            .update_hash::<MAINTAIN_DEPTH, UPDATE_MODE_FIRST_AND_LAST>(
-                                batch_len, input,
-                            );
-                    } else {
-                        self.hash
-                            .update_hash::<MAINTAIN_DEPTH, UPDATE_MODE_ALL>(batch_len, input);
-                    }
+                        .update_hash::<MAINTAIN_DEPTH, UPDATE_MODE_FIRST>(length, input);
+                } else {
+                    self.hash
+                        .update_hash::<MAINTAIN_DEPTH, UPDATE_MODE_ALL>(length, input);
                 }
             }
-
-            input.advance(batch_len);
-            length -= batch_len;
+            DictionaryAddPolicy::AddFirstAndLast(limit) => {
+                if length > limit.into() {
+                    self.hash
+                        .update_hash::<MAINTAIN_DEPTH, UPDATE_MODE_FIRST_AND_LAST>(length, input);
+                } else {
+                    self.hash
+                        .update_hash::<MAINTAIN_DEPTH, UPDATE_MODE_ALL>(length, input);
+                }
+            }
+            DictionaryAddPolicy::AddFirstExcept4kBoundary => {
+                if length > 1 || (input.pos() % 4096) < 4093 {
+                    self.hash
+                        .update_hash::<MAINTAIN_DEPTH, UPDATE_MODE_FIRST>(length, input);
+                }
+            }
         }
     }
 

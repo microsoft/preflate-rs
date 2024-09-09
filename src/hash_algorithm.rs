@@ -11,6 +11,7 @@ pub enum HashAlgorithm {
     Libdeflate4,
     ZlibNG,
     RandomVector,
+    Crc32cHash,
 }
 pub trait HashImplementation: Default + Copy + Clone {
     type HashChainType: HashChain;
@@ -132,6 +133,25 @@ impl HashImplementation for ZlibNGHash {
 
     fn new_hash_chain(self) -> Self::HashChainType {
         crate::hash_chain::HashChainNormalize::<ZlibNGHash>::new(self)
+    }
+}
+
+#[derive(Default, Copy, Clone)]
+pub struct Crc32cHash {}
+
+impl HashImplementation for Crc32cHash {
+    type HashChainType = HashChainNormalize<Crc32cHash>;
+
+    fn get_hash(&self, b: &[u8]) -> u16 {
+        crc32fast::hash(&b[0..4]) as u16
+    }
+
+    fn num_hash_bytes() -> usize {
+        4
+    }
+
+    fn new_hash_chain(self) -> Self::HashChainType {
+        crate::hash_chain::HashChainNormalize::<Crc32cHash>::new(self)
     }
 }
 

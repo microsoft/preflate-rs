@@ -31,6 +31,10 @@ pub enum DictionaryAddPolicy {
     AddFirst(u16),
     /// Add only the first and last substring of a match to the dictionary that are larger than the limit
     AddFirstAndLast(u16),
+
+    /// This policy is used by MiniZ in fastest mode. It adds all substrings of a match to the dictionary except
+    /// literals that are 4 bytes away from the end of the block.
+    AddFirstExcept4kBoundary,
 }
 
 trait InternalPosition: Copy + Clone + Eq + PartialEq + Default + std::fmt::Debug {
@@ -159,10 +163,12 @@ impl<H: HashImplementation, I: InternalPosition> HashTable<H, I> {
     /// depth is the number of matches we need to walk to reach the match_pos. This
     /// is only valid if this was part of the same hash chain
     #[inline]
-    fn get_node_depth(&self, node: I, expected_hash: u16) -> i32 {
-        assert_eq!(self.chain_depth_hash_verify[node.to_index()], expected_hash);
-
-        self.chain_depth[node.to_index()]
+    fn get_node_depth(&self, node: I, expected_hash: u16) -> Option<i32> {
+        if self.chain_depth_hash_verify[node.to_index()] == expected_hash {
+            Some(self.chain_depth[node.to_index()])
+        } else {
+            None
+        }
     }
 
     #[inline]
@@ -237,14 +243,19 @@ impl<H: HashImplementation, I: InternalPosition> HashTable<H, I> {
 
         let match_depth = self.get_node_depth(match_pos, h);
 
-        // if we have a match, then we can calculate the depth
-        debug_assert!(
-            cur_depth >= match_depth,
-            "current match should be >= to previous c: {} m: {}",
-            cur_depth,
-            match_depth
-        );
-        (cur_depth - match_depth) as u32
+        if let (Some(cur_depth), Some(match_depth)) = (cur_depth, match_depth) {
+            // if we have a match, then we can calculate the depth
+            debug_assert!(
+                cur_depth >= match_depth,
+                "current match should be >= to previous c: {} m: {}",
+                cur_depth,
+                match_depth
+            );
+
+            (cur_depth - match_depth) as u32
+        } else {
+            BAD_DEPTH
+        }
     }
 }
 

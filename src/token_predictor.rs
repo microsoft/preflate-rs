@@ -15,6 +15,7 @@ use crate::{
     preflate_constants::MIN_MATCH,
     preflate_input::PreflateInput,
     preflate_parameter_estimator::PreflateStrategy,
+    preflate_parse_config::MatchingType,
     preflate_token::{BlockType, PreflateToken, PreflateTokenBlock, PreflateTokenReference},
     statistical_codec::{
         CodecCorrection, CodecMisprediction, PredictionDecoder, PredictionEncoder,
@@ -53,8 +54,7 @@ pub struct TokenPredictorParameters {
 
     pub zlib_compatible: bool,
     pub max_dist_3_matches: u16,
-    pub good_length: u32,
-    pub max_lazy: u32,
+    pub matching_type: MatchingType,
     pub max_chain: u32,
     pub min_len: u32,
 
@@ -106,8 +106,11 @@ impl<'a> TokenPredictor<'a> {
             codec.encode_value(block.uncompressed_len as u16, 16);
 
             codec.encode_correction(CodecCorrection::NonZeroPadding, block.padding_bits.into());
-            self.state
-                .update_hash(block.uncompressed_len, &mut self.input, true);
+
+            for _i in 0..block.uncompressed_len {
+                self.state.update_hash(1, &self.input);
+                self.input.advance(1);
+            }
 
             return Ok(());
         }
@@ -276,8 +279,10 @@ impl<'a> TokenPredictor<'a> {
                 block.uncompressed_len = codec.decode_value(16).into();
                 block.padding_bits = codec.decode_correction(CodecCorrection::NonZeroPadding) as u8;
 
-                self.state
-                    .update_hash(block.uncompressed_len, &mut self.input, true);
+                for _i in 0..block.uncompressed_len {
+                    self.state.update_hash(1, &mut self.input);
+                    self.input.advance(1);
+                }
                 return Ok(block);
             }
             BT_STATICHUFF => {
@@ -414,28 +419,34 @@ impl<'a> TokenPredictor<'a> {
 
             // Check for a longer match that starts at the next byte, in which case we should
             // just emit a literal instead of a distance/length pair.
-            if match_token.len() < self.params.max_lazy
-                && self.input.remaining() >= match_token.len() + 2
+            if let MatchingType::Lazy {
+                good_length,
+                max_lazy,
+            } = self.params.matching_type
             {
-                let mut max_depth = self.params.max_chain;
+                if match_token.len() < u32::from(max_lazy)
+                    && self.input.remaining() >= match_token.len() + 2
+                {
+                    let mut max_depth = self.params.max_chain;
 
-                if self.params.zlib_compatible && match_token.len() >= self.params.good_length {
-                    // zlib shortens the amount we search by half if the match is "good" enough
-                    max_depth >>= 2;
-                }
+                    if self.params.zlib_compatible && match_token.len() >= u32::from(good_length) {
+                        // zlib shortens the amount we search by half if the match is "good" enough
+                        max_depth >>= 2;
+                    }
 
-                let match_next =
-                    self.state
-                        .match_token(match_token.len(), 1, max_depth, &self.input);
+                    let match_next =
+                        self.state
+                            .match_token(match_token.len(), 1, max_depth, &self.input);
 
-                if let MatchResult::Success(m) = match_next {
-                    if m.len() > match_token.len() {
-                        self.pending_reference = Some(m);
+                    if let MatchResult::Success(m) = match_next {
+                        if m.len() > match_token.len() {
+                            self.pending_reference = Some(m);
 
-                        if !self.params.zlib_compatible {
-                            self.pending_reference = None;
+                            if !self.params.zlib_compatible {
+                                self.pending_reference = None;
+                            }
+                            return PreflateToken::Literal;
                         }
-                        return PreflateToken::Literal;
                     }
                 }
             }
@@ -491,14 +502,16 @@ impl<'a> TokenPredictor<'a> {
                     block.add_literal(self.input.cur_char(0));
                 }
 
-                self.state.update_hash(1, &mut self.input, true);
+                self.state.update_hash(1, &self.input);
+                self.input.advance(1);
             }
             PreflateToken::Reference(t) => {
                 if let Some(block) = block {
                     block.add_reference(t.len(), t.dist(), t.get_irregular258());
                 }
 
-                self.state.update_hash(t.len(), &mut self.input, false);
+                self.state.update_hash(t.len(), &mut self.input);
+                self.input.advance(t.len());
             }
         }
 

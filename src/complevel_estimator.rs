@@ -14,9 +14,11 @@ use crate::{
     preflate_constants,
     preflate_input::PreflateInput,
     preflate_parameter_estimator::PreflateStrategy,
-    preflate_parse_config::{FAST_PREFLATE_PARSER_SETTINGS, SLOW_PREFLATE_PARSER_SETTINGS},
+    preflate_parse_config::{
+        MatchingType, SLOW_PREFLATE_PARSER_SETTINGS, ZLIB_PREFLATE_PARSER_SETTINGS,
+    },
     preflate_token::{BlockType, PreflateToken, PreflateTokenBlock, PreflateTokenReference},
-    skip_length_estimator::estimate_skip_length,
+    skip_length_estimator::estimate_add_policy,
     token_predictor::TokenPredictorParameters,
 };
 
@@ -31,8 +33,7 @@ pub struct CompLevelInfo {
     pub min_len: u32,
     pub add_policy: DictionaryAddPolicy,
     pub hash_algorithm: HashAlgorithm,
-    pub good_length: u32,
-    pub max_lazy: u32,
+    pub match_type: MatchingType,
     pub nice_length: u32,
     pub max_chain: u32,
 }
@@ -64,8 +65,7 @@ impl CandidateInfo {
             max_token_count: 0,
             zlib_compatible: false,
             max_dist_3_matches: 0,
-            good_length: 0,
-            max_lazy: 0,
+            matching_type: MatchingType::Greedy,
             max_chain: 0,
             min_len: 0,
         };
@@ -157,7 +157,7 @@ impl<'a> CompLevelEstimatorState<'a> {
         plain_text: &'a [u8],
         blocks: &'a Vec<PreflateTokenBlock>,
     ) -> Self {
-        let add_policy = estimate_skip_length(blocks);
+        let add_policy = estimate_add_policy(blocks);
 
         let hash_bits = mem_level + 7;
         let mem_hash_shift = (hash_bits + 2) / 3;
@@ -177,7 +177,7 @@ impl<'a> CompLevelEstimatorState<'a> {
         let mut candidates: Vec<Box<CandidateInfo>> = Vec::new();
 
         candidates.push(Box::new(CandidateInfo::new(
-            add_policy,
+            DictionaryAddPolicy::AddFirst(0),
             HashAlgorithm::MiniZFast,
             wbits,
         )));
@@ -214,6 +214,13 @@ impl<'a> CompLevelEstimatorState<'a> {
             wbits,
         )));
 
+        // Crc32c candidate
+        candidates.push(Box::new(CandidateInfo::new(
+            add_policy,
+            HashAlgorithm::Crc32cHash,
+            wbits,
+        )));
+
         CompLevelEstimatorState {
             input,
             candidates,
@@ -227,11 +234,10 @@ impl<'a> CompLevelEstimatorState<'a> {
         }
     }
 
-    fn update_hash(&mut self, length: u32, override_add_policy: bool) {
+    /// updates all the active candidates with the current hash and advance it
+    fn update_candidate_hashes(&mut self, length: u32) {
         for i in &mut self.candidates {
-            let mut inputc = self.input.clone();
-            i.hash_chain
-                .update_hash_with_depth(length, &mut inputc, override_add_policy);
+            i.hash_chain.update_hash_with_depth(length, &self.input);
         }
 
         self.input.advance(length);
@@ -264,17 +270,19 @@ impl<'a> CompLevelEstimatorState<'a> {
     fn check_dump(&mut self) {
         for (_i, b) in self.blocks.iter().enumerate() {
             if b.block_type == BlockType::Stored {
-                self.update_hash(b.uncompressed_len, true);
+                for _i in 0..b.uncompressed_len {
+                    self.update_candidate_hashes(1);
+                }
                 continue;
             }
             for (_j, t) in b.tokens.iter().enumerate() {
                 match t {
                     PreflateToken::Literal => {
-                        self.update_hash(1, true);
+                        self.update_candidate_hashes(1);
                     }
                     &PreflateToken::Reference(r) => {
                         self.check_match(r);
-                        self.update_hash(r.len(), false);
+                        self.update_candidate_hashes(r.len());
                     }
                 }
             }
@@ -292,8 +300,7 @@ impl<'a> CompLevelEstimatorState<'a> {
             .min_by(|&a, &b| a.max_chain_found().cmp(&b.max_chain_found()))
             .unwrap();
 
-        let mut good_length = 32;
-        let mut max_lazy = 258;
+        let mut match_type = MatchingType::Greedy;
         let mut nice_length = 258;
 
         let add_policy = candidate.add_policy;
@@ -303,12 +310,13 @@ impl<'a> CompLevelEstimatorState<'a> {
         let longest_dist_at_hop_1_plus = candidate.longest_dist_at_hop_1_plus;
 
         match candidate.add_policy {
-            DictionaryAddPolicy::AddFirst(_) | DictionaryAddPolicy::AddFirstAndLast(_) => {
-                for config in &FAST_PREFLATE_PARSER_SETTINGS {
+            DictionaryAddPolicy::AddFirst(_)
+            | DictionaryAddPolicy::AddFirstAndLast(_)
+            | DictionaryAddPolicy::AddFirstExcept4kBoundary => {
+                for config in &ZLIB_PREFLATE_PARSER_SETTINGS {
                     if candidate.max_chain_found() < config.max_chain {
-                        good_length = config.good_length;
+                        match_type = config.match_type;
                         nice_length = config.nice_length;
-                        max_lazy = 0;
                         break;
                     }
                 }
@@ -316,8 +324,7 @@ impl<'a> CompLevelEstimatorState<'a> {
             DictionaryAddPolicy::AddAll => {
                 for config in &SLOW_PREFLATE_PARSER_SETTINGS {
                     if candidate.max_chain_found() < config.max_chain {
-                        good_length = config.good_length;
-                        max_lazy = config.max_lazy;
+                        match_type = config.match_type;
                         nice_length = config.nice_length;
                         break;
                     }
@@ -343,8 +350,7 @@ impl<'a> CompLevelEstimatorState<'a> {
             very_far_matches_detected: very_far_matches,
             max_dist_3_matches: self.longest_len_3_dist as u16,
             add_policy,
-            good_length,
-            max_lazy,
+            match_type,
             nice_length,
             max_chain,
             min_len: self.min_len,

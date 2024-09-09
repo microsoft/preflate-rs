@@ -21,7 +21,14 @@ pub enum PreflateError {
     RecreateTree(usize, anyhow::Error),
     EncodeBlock(usize, anyhow::Error),
     InvalidCompressedWrapper,
+    IoError(std::io::Error),
     ZstdError(std::io::Error),
+}
+
+impl From<std::io::Error> for PreflateError {
+    fn from(e: std::io::Error) -> Self {
+        PreflateError::IoError(e)
+    }
 }
 
 impl Display for PreflateError {
@@ -40,6 +47,7 @@ impl Display for PreflateError {
             PreflateError::AnalyzeFailed(e) => write!(f, "AnalyzeFailed: {}", e),
             PreflateError::InvalidCompressedWrapper => write!(f, "InvalidCompressedWrapper"),
             PreflateError::ZstdError(e) => write!(f, "ZstdError: {}", e),
+            PreflateError::IoError(e) => write!(f, "IoError: {}", e),
         }
     }
 }
