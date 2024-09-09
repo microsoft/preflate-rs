@@ -214,6 +214,13 @@ impl<'a> CompLevelEstimatorState<'a> {
             wbits,
         )));
 
+        // Crc32c candidate
+        candidates.push(Box::new(CandidateInfo::new(
+            add_policy,
+            HashAlgorithm::Crc32cHash,
+            wbits,
+        )));
+
         CompLevelEstimatorState {
             input,
             candidates,

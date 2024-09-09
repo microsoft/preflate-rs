@@ -79,7 +79,7 @@ fn test_sample1() {
 fn libzng() {
     let level = 1;
 
-    let v = read_file("sample1.bin");
+    let v = read_file("pptxplaintext.bin");
     println!("zlibng level: {}", level);
 
     let output = libngzsys_compress(&v, level);

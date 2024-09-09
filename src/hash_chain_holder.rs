@@ -6,8 +6,8 @@
 
 use crate::bit_helper::DebugHash;
 use crate::hash_algorithm::{
-    HashAlgorithm, HashImplementation, LibdeflateRotatingHash4, MiniZHash, RandomVectorHash,
-    ZlibNGHash, ZlibRotatingHash,
+    Crc32cHash, HashAlgorithm, HashImplementation, LibdeflateRotatingHash4, MiniZHash,
+    RandomVectorHash, ZlibNGHash, ZlibRotatingHash,
 };
 use crate::hash_chain::{
     DictionaryAddPolicy, HashChain, MAX_UPDATE_HASH_BATCH, UPDATE_MODE_ALL, UPDATE_MODE_FIRST,
@@ -57,6 +57,9 @@ pub fn new_hash_chain_holder(params: &TokenPredictorParameters) -> Box<dyn HashC
         }
         HashAlgorithm::RandomVector => {
             predictor_state = Box::new(HashChainHolderImpl::new(params, RandomVectorHash {}))
+        }
+        HashAlgorithm::Crc32cHash => {
+            predictor_state = Box::new(HashChainHolderImpl::new(params, Crc32cHash {}))
         }
     }
     predictor_state

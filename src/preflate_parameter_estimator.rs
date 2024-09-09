@@ -48,6 +48,7 @@ const HASH_ALGORITHM_MINIZ_FAST: u16 = 1;
 const HASH_ALGORITHM_LIBDEFLATE4: u16 = 2;
 const HASH_ALGORITHM_ZLIBNG: u16 = 3;
 const HASH_ALGORITHM_RANDOMVECTOR: u16 = 4;
+const HASH_ALGORITHM_CRC32C: u16 = 5;
 
 impl PreflateParameters {
     pub fn read(decoder: &mut impl PredictionDecoder) -> Result<Self> {
@@ -131,6 +132,7 @@ impl PreflateParameters {
                     HASH_ALGORITHM_LIBDEFLATE4 => HashAlgorithm::Libdeflate4,
                     HASH_ALGORITHM_ZLIBNG => HashAlgorithm::ZlibNG,
                     HASH_ALGORITHM_RANDOMVECTOR => HashAlgorithm::RandomVector,
+                    HASH_ALGORITHM_CRC32C => HashAlgorithm::Crc32cHash,
                     _ => panic!("invalid hash algorithm"),
                 },
             },
@@ -170,6 +172,9 @@ impl PreflateParameters {
             }
             HashAlgorithm::RandomVector => {
                 encoder.encode_value(HASH_ALGORITHM_RANDOMVECTOR, 4);
+            }
+            HashAlgorithm::Crc32cHash => {
+                encoder.encode_value(HASH_ALGORITHM_CRC32C, 4);
             }
         }
 
@@ -350,6 +355,26 @@ fn verify_miniz_recognition() {
 
     for i in 0..=9 {
         let v = read_file(&format!("compressed_flate2_level{}.deflate", i));
+        let contents = parse_deflate(&v, 1).unwrap();
+
+        let params = estimate_preflate_parameters(&contents.plain_text, &contents.blocks).unwrap();
+
+        if i == 0 {
+            assert_eq!(params.predictor.strategy, PreflateStrategy::Store);
+        } else if i == 1 {
+            println!("{:?}", params);
+        } else {
+            println!("{:?}", params);
+        }
+    }
+}
+
+#[test]
+fn verify_zlibng_recognition() {
+    use crate::process::{parse_deflate, read_file};
+
+    for i in 1..=2 {
+        let v = read_file(&format!("compressed_zlibng_level{}.deflate", i));
         let contents = parse_deflate(&v, 1).unwrap();
 
         let params = estimate_preflate_parameters(&contents.plain_text, &contents.blocks).unwrap();

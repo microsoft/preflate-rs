@@ -17,7 +17,9 @@ mod hash_chain_holder;
 mod huffman_calc;
 mod huffman_encoding;
 mod huffman_helper;
+mod idat_parse;
 mod preflate_constants;
+mod preflate_container;
 pub mod preflate_error;
 mod preflate_input;
 mod preflate_parameter_estimator;
@@ -33,10 +35,10 @@ mod tree_predictor;
 
 use anyhow::{self};
 use cabac::vp8::{VP8Reader, VP8Writer};
+use preflate_container::{expand_zlib_chunks, recreated_zlib_chunks};
 use preflate_error::PreflateError;
 use preflate_parameter_estimator::{estimate_preflate_parameters, PreflateParameters};
 use process::parse_deflate;
-use scan_deflate::search_for_deflate_streams;
 use std::{io::Cursor, panic::catch_unwind};
 
 use crate::{
@@ -44,8 +46,6 @@ use crate::{
     process::{decode_mispredictions, encode_mispredictions},
     statistical_codec::PredictionEncoder,
 };
-
-const COMPRESSED_WRAPPER_VERSION_1: u8 = 1;
 
 /// result of decompress_deflate_stream
 pub struct DecompressResult {
@@ -59,8 +59,8 @@ pub struct DecompressResult {
     /// data that will be recreated using the cabac_encoded data)
     pub compressed_size: usize,
 
-    /// the parameters that were used to compress the stream
-    pub parameters: PreflateParameters,
+    /// the parameters that were used to compress the stream (informational)
+    pub parameters: Option<PreflateParameters>,
 }
 
 impl core::fmt::Debug for DecompressResult {
@@ -81,13 +81,8 @@ pub fn decompress_deflate_stream(
 
     let contents = parse_deflate(compressed_data, 0)?;
 
-    /*
-    let mut writecomp = File::create("c:\\temp\\lastop.deflate").unwrap();
-    writecomp.write_all(compressed_data).unwrap();
-
-    let mut writeplaintext = File::create("c:\\temp\\lastop.bin").unwrap();
-    writeplaintext.write_all(&contents.plain_text).unwrap();
-    */
+    //process::write_file("c:\\temp\\lastop.deflate", compressed_data);
+    //process::write_file("c:\\temp\\lastop.bin", contents.plain_text.as_slice());
 
     let params = estimate_preflate_parameters(&contents.plain_text, &contents.blocks)
         .map_err(|e| PreflateError::AnalyzeFailed(e))?;
@@ -121,7 +116,7 @@ pub fn decompress_deflate_stream(
         plain_text: contents.plain_text,
         prediction_corrections: cabac_encoded,
         compressed_size: contents.compressed_size,
-        parameters: params,
+        parameters: Some(params),
     })
 }
 
@@ -185,7 +180,7 @@ pub fn decompress_deflate_stream_assert(
         plain_text: contents.plain_text,
         prediction_corrections: cabac_encoded,
         compressed_size: contents.compressed_size,
-        parameters: params,
+        parameters: Some(params),
     })
 }
 
@@ -210,110 +205,12 @@ pub fn recompress_deflate_stream_assert(
     Ok(recompressed)
 }
 
-fn append_with_length(dst: &mut Vec<u8>, src: &[u8]) {
-    dst.extend_from_slice(&(src.len() as u32).to_le_bytes());
-    dst.extend_from_slice(src);
-}
-
-fn read_segment_with_length<'a>(
-    src: &'a [u8],
-    index: &mut usize,
-) -> Result<&'a [u8], PreflateError> {
-    if src.len() < *index + 4 {
-        return Err(PreflateError::InvalidCompressedWrapper);
-    }
-
-    let len = u32::from_le_bytes(src[*index..*index + 4].try_into().unwrap()) as usize;
-    *index += 4;
-
-    if src.len() < *index + len {
-        return Err(PreflateError::InvalidCompressedWrapper);
-    }
-
-    let result = &src[*index..*index + len];
-    *index += len;
-
-    Ok(result)
-}
-
-/// scans for deflate streams in a zlib compressed file, decompresses the streams and
-/// returns an uncompressed file that can then be recompressed using a better algorithm.
-/// This can then be passed back into recreated_zlib_chunks to recreate the exact original file.
-pub fn expand_zlib_chunks(compressed_data: &[u8]) -> Vec<u8> {
-    let mut locations_found = Vec::new();
-
-    search_for_deflate_streams(compressed_data, &mut locations_found);
-
-    let mut plain_text = Vec::new();
-    plain_text.push(COMPRESSED_WRAPPER_VERSION_1); // version 1 of format. Definitely will improved.
-
-    let mut prev: Option<scan_deflate::DeflateStreamLocation> = None;
-    for loc in locations_found {
-        //println!("loc: {:?}", loc);
-
-        if let Some(prev) = prev {
-            append_with_length(
-                &mut plain_text,
-                &compressed_data[prev.start + prev.data.compressed_size..loc.start],
-            );
-        } else {
-            append_with_length(&mut plain_text, &compressed_data[0..loc.start]);
-        }
-
-        append_with_length(&mut plain_text, &loc.data.prediction_corrections);
-        append_with_length(&mut plain_text, &loc.data.plain_text);
-        prev = Some(loc);
-    }
-
-    // append the last chunk
-    if let Some(prev) = prev {
-        append_with_length(
-            &mut plain_text,
-            &compressed_data[prev.start + prev.data.compressed_size..],
-        );
-    }
-
-    plain_text
-}
-
-/// takes a binary chunk of data that was created by expand_zlib_chunks and recompresses it back to its
-/// original form.
-pub fn recreated_zlib_chunks(compressed_data: &[u8]) -> Result<Vec<u8>, PreflateError> {
-    let mut result = Vec::new();
-    let mut index = 0;
-
-    if compressed_data.len() < 5 {
-        return Err(PreflateError::InvalidCompressedWrapper);
-    }
-
-    if compressed_data[0] != COMPRESSED_WRAPPER_VERSION_1 {
-        return Err(PreflateError::InvalidCompressedWrapper);
-    }
-    index += 1;
-
-    while index != compressed_data.len() {
-        let segment = read_segment_with_length(compressed_data, &mut index)?;
-        result.extend_from_slice(segment);
-
-        if index == compressed_data.len() {
-            // reached end of file
-            break;
-        }
-
-        let corrections = read_segment_with_length(compressed_data, &mut index)?;
-        let plain_text = read_segment_with_length(compressed_data, &mut index)?;
-        let recompressed = recompress_deflate_stream(plain_text, corrections)?;
-        result.extend_from_slice(&recompressed);
-    }
-
-    Ok(result)
-}
-
 /// expands the Zlib compressed streams in the data and then recompresses the result
 /// with Zstd with the maximum level.
-pub fn compress_zstd(zlib_compressed_data: &[u8]) -> Vec<u8> {
-    let plain_text = expand_zlib_chunks(&zlib_compressed_data);
-    zstd::bulk::compress(&plain_text, 9).unwrap()
+pub fn compress_zstd(zlib_compressed_data: &[u8]) -> Result<Vec<u8>, PreflateError> {
+    let plain_text = expand_zlib_chunks(&zlib_compressed_data)
+        .map_err(|_| PreflateError::InvalidCompressedWrapper)?;
+    zstd::bulk::compress(&plain_text, 9).map_err(|e| PreflateError::ZstdError(e))
 }
 
 /// decompresses the Zstd compressed data and then recompresses the result back
@@ -322,7 +219,9 @@ pub fn decompress_zstd(compressed_data: &[u8], capacity: usize) -> Result<Vec<u8
     let compressed_data = zstd::bulk::decompress(compressed_data, capacity)
         .map_err(|e| PreflateError::ZstdError(e))?;
 
-    recreated_zlib_chunks(&compressed_data)
+    let mut result = Vec::new();
+    recreated_zlib_chunks(&mut Cursor::new(compressed_data), &mut result)?;
+    Ok(result)
 }
 
 /// C ABI interface for compressing Zip file, exposed from DLL.
@@ -339,11 +238,11 @@ pub unsafe extern "C" fn WrapperCompressZip(
         let output_buffer =
             std::slice::from_raw_parts_mut(output_buffer, output_buffer_size as usize);
 
-        let plain_text = expand_zlib_chunks(&input_buffer);
+        let plain_text = expand_zlib_chunks(&input_buffer)?;
 
         *result_size = zstd::bulk::compress_to_buffer(&plain_text, output_buffer, 9)? as u64;
 
-        std::io::Result::Ok(())
+        Result::<(), PreflateError>::Ok(())
     }) {
         Ok(x) => {
             if let Err(_) = x {
@@ -373,10 +272,11 @@ pub unsafe extern "C" fn WrapperDecompressZip(
         let compressed_data = zstd::bulk::decompress(input, 1024 * 1024 * 128)
             .map_err(|e| PreflateError::ZstdError(e))?;
 
-        recreated_zlib_chunks(&compressed_data).map(|v| {
-            output[0..v.len()].copy_from_slice(&v);
-            *result_size = v.len() as u64;
-        })?;
+        let mut source = Cursor::new(&compressed_data);
+        let mut destination = Cursor::new(output);
+
+        recreated_zlib_chunks(&mut source, &mut destination)?;
+        *result_size = destination.position();
 
         Result::<(), PreflateError>::Ok(())
     }) {
@@ -439,9 +339,10 @@ fn verify_zip_compress() {
     use crate::process::read_file;
     let v = read_file("samplezip.zip");
 
-    let expanded = expand_zlib_chunks(&v);
+    let expanded = expand_zlib_chunks(&v).unwrap();
 
-    let recompressed = recreated_zlib_chunks(&expanded).unwrap();
+    let mut recompressed = Vec::new();
+    recreated_zlib_chunks(&mut Cursor::new(expanded), &mut recompressed).unwrap();
 
     assert!(v == recompressed);
 }
@@ -482,7 +383,7 @@ fn verify_zip_compress_zstd() {
     use crate::process::read_file;
     let v = read_file("samplezip.zip");
 
-    let compressed = compress_zstd(&v);
+    let compressed = compress_zstd(&v).unwrap();
 
     let recreated = decompress_zstd(&compressed, 256 * 1024 * 1024).unwrap();
 

@@ -164,6 +164,15 @@ fn recreate_blocks<D: PredictionDecoder>(
     Ok(output_blocks)
 }
 
+pub fn write_file(filename: &str, data: &[u8]) {
+    use std::fs::File;
+    use std::io::Write;
+    use std::path::Path;
+
+    let mut writecomp = std::fs::File::create(filename).unwrap();
+    std::io::Write::write_all(&mut writecomp, &data).unwrap();
+}
+
 #[cfg(test)]
 pub fn read_file(filename: &str) -> Vec<u8> {
     use std::fs::File;
@@ -632,6 +641,16 @@ fn verify_miniz1_compressed_perfect() {
 #[test]
 fn verify_miniz_compressed_1() {
     let v = read_file(&format!("compressed_flate2_level1.deflate"));
+
+    //let minusheader = &v[2..v.len() - 4];
+    //let crc = Some(u32::from_le_bytes([v[v.len() - 4], v[v.len() - 3], v[v.len() - 2], v[v.len() - 1]]));
+
+    do_analyze(None, &v, false);
+}
+
+#[test]
+fn verify_zlibng_compressed_1() {
+    let v = read_file(&format!("zlibng.deflate"));
 
     //let minusheader = &v[2..v.len() - 4];
     //let crc = Some(u32::from_le_bytes([v[v.len() - 4], v[v.len() - 3], v[v.len() - 2], v[v.len() - 1]]));
