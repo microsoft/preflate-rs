@@ -35,7 +35,7 @@ pub fn estimate_add_policy(token_blocks: &[PreflateTokenBlock]) -> DictionaryAdd
         let token_block = &token_blocks[i];
         for token in token_block.tokens.iter() {
             match token {
-                PreflateToken::Literal => {
+                PreflateToken::Literal(_) => {
                     current_window[current_offset as usize & WINDOW_MASK] = 0;
                     current_offset += 1;
                 }

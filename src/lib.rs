@@ -37,6 +37,7 @@ use anyhow::{self};
 use cabac::vp8::{VP8Reader, VP8Writer};
 use preflate_container::{expand_zlib_chunks, recreated_zlib_chunks};
 use preflate_error::PreflateError;
+use preflate_input::PreflateInput;
 use preflate_parameter_estimator::{estimate_preflate_parameters, PreflateParameters};
 use process::parse_deflate;
 use std::{io::Cursor, panic::catch_unwind};
@@ -102,8 +103,11 @@ pub fn decompress_deflate_stream(
             .map_err(|e| PreflateError::InvalidPredictionData(e))?;
         assert_eq!(params, reread_params);
 
-        let (recompressed, _recreated_blocks) =
-            decode_mispredictions(&reread_params, &contents.plain_text, &mut cabac_decoder)?;
+        let (recompressed, _recreated_blocks) = decode_mispredictions(
+            &reread_params,
+            PreflateInput::new(&contents.plain_text),
+            &mut cabac_decoder,
+        )?;
 
         if recompressed[..] != compressed_data[..contents.compressed_size] {
             return Err(PreflateError::Mismatch(anyhow::anyhow!(
@@ -131,7 +135,7 @@ pub fn recompress_deflate_stream(
     let params = PreflateParameters::read(&mut cabac_decoder)
         .map_err(|e| PreflateError::InvalidPredictionData(e))?;
     let (recompressed, _recreated_blocks) =
-        decode_mispredictions(&params, plain_text, &mut cabac_decoder)?;
+        decode_mispredictions(&params, PreflateInput::new(plain_text), &mut cabac_decoder)?;
     Ok(recompressed)
 }
 
@@ -166,8 +170,11 @@ pub fn decompress_deflate_stream_assert(
 
         let params = PreflateParameters::read(&mut cabac_decoder)
             .map_err(|e| PreflateError::InvalidPredictionData(e))?;
-        let (recompressed, _recreated_blocks) =
-            decode_mispredictions(&params, &contents.plain_text, &mut cabac_decoder)?;
+        let (recompressed, _recreated_blocks) = decode_mispredictions(
+            &params,
+            PreflateInput::new(&contents.plain_text),
+            &mut cabac_decoder,
+        )?;
 
         if recompressed[..] != compressed_data[..] {
             return Err(PreflateError::Mismatch(anyhow::anyhow!(
@@ -201,7 +208,7 @@ pub fn recompress_deflate_stream_assert(
         .map_err(|e| PreflateError::InvalidPredictionData(e))?;
 
     let (recompressed, _recreated_blocks) =
-        decode_mispredictions(&params, plain_text, &mut cabac_decoder)?;
+        decode_mispredictions(&params, PreflateInput::new(plain_text), &mut cabac_decoder)?;
     Ok(recompressed)
 }
 

@@ -270,14 +270,14 @@ impl<'a> CompLevelEstimatorState<'a> {
     fn check_dump(&mut self) {
         for (_i, b) in self.blocks.iter().enumerate() {
             if b.block_type == BlockType::Stored {
-                for _i in 0..b.uncompressed_len {
+                for _i in 0..b.uncompressed.len() {
                     self.update_candidate_hashes(1);
                 }
                 continue;
             }
             for (_j, t) in b.tokens.iter().enumerate() {
                 match t {
-                    PreflateToken::Literal => {
+                    PreflateToken::Literal(_) => {
                         self.update_candidate_hashes(1);
                     }
                     &PreflateToken::Reference(r) => {

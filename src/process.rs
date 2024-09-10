@@ -11,6 +11,7 @@ use crate::{
     deflate_writer::DeflateWriter,
     huffman_calc::HufftreeBitCalc,
     preflate_error::PreflateError,
+    preflate_input::PreflateInput,
     preflate_parameter_estimator::PreflateParameters,
     preflate_token::{BlockType, PreflateTokenBlock},
     statistical_codec::{
@@ -29,7 +30,7 @@ pub fn encode_mispredictions(
 ) -> Result<(), PreflateError> {
     predict_blocks(
         &deflate.blocks,
-        TokenPredictor::new(&deflate.plain_text, &params.predictor),
+        TokenPredictor::new(PreflateInput::new(&deflate.plain_text), &params.predictor),
         encoder,
     )?;
 
@@ -114,10 +115,10 @@ fn predict_blocks(
 
 pub fn decode_mispredictions(
     params: &PreflateParameters,
-    plain_text: &[u8],
+    plain_text: PreflateInput,
     decoder: &mut impl PredictionDecoder,
 ) -> Result<(Vec<u8>, Vec<PreflateTokenBlock>), PreflateError> {
-    let mut deflate_writer: DeflateWriter<'_> = DeflateWriter::new(plain_text);
+    let mut deflate_writer: DeflateWriter = DeflateWriter::new();
 
     let output_blocks = recreate_blocks(
         TokenPredictor::new(plain_text, &params.predictor),
@@ -230,8 +231,12 @@ fn analyze_compressed_data_fast(
 
     let params = PreflateParameters::read(&mut cabac_decoder).unwrap();
 
-    let (recompressed, _recreated_blocks) =
-        decode_mispredictions(&params, &contents.plain_text, &mut cabac_decoder).unwrap();
+    let (recompressed, _recreated_blocks) = decode_mispredictions(
+        &params,
+        PreflateInput::new(&contents.plain_text),
+        &mut cabac_decoder,
+    )
+    .unwrap();
 
     assert!(recompressed[..] == compressed_data[..]);
 
@@ -299,8 +304,12 @@ fn analyze_compressed_data_verify(
     let params_reread = PreflateParameters::read(&mut combined_decoder).unwrap();
     assert_eq!(params, params_reread);
 
-    let (recompressed, recreated_blocks) =
-        decode_mispredictions(&params_reread, &contents.plain_text, &mut combined_decoder).unwrap();
+    let (recompressed, recreated_blocks) = decode_mispredictions(
+        &params_reread,
+        PreflateInput::new(&contents.plain_text),
+        &mut combined_decoder,
+    )
+    .unwrap();
 
     assert_eq!(contents.blocks.len(), recreated_blocks.len());
     contents
@@ -427,7 +436,7 @@ fn test_treepngdeflate() {
             let mut chars = chars[0..chars.len().min(10)].to_vec();
 
             match t {
-                crate::preflate_token::PreflateToken::Literal => {
+                crate::preflate_token::PreflateToken::Literal(_) => {
                     chain.update_hash::<true, UPDATE_MODE_ALL>(1, &input);
                     input.advance(1);
                     depth = 0;
@@ -581,7 +590,12 @@ fn verify_zlib_compressed_perfect() {
         encode_mispredictions(&contents, &params, &mut cabac_encoder).unwrap();
 
         let mut cabac_decoder = AssertDefaultOnlyDecoder {};
-        decode_mispredictions(&params, &contents.plain_text, &mut cabac_decoder).unwrap();
+        decode_mispredictions(
+            &params,
+            PreflateInput::new(&contents.plain_text),
+            &mut cabac_decoder,
+        )
+        .unwrap();
     }
 }
 
@@ -632,7 +646,12 @@ fn verify_miniz1_compressed_perfect() {
     let mut cabac_decoder =
         PredictionDecoderCabac::new(VP8Reader::new(Cursor::new(&buffer)).unwrap());
 
-    decode_mispredictions(&params, &contents.plain_text, &mut cabac_decoder).unwrap();
+    decode_mispredictions(
+        &params,
+        PreflateInput::new(&contents.plain_text),
+        &mut cabac_decoder,
+    )
+    .unwrap();
 }
 
 #[test]

@@ -48,7 +48,7 @@ pub fn extract_preflate_info(blocks: &Vec<PreflateTokenBlock>) -> PreflateStream
         let mut block_max_dist = 0;
         for j in 0..b.tokens.len() {
             match &b.tokens[j] {
-                PreflateToken::Literal => {
+                PreflateToken::Literal(_) => {
                     result.literal_count += 1;
                 }
                 PreflateToken::Reference(t) => {

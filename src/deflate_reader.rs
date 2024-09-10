@@ -79,13 +79,13 @@ impl<R: Read> DeflateReader<R> {
                 if (len ^ ilen) != 0xffff {
                     return Err(anyhow::Error::msg("Blocllength mismatch"));
                 }
-                blk.uncompressed_len = len;
                 blk.context_len = 0;
 
                 self.input.flush_buffer_to_byte_boundary();
 
                 for _i in 0..len {
                     let b = self.input.read_byte()?;
+                    blk.uncompressed.push(b);
                     self.write_literal(b);
                 }
 
@@ -129,7 +129,6 @@ impl<R: Read> DeflateReader<R> {
                 blk.add_literal(lit_len as u8);
                 cur_pos += 1;
             } else if lit_len == 256 {
-                blk.uncompressed_len = cur_pos as u32;
                 blk.context_len = -earliest_reference;
                 break;
             } else {
