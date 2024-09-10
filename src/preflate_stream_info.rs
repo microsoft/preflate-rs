@@ -19,7 +19,7 @@ pub struct PreflateStreamInfo {
     pub count_static_huff_tree_blocks: u32,
 }
 
-pub fn extract_preflate_info(blocks: &Vec<PreflateTokenBlock>) -> PreflateStreamInfo {
+pub fn extract_preflate_info(blocks: &[PreflateTokenBlock]) -> PreflateStreamInfo {
     let mut result: PreflateStreamInfo = PreflateStreamInfo {
         count_blocks: blocks.len() as u32,
         count_stored_blocks: 0,

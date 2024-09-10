@@ -81,8 +81,8 @@ impl PreflateParameters {
 
         let add_policy = match decoder.decode_value(2) {
             0 => DictionaryAddPolicy::AddAll,
-            1 => DictionaryAddPolicy::AddFirst(u16::from(decoder.decode_value(8))),
-            2 => DictionaryAddPolicy::AddFirstAndLast(u16::from(decoder.decode_value(8))),
+            1 => DictionaryAddPolicy::AddFirst(decoder.decode_value(8)),
+            2 => DictionaryAddPolicy::AddFirstAndLast(decoder.decode_value(8)),
             3 => DictionaryAddPolicy::AddFirstExcept4kBoundary,
             _ => panic!("invalid add policy"),
         };
@@ -149,7 +149,7 @@ impl PreflateParameters {
         encoder.encode_value(FILE_VERSION, 8);
         encoder.encode_value(self.predictor.strategy as u16, 4);
         encoder.encode_value(self.huff_strategy as u16, 4);
-        encoder.encode_value(u16::try_from(self.predictor.zlib_compatible).unwrap(), 1);
+        encoder.encode_value(u16::from(self.predictor.zlib_compatible), 1);
         encoder.encode_value(u16::try_from(self.predictor.window_bits).unwrap(), 8);
 
         match self.predictor.hash_algorithm {
@@ -180,14 +180,8 @@ impl PreflateParameters {
 
         encoder.encode_value(self.predictor.max_token_count, 16);
         encoder.encode_value(self.predictor.max_dist_3_matches, 16);
-        encoder.encode_value(
-            u16::try_from(self.predictor.very_far_matches_detected).unwrap(),
-            1,
-        );
-        encoder.encode_value(
-            u16::try_from(self.predictor.matches_to_start_detected).unwrap(),
-            1,
-        );
+        encoder.encode_value(u16::from(self.predictor.very_far_matches_detected), 1);
+        encoder.encode_value(u16::from(self.predictor.matches_to_start_detected), 1);
 
         let good_length;
         let max_lazy;
@@ -205,8 +199,8 @@ impl PreflateParameters {
             }
         }
 
-        encoder.encode_value(u16::try_from(good_length).unwrap(), 16);
-        encoder.encode_value(u16::try_from(max_lazy).unwrap(), 16);
+        encoder.encode_value(good_length, 16);
+        encoder.encode_value(max_lazy, 16);
         encoder.encode_value(u16::try_from(self.predictor.nice_length).unwrap(), 16);
         encoder.encode_value(u16::try_from(self.predictor.max_chain).unwrap(), 16);
         encoder.encode_value(u16::try_from(self.predictor.min_len).unwrap(), 16);

@@ -77,7 +77,7 @@ impl HashImplementation for LibdeflateRotatingHash4 {
     type HashChainType = HashChainNormalizeLibflate4;
 
     fn get_hash(&self, b: &[u8]) -> u16 {
-        let hash = u32::from_le_bytes([b[0], b[1], b[2], b[3]]);
+        let hash = u32::from_le_bytes(b[..4].try_into().unwrap());
 
         (hash.wrapping_mul(0x1E35A7BD) >> 16) as u16
     }
@@ -122,7 +122,7 @@ impl HashImplementation for ZlibNGHash {
     type HashChainType = HashChainNormalize<ZlibNGHash>;
 
     fn get_hash(&self, b: &[u8]) -> u16 {
-        let hash = u32::from_le_bytes([b[0], b[1], b[2], b[3]]);
+        let hash = u32::from_le_bytes(b[..4].try_into().unwrap());
 
         (hash.wrapping_mul(2654435761) >> 16) as u16
     }

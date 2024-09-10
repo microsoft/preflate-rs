@@ -81,6 +81,7 @@ impl<'a> TokenPredictor<'a> {
     }
 
     pub fn checksum(&self) -> DebugHash {
+        assert!(VERIFY);
         let mut c = DebugHash::default();
         self.state.checksum(&mut c);
         c
@@ -128,7 +129,7 @@ impl<'a> TokenPredictor<'a> {
             codec.encode_correction(CodecCorrection::TokenCount, 0);
         }
 
-        codec.encode_verify_state("start", self.checksum().hash());
+        codec.encode_verify_state("start", if VERIFY { self.checksum().hash() } else { 0 });
 
         for i in 0..block.tokens.len() {
             let target_token = &block.tokens[i];
@@ -250,7 +251,7 @@ impl<'a> TokenPredictor<'a> {
             self.commit_token(target_token, None);
         }
 
-        codec.encode_verify_state("done", self.checksum().hash());
+        codec.encode_verify_state("done", if VERIFY { self.checksum().hash() } else { 0 });
 
         Ok(())
     }
@@ -278,10 +279,11 @@ impl<'a> TokenPredictor<'a> {
                 block = PreflateTokenBlock::new(BlockType::Stored);
                 let uncompressed_len = codec.decode_value(16).into();
                 block.padding_bits = codec.decode_correction(CodecCorrection::NonZeroPadding) as u8;
+                block.uncompressed.reserve(uncompressed_len as usize);
 
                 for _i in 0..uncompressed_len {
                     block.uncompressed.push(self.input.cur_char(0));
-                    self.state.update_hash(1, &mut self.input);
+                    self.state.update_hash(1, &self.input);
                     self.input.advance(1);
                 }
                 return Ok(block);
@@ -306,7 +308,7 @@ impl<'a> TokenPredictor<'a> {
 
         block.tokens.reserve(blocksize as usize);
 
-        codec.decode_verify_state("start", self.checksum().hash());
+        codec.decode_verify_state("start", if VERIFY { self.checksum().hash() } else { 0 });
 
         while !self.input_eof() && self.current_token_count < blocksize {
             codec.decode_verify_state(
@@ -386,7 +388,7 @@ impl<'a> TokenPredictor<'a> {
             self.commit_token(&PreflateToken::Reference(predicted_ref), Some(&mut block));
         }
 
-        codec.decode_verify_state("done", self.checksum().hash());
+        codec.decode_verify_state("done", if VERIFY { self.checksum().hash() } else { 0 });
 
         Ok(block)
     }
@@ -514,7 +516,7 @@ impl<'a> TokenPredictor<'a> {
                     block.add_reference(t.len(), t.dist(), t.get_irregular258());
                 }
 
-                self.state.update_hash(t.len(), &mut self.input);
+                self.state.update_hash(t.len(), &self.input);
                 self.input.advance(t.len());
             }
         }

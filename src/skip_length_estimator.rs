@@ -10,7 +10,7 @@
 /// use skip_hash or update_hash.
 use crate::{
     hash_chain::DictionaryAddPolicy,
-    preflate_token::{PreflateToken, PreflateTokenBlock},
+    preflate_token::{BlockType, PreflateToken, PreflateTokenBlock},
 };
 
 pub fn estimate_add_policy(token_blocks: &[PreflateTokenBlock]) -> DictionaryAddPolicy {
@@ -33,35 +33,48 @@ pub fn estimate_add_policy(token_blocks: &[PreflateTokenBlock]) -> DictionaryAdd
 
     for i in 0..token_blocks.len() {
         let token_block = &token_blocks[i];
-        for token in token_block.tokens.iter() {
-            match token {
-                PreflateToken::Literal(_) => {
+
+        match token_block.block_type {
+            BlockType::Stored => {
+                // we assume for stored blocks everything was added to the dictionary
+                for _i in 0..token_block.uncompressed.len() {
                     current_window[current_offset as usize & WINDOW_MASK] = 0;
                     current_offset += 1;
                 }
-                PreflateToken::Reference(r) => {
-                    // track if we saw something  on the of the 4k boundary
-                    if (current_offset & 4095) >= 4093 {
-                        block_4k = false;
-                    }
+            }
+            BlockType::StaticHuff | BlockType::DynamicHuff => {
+                for token in token_block.tokens.iter() {
+                    match token {
+                        PreflateToken::Literal(_) => {
+                            current_window[current_offset as usize & WINDOW_MASK] = 0;
+                            current_offset += 1;
+                        }
+                        PreflateToken::Reference(r) => {
+                            // track if we saw something  on the of the 4k boundary
+                            if (current_offset & 4095) >= 4093 {
+                                block_4k = false;
+                            }
 
-                    let previous_match =
-                        current_window[(current_offset - r.dist()) as usize & WINDOW_MASK];
+                            let previous_match =
+                                current_window[(current_offset - r.dist()) as usize & WINDOW_MASK];
 
-                    let match_length = u32::from(previous_match & !LAST_ADDED);
+                            let match_length = u32::from(previous_match & !LAST_ADDED);
 
-                    max_distance = std::cmp::max(max_distance, match_length);
-                    if (previous_match & LAST_ADDED) == 0 {
-                        max_distance_last_add = std::cmp::max(max_distance_last_add, match_length);
-                    }
+                            max_distance = std::cmp::max(max_distance, match_length);
+                            if (previous_match & LAST_ADDED) == 0 {
+                                max_distance_last_add =
+                                    std::cmp::max(max_distance_last_add, match_length);
+                            }
 
-                    current_window[current_offset as usize & WINDOW_MASK] = 0;
-                    current_offset += 1;
+                            current_window[current_offset as usize & WINDOW_MASK] = 0;
+                            current_offset += 1;
 
-                    for i in 1..r.len() {
-                        current_window[current_offset as usize & WINDOW_MASK] =
-                            r.len() as u16 | if i == r.len() - 1 { LAST_ADDED } else { 0 };
-                        current_offset += 1;
+                            for i in 1..r.len() {
+                                current_window[current_offset as usize & WINDOW_MASK] =
+                                    r.len() as u16 | if i == r.len() - 1 { LAST_ADDED } else { 0 };
+                                current_offset += 1;
+                            }
+                        }
                     }
                 }
             }

@@ -168,7 +168,7 @@ fn recreate_blocks<D: PredictionDecoder>(
 #[allow(dead_code)]
 pub fn write_file(filename: &str, data: &[u8]) {
     let mut writecomp = std::fs::File::create(filename).unwrap();
-    std::io::Write::write_all(&mut writecomp, &data).unwrap();
+    std::io::Write::write_all(&mut writecomp, data).unwrap();
 }
 
 #[cfg(test)]

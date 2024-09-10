@@ -118,7 +118,7 @@ pub fn parse_idat(
         deflate_stream.extend_from_slice(chunk);
 
         let mut crc = crc32fast::Hasher::new();
-        crc.update(&chunk_type);
+        crc.update(chunk_type);
         crc.update(chunk);
 
         if crc.finalize()

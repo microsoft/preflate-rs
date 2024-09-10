@@ -32,37 +32,28 @@ pub enum MatchResult {
 /// Factory function to create a new HashChainHolder based on the parameters and returns
 /// a boxed trait object. The reason for this is that this lets the compiler optimize the
 pub fn new_hash_chain_holder(params: &TokenPredictorParameters) -> Box<dyn HashChainHolder> {
-    let predictor_state: Box<dyn HashChainHolder>;
     match params.hash_algorithm {
         HashAlgorithm::Zlib {
             hash_mask,
             hash_shift,
-        } => {
-            predictor_state = Box::new(HashChainHolderImpl::new(
-                params,
-                ZlibRotatingHash {
-                    hash_mask,
-                    hash_shift,
-                },
-            ))
-        }
-        HashAlgorithm::MiniZFast => {
-            predictor_state = Box::new(HashChainHolderImpl::new(params, MiniZHash {}))
-        }
+        } => Box::new(HashChainHolderImpl::new(
+            params,
+            ZlibRotatingHash {
+                hash_mask,
+                hash_shift,
+            },
+        )),
+        HashAlgorithm::MiniZFast => Box::new(HashChainHolderImpl::new(params, MiniZHash {})),
         HashAlgorithm::Libdeflate4 => {
-            predictor_state = Box::new(HashChainHolderImpl::new(params, LibdeflateRotatingHash4 {}))
+            Box::new(HashChainHolderImpl::new(params, LibdeflateRotatingHash4 {}))
         }
-        HashAlgorithm::ZlibNG => {
-            predictor_state = Box::new(HashChainHolderImpl::new(params, ZlibNGHash {}))
-        }
+
+        HashAlgorithm::ZlibNG => Box::new(HashChainHolderImpl::new(params, ZlibNGHash {})),
         HashAlgorithm::RandomVector => {
-            predictor_state = Box::new(HashChainHolderImpl::new(params, RandomVectorHash {}))
+            Box::new(HashChainHolderImpl::new(params, RandomVectorHash {}))
         }
-        HashAlgorithm::Crc32cHash => {
-            predictor_state = Box::new(HashChainHolderImpl::new(params, Crc32cHash {}))
-        }
+        HashAlgorithm::Crc32cHash => Box::new(HashChainHolderImpl::new(params, Crc32cHash {})),
     }
-    predictor_state
 }
 
 /// trait that is not dependent on the HashImplementation so it can
@@ -207,15 +198,13 @@ impl<H: HashImplementation> HashChainHolder for HashChainHolderImpl<H> {
                 if dist > cur_max_dist_hop0 {
                     return MatchResult::DistanceLargerThanHop0(dist, cur_max_dist_hop0);
                 }
-            } else {
-                if dist > cur_max_dist_hop1_plus {
-                    break;
-                }
+            } else if dist > cur_max_dist_hop1_plus {
+                break;
             }
 
             let match_start = input.cur_chars(offset as i32 - dist as i32);
 
-            let match_length = Self::prefix_compare(match_start, input_chars, best_len, max_len);
+            let match_length = prefix_compare(match_start, input_chars, best_len, max_len);
             if match_length > best_len {
                 let r = PreflateTokenReference::new(match_length, dist, false);
 
@@ -272,7 +261,7 @@ impl<H: HashImplementation> HashChainHolder for HashChainHolderImpl<H> {
 
             let match_pos = input.cur_chars(-(dist as i32));
             let match_length =
-                Self::prefix_compare(match_pos, input.cur_chars(0), best_len - 1, best_len);
+                prefix_compare(match_pos, input.cur_chars(0), best_len - 1, best_len);
 
             if match_length >= best_len {
                 hops += 1;
@@ -312,7 +301,7 @@ impl<H: HashImplementation> HashChainHolder for HashChainHolderImpl<H> {
                 break;
             }
 
-            let match_length = Self::prefix_compare(
+            let match_length = prefix_compare(
                 input.cur_chars(-(dist as i32)),
                 input.cur_chars(0),
                 len - 1,
@@ -390,25 +379,25 @@ impl<H: HashImplementation> HashChainHolderImpl<H> {
             }
         }
     }
+}
 
-    fn prefix_compare(s1: &[u8], s2: &[u8], best_len: u32, max_len: u32) -> u32 {
-        assert!(max_len >= 3 && s1.len() >= max_len as usize && s2.len() >= max_len as usize);
+fn prefix_compare(s1: &[u8], s2: &[u8], best_len: u32, max_len: u32) -> u32 {
+    assert!(max_len >= 3 && s1.len() >= max_len as usize && s2.len() >= max_len as usize);
 
-        if s1[best_len as usize] != s2[best_len as usize] {
-            return 0;
-        }
-        if s1[0] != s2[0] || s1[1] != s2[1] || s1[2] != s2[2] {
-            return 0;
-        }
-
-        let mut match_len = 3; // Initialize with the length of the fixed prefix
-        for i in 3..max_len {
-            if s1[i as usize] != s2[i as usize] {
-                break;
-            }
-            match_len = i + 1;
-        }
-
-        match_len
+    if s1[best_len as usize] != s2[best_len as usize] {
+        return 0;
     }
+    if s1[0] != s2[0] || s1[1] != s2[1] || s1[2] != s2[2] {
+        return 0;
+    }
+
+    let mut match_len = 3; // Initialize with the length of the fixed prefix
+    for i in 3..max_len {
+        if s1[i as usize] != s2[i as usize] {
+            break;
+        }
+        match_len = i + 1;
+    }
+
+    match_len
 }

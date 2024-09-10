@@ -105,7 +105,7 @@ impl InternalPosition for InternalPositionAbs {
     }
 
     fn dist(&self, pos: Self) -> u32 {
-        u32::from(self.pos - pos.pos)
+        self.pos - pos.pos
     }
 }
 
@@ -197,9 +197,10 @@ impl<H: HashImplementation, I: InternalPosition> HashTable<H, I> {
                     self.chain_depth[pos.to_index()] =
                         self.chain_depth[self.head[usize::from(h)].to_index()] + 1;
                     self.chain_depth_hash_verify[pos.to_index()] = h;
+                } else {
+                    self.prev[pos.to_index()] = self.head[usize::from(h)];
                 }
 
-                self.prev[pos.to_index()] = self.head[usize::from(h)];
                 self.head[usize::from(h)] = pos;
             } else if MAINTAIN_DEPTH {
                 self.chain_depth[pos.to_index()] = -65535;
@@ -298,9 +299,18 @@ impl<H: HashImplementation> HashChainNormalize<H> {
 
         c
     }
+
+    fn reshift<const MAINTAIN_DEPTH: bool>(&mut self) {
+        const DELTA: usize = 0x7e00;
+
+        self.hash_table.reshift::<MAINTAIN_DEPTH, DELTA>();
+
+        self.total_shift += DELTA as i32;
+    }
 }
 
 impl<H: HashImplementation> HashChain for HashChainNormalize<H> {
+    #[inline]
     fn iterate<'a>(&'a self, input: &PreflateInput, offset: u32) -> impl Iterator<Item = u32> + 'a {
         let ref_pos = InternalPositionRel::from_absolute(input.pos() + offset, self.total_shift);
 
@@ -338,14 +348,12 @@ impl<H: HashImplementation> HashChain for HashChainNormalize<H> {
             if let Some(d) = first_match {
                 first_match = None;
                 Some(d)
+            } else if cur_pos.is_valid() {
+                let d = ref_pos.dist(cur_pos);
+                cur_pos = self.hash_table.prev[cur_pos.to_index()];
+                Some(d)
             } else {
-                if cur_pos.is_valid() {
-                    let d = ref_pos.dist(cur_pos);
-                    cur_pos = self.hash_table.prev[cur_pos.to_index()];
-                    Some(d)
-                } else {
-                    None
-                }
+                None
             }
         })
     }
@@ -382,6 +390,7 @@ impl<H: HashImplementation> HashChain for HashChainNormalize<H> {
         //checksum.update(self.total_shift);
     }
 
+    #[inline]
     fn update_hash<const MAINTAIN_DEPTH: bool, const UPDATE_MODE: u32>(
         &mut self,
         length: u32,
@@ -390,11 +399,7 @@ impl<H: HashImplementation> HashChain for HashChainNormalize<H> {
         assert!(length <= MAX_UPDATE_HASH_BATCH);
 
         if input.pos() as i32 - self.total_shift >= 0xfe08 {
-            const DELTA: usize = 0x7e00;
-
-            self.hash_table.reshift::<MAINTAIN_DEPTH, DELTA>();
-
-            self.total_shift += DELTA as i32;
+            self.reshift::<MAINTAIN_DEPTH>();
         }
 
         let pos = InternalPositionRel::from_absolute(input.pos(), self.total_shift);
@@ -473,14 +478,12 @@ impl HashChain for HashChainNormalizeLibflate4 {
             if let Some(d) = first_match {
                 first_match = None;
                 Some(d)
+            } else if cur_pos.is_valid() {
+                let d = ref_pos.dist(cur_pos);
+                cur_pos = self.hash_table.prev[cur_pos.to_index()];
+                Some(d)
             } else {
-                if cur_pos.is_valid() {
-                    let d = ref_pos.dist(cur_pos);
-                    cur_pos = self.hash_table.prev[cur_pos.to_index()];
-                    Some(d)
-                } else {
-                    None
-                }
+                None
             }
         })
     }
@@ -746,14 +749,12 @@ impl<H: HashImplementation> HashChain for HashChainAbs<H> {
             if let Some(d) = first_match {
                 first_match = None;
                 Some(d)
+            } else if cur_pos.is_valid() {
+                let d = ref_pos.dist(cur_pos);
+                cur_pos = self.hash_table.prev[cur_pos.to_index()];
+                Some(d)
             } else {
-                if cur_pos.is_valid() {
-                    let d = ref_pos.dist(cur_pos);
-                    cur_pos = self.hash_table.prev[cur_pos.to_index()];
-                    Some(d)
-                } else {
-                    None
-                }
+                None
             }
         })
     }
