@@ -54,29 +54,35 @@ impl InternalPosition {
 
 #[derive(DefaultBoxed)]
 #[repr(C, align(64))]
-struct HashTable<H: HashImplementation> {
-    /// Represents the head of the hash chain for a given hash value. In order
-    /// to find additional matches, you follow the prev chain from the head.
+struct HashTable {
+    /// Represents the head of the hash chain for a given hash value, or zero
+    /// if there is none. In order to find additional matches, you follow the prev
+    /// chain from the head.
+    ///
+    /// (We start reading with an offset of -8 to avoid confusion with the end of
+    /// the chain, so the first offset will be 8)
     head: [InternalPosition; 65536],
 
     /// Represents the prev chain for a given position. This is used to find
     /// all the potential matches for a given hash. The value points to previous
-    /// position in the chain, or 0 if there are no more matches. (We start
-    /// with an offset of 8 to avoid confusion with the end of the chain)
+    /// position in the chain, or 0 if there are no more matches.
     prev: [InternalPosition; 65536],
-
-    /// hash function used to calculate the hash
-    hash: H,
 }
 
-impl<H: HashImplementation> HashTable<H> {
+impl HashTable {
     #[inline]
     fn get_head(&self, h: u16) -> InternalPosition {
         self.head[usize::from(h)]
     }
 
     #[inline]
-    fn update_chain(&mut self, chars: &[u8], mut pos: InternalPosition, length: u32) {
+    fn update_chain<H: HashImplementation>(
+        &mut self,
+        hash: H,
+        chars: &[u8],
+        mut pos: InternalPosition,
+        length: u32,
+    ) {
         debug_assert!(length as usize <= chars.len());
         if length as usize + H::num_hash_bytes() - 1 >= chars.len() {
             // reached on of the stream so there will be no more matches
@@ -85,7 +91,7 @@ impl<H: HashImplementation> HashTable<H> {
 
         for i in 0..length {
             {
-                let h = self.hash.get_hash(&chars[i as usize..]);
+                let h = hash.get_hash(&chars[i as usize..]);
 
                 self.prev[pos.to_index()] = self.head[usize::from(h)];
 
@@ -97,8 +103,8 @@ impl<H: HashImplementation> HashTable<H> {
     }
 
     fn reshift<const DELTA: usize>(&mut self) {
-        for i in 0..=65535 {
-            self.head[i] = self.head[i].reshift(DELTA as u16);
+        for x in self.head.iter_mut() {
+            *x = x.reshift(DELTA as u16);
         }
 
         for i in DELTA..=65535 {
@@ -117,8 +123,9 @@ pub trait HashChain {
 
 /// This hash chain algorithm periodically normalizes the hash table
 pub struct HashChainNormalize<H: HashImplementation> {
-    hash_table: Box<HashTable<H>>,
+    hash_table: Box<HashTable>,
     total_shift: i32,
+    hash: H,
 }
 
 impl<H: HashImplementation> HashChainNormalize<H> {
@@ -126,14 +133,11 @@ impl<H: HashImplementation> HashChainNormalize<H> {
         // Important: total_shift starts at -8 since 0 indicates the end of the hash chain
         // so this means that all valid values will be >= 8, otherwise the very first hash
         // offset would be zero and so it would get missed
-        let mut c = HashChainNormalize {
+        HashChainNormalize {
             total_shift: -8,
             hash_table: HashTable::default_boxed(),
-        };
-
-        c.hash_table.hash = hash;
-
-        c
+            hash: hash,
+        }
     }
 
     fn reshift(&mut self) {
@@ -154,7 +158,7 @@ impl<H: HashImplementation> HashChain for HashChainNormalize<H> {
         // we start walking the chain
         let mut first_match = None;
 
-        let h1 = self.hash_table.hash.get_hash(input.cur_chars(0));
+        let h1 = self.hash.get_hash(input.cur_chars(0));
 
         let curr_hash;
 
@@ -164,7 +168,7 @@ impl<H: HashImplementation> HashChain for HashChainNormalize<H> {
             assert_eq!(offset, 1);
 
             // current hash is the next hash since we are starting at offset 1
-            curr_hash = self.hash_table.hash.get_hash(input.cur_chars(1));
+            curr_hash = self.hash.get_hash(input.cur_chars(1));
 
             // we are a lazy match, then we haven't added the last byte to the hash yet
             // which is a problem if that hash should have been part of this hash chain
@@ -214,15 +218,15 @@ impl<H: HashImplementation> HashChain for HashChainNormalize<H> {
 
         let pos = InternalPosition::from_absolute(pos, self.total_shift);
 
-        self.hash_table.update_chain(input, pos, length);
+        self.hash_table.update_chain(self.hash, input, pos, length);
     }
 }
 
 /// implementation of the hash chain that uses the libdeflate rotating hash.
 /// This consists of two hash tables, one for length 3 and one for length 4.
 pub struct HashChainNormalizeLibflate4 {
-    hash_table: Box<HashTable<LibdeflateHash4>>,
-    hash_table_3: Box<HashTable<LibdeflateHash3Secondary>>,
+    hash_table: Box<HashTable>,
+    hash_table_3: Box<HashTable>,
     total_shift: i32,
 }
 
@@ -239,6 +243,9 @@ impl HashChainNormalizeLibflate4 {
     }
 }
 
+const LIBFLATE_HASH_3: LibdeflateHash3Secondary = LibdeflateHash3Secondary {};
+const LIBFLATE_HASH_4: LibdeflateHash4 = LibdeflateHash4 {};
+
 impl HashChain for HashChainNormalizeLibflate4 {
     fn iterate<'a>(&'a self, input: &PreflateInput, offset: u32) -> impl Iterator<Item = u32> + 'a {
         let ref_pos = InternalPosition::from_absolute(input.pos() + offset, self.total_shift);
@@ -252,20 +259,20 @@ impl HashChain for HashChainNormalizeLibflate4 {
         if offset == 0 {
             // for libflate, we look once at the 3 length hash table for a match
             // and then walk the length 4 hash table
-            let curr_hash = self.hash_table_3.hash.get_hash(input.cur_chars(0));
+            let curr_hash = LIBFLATE_HASH_3.get_hash(input.cur_chars(0));
             let start_pos = self.hash_table_3.get_head(curr_hash);
 
             if start_pos.is_valid() {
                 first_match = Some(ref_pos.dist(start_pos));
             }
 
-            let curr_hash = self.hash_table.hash.get_hash(input.cur_chars(0));
+            let curr_hash = LIBFLATE_HASH_4.get_hash(input.cur_chars(0));
             cur_pos = self.hash_table.get_head(curr_hash);
         } else {
             assert_eq!(offset, 1);
 
             // current hash is the next hash since we are starting at offset 1
-            let curr_hash = self.hash_table.hash.get_hash(input.cur_chars(1));
+            let curr_hash = LIBFLATE_HASH_4.get_hash(input.cur_chars(1));
 
             // we are a lazy match, then we haven't added the last byte to the hash yet
             // which is a problem if that hash should have been part of this hash chain
@@ -274,7 +281,7 @@ impl HashChain for HashChainNormalizeLibflate4 {
             //
             // In order to fix this, we see if the hashes are the same, and then add
             // a distance 1 item to the iterator that we return.
-            let prev_hash = self.hash_table.hash.get_hash(input.cur_chars(0));
+            let prev_hash = LIBFLATE_HASH_4.get_hash(input.cur_chars(0));
             if prev_hash == curr_hash {
                 first_match = Some(1);
             }
@@ -315,8 +322,10 @@ impl HashChain for HashChainNormalizeLibflate4 {
 
         let pos = InternalPosition::from_absolute(pos, self.total_shift);
 
-        self.hash_table.update_chain(input, pos, length);
+        self.hash_table
+            .update_chain(LIBFLATE_HASH_4, input, pos, length);
 
-        self.hash_table_3.update_chain(input, pos, length);
+        self.hash_table_3
+            .update_chain(LIBFLATE_HASH_3, input, pos, length);
     }
 }
