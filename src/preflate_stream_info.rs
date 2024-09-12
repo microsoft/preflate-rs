@@ -11,6 +11,7 @@ pub struct PreflateStreamInfo {
     pub literal_count: u32,
     pub reference_count: u32,
     pub max_dist: u32,
+    pub min_len: u32,
     pub max_tokens_per_block: u32,
     pub count_blocks: u32,
     pub count_stored_blocks: u32,
@@ -28,6 +29,7 @@ pub fn extract_preflate_info(blocks: &[PreflateTokenBlock]) -> PreflateStreamInf
         max_tokens_per_block: 0,
         literal_count: 0,
         reference_count: 0,
+        min_len: u32::MAX,
         max_dist: 0,
         count_huff_blocks: 0,
         count_rle_blocks: 0,
@@ -46,6 +48,7 @@ pub fn extract_preflate_info(blocks: &[PreflateTokenBlock]) -> PreflateStreamInf
         result.max_tokens_per_block =
             std::cmp::max(result.max_tokens_per_block, b.tokens.len() as u32);
         let mut block_max_dist = 0;
+        let mut block_min_len = u32::MAX;
         for j in 0..b.tokens.len() {
             match &b.tokens[j] {
                 PreflateToken::Literal(_) => {
@@ -54,10 +57,13 @@ pub fn extract_preflate_info(blocks: &[PreflateTokenBlock]) -> PreflateStreamInf
                 PreflateToken::Reference(t) => {
                     result.reference_count += 1;
                     block_max_dist = std::cmp::max(block_max_dist, t.dist());
+                    block_min_len = std::cmp::min(block_min_len, t.len());
                 }
             }
         }
         result.max_dist = std::cmp::max(result.max_dist, block_max_dist);
+        result.min_len = std::cmp::min(result.min_len, block_min_len);
+
         if block_max_dist == 0 {
             result.count_huff_blocks += 1;
         } else if block_max_dist == 1 {

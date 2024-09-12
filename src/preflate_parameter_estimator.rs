@@ -7,6 +7,7 @@
 use anyhow::Result;
 
 use crate::{
+    add_policy_estimator::estimate_add_policy,
     bit_helper::bit_length,
     complevel_estimator::estimate_preflate_comp_level,
     hash_algorithm::HashAlgorithm,
@@ -43,12 +44,14 @@ pub struct PreflateParameters {
 
 const FILE_VERSION: u16 = 1;
 
-const HASH_ALGORITHM_ZLIB: u16 = 0;
-const HASH_ALGORITHM_MINIZ_FAST: u16 = 1;
-const HASH_ALGORITHM_LIBDEFLATE4: u16 = 2;
-const HASH_ALGORITHM_ZLIBNG: u16 = 3;
-const HASH_ALGORITHM_RANDOMVECTOR: u16 = 4;
-const HASH_ALGORITHM_CRC32C: u16 = 5;
+const HASH_ALGORITHM_NONE: u16 = 0;
+const HASH_ALGORITHM_ZLIB: u16 = 1;
+const HASH_ALGORITHM_MINIZ_FAST: u16 = 2;
+const HASH_ALGORITHM_LIBDEFLATE4: u16 = 3;
+const HASH_ALGORITHM_LIBDEFLATE4_FAST: u16 = 4;
+const HASH_ALGORITHM_ZLIBNG: u16 = 5;
+const HASH_ALGORITHM_RANDOMVECTOR: u16 = 6;
+const HASH_ALGORITHM_CRC32C: u16 = 7;
 
 impl PreflateParameters {
     pub fn read(decoder: &mut impl PredictionDecoder) -> Result<Self> {
@@ -124,12 +127,14 @@ impl PreflateParameters {
                 max_chain: max_chain.into(),
                 min_len: min_len.into(),
                 hash_algorithm: match hash_algorithm {
+                    HASH_ALGORITHM_NONE => HashAlgorithm::None,
                     HASH_ALGORITHM_ZLIB => HashAlgorithm::Zlib {
                         hash_shift: hash_shift.into(),
                         hash_mask,
                     },
                     HASH_ALGORITHM_MINIZ_FAST => HashAlgorithm::MiniZFast,
                     HASH_ALGORITHM_LIBDEFLATE4 => HashAlgorithm::Libdeflate4,
+                    HASH_ALGORITHM_LIBDEFLATE4_FAST => HashAlgorithm::Libdeflate4Fast,
                     HASH_ALGORITHM_ZLIBNG => HashAlgorithm::ZlibNG,
                     HASH_ALGORITHM_RANDOMVECTOR => HashAlgorithm::RandomVector,
                     HASH_ALGORITHM_CRC32C => HashAlgorithm::Crc32cHash,
@@ -153,6 +158,9 @@ impl PreflateParameters {
         encoder.encode_value(u16::try_from(self.predictor.window_bits).unwrap(), 8);
 
         match self.predictor.hash_algorithm {
+            HashAlgorithm::None => {
+                encoder.encode_value(HASH_ALGORITHM_NONE, 4);
+            }
             HashAlgorithm::Zlib {
                 hash_shift,
                 hash_mask,
@@ -163,6 +171,9 @@ impl PreflateParameters {
             }
             HashAlgorithm::MiniZFast => {
                 encoder.encode_value(HASH_ALGORITHM_MINIZ_FAST, 4);
+            }
+            HashAlgorithm::Libdeflate4Fast => {
+                encoder.encode_value(HASH_ALGORITHM_LIBDEFLATE4, 4);
             }
             HashAlgorithm::Libdeflate4 => {
                 encoder.encode_value(HASH_ALGORITHM_LIBDEFLATE4, 4);
@@ -269,15 +280,50 @@ pub fn estimate_preflate_parameters(
 ) -> anyhow::Result<PreflateParameters> {
     let info = extract_preflate_info(blocks);
 
+    let preflate_strategy = estimate_preflate_strategy(&info);
+    let huff_strategy = estimate_preflate_huff_strategy(&info);
+
+    if preflate_strategy == PreflateStrategy::Store
+        || preflate_strategy == PreflateStrategy::HuffOnly
+    {
+        // No dictionary used
+        return Ok(PreflateParameters {
+            predictor: TokenPredictorParameters {
+                window_bits: 0,
+                very_far_matches_detected: false,
+                matches_to_start_detected: false,
+                strategy: preflate_strategy,
+                nice_length: 0,
+                add_policy: DictionaryAddPolicy::AddAll,
+                max_token_count: 16386,
+                zlib_compatible: true,
+                max_dist_3_matches: 0,
+                matching_type: MatchingType::Greedy,
+                max_chain: 0,
+                min_len: 0,
+                hash_algorithm: HashAlgorithm::None,
+            },
+            huff_strategy,
+        });
+    }
+
     let window_bits = estimate_preflate_window_bits(info.max_dist);
     let mem_level = estimate_preflate_mem_level(info.max_tokens_per_block);
+    let add_policy = estimate_add_policy(blocks);
 
     //let hash_shift = 5;
     //let hash_mask = 32767;
 
     let max_token_count = (1 << (6 + mem_level)) - 1;
 
-    let cl = estimate_preflate_comp_level(window_bits, mem_level, unpacked_output, blocks)?;
+    let cl = estimate_preflate_comp_level(
+        window_bits,
+        mem_level,
+        info.min_len,
+        unpacked_output,
+        add_policy,
+        blocks,
+    )?;
 
     Ok(PreflateParameters {
         predictor: TokenPredictorParameters {

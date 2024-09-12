@@ -13,6 +13,7 @@ pub struct DebugHash {
     hash: u64,
 }
 
+#[allow(dead_code)]
 impl DebugHash {
     pub fn update<T: Into<i64>>(&mut self, v: T) {
         self.hash = self.hash.wrapping_mul(13).wrapping_add(v.into() as u64);

@@ -407,7 +407,7 @@ impl<'a> TokenPredictor<'a> {
             MatchResult::Success(pending)
         } else {
             self.state
-                .match_token(0, 0, self.params.max_chain, &self.input)
+                .match_token_0(0, self.params.max_chain, &self.input)
         };
 
         self.pending_reference = None;
@@ -442,7 +442,7 @@ impl<'a> TokenPredictor<'a> {
 
                     let match_next =
                         self.state
-                            .match_token(match_token.len(), 1, max_depth, &self.input);
+                            .match_token_1(match_token.len(), max_depth, &self.input);
 
                     if let MatchResult::Success(m) = match_next {
                         if m.len() > match_token.len() {
@@ -485,7 +485,7 @@ impl<'a> TokenPredictor<'a> {
 
         let match_token = self
             .state
-            .match_token(0, 0, self.params.max_chain, &self.input);
+            .match_token_0(0, self.params.max_chain, &self.input);
 
         self.pending_reference = None;
 

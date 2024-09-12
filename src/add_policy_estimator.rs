@@ -23,13 +23,15 @@ pub fn estimate_add_policy(token_blocks: &[PreflateTokenBlock]) -> DictionaryAdd
     let mut current_window = vec![0u16; WINDOW_MASK + 1];
 
     // tracks the maximum length that we've see that was added to the dictionary
-    let mut max_distance: u32 = 0;
+    let mut max_length: u32 = 0;
 
     // tracks the maximum length that we've seen that was added to the dictionary if the last match was also added
-    let mut max_distance_last_add = 0;
+    let mut max_length_last_add = 0;
     let mut current_offset: u32 = 0;
 
     const LAST_ADDED: u16 = 0x8000;
+
+    let mut min_len = u32::MAX;
 
     for i in 0..token_blocks.len() {
         let token_block = &token_blocks[i];
@@ -55,15 +57,17 @@ pub fn estimate_add_policy(token_blocks: &[PreflateTokenBlock]) -> DictionaryAdd
                                 block_4k = false;
                             }
 
+                            min_len = std::cmp::min(min_len, r.len());
+
                             let previous_match =
                                 current_window[(current_offset - r.dist()) as usize & WINDOW_MASK];
 
                             let match_length = u32::from(previous_match & !LAST_ADDED);
 
-                            max_distance = std::cmp::max(max_distance, match_length);
+                            max_length = std::cmp::max(max_length, match_length);
                             if (previous_match & LAST_ADDED) == 0 {
-                                max_distance_last_add =
-                                    std::cmp::max(max_distance_last_add, match_length);
+                                max_length_last_add =
+                                    std::cmp::max(max_length_last_add, match_length);
                             }
 
                             current_window[current_offset as usize & WINDOW_MASK] = 0;
@@ -81,12 +85,12 @@ pub fn estimate_add_policy(token_blocks: &[PreflateTokenBlock]) -> DictionaryAdd
         }
     }
 
-    if max_distance == 0 && block_4k {
+    if max_length == 0 && block_4k {
         DictionaryAddPolicy::AddFirstExcept4kBoundary
-    } else if max_distance_last_add < max_distance {
-        DictionaryAddPolicy::AddFirstAndLast(max_distance_last_add as u16)
-    } else if max_distance < 258 {
-        DictionaryAddPolicy::AddFirst(max_distance as u16)
+    } else if max_length_last_add < max_length {
+        DictionaryAddPolicy::AddFirstAndLast(max_length_last_add as u16)
+    } else if max_length < 258 {
+        DictionaryAddPolicy::AddFirst(max_length as u16)
     } else {
         DictionaryAddPolicy::AddAll
     }
@@ -94,8 +98,7 @@ pub fn estimate_add_policy(token_blocks: &[PreflateTokenBlock]) -> DictionaryAdd
 
 #[test]
 fn verify_miniz1_recognition() {
-    let f = crate::process::read_file("sample1.bin");
-    let v = miniz_oxide::deflate::compress_to_vec(&f, 1);
+    let v = crate::process::read_file("compressed_minizoxide_level1.deflate");
 
     let contents = crate::process::parse_deflate(&v, 1).unwrap();
 
@@ -139,5 +142,18 @@ fn verify_zlibng_level_recognition() {
         let add_policy = estimate_add_policy(&contents.blocks);
 
         assert_eq!(add_policy, levels[i - 1]);
+    }
+}
+
+/// libflate always adds all matches to the dictionary
+#[test]
+fn verify_libflate_level_recognition() {
+    for i in 1..=9 {
+        let v = crate::process::read_file(&format!("compressed_libdeflate_level{}.deflate", i));
+
+        let contents = crate::process::parse_deflate(&v, 1).unwrap();
+        let add_policy = estimate_add_policy(&contents.blocks);
+
+        assert_eq!(add_policy, DictionaryAddPolicy::AddAll);
     }
 }

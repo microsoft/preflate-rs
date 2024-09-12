@@ -2,13 +2,19 @@ use crate::hash_chain::{HashChain, HashChainAbs, HashChainNormalize, HashChainNo
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Default)]
 pub enum HashAlgorithm {
+    #[default]
+    None,
     Zlib {
         hash_mask: u16,
         hash_shift: u32,
     },
-    #[default]
     MiniZFast,
+
+    /// Libflate 4 byte hash only
+    Libdeflate4Fast,
+    /// Libflate 4 byte hash with 3 byte secondary hash
     Libdeflate4,
+
     ZlibNG,
     RandomVector,
     Crc32cHash,
