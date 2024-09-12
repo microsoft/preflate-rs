@@ -76,10 +76,33 @@ impl HashImplementation for MiniZHash {
     }
 }
 
+/// Fast version of Libflate hash that doesn't use a secondary 3
+/// byte hash. This is used by level 1 compression.
 #[derive(Default, Copy, Clone)]
-pub struct LibdeflateRotatingHash4 {}
+pub struct LibdeflateHash4Fast {}
 
-impl HashImplementation for LibdeflateRotatingHash4 {
+impl HashImplementation for LibdeflateHash4Fast {
+    type HashChainType = HashChainNormalize<LibdeflateHash4Fast>;
+
+    fn get_hash(&self, b: &[u8]) -> u16 {
+        let hash = u32::from_le_bytes(b[..4].try_into().unwrap());
+
+        (hash.wrapping_mul(0x1E35A7BD) >> 16) as u16
+    }
+
+    fn num_hash_bytes() -> usize {
+        4
+    }
+
+    fn new_hash_chain(self) -> Self::HashChainType {
+        HashChainNormalize::<LibdeflateHash4Fast>::new(self)
+    }
+}
+
+#[derive(Default, Copy, Clone)]
+pub struct LibdeflateHash4 {}
+
+impl HashImplementation for LibdeflateHash4 {
     type HashChainType = HashChainNormalizeLibflate4;
 
     fn get_hash(&self, b: &[u8]) -> u16 {
@@ -101,10 +124,10 @@ impl HashImplementation for LibdeflateRotatingHash4 {
 /// as a secondary hash value to find 3 byte matches within the first 4096K if
 /// we fail to find any four byte matches with the primary hash.
 #[derive(Default, Copy, Clone)]
-pub struct LibdeflateRotatingHash3 {}
+pub struct LibdeflateHash3Secondary {}
 
-impl HashImplementation for LibdeflateRotatingHash3 {
-    type HashChainType = HashChainNormalize<LibdeflateRotatingHash3>;
+impl HashImplementation for LibdeflateHash3Secondary {
+    type HashChainType = HashChainNormalize<LibdeflateHash3Secondary>;
 
     fn get_hash(&self, b: &[u8]) -> u16 {
         let hash = u32::from(b[0]) | (u32::from(b[1]) << 8) | (u32::from(b[2]) << 16);

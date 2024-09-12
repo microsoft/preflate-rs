@@ -173,7 +173,7 @@ impl PreflateParameters {
                 encoder.encode_value(HASH_ALGORITHM_MINIZ_FAST, 4);
             }
             HashAlgorithm::Libdeflate4Fast => {
-                encoder.encode_value(HASH_ALGORITHM_LIBDEFLATE4, 4);
+                encoder.encode_value(HASH_ALGORITHM_LIBDEFLATE4_FAST, 4);
             }
             HashAlgorithm::Libdeflate4 => {
                 encoder.encode_value(HASH_ALGORITHM_LIBDEFLATE4, 4);

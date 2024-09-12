@@ -10,7 +10,7 @@ use default_boxed::DefaultBoxed;
 
 use crate::{
     bit_helper::DebugHash,
-    hash_algorithm::{HashImplementation, LibdeflateRotatingHash3, LibdeflateRotatingHash4},
+    hash_algorithm::{HashImplementation, LibdeflateHash3Secondary, LibdeflateHash4},
     preflate_input::PreflateInput,
 };
 
@@ -333,8 +333,8 @@ impl<H: HashImplementation> HashChain for HashChainNormalize<H> {
 /// implementation of the hash chain that uses the libdeflate rotating hash.
 /// This consists of two hash tables, one for length 3 and one for length 4.
 pub struct HashChainNormalizeLibflate4 {
-    hash_table: Box<HashTable<LibdeflateRotatingHash4, InternalPositionRel>>,
-    hash_table_3: Box<HashTable<LibdeflateRotatingHash3, InternalPositionRel>>,
+    hash_table: Box<HashTable<LibdeflateHash4, InternalPositionRel>>,
+    hash_table_3: Box<HashTable<LibdeflateHash3Secondary, InternalPositionRel>>,
     total_shift: i32,
 }
 

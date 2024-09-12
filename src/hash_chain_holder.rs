@@ -6,7 +6,7 @@
 
 use crate::bit_helper::DebugHash;
 use crate::hash_algorithm::{
-    Crc32cHash, HashAlgorithm, HashImplementation, LibdeflateRotatingHash4, MiniZHash,
+    Crc32cHash, HashAlgorithm, HashImplementation, LibdeflateHash4, LibdeflateHash4Fast, MiniZHash,
     RandomVectorHash, ZlibNGHash, ZlibRotatingHash,
 };
 use crate::hash_chain::{
@@ -45,8 +45,11 @@ pub fn new_hash_chain_holder(params: &TokenPredictorParameters) -> Box<dyn HashC
             },
         )),
         HashAlgorithm::MiniZFast => Box::new(HashChainHolderImpl::new(params, MiniZHash {})),
-        HashAlgorithm::Libdeflate4 | HashAlgorithm::Libdeflate4Fast => {
-            Box::new(HashChainHolderImpl::new(params, LibdeflateRotatingHash4 {}))
+        HashAlgorithm::Libdeflate4 => {
+            Box::new(HashChainHolderImpl::new(params, LibdeflateHash4 {}))
+        }
+        HashAlgorithm::Libdeflate4Fast => {
+            Box::new(HashChainHolderImpl::new(params, LibdeflateHash4Fast {}))
         }
 
         HashAlgorithm::ZlibNG => Box::new(HashChainHolderImpl::new(params, ZlibNGHash {})),
@@ -97,7 +100,8 @@ pub trait HashChainHolder {
     fn checksum(&self, checksum: &mut DebugHash);
 }
 
-/// empty implementation of HashChainHolder if there is no hash
+/// empty implementation of HashChainHolder if there is no dictionary
+/// being used (for example the file is stored or huffman only encoded)
 impl HashChainHolder for () {
     fn update_hash(&mut self, _length: u32, _input: &PreflateInput) {}
 
@@ -107,7 +111,7 @@ impl HashChainHolder for () {
         _max_depth: u32,
         _input: &PreflateInput,
     ) -> MatchResult {
-        unimplemented!()
+        MatchResult::NoMoreMatchesFound
     }
 
     fn match_token_1(
@@ -116,7 +120,7 @@ impl HashChainHolder for () {
         _max_depth: u32,
         _input: &PreflateInput,
     ) -> MatchResult {
-        unimplemented!()
+        MatchResult::NoMoreMatchesFound
     }
 
     fn calculate_hops(

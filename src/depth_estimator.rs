@@ -55,16 +55,11 @@ impl<H: HashImplementation> HashTableDepthEstimatorImpl<H> {
         l
     }
 
-    fn internal_update_hash(&mut self, chars: &[u8], pos: u32, mut length: u32) {
+    fn internal_update_hash(&mut self, chars: &[u8], pos: u32, length: u32) {
         debug_assert!(length as usize <= chars.len());
-
         if length as usize + H::num_hash_bytes() - 1 >= chars.len() {
-            if chars.len() < H::num_hash_bytes() {
-                // not even enough bytes left to do a single hash
-                return;
-            } else {
-                length = (chars.len() - (H::num_hash_bytes() - 1)) as u32;
-            }
+            // reached on of the stream so there will be no more matches
+            return;
         }
 
         let mut pos = pos as u16;
@@ -122,16 +117,18 @@ impl<H: HashImplementation> HashTableDepthEstimator for HashTableDepthEstimatorI
 /// but then continues with the next 4 bytes. This is used by libflate.
 #[derive(DefaultBoxed)]
 struct HashTableDepthEstimatorLibflate {
-    length4: HashTableDepthEstimatorImpl<LibdeflateRotatingHash4>,
+    length4: HashTableDepthEstimatorImpl<LibdeflateHash4>,
     head3: [u32; 65536],
 }
 
-const LIB_DEFLATE3_HASH: LibdeflateRotatingHash3 = LibdeflateRotatingHash3 {};
+const LIB_DEFLATE3_HASH: LibdeflateHash3Secondary = LibdeflateHash3Secondary {};
 
 impl HashTableDepthEstimatorLibflate {
-    fn internal_update_hash3(&mut self, chars: &[u8], pos: u32, mut length: u32) {
+    fn internal_update_hash3(&mut self, chars: &[u8], pos: u32, length: u32) {
+        debug_assert!(length as usize <= chars.len());
         if length as usize + 3 - 1 >= chars.len() {
-            length = (chars.len() - 3 - 1) as u32;
+            // reached on of the stream so there will be no more matches
+            return;
         }
 
         for i in 0..length {
@@ -188,9 +185,7 @@ pub fn new_depth_estimator(hash_algorithm: HashAlgorithm) -> Box<dyn HashTableDe
         }),
         HashAlgorithm::MiniZFast => HashTableDepthEstimatorImpl::box_new(MiniZHash {}),
         HashAlgorithm::Libdeflate4 => HashTableDepthEstimatorLibflate::default_boxed(),
-        HashAlgorithm::Libdeflate4Fast => {
-            HashTableDepthEstimatorImpl::box_new(LibdeflateRotatingHash4 {})
-        }
+        HashAlgorithm::Libdeflate4Fast => HashTableDepthEstimatorImpl::box_new(LibdeflateHash4 {}),
 
         HashAlgorithm::ZlibNG => HashTableDepthEstimatorImpl::box_new(ZlibNGHash {}),
         HashAlgorithm::RandomVector => HashTableDepthEstimatorImpl::box_new(RandomVectorHash {}),
