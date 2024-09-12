@@ -1,14 +1,20 @@
-use crate::hash_chain::{HashChain, HashChainAbs, HashChainNormalize, HashChainNormalizeLibflate4};
+use crate::hash_chain::{HashChain, HashChainNormalize, HashChainNormalizeLibflate4};
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Default)]
 pub enum HashAlgorithm {
+    #[default]
+    None,
     Zlib {
         hash_mask: u16,
         hash_shift: u32,
     },
-    #[default]
     MiniZFast,
+
+    /// Libflate 4 byte hash only
+    Libdeflate4Fast,
+    /// Libflate 4 byte hash with 3 byte secondary hash
     Libdeflate4,
+
     ZlibNG,
     RandomVector,
     Crc32cHash,
@@ -70,14 +76,37 @@ impl HashImplementation for MiniZHash {
     }
 }
 
+/// Fast version of Libflate hash that doesn't use a secondary 3
+/// byte hash. This is used by level 1 compression.
 #[derive(Default, Copy, Clone)]
-pub struct LibdeflateRotatingHash4 {}
+pub struct LibdeflateHash4Fast {}
 
-impl HashImplementation for LibdeflateRotatingHash4 {
+impl HashImplementation for LibdeflateHash4Fast {
+    type HashChainType = HashChainNormalize<LibdeflateHash4Fast>;
+
+    fn get_hash(&self, b: &[u8]) -> u16 {
+        let hash = u32::from_le_bytes(b[..4].try_into().unwrap());
+
+        (hash.wrapping_mul(0x1E35A7BD) >> 16) as u16
+    }
+
+    fn num_hash_bytes() -> usize {
+        4
+    }
+
+    fn new_hash_chain(self) -> Self::HashChainType {
+        HashChainNormalize::<LibdeflateHash4Fast>::new(self)
+    }
+}
+
+#[derive(Default, Copy, Clone)]
+pub struct LibdeflateHash4 {}
+
+impl HashImplementation for LibdeflateHash4 {
     type HashChainType = HashChainNormalizeLibflate4;
 
     fn get_hash(&self, b: &[u8]) -> u16 {
-        let hash = u32::from_le_bytes([b[0], b[1], b[2], b[3]]);
+        let hash = u32::from_le_bytes(b[..4].try_into().unwrap());
 
         (hash.wrapping_mul(0x1E35A7BD) >> 16) as u16
     }
@@ -95,10 +124,10 @@ impl HashImplementation for LibdeflateRotatingHash4 {
 /// as a secondary hash value to find 3 byte matches within the first 4096K if
 /// we fail to find any four byte matches with the primary hash.
 #[derive(Default, Copy, Clone)]
-pub struct LibdeflateRotatingHash3 {}
+pub struct LibdeflateHash3Secondary {}
 
-impl HashImplementation for LibdeflateRotatingHash3 {
-    type HashChainType = HashChainNormalize<LibdeflateRotatingHash3>;
+impl HashImplementation for LibdeflateHash3Secondary {
+    type HashChainType = HashChainNormalize<LibdeflateHash3Secondary>;
 
     fn get_hash(&self, b: &[u8]) -> u16 {
         let hash = u32::from(b[0]) | (u32::from(b[1]) << 8) | (u32::from(b[2]) << 16);
@@ -122,7 +151,7 @@ impl HashImplementation for ZlibNGHash {
     type HashChainType = HashChainNormalize<ZlibNGHash>;
 
     fn get_hash(&self, b: &[u8]) -> u16 {
-        let hash = u32::from_le_bytes([b[0], b[1], b[2], b[3]]);
+        let hash = u32::from_le_bytes(b[..4].try_into().unwrap());
 
         (hash.wrapping_mul(2654435761) >> 16) as u16
     }
@@ -227,7 +256,7 @@ const RANDOM_VECTOR: [u16; 768] = [
 ];
 
 impl HashImplementation for RandomVectorHash {
-    type HashChainType = HashChainAbs<RandomVectorHash>;
+    type HashChainType = HashChainNormalize<RandomVectorHash>;
 
     fn get_hash(&self, b: &[u8]) -> u16 {
         RANDOM_VECTOR[b[0] as usize]

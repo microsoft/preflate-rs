@@ -8,18 +8,15 @@
 /// Getting the parameters correct means that the resulting diff between the deflate stream
 /// and the predicted deflate stream will be as small as possible.
 use crate::{
+    add_policy_estimator::DictionaryAddPolicy,
+    depth_estimator::{new_depth_estimator, HashTableDepthEstimator},
     hash_algorithm::HashAlgorithm,
-    hash_chain::DictionaryAddPolicy,
-    hash_chain_holder::{new_hash_chain_holder, HashChainHolder},
     preflate_constants,
     preflate_input::PreflateInput,
-    preflate_parameter_estimator::PreflateStrategy,
     preflate_parse_config::{
         MatchingType, SLOW_PREFLATE_PARSER_SETTINGS, ZLIB_PREFLATE_PARSER_SETTINGS,
     },
     preflate_token::{BlockType, PreflateToken, PreflateTokenBlock, PreflateTokenReference},
-    skip_length_estimator::estimate_add_policy,
-    token_predictor::TokenPredictorParameters,
 };
 
 #[derive(Default)]
@@ -40,8 +37,7 @@ pub struct CompLevelInfo {
 
 struct CandidateInfo {
     hash_algorithm: HashAlgorithm,
-    add_policy: DictionaryAddPolicy,
-    hash_chain: Box<dyn HashChainHolder>,
+    depth_estimator: Box<dyn HashTableDepthEstimator>,
 
     longest_dist_at_hop_0: u32,
     longest_dist_at_hop_1_plus: u32,
@@ -49,44 +45,18 @@ struct CandidateInfo {
 }
 
 impl CandidateInfo {
-    fn new(
-        add_policy: DictionaryAddPolicy,
-        hash_algorithm: HashAlgorithm,
-        window_bits: u32,
-    ) -> Self {
-        let params = TokenPredictorParameters {
-            hash_algorithm,
-            add_policy,
-            matches_to_start_detected: false,
-            very_far_matches_detected: false,
-            window_bits,
-            strategy: PreflateStrategy::Default,
-            nice_length: 0,
-            max_token_count: 0,
-            zlib_compatible: false,
-            max_dist_3_matches: 0,
-            matching_type: MatchingType::Greedy,
-            max_chain: 0,
-            min_len: 0,
-        };
-
+    fn new(hash_algorithm: HashAlgorithm) -> Self {
         Self {
-            add_policy,
             hash_algorithm,
-            hash_chain: new_hash_chain_holder(&params),
+            depth_estimator: new_depth_estimator(hash_algorithm),
             longest_dist_at_hop_0: 0,
             longest_dist_at_hop_1_plus: 0,
             max_chain_found: 0,
         }
     }
 
-    fn match_depth(
-        &mut self,
-        token: PreflateTokenReference,
-        window_size: u32,
-        input: &PreflateInput,
-    ) -> bool {
-        let mdepth = self.hash_chain.match_depth(token, window_size, input);
+    fn match_depth(&mut self, token: PreflateTokenReference, input: &PreflateInput) -> bool {
+        let mdepth = self.depth_estimator.match_depth(token, input);
 
         // remove element if the match was impossible due to matching the
         // the hash depth or because in fast mode we can't match partial words
@@ -140,6 +110,8 @@ struct CompLevelEstimatorState<'a> {
     /// candidates for checking for which hash algorithm to use
     candidates: Vec<Box<CandidateInfo>>,
 
+    add_policy: DictionaryAddPolicy,
+
     blocks: &'a Vec<PreflateTokenBlock>,
     wsize: u16,
     reference_count: u32,
@@ -155,74 +127,56 @@ impl<'a> CompLevelEstimatorState<'a> {
         wbits: u32,
         mem_level: u32,
         plain_text: &'a [u8],
+        add_policy: DictionaryAddPolicy,
+        min_len: u32,
         blocks: &'a Vec<PreflateTokenBlock>,
     ) -> Self {
-        let add_policy = estimate_add_policy(blocks);
-
         let hash_bits = mem_level + 7;
         let mem_hash_shift = (hash_bits + 2) / 3;
         let mem_hash_mask = ((1u32 << hash_bits) - 1) as u16;
-
-        let mut hashparameters = vec![(5, 0x7fff), (4, 2047), (4, 4095)];
-
-        if !hashparameters
-            .iter()
-            .any(|&(a, b)| a == mem_hash_shift && b == mem_hash_mask)
-        {
-            hashparameters.push((mem_hash_shift, mem_hash_mask));
-        }
 
         let input = PreflateInput::new(plain_text);
 
         let mut candidates: Vec<Box<CandidateInfo>> = Vec::new();
 
-        candidates.push(Box::new(CandidateInfo::new(
-            DictionaryAddPolicy::AddFirst(0),
-            HashAlgorithm::MiniZFast,
-            wbits,
-        )));
+        if min_len == 3 {
+            let mut hashparameters = vec![(5, 0x7fff), (4, 2047), (4, 4095)];
 
-        for (hash_shift, hash_mask) in [(5, 32767), (4, 2047)] {
-            candidates.push(Box::new(CandidateInfo::new(
-                add_policy,
-                HashAlgorithm::Zlib {
+            if !hashparameters
+                .iter()
+                .any(|&(a, b)| a == mem_hash_shift && b == mem_hash_mask)
+            {
+                hashparameters.push((mem_hash_shift, mem_hash_mask));
+            }
+
+            candidates.push(Box::new(CandidateInfo::new(HashAlgorithm::MiniZFast)));
+
+            for (hash_shift, hash_mask) in [(5, 32767), (4, 2047)] {
+                candidates.push(Box::new(CandidateInfo::new(HashAlgorithm::Zlib {
                     hash_mask,
                     hash_shift,
-                },
-                wbits,
-            )));
+                })));
+            }
+
+            // LibFlate4 candidate
+            candidates.push(Box::new(CandidateInfo::new(HashAlgorithm::Libdeflate4)));
+
+            // RandomVector candidate
+            candidates.push(Box::new(CandidateInfo::new(HashAlgorithm::RandomVector)));
+        } else {
+            // Libflate4 fast (only 4 bytes or more)
+            candidates.push(Box::new(CandidateInfo::new(HashAlgorithm::Libdeflate4Fast)));
+
+            // ZlibNG candidate
+            candidates.push(Box::new(CandidateInfo::new(HashAlgorithm::ZlibNG)));
+
+            // Crc32c candidate
+            candidates.push(Box::new(CandidateInfo::new(HashAlgorithm::Crc32cHash)));
         }
-
-        // LibFlate4 candidate
-        candidates.push(Box::new(CandidateInfo::new(
-            add_policy,
-            HashAlgorithm::Libdeflate4,
-            wbits,
-        )));
-
-        // ZlibNG candidate
-        candidates.push(Box::new(CandidateInfo::new(
-            add_policy,
-            HashAlgorithm::ZlibNG,
-            wbits,
-        )));
-
-        // RandomVector candidate
-        candidates.push(Box::new(CandidateInfo::new(
-            add_policy,
-            HashAlgorithm::RandomVector,
-            wbits,
-        )));
-
-        // Crc32c candidate
-        candidates.push(Box::new(CandidateInfo::new(
-            add_policy,
-            HashAlgorithm::Crc32cHash,
-            wbits,
-        )));
 
         CompLevelEstimatorState {
             input,
+            add_policy: add_policy,
             candidates,
             blocks,
             wsize: 1 << wbits,
@@ -230,14 +184,15 @@ impl<'a> CompLevelEstimatorState<'a> {
             unfound_references: 0,
             match_to_start: false,
             longest_len_3_dist: 0,
-            min_len: 258,
+            min_len: min_len,
         }
     }
 
     /// updates all the active candidates with the current hash and advance it
     fn update_candidate_hashes(&mut self, length: u32) {
         for i in &mut self.candidates {
-            i.hash_chain.update_hash_with_depth(length, &self.input);
+            i.depth_estimator
+                .update_hash(self.add_policy, &self.input, length);
         }
 
         self.input.advance(length);
@@ -251,16 +206,12 @@ impl<'a> CompLevelEstimatorState<'a> {
             return;
         }
 
-        let window_size = self.window_size();
-
         self.candidates
-            .retain_mut(|c| c.match_depth(token, window_size, &self.input));
+            .retain_mut(|c| c.match_depth(token, &self.input));
 
         if token.dist() == self.input.pos() {
             self.match_to_start = true;
         }
-
-        self.min_len = std::cmp::min(self.min_len, token.len());
 
         if token.len() == 3 {
             self.longest_len_3_dist = std::cmp::max(self.longest_len_3_dist, token.dist());
@@ -270,14 +221,14 @@ impl<'a> CompLevelEstimatorState<'a> {
     fn check_dump(&mut self) {
         for (_i, b) in self.blocks.iter().enumerate() {
             if b.block_type == BlockType::Stored {
-                for _i in 0..b.uncompressed_len {
+                for _i in 0..b.uncompressed.len() {
                     self.update_candidate_hashes(1);
                 }
                 continue;
             }
             for (_j, t) in b.tokens.iter().enumerate() {
                 match t {
-                    PreflateToken::Literal => {
+                    PreflateToken::Literal(_) => {
                         self.update_candidate_hashes(1);
                     }
                     &PreflateToken::Reference(r) => {
@@ -303,13 +254,12 @@ impl<'a> CompLevelEstimatorState<'a> {
         let mut match_type = MatchingType::Greedy;
         let mut nice_length = 258;
 
-        let add_policy = candidate.add_policy;
         let max_chain = candidate.max_chain_found() + 1;
         let hash_algorithm = candidate.hash_algorithm();
         let longest_dist_at_hop_0 = candidate.longest_dist_at_hop_0;
         let longest_dist_at_hop_1_plus = candidate.longest_dist_at_hop_1_plus;
 
-        match candidate.add_policy {
+        match self.add_policy {
             DictionaryAddPolicy::AddFirst(_)
             | DictionaryAddPolicy::AddFirstAndLast(_)
             | DictionaryAddPolicy::AddFirstExcept4kBoundary => {
@@ -349,7 +299,7 @@ impl<'a> CompLevelEstimatorState<'a> {
             matches_to_start_detected: self.match_to_start,
             very_far_matches_detected: very_far_matches,
             max_dist_3_matches: self.longest_len_3_dist as u16,
-            add_policy,
+            add_policy: self.add_policy,
             match_type,
             nice_length,
             max_chain,
@@ -357,7 +307,8 @@ impl<'a> CompLevelEstimatorState<'a> {
             hash_algorithm,
             zlib_compatible: !self.match_to_start
                 && !very_far_matches
-                && (self.longest_len_3_dist < 4096 || add_policy != DictionaryAddPolicy::AddAll),
+                && (self.longest_len_3_dist < 4096
+                    || self.add_policy != DictionaryAddPolicy::AddAll),
         })
     }
 
@@ -369,10 +320,13 @@ impl<'a> CompLevelEstimatorState<'a> {
 pub fn estimate_preflate_comp_level(
     wbits: u32,
     mem_level: u32,
+    min_len: u32,
     plain_text: &[u8],
+    add_policy: DictionaryAddPolicy,
     blocks: &Vec<PreflateTokenBlock>,
 ) -> anyhow::Result<CompLevelInfo> {
-    let mut state = CompLevelEstimatorState::new(wbits, mem_level, plain_text, blocks);
+    let mut state =
+        CompLevelEstimatorState::new(wbits, mem_level, plain_text, add_policy, min_len, blocks);
     state.check_dump();
     state.recommend()
 }

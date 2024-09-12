@@ -7,10 +7,10 @@
 use anyhow::Context;
 
 use crate::{
+    add_policy_estimator::DictionaryAddPolicy,
     bit_helper::DebugHash,
     cabac_codec::{decode_difference, encode_difference},
     hash_algorithm::HashAlgorithm,
-    hash_chain::DictionaryAddPolicy,
     hash_chain_holder::{new_hash_chain_holder, HashChainHolder, MatchResult},
     preflate_constants::MIN_MATCH,
     preflate_input::PreflateInput,
@@ -62,7 +62,7 @@ pub struct TokenPredictorParameters {
 }
 
 impl<'a> TokenPredictor<'a> {
-    pub fn new(uncompressed: &'a [u8], params: &TokenPredictorParameters) -> Self {
+    pub fn new(uncompressed: PreflateInput<'a>, params: &TokenPredictorParameters) -> Self {
         // Implement constructor logic for PreflateTokenPredictor
         // Initialize fields as necessary
         // Create and initialize PreflatePredictorState, PreflateHashChainExt, and PreflateSeqChain instances
@@ -76,11 +76,12 @@ impl<'a> TokenPredictor<'a> {
             pending_reference: None,
             current_token_count: 0,
             max_token_count: params.max_token_count.into(),
-            input: PreflateInput::new(uncompressed),
+            input: uncompressed,
         }
     }
 
     pub fn checksum(&self) -> DebugHash {
+        assert!(VERIFY);
         let mut c = DebugHash::default();
         self.state.checksum(&mut c);
         c
@@ -103,11 +104,11 @@ impl<'a> TokenPredictor<'a> {
         );
 
         if block.block_type == BlockType::Stored {
-            codec.encode_value(block.uncompressed_len as u16, 16);
+            codec.encode_value(block.uncompressed.len() as u16, 16);
 
             codec.encode_correction(CodecCorrection::NonZeroPadding, block.padding_bits.into());
 
-            for _i in 0..block.uncompressed_len {
+            for _i in 0..block.uncompressed.len() {
                 self.state.update_hash(1, &self.input);
                 self.input.advance(1);
             }
@@ -128,7 +129,7 @@ impl<'a> TokenPredictor<'a> {
             codec.encode_correction(CodecCorrection::TokenCount, 0);
         }
 
-        codec.encode_verify_state("start", self.checksum().hash());
+        codec.encode_verify_state("start", if VERIFY { self.checksum().hash() } else { 0 });
 
         for i in 0..block.tokens.len() {
             let target_token = &block.tokens[i];
@@ -170,9 +171,9 @@ impl<'a> TokenPredictor<'a> {
             // println!("B{}T{}: TGT({},{}) -> PRD({},{})", blockno, i, target_token.len, target_token.dist, predicted_token.len, predicted_token.dist);
 
             match target_token {
-                PreflateToken::Literal => {
+                PreflateToken::Literal(_) => {
                     match predicted_token {
-                        PreflateToken::Literal => {
+                        PreflateToken::Literal(_) => {
                             codec.encode_misprediction(
                                 CodecMisprediction::LiteralPredictionWrong,
                                 false,
@@ -189,7 +190,7 @@ impl<'a> TokenPredictor<'a> {
                 }
                 PreflateToken::Reference(target_ref) => {
                     let predicted_ref = match predicted_token {
-                        PreflateToken::Literal => {
+                        PreflateToken::Literal(_) => {
                             // target had a reference, so we were wrong if we predicted a literal
                             codec.encode_misprediction(
                                 CodecMisprediction::LiteralPredictionWrong,
@@ -250,7 +251,7 @@ impl<'a> TokenPredictor<'a> {
             self.commit_token(target_token, None);
         }
 
-        codec.encode_verify_state("done", self.checksum().hash());
+        codec.encode_verify_state("done", if VERIFY { self.checksum().hash() } else { 0 });
 
         Ok(())
     }
@@ -276,11 +277,13 @@ impl<'a> TokenPredictor<'a> {
         match bt {
             BT_STORED => {
                 block = PreflateTokenBlock::new(BlockType::Stored);
-                block.uncompressed_len = codec.decode_value(16).into();
+                let uncompressed_len = codec.decode_value(16).into();
                 block.padding_bits = codec.decode_correction(CodecCorrection::NonZeroPadding) as u8;
+                block.uncompressed.reserve(uncompressed_len as usize);
 
-                for _i in 0..block.uncompressed_len {
-                    self.state.update_hash(1, &mut self.input);
+                for _i in 0..uncompressed_len {
+                    block.uncompressed.push(self.input.cur_char(0));
+                    self.state.update_hash(1, &self.input);
                     self.input.advance(1);
                 }
                 return Ok(block);
@@ -305,7 +308,7 @@ impl<'a> TokenPredictor<'a> {
 
         block.tokens.reserve(blocksize as usize);
 
-        codec.decode_verify_state("start", self.checksum().hash());
+        codec.decode_verify_state("start", if VERIFY { self.checksum().hash() } else { 0 });
 
         while !self.input_eof() && self.current_token_count < blocksize {
             codec.decode_verify_state(
@@ -319,11 +322,11 @@ impl<'a> TokenPredictor<'a> {
 
             let mut predicted_ref: PreflateTokenReference;
             match self.predict_token() {
-                PreflateToken::Literal => {
+                PreflateToken::Literal(l) => {
                     let not_ok =
                         codec.decode_misprediction(CodecMisprediction::LiteralPredictionWrong);
                     if !not_ok {
-                        self.commit_token(&PreflateToken::Literal, Some(&mut block));
+                        self.commit_token(&PreflateToken::Literal(l), Some(&mut block));
                         continue;
                     }
 
@@ -338,7 +341,10 @@ impl<'a> TokenPredictor<'a> {
                     let not_ok =
                         codec.decode_misprediction(CodecMisprediction::ReferencePredictionWrong);
                     if not_ok {
-                        self.commit_token(&PreflateToken::Literal, Some(&mut block));
+                        self.commit_token(
+                            &PreflateToken::Literal(self.input.cur_char(0)),
+                            Some(&mut block),
+                        );
                         continue;
                     }
 
@@ -382,7 +388,7 @@ impl<'a> TokenPredictor<'a> {
             self.commit_token(&PreflateToken::Reference(predicted_ref), Some(&mut block));
         }
 
-        codec.decode_verify_state("done", self.checksum().hash());
+        codec.decode_verify_state("done", if VERIFY { self.checksum().hash() } else { 0 });
 
         Ok(block)
     }
@@ -394,27 +400,27 @@ impl<'a> TokenPredictor<'a> {
 
     fn predict_token(&mut self) -> PreflateToken {
         if self.input.pos() == 0 || self.input.remaining() < MIN_MATCH {
-            return PreflateToken::Literal;
+            return PreflateToken::Literal(self.input.cur_char(0));
         }
 
         let m = if let Some(pending) = self.pending_reference {
             MatchResult::Success(pending)
         } else {
             self.state
-                .match_token(0, 0, self.params.max_chain, &self.input)
+                .match_token_0(0, self.params.max_chain, &self.input)
         };
 
         self.pending_reference = None;
 
         if let MatchResult::Success(match_token) = m {
             if match_token.len() < MIN_MATCH {
-                return PreflateToken::Literal;
+                return PreflateToken::Literal(self.input.cur_char(0));
             }
 
             // match is too small and far way to be worth encoding as a distance/length pair.
             if match_token.len() == 3 && match_token.dist() > self.params.max_dist_3_matches.into()
             {
-                return PreflateToken::Literal;
+                return PreflateToken::Literal(self.input.cur_char(0));
             }
 
             // Check for a longer match that starts at the next byte, in which case we should
@@ -436,7 +442,7 @@ impl<'a> TokenPredictor<'a> {
 
                     let match_next =
                         self.state
-                            .match_token(match_token.len(), 1, max_depth, &self.input);
+                            .match_token_1(match_token.len(), max_depth, &self.input);
 
                     if let MatchResult::Success(m) = match_next {
                         if m.len() > match_token.len() {
@@ -445,7 +451,7 @@ impl<'a> TokenPredictor<'a> {
                             if !self.params.zlib_compatible {
                                 self.pending_reference = None;
                             }
-                            return PreflateToken::Literal;
+                            return PreflateToken::Literal(self.input.cur_char(0));
                         }
                     }
                 }
@@ -453,7 +459,7 @@ impl<'a> TokenPredictor<'a> {
 
             PreflateToken::Reference(match_token)
         } else {
-            PreflateToken::Literal
+            PreflateToken::Literal(self.input.cur_char(0))
         }
     }
 
@@ -479,7 +485,7 @@ impl<'a> TokenPredictor<'a> {
 
         let match_token = self
             .state
-            .match_token(0, 0, self.params.max_chain, &self.input);
+            .match_token_0(0, self.params.max_chain, &self.input);
 
         self.pending_reference = None;
 
@@ -497,9 +503,9 @@ impl<'a> TokenPredictor<'a> {
 
     fn commit_token(&mut self, token: &PreflateToken, block: Option<&mut PreflateTokenBlock>) {
         match token {
-            PreflateToken::Literal => {
+            PreflateToken::Literal(lit) => {
                 if let Some(block) = block {
-                    block.add_literal(self.input.cur_char(0));
+                    block.add_literal(*lit);
                 }
 
                 self.state.update_hash(1, &self.input);
@@ -510,7 +516,7 @@ impl<'a> TokenPredictor<'a> {
                     block.add_reference(t.len(), t.dist(), t.get_irregular258());
                 }
 
-                self.state.update_hash(t.len(), &mut self.input);
+                self.state.update_hash(t.len(), &self.input);
                 self.input.advance(t.len());
             }
         }

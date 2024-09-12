@@ -16,13 +16,7 @@ use crate::{
     preflate_token::{BlockType, PreflateToken, PreflateTokenBlock},
 };
 
-pub struct DeflateWriter<'a> {
-    /// original uncompressed plain text
-    plain_text: &'a [u8],
-
-    /// how far we have gotten through the plain text
-    plain_text_index: usize,
-
+pub struct DeflateWriter {
     /// bit writer to write partial bits to output
     bitwriter: BitWriter,
 
@@ -30,12 +24,10 @@ pub struct DeflateWriter<'a> {
     output: Vec<u8>,
 }
 
-impl<'a> DeflateWriter<'a> {
-    pub fn new(plain_text: &'a [u8]) -> Self {
+impl DeflateWriter {
+    pub fn new() -> Self {
         Self {
             output: Vec::new(),
-            plain_text,
-            plain_text_index: 0,
             bitwriter: BitWriter::default(),
         }
     }
@@ -55,16 +47,11 @@ impl<'a> DeflateWriter<'a> {
                 self.bitwriter.flush_whole_bytes(&mut self.output);
 
                 self.output
-                    .extend_from_slice(&(block.uncompressed_len as u16).to_le_bytes());
+                    .extend_from_slice(&(block.uncompressed.len() as u16).to_le_bytes());
                 self.output
-                    .extend_from_slice(&(!block.uncompressed_len as u16).to_le_bytes());
+                    .extend_from_slice(&(!block.uncompressed.len() as u16).to_le_bytes());
 
-                self.output.extend_from_slice(
-                    &self.plain_text[self.plain_text_index
-                        ..self.plain_text_index + block.uncompressed_len as usize],
-                );
-
-                self.plain_text_index += block.uncompressed_len as usize;
+                self.output.extend_from_slice(&block.uncompressed);
             }
             BlockType::StaticHuff => {
                 self.bitwriter.write(1, 2, &mut self.output);
@@ -95,17 +82,14 @@ impl<'a> DeflateWriter<'a> {
         block: &PreflateTokenBlock,
         huffman_writer: &HuffmanWriter,
     ) {
-        let mut index = self.plain_text_index;
-
         for token in &block.tokens {
             match token {
-                PreflateToken::Literal => {
+                PreflateToken::Literal(lit) => {
                     huffman_writer.write_literal(
                         &mut self.bitwriter,
                         &mut self.output,
-                        self.plain_text[index].into(),
+                        u16::from(*lit),
                     );
-                    index += 1;
                 }
                 PreflateToken::Reference(reference) => {
                     if reference.get_irregular258() {
@@ -148,12 +132,8 @@ impl<'a> DeflateWriter<'a> {
                             );
                         }
                     }
-
-                    index += reference.len() as usize;
                 }
             }
-
-            self.plain_text_index = index;
         }
 
         huffman_writer.write_literal(&mut self.bitwriter, &mut self.output, 256);

@@ -36,3 +36,7 @@ miniz_oxide="0.7.1"
 
 [lib]
 crate-type = ["cdylib","lib"]
+
+[[bin]]
+name = "preflate_util"
+path = "src/main.rs"

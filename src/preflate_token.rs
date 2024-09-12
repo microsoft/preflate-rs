@@ -14,14 +14,14 @@ use crate::{
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct PreflateTokenReference {
-    len: u16,
+    len: u8,
     dist: u16,
     irregular258: bool,
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum PreflateToken {
-    Literal,
+    Literal(u8),
     Reference(PreflateTokenReference),
 }
 
@@ -34,14 +34,14 @@ impl PreflateToken {
 impl PreflateTokenReference {
     pub fn new(len: u32, dist: u32, irregular258: bool) -> PreflateTokenReference {
         PreflateTokenReference {
-            len: len as u16,
+            len: (len - 3) as u8,
             dist: dist as u16,
             irregular258,
         }
     }
 
     pub fn len(&self) -> u32 {
-        self.len as u32
+        (self.len as u32) + 3
     }
 
     pub fn dist(&self) -> u32 {
@@ -68,7 +68,8 @@ pub enum BlockType {
 #[derive(Debug)]
 pub struct PreflateTokenBlock {
     pub block_type: BlockType,
-    pub uncompressed_len: u32,
+    // if this is an uncompressed block, then this is the length
+    pub uncompressed: Vec<u8>,
     pub context_len: i32,
     pub padding_bits: u8,
     pub tokens: Vec<PreflateToken>,
@@ -100,7 +101,7 @@ impl PreflateTokenBlock {
     pub fn new(block_type: BlockType) -> PreflateTokenBlock {
         PreflateTokenBlock {
             block_type,
-            uncompressed_len: 0,
+            uncompressed: Vec::new(),
             context_len: 0,
             padding_bits: 0,
             tokens: Vec::new(),
@@ -110,7 +111,7 @@ impl PreflateTokenBlock {
     }
 
     pub fn add_literal(&mut self, lit: u8) {
-        self.tokens.push(PreflateToken::Literal);
+        self.tokens.push(PreflateToken::Literal(lit));
         self.freq.literal_codes[lit as usize] += 1;
     }
 

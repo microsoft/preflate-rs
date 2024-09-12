@@ -152,10 +152,7 @@ pub fn calculate_huffman_code_tree(code_lengths: &[u8]) -> anyhow::Result<Vec<i3
 /// Huffman Nodes are encoded in the array of ints as follows:
 /// '0' child link of node 'N' is at huffman_tree[N], '1' child link is at huffman_tree[N + 1]
 /// Root of tree is at huffman_tree.len() - 2
-pub fn decode_symbol<R: ReadBits>(
-    bit_reader: &mut R,
-    huffman_tree: &Vec<i32>,
-) -> anyhow::Result<u16> {
+pub fn decode_symbol<R: ReadBits>(bit_reader: &mut R, huffman_tree: &[i32]) -> anyhow::Result<u16> {
     let mut i_node_cur: i32 = huffman_tree.len() as i32 - 2; // Start at the root of the Huffman tree
 
     loop {

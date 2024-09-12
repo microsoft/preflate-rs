@@ -1,15 +1,17 @@
 use std::io::Cursor;
 
 use crate::{
-    decompress_deflate_stream,
     idat_parse::{parse_idat, IdatContents},
-    DecompressResult,
+    preflate_container::{decompress_deflate_stream, DecompressResult},
 };
 
 use byteorder::{LittleEndian, ReadBytesExt};
 use std::io::{Read, Seek, SeekFrom};
 
 use anyhow::Result;
+
+/// The minimum size of a block that is considered for splitting into chunks
+const MIN_BLOCKSIZE: usize = 1024;
 
 #[derive(Debug)]
 pub enum BlockChunk {
@@ -34,7 +36,7 @@ enum Signature {
 }
 
 fn next_signature(src: &[u8], index: &mut usize) -> Option<Signature> {
-    if src.len() == 0 {
+    if src.is_empty() {
         return None;
     }
 
@@ -67,16 +69,18 @@ pub fn split_into_deflate_streams(src: &[u8], locations_found: &mut Vec<BlockChu
         match signature {
             Signature::Zlib(_) => {
                 if let Ok(res) = decompress_deflate_stream(&src[index + 2..], true) {
-                    index += 2;
+                    if res.plain_text.len() > MIN_BLOCKSIZE {
+                        index += 2;
 
-                    locations_found.push(BlockChunk::Literal(index - prev_index));
+                        locations_found.push(BlockChunk::Literal(index - prev_index));
 
-                    index += res.compressed_size as usize;
+                        index += res.compressed_size;
 
-                    locations_found.push(BlockChunk::DeflateStream(res));
+                        locations_found.push(BlockChunk::DeflateStream(res));
 
-                    prev_index = index;
-                    continue;
+                        prev_index = index;
+                        continue;
+                    }
                 }
             }
 
@@ -84,29 +88,33 @@ pub fn split_into_deflate_streams(src: &[u8], locations_found: &mut Vec<BlockChu
                 let mut cursor = Cursor::new(&src[index..]);
                 if skip_gzip_header(&mut cursor).is_ok() {
                     let start = index + cursor.position() as usize;
-                    if let Ok(res) = decompress_deflate_stream(&src[start as usize..], true) {
-                        locations_found.push(BlockChunk::Literal(start - prev_index));
+                    if let Ok(res) = decompress_deflate_stream(&src[start..], true) {
+                        if res.plain_text.len() > MIN_BLOCKSIZE {
+                            locations_found.push(BlockChunk::Literal(start - prev_index));
 
-                        index = start + res.compressed_size as usize;
-                        prev_index = index;
+                            index = start + res.compressed_size;
+                            prev_index = index;
 
-                        locations_found.push(BlockChunk::DeflateStream(res));
+                            locations_found.push(BlockChunk::DeflateStream(res));
 
-                        continue;
+                            continue;
+                        }
                     }
                 }
             }
 
             Signature::ZipLocalFileHeader => {
                 if let Ok((header_size, res)) = parse_zip_stream(&src[index..]) {
-                    locations_found.push(BlockChunk::Literal(index - prev_index + header_size));
+                    if res.plain_text.len() > MIN_BLOCKSIZE {
+                        locations_found.push(BlockChunk::Literal(index - prev_index + header_size));
 
-                    index += header_size + res.compressed_size as usize;
-                    prev_index = index;
+                        index += header_size + res.compressed_size;
+                        prev_index = index;
 
-                    locations_found.push(BlockChunk::DeflateStream(res));
+                        locations_found.push(BlockChunk::DeflateStream(res));
 
-                    continue;
+                        continue;
+                    }
                 }
             }
 
@@ -118,14 +126,15 @@ pub fn split_into_deflate_streams(src: &[u8], locations_found: &mut Vec<BlockChu
                     if let Ok((r, payload)) = parse_idat(&src[real_start..], 0) {
                         if let Ok(res) = decompress_deflate_stream(&payload, true) {
                             let length = r.total_chunk_length;
+                            if length > MIN_BLOCKSIZE {
+                                locations_found.push(BlockChunk::Literal(real_start - prev_index));
 
-                            locations_found.push(BlockChunk::Literal(real_start - prev_index));
+                                locations_found.push(BlockChunk::IDATDeflate(r, res));
 
-                            locations_found.push(BlockChunk::IDATDeflate(r, res));
-
-                            index = real_start + length;
-                            prev_index = index;
-                            continue;
+                                index = real_start + length;
+                                prev_index = index;
+                                continue;
+                            }
                         }
                     }
                 }
@@ -291,8 +300,7 @@ fn parse_zip_stream(contents: &[u8]) -> anyhow::Result<(usize, DecompressResult)
     }
 
     // read extended information
-    let mut file_name_buf = Vec::<u8>::new();
-    file_name_buf.resize(zip_local_file_header.file_name_length as usize, 0);
+    let mut file_name_buf = vec![0; zip_local_file_header.file_name_length as usize];
     binary_reader.read_exact(&mut file_name_buf)?;
     let _path = String::from_utf8(file_name_buf)?;
 
