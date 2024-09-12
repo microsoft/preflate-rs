@@ -1,4 +1,4 @@
-use crate::hash_chain::{HashChain, HashChainAbs, HashChainNormalize, HashChainNormalizeLibflate4};
+use crate::hash_chain::{HashChain, HashChainNormalize, HashChainNormalizeLibflate4};
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Default)]
 pub enum HashAlgorithm {
@@ -256,7 +256,7 @@ const RANDOM_VECTOR: [u16; 768] = [
 ];
 
 impl HashImplementation for RandomVectorHash {
-    type HashChainType = HashChainAbs<RandomVectorHash>;
+    type HashChainType = HashChainNormalize<RandomVectorHash>;
 
     fn get_hash(&self, b: &[u8]) -> u16 {
         RANDOM_VECTOR[b[0] as usize]

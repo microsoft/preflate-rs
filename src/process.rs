@@ -383,3 +383,8 @@ fn verify_longmatch() {
         false,
     );
 }
+
+#[test]
+fn verify_zlibng() {
+    do_analyze(None, &read_file("compressed_zlibng_level1.deflate"), false);
+}

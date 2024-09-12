@@ -8,9 +8,9 @@
 /// Getting the parameters correct means that the resulting diff between the deflate stream
 /// and the predicted deflate stream will be as small as possible.
 use crate::{
+    add_policy_estimator::DictionaryAddPolicy,
     depth_estimator::{new_depth_estimator, HashTableDepthEstimator},
     hash_algorithm::HashAlgorithm,
-    hash_chain::DictionaryAddPolicy,
     preflate_constants,
     preflate_input::PreflateInput,
     preflate_parse_config::{

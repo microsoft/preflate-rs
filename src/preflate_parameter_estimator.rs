@@ -7,11 +7,10 @@
 use anyhow::Result;
 
 use crate::{
-    add_policy_estimator::estimate_add_policy,
+    add_policy_estimator::{estimate_add_policy, DictionaryAddPolicy},
     bit_helper::bit_length,
     complevel_estimator::estimate_preflate_comp_level,
     hash_algorithm::HashAlgorithm,
-    hash_chain::DictionaryAddPolicy,
     preflate_constants::{self},
     preflate_parse_config::MatchingType,
     preflate_stream_info::{extract_preflate_info, PreflateStreamInfo},

@@ -8,10 +8,61 @@
 ///
 /// This will be the limit that we use when we decide whether to
 /// use skip_hash or update_hash.
-use crate::{
-    hash_chain::DictionaryAddPolicy,
-    preflate_token::{BlockType, PreflateToken, PreflateTokenBlock},
-};
+use crate::preflate_token::{BlockType, PreflateToken, PreflateTokenBlock};
+
+#[derive(Default, Eq, PartialEq, Debug, Clone, Copy)]
+pub enum DictionaryAddPolicy {
+    /// Add all substrings of a match to the dictionary
+    #[default]
+    AddAll,
+    /// Add only the first substring of a match to the dictionary that are larger than the limit
+    AddFirst(u16),
+    /// Add only the first and last substring of a match to the dictionary that are larger than the limit
+    AddFirstAndLast(u16),
+
+    /// This policy is used by MiniZ in fastest mode. It adds all substrings of a match to the dictionary except
+    /// literals that are 4 bytes away from the end of the block.
+    AddFirstExcept4kBoundary,
+}
+
+impl DictionaryAddPolicy {
+    /// Updates the hash based on the dictionary add policy
+    pub fn update_hash<U: FnMut(&[u8], u32, u32)>(
+        &self,
+        input: &[u8],
+        pos: u32,
+        length: u32,
+        mut update_fn: U,
+    ) {
+        if length == 1 {
+            update_fn(input, pos, 1);
+        } else {
+            match *self {
+                DictionaryAddPolicy::AddAll => update_fn(input, pos, length),
+                DictionaryAddPolicy::AddFirst(limit) => {
+                    if length <= u32::from(limit) {
+                        update_fn(input, pos, length);
+                    } else {
+                        update_fn(input, pos, 1);
+                    }
+                }
+                DictionaryAddPolicy::AddFirstAndLast(limit) => {
+                    if length <= u32::from(limit) {
+                        update_fn(input, pos, length);
+                    } else {
+                        update_fn(input, pos, 1);
+                        update_fn(&input[length as usize - 1..], pos + length - 1, 1);
+                    }
+                }
+                DictionaryAddPolicy::AddFirstExcept4kBoundary => {
+                    if (pos & 4095) < 4093 {
+                        update_fn(input, pos, 1);
+                    }
+                }
+            }
+        }
+    }
+}
 
 pub fn estimate_add_policy(token_blocks: &[PreflateTokenBlock]) -> DictionaryAddPolicy {
     const WINDOW_MASK: usize = 0x7fff;

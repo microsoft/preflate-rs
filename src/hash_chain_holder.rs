@@ -9,10 +9,7 @@ use crate::hash_algorithm::{
     Crc32cHash, HashAlgorithm, HashImplementation, LibdeflateHash4, LibdeflateHash4Fast, MiniZHash,
     RandomVectorHash, ZlibNGHash, ZlibRotatingHash,
 };
-use crate::hash_chain::{
-    DictionaryAddPolicy, HashChain, MAX_UPDATE_HASH_BATCH, UPDATE_MODE_ALL, UPDATE_MODE_FIRST,
-    UPDATE_MODE_FIRST_AND_LAST,
-};
+use crate::hash_chain::{HashChain, MAX_UPDATE_HASH_BATCH};
 use crate::preflate_constants::{MAX_MATCH, MIN_LOOKAHEAD, MIN_MATCH};
 use crate::preflate_input::PreflateInput;
 use crate::preflate_parameter_estimator::PreflateStrategy;
@@ -149,7 +146,16 @@ struct HashChainHolderImpl<H: HashImplementation> {
 
 impl<H: HashImplementation> HashChainHolder for HashChainHolderImpl<H> {
     fn update_hash(&mut self, length: u32, input: &PreflateInput) {
-        self.update_hash_with_policy(length, input, self.params.add_policy);
+        debug_assert!(length <= MAX_UPDATE_HASH_BATCH);
+
+        self.params.add_policy.update_hash(
+            input.cur_chars(0),
+            input.pos(),
+            length,
+            |input, pos, length| {
+                self.hash.update_hash(input, pos, length);
+            },
+        );
     }
     fn match_token_0(&self, prev_len: u32, max_depth: u32, input: &PreflateInput) -> MatchResult {
         self.match_token_offset::<0>(prev_len, max_depth, input)
@@ -262,41 +268,6 @@ impl<H: HashImplementation> HashChainHolderImpl<H> {
             hash: hash.new_hash_chain(),
             window_bytes: 1 << params.window_bits,
             params: *params,
-        }
-    }
-
-    fn update_hash_with_policy(
-        &mut self,
-        length: u32,
-        input: &PreflateInput,
-        add_policy: DictionaryAddPolicy,
-    ) {
-        debug_assert!(length <= MAX_UPDATE_HASH_BATCH);
-
-        match add_policy {
-            DictionaryAddPolicy::AddAll => {
-                self.hash.update_hash::<UPDATE_MODE_ALL>(length, input);
-            }
-            DictionaryAddPolicy::AddFirst(limit) => {
-                if length > limit.into() {
-                    self.hash.update_hash::<UPDATE_MODE_FIRST>(length, input);
-                } else {
-                    self.hash.update_hash::<UPDATE_MODE_ALL>(length, input);
-                }
-            }
-            DictionaryAddPolicy::AddFirstAndLast(limit) => {
-                if length > limit.into() {
-                    self.hash
-                        .update_hash::<UPDATE_MODE_FIRST_AND_LAST>(length, input);
-                } else {
-                    self.hash.update_hash::<UPDATE_MODE_ALL>(length, input);
-                }
-            }
-            DictionaryAddPolicy::AddFirstExcept4kBoundary => {
-                if length > 1 || (input.pos() % 4096) < 4093 {
-                    self.hash.update_hash::<UPDATE_MODE_FIRST>(length, input);
-                }
-            }
         }
     }
 

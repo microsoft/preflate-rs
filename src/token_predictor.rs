@@ -7,10 +7,10 @@
 use anyhow::Context;
 
 use crate::{
+    add_policy_estimator::DictionaryAddPolicy,
     bit_helper::DebugHash,
     cabac_codec::{decode_difference, encode_difference},
     hash_algorithm::HashAlgorithm,
-    hash_chain::DictionaryAddPolicy,
     hash_chain_holder::{new_hash_chain_holder, HashChainHolder, MatchResult},
     preflate_constants::MIN_MATCH,
     preflate_input::PreflateInput,

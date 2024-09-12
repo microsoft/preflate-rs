@@ -1,7 +1,7 @@
 use default_boxed::DefaultBoxed;
 
 use crate::{
-    hash_algorithm::*, hash_chain::DictionaryAddPolicy, preflate_input::PreflateInput,
+    add_policy_estimator::DictionaryAddPolicy, hash_algorithm::*, preflate_input::PreflateInput,
     preflate_token::PreflateTokenReference,
 };
 
@@ -207,6 +207,7 @@ fn verify_max_chain_length() {
 
     #[rustfmt::skip]
     let levels = [
+        ("compressed_zlibng_level1.deflate", HashAlgorithm::ZlibNG, DictionaryAddPolicy::AddFirstAndLast(0), 23),
         ("compressed_libdeflate_level1.deflate", HashAlgorithm::Libdeflate4Fast, DictionaryAddPolicy::AddAll, 1),
         ("compressed_libdeflate_level2.deflate", HashAlgorithm::Libdeflate4, DictionaryAddPolicy::AddAll, 6),
         ("compressed_libdeflate_level3.deflate", HashAlgorithm::Libdeflate4, DictionaryAddPolicy::AddAll, 12),
@@ -226,6 +227,7 @@ fn verify_max_chain_length() {
         ("compressed_zlib_level8.deflate", zlib, DictionaryAddPolicy::AddAll, 1022),
         ("compressed_zlib_level9.deflate", zlib, DictionaryAddPolicy::AddAll, 3986),
         ("compressed_minizoxide_level1.deflate", HashAlgorithm::MiniZFast, DictionaryAddPolicy::AddFirstExcept4kBoundary, 2),
+
     ];
 
     for level in levels {
