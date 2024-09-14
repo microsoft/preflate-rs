@@ -112,13 +112,18 @@ impl PreflateTokenBlock {
 
     pub fn add_literal(&mut self, lit: u8) {
         self.tokens.push(PreflateToken::Literal(lit));
-        self.freq.literal_codes[lit as usize] += 1;
+        if self.block_type == BlockType::DynamicHuff {
+            self.freq.literal_codes[lit as usize] += 1;
+        }
     }
 
     pub fn add_reference(&mut self, len: u32, dist: u32, irregular258: bool) {
         self.tokens
             .push(PreflateToken::new_reference(len, dist, irregular258));
-        self.freq.literal_codes[NONLEN_CODE_COUNT + quantize_length(len)] += 1;
-        self.freq.distance_codes[quantize_distance(dist)] += 1;
+
+        if self.block_type == BlockType::DynamicHuff {
+            self.freq.literal_codes[NONLEN_CODE_COUNT + quantize_length(len)] += 1;
+            self.freq.distance_codes[quantize_distance(dist)] += 1;
+        }
     }
 }

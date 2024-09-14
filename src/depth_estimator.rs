@@ -38,6 +38,9 @@ pub struct HashTableDepthEstimatorImpl<H: HashImplementation> {
 
     /// hash function used to calculate the hash
     hash: H,
+
+    /// the dictionary add policy used to update the hash
+    add_policy: DictionaryAddPolicy,
 }
 
 impl<H: HashImplementation> HashTableDepthEstimatorImpl<H> {
@@ -45,7 +48,13 @@ impl<H: HashImplementation> HashTableDepthEstimatorImpl<H> {
     /// is only valid if this was part of the same hash chain
     #[inline]
     fn get_node_depth(&self, node: u16, expected_hash: u16) -> i32 {
-        debug_assert_eq!(self.chain_depth_hash_verify[node as usize], expected_hash);
+        debug_assert_eq!(
+            self.chain_depth_hash_verify[node as usize],
+            expected_hash,
+            "hash chain imcomplete {:?} {:?}",
+            self.hash.algorithm(),
+            self.add_policy
+        );
         self.chain_depth[node as usize]
     }
 
@@ -80,6 +89,7 @@ impl<H: HashImplementation> HashTableDepthEstimatorImpl<H> {
 
 impl<H: HashImplementation> HashTableDepthEstimator for HashTableDepthEstimatorImpl<H> {
     fn update_hash(&mut self, add_policy: DictionaryAddPolicy, input: &PreflateInput, length: u32) {
+        self.add_policy = add_policy;
         add_policy.update_hash(
             input.cur_chars(0),
             input.pos(),
@@ -113,17 +123,17 @@ impl<H: HashImplementation> HashTableDepthEstimator for HashTableDepthEstimatorI
     }
 }
 
-/// this algorithm is wierd because it uses the first candidate of the 3 byte match,
-/// but then continues with the next 4 bytes. This is used by libflate.
+/// Libdeflate is a bit special because it uses the first candidate of the 3 byte match,
+/// but then continues with the next 4 bytes.
 #[derive(DefaultBoxed)]
-struct HashTableDepthEstimatorLibflate {
+struct HashTableDepthEstimatorLibdeflate {
     length4: HashTableDepthEstimatorImpl<LibdeflateHash4>,
     head3: [u32; 65536],
 }
 
 const LIB_DEFLATE3_HASH: LibdeflateHash3Secondary = LibdeflateHash3Secondary {};
 
-impl HashTableDepthEstimatorLibflate {
+impl HashTableDepthEstimatorLibdeflate {
     fn internal_update_hash3(&mut self, chars: &[u8], pos: u32, length: u32) {
         debug_assert!(length as usize <= chars.len());
         if length as usize + 3 - 1 >= chars.len() {
@@ -139,7 +149,7 @@ impl HashTableDepthEstimatorLibflate {
     }
 }
 
-impl HashTableDepthEstimator for HashTableDepthEstimatorLibflate {
+impl HashTableDepthEstimator for HashTableDepthEstimatorLibdeflate {
     fn update_hash(&mut self, add_policy: DictionaryAddPolicy, input: &PreflateInput, length: u32) {
         add_policy.update_hash(
             input.cur_chars(0),
@@ -184,7 +194,7 @@ pub fn new_depth_estimator(hash_algorithm: HashAlgorithm) -> Box<dyn HashTableDe
             hash_shift,
         }),
         HashAlgorithm::MiniZFast => HashTableDepthEstimatorImpl::box_new(MiniZHash {}),
-        HashAlgorithm::Libdeflate4 => HashTableDepthEstimatorLibflate::default_boxed(),
+        HashAlgorithm::Libdeflate4 => HashTableDepthEstimatorLibdeflate::default_boxed(),
         HashAlgorithm::Libdeflate4Fast => HashTableDepthEstimatorImpl::box_new(LibdeflateHash4 {}),
 
         HashAlgorithm::ZlibNG => HashTableDepthEstimatorImpl::box_new(ZlibNGHash {}),
@@ -207,7 +217,10 @@ fn verify_max_chain_length() {
 
     #[rustfmt::skip]
     let levels = [
-        ("compressed_zlibng_level1.deflate", HashAlgorithm::ZlibNG, DictionaryAddPolicy::AddFirstAndLast(0), 23),
+        ("compressed_zlibng_level1.deflate", HashAlgorithm::Crc32cHash, DictionaryAddPolicy::AddFirstWith32KBoundary, 0),
+        ("compressed_zlibng_level2.deflate", HashAlgorithm::Crc32cHash, DictionaryAddPolicy::AddFirstAndLast(4), 3),
+        ("compressed_zlibng_level3.deflate", HashAlgorithm::Crc32cHash, DictionaryAddPolicy::AddFirstAndLast(96), 5),
+        ("compressed_zlibng_level4.deflate", HashAlgorithm::Crc32cHash, DictionaryAddPolicy::AddFirstAndLast(191), 23),
         ("compressed_libdeflate_level1.deflate", HashAlgorithm::Libdeflate4Fast, DictionaryAddPolicy::AddAll, 1),
         ("compressed_libdeflate_level2.deflate", HashAlgorithm::Libdeflate4, DictionaryAddPolicy::AddAll, 6),
         ("compressed_libdeflate_level3.deflate", HashAlgorithm::Libdeflate4, DictionaryAddPolicy::AddAll, 12),
@@ -234,6 +247,14 @@ fn verify_max_chain_length() {
         let compressed_data = crate::process::read_file(level.0);
 
         let parsed = parse_deflate(&compressed_data, 0).unwrap();
+
+        let add_policy_estimator = crate::add_policy_estimator::estimate_add_policy(&parsed.blocks);
+
+        assert_eq!(
+            add_policy_estimator, level.2,
+            "add policy for file {} is incorrect (should be {:?})",
+            level.0, level.2
+        );
 
         let mut estimator = new_depth_estimator(level.1);
 

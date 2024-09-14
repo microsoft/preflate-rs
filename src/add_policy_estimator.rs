@@ -23,6 +23,16 @@ pub enum DictionaryAddPolicy {
     /// This policy is used by MiniZ in fastest mode. It adds all substrings of a match to the dictionary except
     /// literals that are 4 bytes away from the end of the block.
     AddFirstExcept4kBoundary,
+
+    /// This policy is used by fast mode in zlibng, it is the same
+    /// as AddFirst(0) but it also add the last character for the
+    /// last match in the 32k window.
+    ///
+    /// This is due to the fact that
+    /// each time the dictionary is reset, it explicitly adds the
+    /// last character to the dictionary which ends up being the
+    /// last chacacter of the previous match.
+    AddFirstWith32KBoundary,
 }
 
 impl DictionaryAddPolicy {
@@ -59,11 +69,29 @@ impl DictionaryAddPolicy {
                         update_fn(input, pos, 1);
                     }
                 }
+                DictionaryAddPolicy::AddFirstWith32KBoundary => {
+                    update_fn(input, pos, 1);
+                    if is_at_32k_boundary(length, pos) {
+                        update_fn(&input[length as usize - 1..], pos + length - 1, 1);
+                    }
+                }
             }
         }
     }
 }
 
+/// Check if the match is crossing the 32k boundary as which happens
+/// in zlibng.  
+fn is_at_32k_boundary(length: u32, pos: u32) -> bool {
+    length > 1
+        && (((pos) & 0x7fff) <= (32768 - 0x106))
+        && (((pos + length) & 0x7fff) >= (32768 - 0x106))
+}
+
+/// When adding matches to the dictionary, some of the fast variants
+/// only add smaller strings in their entirety (ie a substring starting
+/// at each position). This function is designed to measure this
+/// and determine the policy that should be used.
 pub fn estimate_add_policy(token_blocks: &[PreflateTokenBlock]) -> DictionaryAddPolicy {
     const WINDOW_MASK: usize = 0x7fff;
 
@@ -78,9 +106,16 @@ pub fn estimate_add_policy(token_blocks: &[PreflateTokenBlock]) -> DictionaryAdd
 
     // tracks the maximum length that we've seen that was added to the dictionary if the last match was also added
     let mut max_length_last_add = 0;
+
+    // same as previous, but tracks if we are inside the 32k boundary
+    let mut last_outside_32k_seen = false;
+
     let mut current_offset: u32 = 0;
 
     const LAST_ADDED: u16 = 0x8000;
+    const LAST_32K: u16 = 0x4000;
+
+    const MASK: u16 = 0x0fff;
 
     let mut min_len = u32::MAX;
 
@@ -113,7 +148,7 @@ pub fn estimate_add_policy(token_blocks: &[PreflateTokenBlock]) -> DictionaryAdd
                             let previous_match =
                                 current_window[(current_offset - r.dist()) as usize & WINDOW_MASK];
 
-                            let match_length = u32::from(previous_match & !LAST_ADDED);
+                            let match_length = u32::from(previous_match & MASK);
 
                             max_length = std::cmp::max(max_length, match_length);
                             if (previous_match & LAST_ADDED) == 0 {
@@ -121,12 +156,23 @@ pub fn estimate_add_policy(token_blocks: &[PreflateTokenBlock]) -> DictionaryAdd
                                     std::cmp::max(max_length_last_add, match_length);
                             }
 
+                            if match_length != 0 && (previous_match & LAST_32K) == 0 {
+                                last_outside_32k_seen = true;
+                            }
+
+                            let last = LAST_ADDED
+                                | if is_at_32k_boundary(r.len(), current_offset) {
+                                    LAST_32K
+                                } else {
+                                    0
+                                };
+
                             current_window[current_offset as usize & WINDOW_MASK] = 0;
                             current_offset += 1;
 
                             for i in 1..r.len() {
                                 current_window[current_offset as usize & WINDOW_MASK] =
-                                    r.len() as u16 | if i == r.len() - 1 { LAST_ADDED } else { 0 };
+                                    r.len() as u16 | if i == r.len() - 1 { last } else { 0 };
                                 current_offset += 1;
                             }
                         }
@@ -138,6 +184,8 @@ pub fn estimate_add_policy(token_blocks: &[PreflateTokenBlock]) -> DictionaryAdd
 
     if max_length == 0 && block_4k {
         DictionaryAddPolicy::AddFirstExcept4kBoundary
+    } else if !last_outside_32k_seen {
+        DictionaryAddPolicy::AddFirstWith32KBoundary
     } else if max_length_last_add < max_length {
         DictionaryAddPolicy::AddFirstAndLast(max_length_last_add as u16)
     } else if max_length < 258 {
@@ -180,10 +228,10 @@ fn verify_zlib_level_recognition() {
 #[test]
 fn verify_zlibng_level_recognition() {
     let levels = [
-        DictionaryAddPolicy::AddFirstAndLast(0),   // 1 quick
-        DictionaryAddPolicy::AddFirstAndLast(4),   // 2 fast
-        DictionaryAddPolicy::AddFirstAndLast(96),  // 3 medium
-        DictionaryAddPolicy::AddFirstAndLast(191), // 4 medium
+        DictionaryAddPolicy::AddFirstWith32KBoundary, // 1 quick
+        DictionaryAddPolicy::AddFirstAndLast(4),      // 2 fast
+        DictionaryAddPolicy::AddFirstAndLast(96),     // 3 medium
+        DictionaryAddPolicy::AddFirstAndLast(191),    // 4 medium
     ];
 
     for i in 1..=4 {
@@ -198,7 +246,7 @@ fn verify_zlibng_level_recognition() {
 
 /// libflate always adds all matches to the dictionary
 #[test]
-fn verify_libflate_level_recognition() {
+fn verify_libdeflate_level_recognition() {
     for i in 1..=9 {
         let v = crate::process::read_file(&format!("compressed_libdeflate_level{}.deflate", i));
 
