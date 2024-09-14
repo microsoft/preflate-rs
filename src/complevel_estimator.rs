@@ -262,6 +262,7 @@ impl<'a> CompLevelEstimatorState<'a> {
         match self.add_policy {
             DictionaryAddPolicy::AddFirst(_)
             | DictionaryAddPolicy::AddFirstAndLast(_)
+            | DictionaryAddPolicy::AddFirstWith32KBoundary
             | DictionaryAddPolicy::AddFirstExcept4kBoundary => {
                 for config in &ZLIB_PREFLATE_PARSER_SETTINGS {
                     if candidate.max_chain_found() < config.max_chain {

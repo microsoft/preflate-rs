@@ -81,11 +81,12 @@ impl PreflateParameters {
         let max_chain = decoder.decode_value(16);
         let min_len = decoder.decode_value(16);
 
-        let add_policy = match decoder.decode_value(2) {
+        let add_policy = match decoder.decode_value(3) {
             0 => DictionaryAddPolicy::AddAll,
             1 => DictionaryAddPolicy::AddFirst(decoder.decode_value(8)),
             2 => DictionaryAddPolicy::AddFirstAndLast(decoder.decode_value(8)),
             3 => DictionaryAddPolicy::AddFirstExcept4kBoundary,
+            4 => DictionaryAddPolicy::AddFirstWith32KBoundary,
             _ => panic!("invalid add policy"),
         };
 
@@ -216,17 +217,20 @@ impl PreflateParameters {
         encoder.encode_value(u16::try_from(self.predictor.min_len).unwrap(), 16);
 
         match self.predictor.add_policy {
-            DictionaryAddPolicy::AddAll => encoder.encode_value(0, 2),
+            DictionaryAddPolicy::AddAll => encoder.encode_value(0, 3),
             DictionaryAddPolicy::AddFirst(v) => {
-                encoder.encode_value(1, 2);
+                encoder.encode_value(1, 3);
                 encoder.encode_value(v as u16, 8);
             }
             DictionaryAddPolicy::AddFirstAndLast(v) => {
-                encoder.encode_value(2, 2);
+                encoder.encode_value(2, 3);
                 encoder.encode_value(v as u16, 8);
             }
             DictionaryAddPolicy::AddFirstExcept4kBoundary => {
-                encoder.encode_value(3, 2);
+                encoder.encode_value(3, 3);
+            }
+            DictionaryAddPolicy::AddFirstWith32KBoundary => {
+                encoder.encode_value(4, 3);
             }
         }
     }
