@@ -43,9 +43,14 @@ steps:
     packageType: 'sdk'
     version: '6.x'
 
-- task: EsrpCodeSigning@4
+- task: EsrpCodeSigning@5
   inputs:
-    ConnectedServiceName: 'ESRP CodeSigning'
+    ConnectedServiceName: 'ESRP CodeSigningV2-OneDrive Service'
+    AppRegistrationClientId: 'bd3fbc52-4cf5-4cca-a25d-94160e5ed309' 
+    AppRegistrationTenantId: 'cdc5aeea-15c5-4db6-b079-fcadd2505dc2' 
+    AuthAKVName: 'ODSP-ESRP' 
+    AuthCertName: 'ODSP-ESRP-Auth-V2' 
+    AuthSignCertName: 'CodeSigningCertificate'
     FolderPath: '$(Build.SourcesDirectory)'
     Pattern: '
       target\debug\preflate_rs.dll,
