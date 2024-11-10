@@ -71,7 +71,7 @@ fn test_docx() {
 
 fn test_container(filename: &str) {
     let v = read_file(filename);
-    let c = compress_zstd(&v).unwrap();
+    let c = compress_zstd(&v, 1).unwrap();
 
     let r = decompress_zstd(&c, 1024 * 1024 * 128).unwrap();
     assert!(v == r);
@@ -104,7 +104,7 @@ fn libzng() {
 }
 
 fn verifyresult(compressed_data: &[u8]) {
-    let result = decompress_deflate_stream(compressed_data, true).unwrap();
+    let result = decompress_deflate_stream(compressed_data, true, 1).unwrap();
     let recomp =
         recompress_deflate_stream(&result.plain_text, &result.prediction_corrections).unwrap();
 

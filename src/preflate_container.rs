@@ -179,7 +179,7 @@ fn roundtrip_chunk_block_literal() {
 #[test]
 fn roundtrip_chunk_block_deflate() {
     let contents = crate::process::read_file("compressed_zlib_level1.deflate");
-    let results = decompress_deflate_stream(&contents, true).unwrap();
+    let results = decompress_deflate_stream(&contents, true, 1).unwrap();
 
     let mut buffer = Vec::new();
 
@@ -198,7 +198,7 @@ fn roundtrip_chunk_block_png() {
 
     // we know the first IDAT chunk starts at 83 (avoid testing the scan_deflate code in a unit teast)
     let (idat_contents, deflate_stream) = crate::idat_parse::parse_idat(&f[83..], 1).unwrap();
-    let results = decompress_deflate_stream(&deflate_stream, true).unwrap();
+    let results = decompress_deflate_stream(&deflate_stream, true, 1).unwrap();
 
     let total_chunk_length = idat_contents.total_chunk_length;
 
@@ -221,11 +221,16 @@ fn roundtrip_chunk_block_png() {
 /// scans for deflate streams in a zlib compressed file, decompresses the streams and
 /// returns an uncompressed file that can then be recompressed using a better algorithm.
 /// This can then be passed back into recreated_zlib_chunks to recreate the exact original file.
-pub fn expand_zlib_chunks(compressed_data: &[u8]) -> std::result::Result<Vec<u8>, PreflateError> {
+pub fn expand_zlib_chunks(
+    compressed_data: &[u8],
+    loglevel: u32,
+) -> std::result::Result<Vec<u8>, PreflateError> {
     let mut locations_found = Vec::new();
 
-    split_into_deflate_streams(compressed_data, &mut locations_found);
-    println!("locations found: {:?}", locations_found);
+    split_into_deflate_streams(compressed_data, &mut locations_found, loglevel);
+    if loglevel > 0 {
+        println!("locations found: {:?}", locations_found);
+    }
 
     let mut plain_text = Vec::new();
     plain_text.push(COMPRESSED_WRAPPER_VERSION_1); // version 1 of format. Definitely will improved.
@@ -262,7 +267,7 @@ pub fn recreated_zlib_chunks(
 fn roundtrip_deflate_chunks(filename: &str) {
     let f = crate::process::read_file(filename);
 
-    let expanded = expand_zlib_chunks(&f).unwrap();
+    let expanded = expand_zlib_chunks(&f, 1).unwrap();
 
     let mut read_cursor = std::io::Cursor::new(expanded);
 
@@ -327,6 +332,7 @@ impl core::fmt::Debug for DecompressResult {
 pub fn decompress_deflate_stream(
     compressed_data: &[u8],
     verify: bool,
+    loglevel: u32,
 ) -> Result<DecompressResult, PreflateError> {
     let mut cabac_encoded = Vec::new();
 
@@ -341,7 +347,9 @@ pub fn decompress_deflate_stream(
     let params = estimate_preflate_parameters(&contents.plain_text, &contents.blocks)
         .map_err(PreflateError::AnalyzeFailed)?;
 
-    //println!("params: {:?}", params);
+    if loglevel > 0 {
+        println!("params: {:?}", params);
+    }
 
     params.write(&mut cabac_encoder);
     encode_mispredictions(&contents, &params, &mut cabac_encoder)?;
@@ -350,7 +358,7 @@ pub fn decompress_deflate_stream(
 
     if verify {
         let mut cabac_decoder =
-            PredictionDecoderCabac::new(VP8Reader::new(Cursor::new(&cabac_encoded)).unwrap());
+            PredictionDecoderCabac::new(VP8Reader::new(Cursor::new(&cabac_encoded[..])).unwrap());
 
         let reread_params = PreflateParameters::read(&mut cabac_decoder)
             .map_err(PreflateError::InvalidPredictionData)?;
@@ -383,7 +391,7 @@ pub fn recompress_deflate_stream(
     prediction_corrections: &[u8],
 ) -> Result<Vec<u8>, PreflateError> {
     let mut cabac_decoder =
-        PredictionDecoderCabac::new(VP8Reader::new(Cursor::new(&prediction_corrections)).unwrap());
+        PredictionDecoderCabac::new(VP8Reader::new(Cursor::new(prediction_corrections)).unwrap());
 
     let params = PreflateParameters::read(&mut cabac_decoder)
         .map_err(PreflateError::InvalidPredictionData)?;
@@ -470,7 +478,7 @@ fn verify_zip_compress() {
     use crate::process::read_file;
     let v = read_file("samplezip.zip");
 
-    let expanded = expand_zlib_chunks(&v).unwrap();
+    let expanded = expand_zlib_chunks(&v, 1).unwrap();
 
     let mut recompressed = Vec::new();
     recreated_zlib_chunks(&mut Cursor::new(expanded), &mut recompressed).unwrap();
@@ -504,15 +512,15 @@ fn verify_file(filename: &str) {
     use crate::process::read_file;
     let v = read_file(filename);
 
-    let r = decompress_deflate_stream(&v, true).unwrap();
+    let r = decompress_deflate_stream(&v, true, 1).unwrap();
     let recompressed = recompress_deflate_stream(&r.plain_text, &r.prediction_corrections).unwrap();
     assert!(v == recompressed);
 }
 
 /// expands the Zlib compressed streams in the data and then recompresses the result
 /// with Zstd with the maximum level.
-pub fn compress_zstd(zlib_compressed_data: &[u8]) -> Result<Vec<u8>, PreflateError> {
-    let plain_text = expand_zlib_chunks(zlib_compressed_data)
+pub fn compress_zstd(zlib_compressed_data: &[u8], loglevel: u32) -> Result<Vec<u8>, PreflateError> {
+    let plain_text = expand_zlib_chunks(zlib_compressed_data, loglevel)
         .map_err(|_| PreflateError::InvalidCompressedWrapper)?;
     zstd::bulk::compress(&plain_text, 9).map_err(PreflateError::ZstdError)
 }
@@ -533,7 +541,7 @@ fn verify_zip_compress_zstd() {
     use crate::process::read_file;
     let v = read_file("samplezip.zip");
 
-    let compressed = compress_zstd(&v).unwrap();
+    let compressed = compress_zstd(&v, 1).unwrap();
 
     let recreated = decompress_zstd(&compressed, 256 * 1024 * 1024).unwrap();
 

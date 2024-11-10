@@ -134,6 +134,7 @@ pub fn decode_mispredictions(
     Ok((deflate_writer.detach_output(), output_blocks))
 }
 
+#[inline(never)]
 fn recreate_blocks<D: PredictionDecoder>(
     mut token_predictor: TokenPredictor,
     decoder: &mut D,

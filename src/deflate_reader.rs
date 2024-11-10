@@ -45,7 +45,7 @@ impl<R: Read> DeflateReader<R> {
         Ok(self.input.get(1)? != 0)
     }
 
-    fn read_bits(&mut self, cbits: u32) -> anyhow::Result<u32> {
+    fn read_bits(&mut self, cbits: u32) -> std::io::Result<u32> {
         self.input.get(cbits)
     }
 

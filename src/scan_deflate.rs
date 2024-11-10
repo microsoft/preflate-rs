@@ -62,13 +62,17 @@ fn next_signature(src: &[u8], index: &mut usize) -> Option<Signature> {
 
 /// Scans for deflate streams in a zlib compressed file, decompresses the streams and
 /// PNG IDAT chunks, and returns the locations of the streams.
-pub fn split_into_deflate_streams(src: &[u8], locations_found: &mut Vec<BlockChunk>) {
+pub fn split_into_deflate_streams(
+    src: &[u8],
+    locations_found: &mut Vec<BlockChunk>,
+    loglevel: u32,
+) {
     let mut index: usize = 0;
     let mut prev_index = 0;
     while let Some(signature) = next_signature(src, &mut index) {
         match signature {
             Signature::Zlib(_) => {
-                if let Ok(res) = decompress_deflate_stream(&src[index + 2..], true) {
+                if let Ok(res) = decompress_deflate_stream(&src[index + 2..], true, loglevel) {
                     if res.plain_text.len() > MIN_BLOCKSIZE {
                         index += 2;
 
@@ -88,7 +92,7 @@ pub fn split_into_deflate_streams(src: &[u8], locations_found: &mut Vec<BlockChu
                 let mut cursor = Cursor::new(&src[index..]);
                 if skip_gzip_header(&mut cursor).is_ok() {
                     let start = index + cursor.position() as usize;
-                    if let Ok(res) = decompress_deflate_stream(&src[start..], true) {
+                    if let Ok(res) = decompress_deflate_stream(&src[start..], true, loglevel) {
                         if res.plain_text.len() > MIN_BLOCKSIZE {
                             locations_found.push(BlockChunk::Literal(start - prev_index));
 
@@ -124,7 +128,7 @@ pub fn split_into_deflate_streams(src: &[u8], locations_found: &mut Vec<BlockChu
                     // if we find and IDAT
                     let real_start = index - 4;
                     if let Ok((r, payload)) = parse_idat(&src[real_start..], 0) {
-                        if let Ok(res) = decompress_deflate_stream(&payload, true) {
+                        if let Ok(res) = decompress_deflate_stream(&payload, true, loglevel) {
                             let length = r.total_chunk_length;
                             if length > MIN_BLOCKSIZE {
                                 locations_found.push(BlockChunk::Literal(real_start - prev_index));
@@ -192,7 +196,7 @@ fn parse_png() {
     let f = crate::process::read_file("treegdi.png");
 
     let mut locations_found = Vec::new();
-    split_into_deflate_streams(&f, &mut locations_found);
+    split_into_deflate_streams(&f, &mut locations_found, 1);
 
     println!("locations found: {:?}", locations_found);
 }
@@ -202,7 +206,7 @@ fn parse_gz() {
     let f = crate::process::read_file("sample1.bin.gz");
 
     let mut locations_found = Vec::new();
-    split_into_deflate_streams(&f, &mut locations_found);
+    split_into_deflate_streams(&f, &mut locations_found, 1);
 
     println!("locations found: {:?}", locations_found);
 
@@ -232,7 +236,7 @@ fn parse_docx() {
     let f = crate::process::read_file("file-sample_1MB.docx");
 
     let mut locations_found = Vec::new();
-    split_into_deflate_streams(&f, &mut locations_found);
+    split_into_deflate_streams(&f, &mut locations_found, 1);
 
     for x in locations_found {
         match x {
@@ -313,7 +317,7 @@ fn parse_zip_stream(contents: &[u8]) -> anyhow::Result<(usize, DecompressResult)
     if zip_local_file_header.compression_method == 8 {
         let deflate_start_position = binary_reader.stream_position()? as usize;
 
-        if let Ok(res) = decompress_deflate_stream(&contents[deflate_start_position..], true) {
+        if let Ok(res) = decompress_deflate_stream(&contents[deflate_start_position..], true, 1) {
             return Ok((deflate_start_position, res));
         }
     }

@@ -52,7 +52,7 @@ pub unsafe extern "C" fn WrapperCompressZip(
         let output_buffer =
             std::slice::from_raw_parts_mut(output_buffer, output_buffer_size as usize);
 
-        let plain_text = expand_zlib_chunks(&input_buffer)?;
+        let plain_text = expand_zlib_chunks(&input_buffer, 0)?;
 
         *result_size = zstd::bulk::compress_to_buffer(&plain_text, output_buffer, 9)? as u64;
 

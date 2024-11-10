@@ -79,7 +79,7 @@ fn main() {
 
         let zstdlen = zstd::bulk::compress(&file, 9).unwrap();
 
-        let preflatecompressed = compress_zstd(&file).unwrap();
+        let preflatecompressed = compress_zstd(&file, 1).unwrap();
 
         totalseen += zstdlen.len() as u64;
         totalzstd += preflatecompressed.len() as u64;

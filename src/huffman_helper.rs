@@ -174,7 +174,7 @@ struct SingleCode {
 
 #[cfg(test)]
 impl ReadBits for SingleCode {
-    fn get(&mut self, cbits: u32) -> anyhow::Result<u32> {
+    fn get(&mut self, cbits: u32) -> std::io::Result<u32> {
         let result = self.code & ((1 << cbits) - 1);
         self.code >>= cbits;
 

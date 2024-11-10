@@ -4,12 +4,12 @@
  *  This software incorporates material from third parties. See NOTICE.txt for details.
  *--------------------------------------------------------------------------------------------*/
 
-use std::io::Read;
+use std::io::{Error, ErrorKind, Read, Result};
 
 use byteorder::ReadBytesExt;
 
 pub trait ReadBits {
-    fn get(&mut self, cbit: u32) -> anyhow::Result<u32>;
+    fn get(&mut self, cbit: u32) -> Result<u32>;
 }
 
 pub struct BitReader<R> {
@@ -19,7 +19,7 @@ pub struct BitReader<R> {
 }
 
 impl<R: Read> ReadBits for BitReader<R> {
-    fn get(&mut self, cbit: u32) -> anyhow::Result<u32> {
+    fn get(&mut self, cbit: u32) -> Result<u32> {
         BitReader::get(self, cbit)
     }
 }
@@ -42,10 +42,8 @@ impl<R: Read> BitReader<R> {
         8 - self.bit_count
     }
 
-    pub fn read_byte(&mut self) -> anyhow::Result<u8> {
-        if self.bit_count != 0 {
-            return Err(anyhow::Error::msg("BitReader Error: Attempt to read bytes without first calling FlushBufferToByteBoundary"));
-        }
+    pub fn read_byte(&mut self) -> Result<u8> {
+        assert!(self.bit_count == 0, "BitReader Error: Attempt to read bytes without first calling FlushBufferToByteBoundary");
 
         let result = self.binary_reader.read_u8()?;
         Ok(result)
@@ -53,7 +51,7 @@ impl<R: Read> BitReader<R> {
 
     /// Read cbit bits from the input stream return
     /// Only supports read of 1 to 32 bits.
-    pub fn get(&mut self, cbit: u32) -> anyhow::Result<u32> {
+    pub fn get(&mut self, cbit: u32) -> Result<u32> {
         let mut wret: u32 = 0;
         let mut cbits_added = 0;
 
@@ -62,7 +60,8 @@ impl<R: Read> BitReader<R> {
         }
 
         if cbit > 32 {
-            return Err(anyhow::Error::msg(
+            return Err(Error::new(
+                ErrorKind::InvalidInput,
                 "BitReader Error: Attempt to read more than 32 bits",
             ));
         }
