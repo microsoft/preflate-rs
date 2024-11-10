@@ -5,7 +5,7 @@ use std::io::{Cursor, Read, Write};
 use crate::{
     cabac_codec::{PredictionDecoderCabac, PredictionEncoderCabac},
     idat_parse::{recreate_idat, IdatContents},
-    preflate_error::PreflateError,
+    preflate_error::{ExitCode, PreflateError},
     preflate_input::PreflateInput,
     preflate_parameter_estimator::{estimate_preflate_parameters, PreflateParameters},
     process::{decode_mispredictions, encode_mispredictions, parse_deflate},
@@ -153,12 +153,17 @@ fn read_chunk_block(
 
             if let Some(idat) = idat {
                 recreate_idat(&idat, &recompressed[..], destination)
-                    .map_err(|_e| PreflateError::InvalidCompressedWrapper)?;
+                    .map_err(|e| PreflateError::wrap(ExitCode::InvalidCompressedWrapper, &e))?;
             } else {
                 destination.write_all(&recompressed)?;
             }
         }
-        _ => return Err(PreflateError::InvalidCompressedWrapper),
+        _ => {
+            return Err(PreflateError::new(
+                ExitCode::InvalidCompressedWrapper,
+                "Invalid chunk",
+            ))
+        }
     }
     Ok(true)
 }
@@ -251,7 +256,10 @@ pub fn recreated_zlib_chunks(
 ) -> std::result::Result<(), PreflateError> {
     let version = source.read_u8()?;
     if version != COMPRESSED_WRAPPER_VERSION_1 {
-        return Err(PreflateError::InvalidCompressedWrapper);
+        return Err(PreflateError::new(
+            ExitCode::InvalidCompressedWrapper,
+            format!("Invalid version {version}").as_str(),
+        ));
     }
 
     loop {
@@ -345,7 +353,7 @@ pub fn decompress_deflate_stream(
     //process::write_file("c:\\temp\\lastop.bin", contents.plain_text.as_slice());
 
     let params = estimate_preflate_parameters(&contents.plain_text, &contents.blocks)
-        .map_err(PreflateError::AnalyzeFailed)?;
+        .map_err(|e| PreflateError::wrap(ExitCode::AnalyzeFailed, &e))?;
 
     if loglevel > 0 {
         println!("params: {:?}", params);
@@ -361,7 +369,7 @@ pub fn decompress_deflate_stream(
             PredictionDecoderCabac::new(VP8Reader::new(Cursor::new(&cabac_encoded[..])).unwrap());
 
         let reread_params = PreflateParameters::read(&mut cabac_decoder)
-            .map_err(PreflateError::InvalidPredictionData)?;
+            .map_err(|e| PreflateError::wrap(ExitCode::InvalidPredictionData, &e))?;
         assert_eq!(params, reread_params);
 
         let (recompressed, _recreated_blocks) = decode_mispredictions(
@@ -371,9 +379,10 @@ pub fn decompress_deflate_stream(
         )?;
 
         if recompressed[..] != compressed_data[..contents.compressed_size] {
-            return Err(PreflateError::Mismatch(anyhow::anyhow!(
-                "recompressed data does not match original"
-            )));
+            return Err(PreflateError::new(
+                ExitCode::RoundtripMismatch,
+                "recompressed data does not match original",
+            ));
         }
     }
 
@@ -394,7 +403,7 @@ pub fn recompress_deflate_stream(
         PredictionDecoderCabac::new(VP8Reader::new(Cursor::new(prediction_corrections)).unwrap());
 
     let params = PreflateParameters::read(&mut cabac_decoder)
-        .map_err(PreflateError::InvalidPredictionData)?;
+        .map_err(|e| PreflateError::wrap(ExitCode::InvalidPredictionData, &e))?;
     let (recompressed, _recreated_blocks) =
         decode_mispredictions(&params, PreflateInput::new(plain_text), &mut cabac_decoder)?;
     Ok(recompressed)
@@ -417,7 +426,7 @@ pub fn decompress_deflate_stream_assert(
     let contents = parse_deflate(compressed_data, 0)?;
 
     let params = estimate_preflate_parameters(&contents.plain_text, &contents.blocks)
-        .map_err(PreflateError::AnalyzeFailed)?;
+        .map_err(|e| PreflateError::wrap(ExitCode::AnalyzeFailed, &e))?;
 
     params.write(&mut cabac_encoder);
     encode_mispredictions(&contents, &params, &mut cabac_encoder)?;
@@ -430,7 +439,7 @@ pub fn decompress_deflate_stream_assert(
             PredictionDecoderCabac::new(DebugReader::new(Cursor::new(&cabac_encoded)).unwrap());
 
         let params = PreflateParameters::read(&mut cabac_decoder)
-            .map_err(PreflateError::InvalidPredictionData)?;
+            .map_err(|e| PreflateError::wrap(ExitCode::InvalidPredictionData, &e))?;
         let (recompressed, _recreated_blocks) = decode_mispredictions(
             &params,
             PreflateInput::new(&contents.plain_text),
@@ -438,9 +447,10 @@ pub fn decompress_deflate_stream_assert(
         )?;
 
         if recompressed[..] != compressed_data[..] {
-            return Err(PreflateError::Mismatch(anyhow::anyhow!(
-                "recompressed data does not match original"
-            )));
+            return Err(PreflateError::new(
+                ExitCode::RoundtripMismatch,
+                "recompressed data does not match original",
+            ));
         }
     }
 
@@ -465,8 +475,7 @@ pub fn recompress_deflate_stream_assert(
         DebugReader::new(Cursor::new(&prediction_corrections)).unwrap(),
     );
 
-    let params = PreflateParameters::read(&mut cabac_decoder)
-        .map_err(PreflateError::InvalidPredictionData)?;
+    let params = PreflateParameters::read(&mut cabac_decoder)?;
 
     let (recompressed, _recreated_blocks) =
         decode_mispredictions(&params, PreflateInput::new(plain_text), &mut cabac_decoder)?;
@@ -520,16 +529,14 @@ fn verify_file(filename: &str) {
 /// expands the Zlib compressed streams in the data and then recompresses the result
 /// with Zstd with the maximum level.
 pub fn compress_zstd(zlib_compressed_data: &[u8], loglevel: u32) -> Result<Vec<u8>, PreflateError> {
-    let plain_text = expand_zlib_chunks(zlib_compressed_data, loglevel)
-        .map_err(|_| PreflateError::InvalidCompressedWrapper)?;
-    zstd::bulk::compress(&plain_text, 9).map_err(PreflateError::ZstdError)
+    let plain_text = expand_zlib_chunks(zlib_compressed_data, loglevel)?;
+    Ok(zstd::bulk::compress(&plain_text, 9)?)
 }
 
 /// decompresses the Zstd compressed data and then recompresses the result back
 /// to the original Zlib compressed streams.
 pub fn decompress_zstd(compressed_data: &[u8], capacity: usize) -> Result<Vec<u8>, PreflateError> {
-    let compressed_data =
-        zstd::bulk::decompress(compressed_data, capacity).map_err(PreflateError::ZstdError)?;
+    let compressed_data = zstd::bulk::decompress(compressed_data, capacity)?;
 
     let mut result = Vec::new();
     recreated_zlib_chunks(&mut Cursor::new(compressed_data), &mut result)?;

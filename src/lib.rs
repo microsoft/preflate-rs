@@ -21,8 +21,8 @@ mod huffman_encoding;
 mod huffman_helper;
 mod idat_parse;
 mod preflate_constants;
-pub mod preflate_container;
-pub mod preflate_error;
+mod preflate_container;
+mod preflate_error;
 mod preflate_input;
 mod preflate_parameter_estimator;
 mod preflate_parse_config;
@@ -34,8 +34,12 @@ mod statistical_codec;
 mod token_predictor;
 mod tree_predictor;
 
-use preflate_container::{expand_zlib_chunks, recreated_zlib_chunks};
-use preflate_error::PreflateError;
+pub use preflate_container::{
+    compress_zstd, decompress_deflate_stream, decompress_zstd, expand_zlib_chunks,
+    recompress_deflate_stream, recreated_zlib_chunks,
+};
+pub use preflate_error::PreflateError;
+
 use std::{io::Cursor, panic::catch_unwind};
 
 /// C ABI interface for compressing Zip file, exposed from DLL.
@@ -84,7 +88,7 @@ pub unsafe extern "C" fn WrapperDecompressZip(
         let output = std::slice::from_raw_parts_mut(output_buffer, output_buffer_size as usize);
 
         let compressed_data =
-            zstd::bulk::decompress(input, 1024 * 1024 * 128).map_err(PreflateError::ZstdError)?;
+            zstd::bulk::decompress(input, 1024 * 1024 * 128).map_err(PreflateError::from)?;
 
         let mut source = Cursor::new(&compressed_data);
         let mut destination = Cursor::new(output);

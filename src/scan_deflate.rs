@@ -258,6 +258,7 @@ fn parse_docx() {
 const ZIP_LOCAL_FILE_HEADER_SIGNATURE: u32 = 0x04034b50;
 
 #[derive(Default)]
+#[allow(dead_code)]
 pub struct ZipLocalFileHeader {
     pub local_file_header_signature: u32,
     pub version_needed_to_extract: u16,

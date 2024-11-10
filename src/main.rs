@@ -3,37 +3,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use preflate_container::{compress_zstd, decompress_zstd};
-
-mod add_policy_estimator;
-mod bit_helper;
-mod bit_reader;
-mod bit_writer;
-mod cabac_codec;
-mod complevel_estimator;
-mod deflate_reader;
-mod deflate_writer;
-mod depth_estimator;
-mod hash_algorithm;
-mod hash_chain;
-mod hash_chain_holder;
-mod huffman_calc;
-mod huffman_encoding;
-mod huffman_helper;
-mod idat_parse;
-mod preflate_constants;
-mod preflate_container;
-pub mod preflate_error;
-mod preflate_input;
-mod preflate_parameter_estimator;
-mod preflate_parse_config;
-mod preflate_stream_info;
-mod preflate_token;
-mod process;
-mod scan_deflate;
-mod statistical_codec;
-mod token_predictor;
-mod tree_predictor;
+use preflate_rs::{compress_zstd, decompress_zstd};
 
 fn enumerate_directory_recursively(path: &Path) -> Result<Vec<PathBuf>, std::io::Error> {
     let mut results = Vec::new();

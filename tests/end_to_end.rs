@@ -10,7 +10,7 @@ use std::path::Path;
 use std::{mem, ptr};
 
 use libdeflate_sys::{libdeflate_alloc_compressor, libdeflate_deflate_compress};
-use preflate_rs::preflate_container::{
+use preflate_rs::{
     compress_zstd, decompress_deflate_stream, decompress_zstd, recompress_deflate_stream,
 };
 

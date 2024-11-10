@@ -12,11 +12,13 @@ use crate::{
     complevel_estimator::estimate_preflate_comp_level,
     hash_algorithm::HashAlgorithm,
     preflate_constants::{self},
+    preflate_error::ExitCode,
     preflate_parse_config::MatchingType,
     preflate_stream_info::{extract_preflate_info, PreflateStreamInfo},
     preflate_token::PreflateTokenBlock,
     statistical_codec::{PredictionDecoder, PredictionEncoder},
     token_predictor::TokenPredictorParameters,
+    PreflateError,
 };
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
@@ -53,7 +55,7 @@ const HASH_ALGORITHM_RANDOMVECTOR: u16 = 6;
 const HASH_ALGORITHM_CRC32C: u16 = 7;
 
 impl PreflateParameters {
-    pub fn read(decoder: &mut impl PredictionDecoder) -> Result<Self> {
+    pub fn read(decoder: &mut impl PredictionDecoder) -> core::result::Result<Self, PreflateError> {
         assert_eq!(FILE_VERSION, decoder.decode_value(8));
         let strategy = decoder.decode_value(4);
         let huff_strategy = decoder.decode_value(4);
@@ -87,7 +89,12 @@ impl PreflateParameters {
             2 => DictionaryAddPolicy::AddFirstAndLast(decoder.decode_value(8)),
             3 => DictionaryAddPolicy::AddFirstExcept4kBoundary,
             4 => DictionaryAddPolicy::AddFirstWith32KBoundary,
-            _ => panic!("invalid add policy"),
+            _ => {
+                return Err(PreflateError::new(
+                    ExitCode::InvalidParameterHeader,
+                    "invalid add policy",
+                ))
+            }
         };
 
         const STRATEGY_DEFAULT: u16 = PreflateStrategy::Default as u16;
@@ -106,7 +113,12 @@ impl PreflateParameters {
                     STRATEGY_RLE_ONLY => PreflateStrategy::RleOnly,
                     STRATEGY_HUFF_ONLY => PreflateStrategy::HuffOnly,
                     STRATEGY_STORE => PreflateStrategy::Store,
-                    _ => panic!("invalid strategy"),
+                    _ => {
+                        return Err(PreflateError::new(
+                            ExitCode::InvalidParameterHeader,
+                            "invalid strategy",
+                        ))
+                    }
                 },
                 window_bits: window_bits.into(),
                 very_far_matches_detected,
@@ -138,14 +150,24 @@ impl PreflateParameters {
                     HASH_ALGORITHM_ZLIBNG => HashAlgorithm::ZlibNG,
                     HASH_ALGORITHM_RANDOMVECTOR => HashAlgorithm::RandomVector,
                     HASH_ALGORITHM_CRC32C => HashAlgorithm::Crc32cHash,
-                    _ => panic!("invalid hash algorithm"),
+                    _ => {
+                        return Err(PreflateError::new(
+                            ExitCode::InvalidParameterHeader,
+                            "invalid hash algorithm",
+                        ))
+                    }
                 },
             },
             huff_strategy: match huff_strategy {
                 HUFF_STRATEGY_DYNAMIC => PreflateHuffStrategy::Dynamic,
                 HUFF_STRATEGY_MIXED => PreflateHuffStrategy::Mixed,
                 HUFF_STRATEGY_STATIC => PreflateHuffStrategy::Static,
-                _ => panic!("invalid huff strategy"),
+                _ => {
+                    return Err(PreflateError::new(
+                        ExitCode::InvalidParameterHeader,
+                        "invalid huff strategy",
+                    ))
+                }
             },
         })
     }
