@@ -5,10 +5,11 @@
  *--------------------------------------------------------------------------------------------*/
 
 use crate::bit_reader::ReadBits;
+use crate::preflate_error::{err_exit_code, ExitCode, Result};
 use std::vec;
 
 /// Calculates Huffman code array given an array of Huffman Code Lengths using the RFC 1951 algorithm
-pub fn calc_huffman_codes(code_lengths: &[u8]) -> anyhow::Result<Vec<u16>> {
+pub fn calc_huffman_codes(code_lengths: &[u8]) -> Result<Vec<u16>> {
     let mut result: Vec<u16> = vec![0; code_lengths.len()];
 
     // The following algorithm generates the codes as integers, intended to be read
@@ -100,9 +101,9 @@ fn is_valid_huffman_code_lengths(code_lengths: &[u8]) -> bool {
 ///    rg_huff_nodes[N+1] is the array index of the '1' child
 /// 2. If rg_huff_nodes[i] is less than zero then it is a leaf and the literal alphabet value is -rg_huff_nodes[i] + 1
 /// 3. The root node index 'N' is rg_huff_nodes.len() - 2. Search should start at that node.
-pub fn calculate_huffman_code_tree(code_lengths: &[u8]) -> anyhow::Result<Vec<i32>> {
+pub fn calculate_huffman_code_tree(code_lengths: &[u8]) -> Result<Vec<i32>> {
     if !is_valid_huffman_code_lengths(code_lengths) {
-        return Err(anyhow::anyhow!("Invalid Huffman code lengths"));
+        return err_exit_code(ExitCode::InvalidDeflate, "Invalid Huffman code lengths");
     }
 
     let mut c_codes: i32 = 0;
@@ -152,7 +153,7 @@ pub fn calculate_huffman_code_tree(code_lengths: &[u8]) -> anyhow::Result<Vec<i3
 /// Huffman Nodes are encoded in the array of ints as follows:
 /// '0' child link of node 'N' is at huffman_tree[N], '1' child link is at huffman_tree[N + 1]
 /// Root of tree is at huffman_tree.len() - 2
-pub fn decode_symbol<R: ReadBits>(bit_reader: &mut R, huffman_tree: &[i32]) -> anyhow::Result<u16> {
+pub fn decode_symbol<R: ReadBits>(bit_reader: &mut R, huffman_tree: &[i32]) -> Result<u16> {
     let mut i_node_cur: i32 = huffman_tree.len() as i32 - 2; // Start at the root of the Huffman tree
 
     loop {

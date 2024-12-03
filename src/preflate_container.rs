@@ -5,7 +5,7 @@ use std::io::{Cursor, Read, Write};
 use crate::{
     cabac_codec::{PredictionDecoderCabac, PredictionEncoderCabac},
     idat_parse::{recreate_idat, IdatContents},
-    preflate_error::{ExitCode, PreflateError},
+    preflate_error::{AddContext, ExitCode, PreflateError},
     preflate_input::PreflateInput,
     preflate_parameter_estimator::{estimate_preflate_parameters, PreflateParameters},
     process::{decode_mispredictions, encode_mispredictions, parse_deflate},
@@ -152,8 +152,7 @@ fn read_chunk_block(
             let recompressed = recompress_deflate_stream(&segment, &corrections)?;
 
             if let Some(idat) = idat {
-                recreate_idat(&idat, &recompressed[..], destination)
-                    .map_err(|e| PreflateError::wrap(ExitCode::InvalidCompressedWrapper, &e))?;
+                recreate_idat(&idat, &recompressed[..], destination).context()?;
             } else {
                 destination.write_all(&recompressed)?;
             }
@@ -352,8 +351,7 @@ pub fn decompress_deflate_stream(
     //process::write_file("c:\\temp\\lastop.deflate", compressed_data);
     //process::write_file("c:\\temp\\lastop.bin", contents.plain_text.as_slice());
 
-    let params = estimate_preflate_parameters(&contents.plain_text, &contents.blocks)
-        .map_err(|e| PreflateError::wrap(ExitCode::AnalyzeFailed, &e))?;
+    let params = estimate_preflate_parameters(&contents.plain_text, &contents.blocks).context()?;
 
     if loglevel > 0 {
         println!("params: {:?}", params);
@@ -364,12 +362,15 @@ pub fn decompress_deflate_stream(
 
     cabac_encoder.finish();
 
+    if loglevel > 0 {
+        cabac_encoder.print();
+    }
+
     if verify {
         let mut cabac_decoder =
             PredictionDecoderCabac::new(VP8Reader::new(Cursor::new(&cabac_encoded[..])).unwrap());
 
-        let reread_params = PreflateParameters::read(&mut cabac_decoder)
-            .map_err(|e| PreflateError::wrap(ExitCode::InvalidPredictionData, &e))?;
+        let reread_params = PreflateParameters::read(&mut cabac_decoder).context()?;
         assert_eq!(params, reread_params);
 
         let (recompressed, _recreated_blocks) = decode_mispredictions(
@@ -402,8 +403,7 @@ pub fn recompress_deflate_stream(
     let mut cabac_decoder =
         PredictionDecoderCabac::new(VP8Reader::new(Cursor::new(prediction_corrections)).unwrap());
 
-    let params = PreflateParameters::read(&mut cabac_decoder)
-        .map_err(|e| PreflateError::wrap(ExitCode::InvalidPredictionData, &e))?;
+    let params = PreflateParameters::read(&mut cabac_decoder).context()?;
     let (recompressed, _recreated_blocks) =
         decode_mispredictions(&params, PreflateInput::new(plain_text), &mut cabac_decoder)?;
     Ok(recompressed)
@@ -418,6 +418,8 @@ pub fn decompress_deflate_stream_assert(
 ) -> Result<DecompressResult, PreflateError> {
     use cabac::debug::{DebugReader, DebugWriter};
 
+    use crate::preflate_error::AddContext;
+
     let mut cabac_encoded = Vec::new();
 
     let mut cabac_encoder =
@@ -425,8 +427,7 @@ pub fn decompress_deflate_stream_assert(
 
     let contents = parse_deflate(compressed_data, 0)?;
 
-    let params = estimate_preflate_parameters(&contents.plain_text, &contents.blocks)
-        .map_err(|e| PreflateError::wrap(ExitCode::AnalyzeFailed, &e))?;
+    let params = estimate_preflate_parameters(&contents.plain_text, &contents.blocks).context()?;
 
     params.write(&mut cabac_encoder);
     encode_mispredictions(&contents, &params, &mut cabac_encoder)?;
@@ -438,8 +439,7 @@ pub fn decompress_deflate_stream_assert(
         let mut cabac_decoder =
             PredictionDecoderCabac::new(DebugReader::new(Cursor::new(&cabac_encoded)).unwrap());
 
-        let params = PreflateParameters::read(&mut cabac_decoder)
-            .map_err(|e| PreflateError::wrap(ExitCode::InvalidPredictionData, &e))?;
+        let params = PreflateParameters::read(&mut cabac_decoder)?;
         let (recompressed, _recreated_blocks) = decode_mispredictions(
             &params,
             PreflateInput::new(&contents.plain_text),

@@ -9,6 +9,7 @@ use crate::{
     huffman_calc::{calc_bit_lengths, HufftreeBitCalc},
     huffman_encoding::{HuffmanOriginalEncoding, TreeCodeType},
     preflate_constants::{CODETREE_CODE_COUNT, NONLEN_CODE_COUNT, TREE_CODE_ORDER_TABLE},
+    preflate_error::{err_exit_code, ExitCode, Result},
     preflate_token::TokenFrequency,
     statistical_codec::{
         CodecCorrection, CodecMisprediction, PredictionDecoder, PredictionEncoder,
@@ -20,7 +21,7 @@ pub fn predict_tree_for_block<D: PredictionEncoder>(
     freq: &TokenFrequency,
     encoder: &mut D,
     huffcalc: HufftreeBitCalc,
-) -> anyhow::Result<()> {
+) -> Result<()> {
     encoder.encode_verify_state("tree", 0);
 
     // bit_lengths is a vector of huffman code sizes for literals followed by length codes
@@ -105,7 +106,7 @@ pub fn recreate_tree_for_block<D: PredictionDecoder>(
     freq: &TokenFrequency,
     codec: &mut D,
     huffcalc: HufftreeBitCalc,
-) -> anyhow::Result<HuffmanOriginalEncoding> {
+) -> Result<HuffmanOriginalEncoding> {
     codec.decode_verify_state("tree", 0);
 
     let mut result: HuffmanOriginalEncoding = Default::default();
@@ -176,7 +177,7 @@ fn predict_ld_trees<D: PredictionEncoder>(
     encoder: &mut D,
     predicted_bit_len: &[u8],
     actual_target_codes: &[(TreeCodeType, u8)],
-) -> anyhow::Result<()> {
+) -> Result<()> {
     let mut symbols = predicted_bit_len;
     let mut prev_code = None;
 
@@ -195,7 +196,7 @@ fn predict_ld_trees<D: PredictionEncoder>(
 
     for &(target_tree_code_type, target_tree_code_data) in actual_target_codes.iter() {
         if symbols.is_empty() {
-            return Err(anyhow::anyhow!("Reconstruction failed"));
+            return err_exit_code(ExitCode::InvalidDeflate, "Reconstruction failed");
         }
 
         let predicted_tree_code_type: TreeCodeType = predict_code_type(symbols, prev_code);
@@ -243,7 +244,7 @@ fn predict_ld_trees<D: PredictionEncoder>(
 fn reconstruct_ld_trees<D: PredictionDecoder>(
     decoder: &mut D,
     sym_bit_len: &[u8],
-) -> anyhow::Result<Vec<(TreeCodeType, u8)>> {
+) -> Result<Vec<(TreeCodeType, u8)>> {
     let mut symbols = sym_bit_len;
     let mut prev_code = None;
     let mut result: Vec<(TreeCodeType, u8)> = Vec::new();
@@ -267,7 +268,7 @@ fn reconstruct_ld_trees<D: PredictionDecoder>(
             TC_REPEAT => TreeCodeType::Repeat,
             TC_ZERO_SHORT => TreeCodeType::ZeroShort,
             TC_ZERO_LONG => TreeCodeType::ZeroLong,
-            _ => return Err(anyhow::anyhow!("Reconstruction failed")),
+            _ => return err_exit_code(ExitCode::RecompressFailed, "Reconstruction failed"),
         };
 
         let mut predicted_tree_code_data = predict_code_data(symbols, predicted_tree_code_type);

@@ -1,8 +1,11 @@
 use std::io::{Read, Write};
 
-use anyhow::Result;
+use crate::preflate_error::Result;
 
-use crate::preflate_container::{read_varint, write_varint};
+use crate::{
+    preflate_container::{read_varint, write_varint},
+    preflate_error::{err_exit_code, ExitCode},
+};
 
 #[derive(Debug, PartialEq)]
 pub struct IdatContents {
@@ -88,7 +91,7 @@ pub fn parse_idat(
     deflate_info_dump_level: u32,
 ) -> Result<(IdatContents, Vec<u8>)> {
     if png_idat_stream.len() < 12 || &png_idat_stream[4..8] != b"IDAT" {
-        return Err(anyhow::Error::msg("No IDAT chunk found"));
+        return err_exit_code(ExitCode::InvalidIDat, "No IDAT chunk found");
     }
 
     let mut deflate_stream = Vec::new();
@@ -129,7 +132,7 @@ pub fn parse_idat(
                 png_idat_stream[pos + chunk_len + 11],
             ])
         {
-            return Err(anyhow::Error::msg("CRC mismatch"));
+            return err_exit_code(ExitCode::InvalidIDat, "CRC mismatch");
         }
 
         idat_chunk_sizes.push(chunk_len as u32);
@@ -141,7 +144,7 @@ pub fn parse_idat(
     }
 
     if deflate_stream.len() < 3 {
-        return Err(anyhow::Error::msg("No IDAT data found"));
+        return err_exit_code(ExitCode::InvalidIDat, "No IDAT data found");
     }
 
     // remove the zlib header since it can be somewhat arbitary so we store it seperately
@@ -175,9 +178,10 @@ pub fn recreate_idat(
 ) -> Result<()> {
     // the total length of the chunks is the sum of the chunk sizes + 2 bytes for the zlib header + 4 bytes for the addler32
     if idat.chunk_sizes.iter().sum::<u32>() as usize != deflate_stream.len() + 2 + 4 {
-        return Err(anyhow::Error::msg(
+        return err_exit_code(
+            ExitCode::InvalidIDat,
             "Chunk sizes do not match deflate stream length",
-        ));
+        );
     }
 
     let mut index = 0;

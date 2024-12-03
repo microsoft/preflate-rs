@@ -87,7 +87,7 @@ fn test_container(filename: &str) {
 
 #[test]
 fn libzng() {
-    let level = 1;
+    let level = 4;
 
     let v = read_file("pptxplaintext.bin");
     println!("zlibng level: {}", level);

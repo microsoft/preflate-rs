@@ -15,7 +15,7 @@ pub trait HashTableDepthEstimator {
 }
 
 #[derive(DefaultBoxed)]
-pub struct HashTableDepthEstimatorImpl<H: HashImplementation> {
+struct HashTableDepthEstimatorImpl<H: HashImplementation> {
     /// Represents the head of the hash chain for a given hash value.
     head: [u16; 65536],
 

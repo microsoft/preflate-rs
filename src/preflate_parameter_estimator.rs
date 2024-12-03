@@ -4,15 +4,13 @@
  *  This software incorporates material from third parties. See NOTICE.txt for details.
  *--------------------------------------------------------------------------------------------*/
 
-use anyhow::Result;
-
 use crate::{
     add_policy_estimator::{estimate_add_policy, DictionaryAddPolicy},
     bit_helper::bit_length,
     complevel_estimator::estimate_preflate_comp_level,
     hash_algorithm::HashAlgorithm,
     preflate_constants::{self},
-    preflate_error::ExitCode,
+    preflate_error::{ExitCode, Result},
     preflate_parse_config::MatchingType,
     preflate_stream_info::{extract_preflate_info, PreflateStreamInfo},
     preflate_token::PreflateTokenBlock,
@@ -302,7 +300,7 @@ pub fn estimate_preflate_huff_strategy(info: &PreflateStreamInfo) -> PreflateHuf
 pub fn estimate_preflate_parameters(
     unpacked_output: &[u8],
     blocks: &Vec<PreflateTokenBlock>,
-) -> anyhow::Result<PreflateParameters> {
+) -> Result<PreflateParameters> {
     let info = extract_preflate_info(blocks);
 
     let preflate_strategy = estimate_preflate_strategy(&info);

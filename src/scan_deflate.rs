@@ -3,12 +3,13 @@ use std::io::Cursor;
 use crate::{
     idat_parse::{parse_idat, IdatContents},
     preflate_container::{decompress_deflate_stream, DecompressResult},
+    preflate_error::{err_exit_code, ExitCode},
 };
 
 use byteorder::{LittleEndian, ReadBytesExt};
 use std::io::{Read, Seek, SeekFrom};
 
-use anyhow::Result;
+use crate::preflate_error::Result;
 
 /// The minimum size of a block that is considered for splitting into chunks
 const MIN_BLOCKSIZE: usize = 1024;
@@ -160,7 +161,7 @@ fn skip_gzip_header<R: Read>(reader: &mut R) -> Result<()> {
     reader.read_exact(&mut buffer)?; // Read past the fixed 10-byte GZIP header
 
     if buffer[2] != 8 {
-        return Err(anyhow::Error::msg("Unsupported compression method"));
+        return err_exit_code(ExitCode::InvalidDeflate, "Unsupported compression method");
     }
 
     if buffer[3] & 0x04 != 0 {
@@ -274,7 +275,7 @@ pub struct ZipLocalFileHeader {
 }
 
 impl ZipLocalFileHeader {
-    pub fn create_and_load<R: Read>(binary_reader: &mut R) -> anyhow::Result<Self> {
+    pub fn create_and_load<R: Read>(binary_reader: &mut R) -> Result<Self> {
         let zip_local_file_header = Self {
             local_file_header_signature: binary_reader.read_u32::<LittleEndian>()?,
             version_needed_to_extract: binary_reader.read_u16::<LittleEndian>()?,
@@ -294,20 +295,20 @@ impl ZipLocalFileHeader {
 }
 
 /// parses the zip stream and returns the size of the header, followed by the decompressed contents
-fn parse_zip_stream(contents: &[u8]) -> anyhow::Result<(usize, DecompressResult)> {
+fn parse_zip_stream(contents: &[u8]) -> Result<(usize, DecompressResult)> {
     let mut binary_reader = Cursor::new(&contents);
 
     // read the signature
     let zip_local_file_header = ZipLocalFileHeader::create_and_load(&mut binary_reader)?;
     let signature = zip_local_file_header.local_file_header_signature;
     if signature != ZIP_LOCAL_FILE_HEADER_SIGNATURE {
-        return Err(anyhow::Error::msg("No local header"));
+        return err_exit_code(ExitCode::InvalidDeflate, "No local header");
     }
 
     // read extended information
     let mut file_name_buf = vec![0; zip_local_file_header.file_name_length as usize];
     binary_reader.read_exact(&mut file_name_buf)?;
-    let _path = String::from_utf8(file_name_buf)?;
+    //let _path = String::from_utf8(file_name_buf).map_err( PreflateError)?;
 
     // Skip Extra field
     binary_reader.seek(SeekFrom::Current(
@@ -323,5 +324,5 @@ fn parse_zip_stream(contents: &[u8]) -> anyhow::Result<(usize, DecompressResult)
         }
     }
 
-    Err(anyhow::Error::msg("No deflate stream found"))
+    err_exit_code(ExitCode::InvalidDeflate, "No deflate stream found")
 }

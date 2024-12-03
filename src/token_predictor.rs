@@ -4,8 +4,6 @@
  *  This software incorporates material from third parties. See NOTICE.txt for details.
  *--------------------------------------------------------------------------------------------*/
 
-use anyhow::Context;
-
 use crate::{
     add_policy_estimator::DictionaryAddPolicy,
     bit_helper::DebugHash,
@@ -13,6 +11,7 @@ use crate::{
     hash_algorithm::HashAlgorithm,
     hash_chain_holder::{new_hash_chain_holder, HashChainHolder, MatchResult},
     preflate_constants::MIN_MATCH,
+    preflate_error::{err_exit_code, AddContext, ExitCode, Result},
     preflate_input::PreflateInput,
     preflate_parameter_estimator::PreflateStrategy,
     preflate_parse_config::MatchingType,
@@ -92,7 +91,7 @@ impl<'a> TokenPredictor<'a> {
         block: &PreflateTokenBlock,
         codec: &mut D,
         last_block: bool,
-    ) -> anyhow::Result<()> {
+    ) -> Result<()> {
         self.current_token_count = 0;
         self.pending_reference = None;
 
@@ -259,7 +258,7 @@ impl<'a> TokenPredictor<'a> {
     pub fn recreate_block<D: PredictionDecoder>(
         &mut self,
         codec: &mut D,
-    ) -> anyhow::Result<PreflateTokenBlock> {
+    ) -> Result<PreflateTokenBlock> {
         let mut block;
         self.current_token_count = 0;
         self.pending_reference = None;
@@ -295,7 +294,7 @@ impl<'a> TokenPredictor<'a> {
                 block = PreflateTokenBlock::new(BlockType::DynamicHuff);
             }
             _ => {
-                return Err(anyhow::Error::msg(format!("Invalid block type {}", bt)));
+                return err_exit_code(ExitCode::InvalidDeflate, "Invalid block type");
             }
         }
 
@@ -468,11 +467,12 @@ impl<'a> TokenPredictor<'a> {
     fn repredict_reference(
         &mut self,
         _dist_match: Option<PreflateTokenReference>,
-    ) -> anyhow::Result<PreflateTokenReference> {
+    ) -> Result<PreflateTokenReference> {
         if self.input.pos() == 0 || self.input.remaining() < MIN_MATCH {
-            return Err(anyhow::Error::msg(
+            return err_exit_code(
+                ExitCode::RecompressFailed,
                 "Not enough space left to find a reference",
-            ));
+            );
         }
 
         /*
@@ -495,10 +495,10 @@ impl<'a> TokenPredictor<'a> {
             }
         }
 
-        Err(anyhow::Error::msg(format!(
-            "Didnt find a match {:?}",
-            match_token
-        )))
+        err_exit_code(
+            ExitCode::MatchNotFound,
+            format!("Didnt find a match {:?}", match_token).as_str(),
+        )
     }
 
     fn commit_token(&mut self, token: &PreflateToken, block: Option<&mut PreflateTokenBlock>) {

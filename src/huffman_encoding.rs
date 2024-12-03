@@ -4,7 +4,7 @@
  *  This software incorporates material from third parties. See NOTICE.txt for details.
  *--------------------------------------------------------------------------------------------*/
 
-use anyhow::Result;
+use crate::preflate_error::{err_exit_code, ExitCode, Result};
 
 use crate::{
     bit_reader::ReadBits,
@@ -48,7 +48,7 @@ impl HuffmanOriginalEncoding {
     /// Reads a dynamic huffman table from the bit reader. The structure
     /// holds all the information necessary to recode the huffman table
     /// exactly as it was written.
-    pub fn read<R: ReadBits>(bit_reader: &mut R) -> anyhow::Result<HuffmanOriginalEncoding> {
+    pub fn read<R: ReadBits>(bit_reader: &mut R) -> Result<HuffmanOriginalEncoding> {
         // 5 Bits: HLIT, # of Literal/Length codes - 257 (257 - 286)
         let hlit = bit_reader.get(5)? as usize + 257;
         // 5 Bits: HDIST, # of Distance codes - 1        (1 - 32)
@@ -92,7 +92,9 @@ impl HuffmanOriginalEncoding {
                     16 => TreeCodeType::Repeat,
                     17 => TreeCodeType::ZeroShort,
                     18 => TreeCodeType::ZeroLong,
-                    _ => return Err(anyhow::Error::msg("Invalid code length")),
+                    _ => {
+                        return err_exit_code(ExitCode::InvalidDeflate, "Invalid code length");
+                    }
                 };
 
                 let (sub, bits) = Self::get_tree_code_adjustment(tree_code);
@@ -105,9 +107,10 @@ impl HuffmanOriginalEncoding {
         }
 
         if codes_read != c_lengths_combined {
-            return Err(anyhow::Error::msg(
+            return err_exit_code(
+                ExitCode::InvalidDeflate,
                 "Code table should be same size as hdist + hlit",
-            ));
+            );
         }
 
         Ok(HuffmanOriginalEncoding {
@@ -120,11 +123,7 @@ impl HuffmanOriginalEncoding {
     }
 
     /// writes dynamic huffman table to the output buffer using the bitwriter
-    pub fn write(
-        &self,
-        bitwriter: &mut BitWriter,
-        output_buffer: &mut Vec<u8>,
-    ) -> anyhow::Result<()> {
+    pub fn write(&self, bitwriter: &mut BitWriter, output_buffer: &mut Vec<u8>) -> Result<()> {
         bitwriter.write(self.num_literals as u32 - 257, 5, output_buffer);
         bitwriter.write(self.num_dist as u32 - 1, 5, output_buffer);
         bitwriter.write(self.num_code_lengths as u32 - 4, 4, output_buffer);
@@ -265,7 +264,7 @@ impl HuffmanReader {
     /// clarity.  Literal/length values 286-287 will never actually
     /// occur in the compressed data, but participate in the code
     /// construction.
-    pub fn create_fixed() -> anyhow::Result<Self> {
+    pub fn create_fixed() -> Result<Self> {
         let (lit_lengths, dist_lengths) = HuffmanOriginalEncoding::get_fixed_distance_lengths();
 
         Ok(HuffmanReader {
@@ -286,11 +285,11 @@ impl HuffmanReader {
         })
     }
 
-    pub fn fetch_next_literal_code<R: ReadBits>(&self, bit_reader: &mut R) -> anyhow::Result<u16> {
+    pub fn fetch_next_literal_code<R: ReadBits>(&self, bit_reader: &mut R) -> Result<u16> {
         decode_symbol(bit_reader, &self.lit_huff_code_tree)
     }
 
-    pub fn fetch_next_distance_char<R: ReadBits>(&self, bit_reader: &mut R) -> anyhow::Result<u16> {
+    pub fn fetch_next_distance_char<R: ReadBits>(&self, bit_reader: &mut R) -> Result<u16> {
         decode_symbol(bit_reader, &self.dist_huff_code_tree)
     }
 }

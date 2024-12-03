@@ -4,18 +4,9 @@
  *  This software incorporates material from third parties. See NOTICE.txt for details.
  *--------------------------------------------------------------------------------------------*/
 
-use std::{fmt::Display, io::ErrorKind};
-
-use anyhow::Error;
-
-#[derive(Debug, Clone)]
-pub struct PreflateError {
-    /// standard error code
-    exit_code: ExitCode,
-
-    /// diagnostic message including location. Content should not be relied on.
-    message: String,
-}
+use std::fmt::Display;
+use std::io::ErrorKind;
+use std::num::TryFromIntError;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[allow(dead_code)]
@@ -38,25 +29,9 @@ pub enum ExitCode {
     ShortRead = 16,
     OsError = 17,
     GeneralFailure = 18,
-}
-
-/// translates std::io::Error into LeptonError
-impl From<std::io::Error> for PreflateError {
-    #[track_caller]
-    fn from(e: std::io::Error) -> Self {
-        match e.downcast::<PreflateError>() {
-            Ok(le) => {
-                return le;
-            }
-            Err(e) => {
-                let caller = std::panic::Location::caller();
-                return PreflateError {
-                    exit_code: get_io_error_exit_code(&e),
-                    message: format!("error {} at {}", e.to_string(), caller.to_string()),
-                };
-            }
-        }
-    }
+    InvalidIDat = 19,
+    MatchNotFound = 20,
+    InvalidDeflate = 21,
 }
 
 impl Display for ExitCode {
@@ -65,53 +40,105 @@ impl Display for ExitCode {
     }
 }
 
+impl ExitCode {
+    /// Converts the error code into an integer for use as an error code when
+    /// returning from a C API.
+    pub fn as_integer_error_code(self) -> i32 {
+        self as i32
+    }
+}
+
+/// Since errors are rare and stop everything, we want them to be as lightweight as possible.
+#[derive(Debug, Clone)]
+struct PreflateErrorInternal {
+    exit_code: ExitCode,
+    message: String,
+}
+
+/// Standard error returned by Preflate library
+#[derive(Debug, Clone)]
+pub struct PreflateError {
+    i: Box<PreflateErrorInternal>,
+}
+
+pub type Result<T> = std::result::Result<T, PreflateError>;
+
 impl Display for PreflateError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{0}: {1}", self.exit_code, self.message)
+        write!(f, "{0}: {1}", self.i.exit_code, self.i.message)
     }
 }
 
-impl From<anyhow::Error> for PreflateError {
-    fn from(mut error: anyhow::Error) -> Self {
-        // first see if there is a LeptonError already inside
-        match error.downcast::<PreflateError>() {
-            Ok(le) => {
-                return le;
-            }
-            Err(old_error) => {
-                error = old_error;
-            }
+impl PreflateError {
+    pub fn new(exit_code: ExitCode, message: &str) -> PreflateError {
+        PreflateError {
+            i: Box::new(PreflateErrorInternal {
+                exit_code,
+                message: message.to_owned(),
+            }),
         }
+    }
 
-        // capture the original error string before we lose it due
-        // to downcasting to look for stashed LeptonErrors
-        let original_string = error.to_string();
+    pub fn exit_code(&self) -> ExitCode {
+        self.i.exit_code
+    }
 
-        // see if there is a LeptonError hiding inside an io error
-        // which happens if we cross an API boundary that returns an std::io:Error
-        // like Read or Write
-        match error.downcast::<std::io::Error>() {
-            Ok(ioe) => match ioe.downcast::<PreflateError>() {
-                Ok(le) => {
-                    return le;
-                }
-                Err(e) => {
-                    return PreflateError {
-                        exit_code: get_io_error_exit_code(&e),
-                        message: format!("{} {}", e, original_string),
-                    };
-                }
-            },
-            Err(_) => {}
-        }
+    pub fn message(&self) -> &str {
+        &self.i.message
+    }
 
-        // don't know what we got, so treat it as a general failure
-        return PreflateError {
-            exit_code: ExitCode::GeneralFailure,
-            message: original_string,
-        };
+    #[cold]
+    #[inline(never)]
+    #[track_caller]
+    pub fn add_context(&mut self) {
+        self.i
+            .message
+            .push_str(&format!("\n at {}", std::panic::Location::caller()));
     }
 }
+
+#[cold]
+#[track_caller]
+pub fn err_exit_code<T>(error_code: ExitCode, message: &str) -> Result<T> {
+    let mut e = PreflateError::new(error_code, message);
+    e.add_context();
+    return Err(e);
+}
+
+pub trait AddContext<T> {
+    #[track_caller]
+    fn context(self) -> Result<T>;
+    fn with_context<FN: Fn() -> String>(self, f: FN) -> Result<T>;
+}
+
+impl<T, E: Into<PreflateError>> AddContext<T> for core::result::Result<T, E> {
+    #[track_caller]
+    fn context(self) -> Result<T> {
+        match self {
+            Ok(x) => Ok(x),
+            Err(e) => {
+                let mut e = e.into();
+                e.add_context();
+                Err(e)
+            }
+        }
+    }
+
+    #[track_caller]
+    fn with_context<FN: Fn() -> String>(self, f: FN) -> Result<T> {
+        match self {
+            Ok(x) => Ok(x),
+            Err(e) => {
+                let mut e = e.into();
+                e.i.message.push_str(&f());
+                e.add_context();
+                Err(e)
+            }
+        }
+    }
+}
+
+impl std::error::Error for PreflateError {}
 
 fn get_io_error_exit_code(e: &std::io::Error) -> ExitCode {
     if e.kind() == ErrorKind::UnexpectedEof {
@@ -121,75 +148,52 @@ fn get_io_error_exit_code(e: &std::io::Error) -> ExitCode {
     }
 }
 
-impl PreflateError {
-    pub fn new(exit_code: ExitCode, message: &str) -> PreflateError {
-        PreflateError {
-            exit_code,
-            message: message.to_owned(),
-        }
-    }
-
-    pub fn error_on_block(exit_code: ExitCode, block_number: usize, e: &Error) -> PreflateError {
-        PreflateError {
-            exit_code,
-            message: format!("Error on block {}: {}", block_number, e),
-        }
-    }
-
-    pub fn wrap(exit_code: ExitCode, e: &impl Display) -> PreflateError {
-        PreflateError {
-            exit_code,
-            message: e.to_string(),
-        }
-    }
-
-    pub fn wrap_anyhow(exit_code: ExitCode, e: &anyhow::Error) -> PreflateError {
-        PreflateError {
-            exit_code,
-            message: e.to_string(),
-        }
-    }
-
-    pub fn exit_code(&self) -> ExitCode {
-        self.exit_code
-    }
-
-    pub fn message(&self) -> &str {
-        &self.message
+impl From<TryFromIntError> for PreflateError {
+    #[track_caller]
+    fn from(e: TryFromIntError) -> Self {
+        let mut e = PreflateError::new(ExitCode::GeneralFailure, e.to_string().as_str());
+        e.add_context();
+        e
     }
 }
 
-/// translates LeptonError into std::io::Error, which involves putting into a Box and using Other
+/// translates std::io::Error into PreflateError
+impl From<std::io::Error> for PreflateError {
+    #[track_caller]
+    fn from(e: std::io::Error) -> Self {
+        match e.downcast::<PreflateError>() {
+            Ok(le) => {
+                return le;
+            }
+            Err(e) => {
+                let mut e = PreflateError::new(get_io_error_exit_code(&e), e.to_string().as_str());
+                e.add_context();
+                e
+            }
+        }
+    }
+}
+
+/// translates PreflateError into std::io::Error, which involves putting into a Box and using Other
 impl From<PreflateError> for std::io::Error {
     fn from(e: PreflateError) -> Self {
         return std::io::Error::new(std::io::ErrorKind::Other, e);
     }
 }
 
-impl std::error::Error for PreflateError {}
-
 #[test]
 fn test_error_translation() {
     // test wrapping inside an io error
-    fn my_std_error() -> Result<(), std::io::Error> {
-        Err(PreflateError::new(ExitCode::ReadDeflate, "test error").into())
+    fn my_std_error() -> core::result::Result<(), std::io::Error> {
+        Err(PreflateError::new(ExitCode::AnalyzeFailed, "test error").into())
     }
 
     let e: PreflateError = my_std_error().unwrap_err().into();
-    assert_eq!(e.exit_code, ExitCode::ReadDeflate);
-    assert_eq!(e.message, "test error");
-
-    // wrapping inside anyhow
-    fn my_anyhow() -> Result<(), anyhow::Error> {
-        Err(PreflateError::new(ExitCode::ReadDeflate, "test error").into())
-    }
-
-    let e: PreflateError = my_anyhow().unwrap_err().into();
-    assert_eq!(e.exit_code, ExitCode::ReadDeflate);
-    assert_eq!(e.message, "test error");
+    assert_eq!(e.exit_code(), ExitCode::AnalyzeFailed);
+    assert_eq!(e.message(), "test error");
 
     // an IO error should be translated into an OsError
     let e: PreflateError =
         std::io::Error::new(std::io::ErrorKind::NotFound, "file not found").into();
-    assert_eq!(e.exit_code, ExitCode::OsError);
+    assert_eq!(e.exit_code(), ExitCode::OsError);
 }

@@ -12,6 +12,7 @@ use crate::{
     depth_estimator::{new_depth_estimator, HashTableDepthEstimator},
     hash_algorithm::HashAlgorithm,
     preflate_constants,
+    preflate_error::{err_exit_code, ExitCode, Result},
     preflate_input::PreflateInput,
     preflate_parse_config::{
         MatchingType, SLOW_PREFLATE_PARSER_SETTINGS, ZLIB_PREFLATE_PARSER_SETTINGS,
@@ -240,9 +241,9 @@ impl<'a> CompLevelEstimatorState<'a> {
         }
     }
 
-    fn recommend(&mut self) -> anyhow::Result<CompLevelInfo> {
+    fn recommend(&mut self) -> Result<CompLevelInfo> {
         if self.candidates.is_empty() {
-            return Err(anyhow::anyhow!("no candidates found"));
+            return err_exit_code(ExitCode::PredictBlock, "no candidates found");
         }
 
         let candidate = self
@@ -284,10 +285,10 @@ impl<'a> CompLevelEstimatorState<'a> {
         }
 
         if candidate.max_chain_found() >= 4096 {
-            return Err(anyhow::anyhow!(
-                "max_chain_found too large: {}",
-                candidate.max_chain_found()
-            ));
+            return err_exit_code(
+                ExitCode::PredictBlock,
+                format!("max_chain_found too large: {}", candidate.max_chain_found()).as_str(),
+            );
         }
 
         let very_far_matches = longest_dist_at_hop_0
@@ -325,7 +326,7 @@ pub fn estimate_preflate_comp_level(
     plain_text: &[u8],
     add_policy: DictionaryAddPolicy,
     blocks: &Vec<PreflateTokenBlock>,
-) -> anyhow::Result<CompLevelInfo> {
+) -> Result<CompLevelInfo> {
     let mut state =
         CompLevelEstimatorState::new(wbits, mem_level, plain_text, add_policy, min_len, blocks);
     state.check_dump();

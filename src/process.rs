@@ -57,9 +57,7 @@ pub fn parse_deflate(
     let mut blocks = Vec::new();
     let mut last = false;
     while !last {
-        let block = block_decoder
-            .read_block(&mut last)
-            .map_err(|e| PreflateError::error_on_block(ExitCode::ReadBlock, blocks.len(), &e))?;
+        let block = block_decoder.read_block(&mut last)?;
 
         if deflate_info_dump_level > 0 {
             // Log information about this deflate compressed block
@@ -95,9 +93,7 @@ fn predict_blocks(
             encoder.encode_misprediction(CodecMisprediction::EOFMisprediction, true);
         }
 
-        token_predictor_in
-            .predict_block(&blocks[i], encoder, i == blocks.len() - 1)
-            .map_err(|e| PreflateError::error_on_block(ExitCode::PredictBlock, i, &e))?;
+        token_predictor_in.predict_block(&blocks[i], encoder, i == blocks.len() - 1)?;
 
         if blocks[i].block_type == BlockType::DynamicHuff {
             predict_tree_for_block(
@@ -105,8 +101,7 @@ fn predict_blocks(
                 &blocks[i].freq,
                 encoder,
                 HufftreeBitCalc::Zlib,
-            )
-            .map_err(|e| PreflateError::error_on_block(ExitCode::PredictTree, i, &e))?;
+            )?;
         }
     }
     assert!(token_predictor_in.input_eof());
@@ -144,27 +139,17 @@ fn recreate_blocks<D: PredictionDecoder>(
     let mut is_eof = token_predictor.input_eof()
         && !decoder.decode_misprediction(CodecMisprediction::EOFMisprediction);
     while !is_eof {
-        let mut block = token_predictor.recreate_block(decoder).map_err(|e| {
-            PreflateError::error_on_block(ExitCode::RecreateBlock, output_blocks.len(), &e)
-        })?;
+        let mut block = token_predictor.recreate_block(decoder)?;
 
         if block.block_type == BlockType::DynamicHuff {
-            block.huffman_encoding = recreate_tree_for_block(
-                &block.freq,
-                decoder,
-                HufftreeBitCalc::Zlib,
-            )
-            .map_err(|e| {
-                PreflateError::error_on_block(ExitCode::RecreateTree, output_blocks.len(), &e)
-            })?;
+            block.huffman_encoding =
+                recreate_tree_for_block(&block.freq, decoder, HufftreeBitCalc::Zlib)?;
         }
 
         is_eof = token_predictor.input_eof()
             && !decoder.decode_misprediction(CodecMisprediction::EOFMisprediction);
 
-        deflate_writer.encode_block(&block, is_eof).map_err(|e| {
-            PreflateError::error_on_block(ExitCode::EncodeBlock, output_blocks.len(), &e)
-        })?;
+        deflate_writer.encode_block(&block, is_eof)?;
 
         output_blocks.push(block);
     }

@@ -11,10 +11,12 @@ use crate::hash_algorithm::{
 };
 use crate::hash_chain::{HashChain, MAX_UPDATE_HASH_BATCH};
 use crate::preflate_constants::{MAX_MATCH, MIN_LOOKAHEAD, MIN_MATCH};
+use crate::preflate_error::{err_exit_code, ExitCode, Result};
 use crate::preflate_input::PreflateInput;
 use crate::preflate_parameter_estimator::PreflateStrategy;
 use crate::preflate_token::PreflateTokenReference;
 use crate::token_predictor::TokenPredictorParameters;
+
 use std::cmp;
 
 #[derive(Debug, Copy, Clone)]
@@ -85,11 +87,11 @@ pub trait HashChainHolder {
         &self,
         target_reference: &PreflateTokenReference,
         input: &PreflateInput,
-    ) -> anyhow::Result<u32>;
+    ) -> Result<u32>;
 
     /// Does the inverse of calculate_hops, where we start from the predicted token and
     /// get the new distance based on the number of hops
-    fn hop_match(&self, len: u32, hops: u32, input: &PreflateInput) -> anyhow::Result<u32>;
+    fn hop_match(&self, len: u32, hops: u32, input: &PreflateInput) -> Result<u32>;
 
     /// debugging function to verify that the hash chain is correct
     fn verify_hash(&self, _dist: Option<PreflateTokenReference>);
@@ -124,11 +126,11 @@ impl HashChainHolder for () {
         &self,
         _target_reference: &PreflateTokenReference,
         _input: &PreflateInput,
-    ) -> anyhow::Result<u32> {
+    ) -> Result<u32> {
         unimplemented!()
     }
 
-    fn hop_match(&self, _len: u32, _hops: u32, _input: &PreflateInput) -> anyhow::Result<u32> {
+    fn hop_match(&self, _len: u32, _hops: u32, _input: &PreflateInput) -> Result<u32> {
         unimplemented!()
     }
 
@@ -171,11 +173,11 @@ impl<H: HashImplementation> HashChainHolder for HashChainHolderImpl<H> {
         &self,
         target_reference: &PreflateTokenReference,
         input: &PreflateInput,
-    ) -> anyhow::Result<u32> {
+    ) -> Result<u32> {
         let max_len = std::cmp::min(input.remaining(), MAX_MATCH);
 
         if max_len < target_reference.len() {
-            return Err(anyhow::anyhow!("max_len < target_reference.len()"));
+            return err_exit_code(ExitCode::PredictBlock, "max_len < target_reference.len()");
         }
 
         let max_chain_org = 0xffff; // max hash chain length
@@ -213,15 +215,15 @@ impl<H: HashImplementation> HashChainHolder for HashChainHolderImpl<H> {
             max_chain -= 1;
         }
 
-        Err(anyhow::anyhow!("no match found"))
+        err_exit_code(ExitCode::MatchNotFound, "no match found")
     }
 
     /// Does the inverse of calculate_hops, where we start from the predicted token and
     /// get the new distance based on the number of hops
-    fn hop_match(&self, len: u32, hops: u32, input: &PreflateInput) -> anyhow::Result<u32> {
+    fn hop_match(&self, len: u32, hops: u32, input: &PreflateInput) -> Result<u32> {
         let max_len = std::cmp::min(input.remaining(), MAX_MATCH);
         if max_len < len {
-            return Err(anyhow::anyhow!("not enough data left to match"));
+            return err_exit_code(ExitCode::RecompressFailed, "not enough data left to match");
         }
 
         let cur_max_dist = std::cmp::min(input.pos(), self.window_bytes);
@@ -247,7 +249,7 @@ impl<H: HashImplementation> HashChainHolder for HashChainHolderImpl<H> {
             }
         }
 
-        Err(anyhow::anyhow!("no match found"))
+        err_exit_code(ExitCode::MatchNotFound, "no match found")
     }
 
     /// debugging function to verify that the hash chain is correct

@@ -4,7 +4,7 @@
  *  This software incorporates material from third parties. See NOTICE.txt for details.
  *--------------------------------------------------------------------------------------------*/
 
-use anyhow::Context;
+use crate::preflate_error::{err_exit_code, AddContext, ExitCode, Result};
 
 use std::io::Read;
 
@@ -41,7 +41,7 @@ impl<R: Read> DeflateReader<R> {
         std::mem::take(&mut self.plain_text)
     }
 
-    fn read_bit(&mut self) -> anyhow::Result<bool> {
+    fn read_bit(&mut self) -> Result<bool> {
         Ok(self.input.get(1)? != 0)
     }
 
@@ -61,7 +61,7 @@ impl<R: Read> DeflateReader<R> {
         }
     }
 
-    pub fn read_block(&mut self, last: &mut bool) -> anyhow::Result<PreflateTokenBlock> {
+    pub fn read_block(&mut self, last: &mut bool) -> Result<PreflateTokenBlock> {
         let mut blk;
 
         *last = self.read_bit()?;
@@ -77,7 +77,7 @@ impl<R: Read> DeflateReader<R> {
                 let len = self.read_bits(16)?;
                 let ilen = self.read_bits(16)?;
                 if (len ^ ilen) != 0xffff {
-                    return Err(anyhow::Error::msg("Blocllength mismatch"));
+                    return err_exit_code(ExitCode::AnalyzeFailed, "Block length mismatch");
                 }
                 blk.context_len = 0;
 
@@ -105,12 +105,11 @@ impl<R: Read> DeflateReader<R> {
 
                 let decoder = HuffmanReader::create_from_original_encoding(&blk.huffman_encoding)?;
 
-                self.decode_block(&decoder, &mut blk)
-                    .with_context(|| "decode_block dyn")?;
+                self.decode_block(&decoder, &mut blk).context()?;
                 Ok(blk)
             }
 
-            _ => Err(anyhow::Error::msg("Invalid block type")),
+            _ => err_exit_code(ExitCode::InvalidDeflate, "Invalid block type"),
         }
     }
 
@@ -118,7 +117,7 @@ impl<R: Read> DeflateReader<R> {
         &mut self,
         decoder: &HuffmanReader,
         blk: &mut PreflateTokenBlock,
-    ) -> anyhow::Result<()> {
+    ) -> Result<()> {
         let mut earliest_reference = i32::MAX;
         let mut cur_pos = 0;
 
@@ -134,7 +133,7 @@ impl<R: Read> DeflateReader<R> {
             } else {
                 let lcode: u32 = lit_len - preflate_constants::NONLEN_CODE_COUNT as u32;
                 if lcode >= preflate_constants::LEN_CODE_COUNT as u32 {
-                    return Err(anyhow::Error::msg("Invalid length code"));
+                    return err_exit_code(ExitCode::InvalidDeflate, "Invalid length code");
                 }
                 let len: u32 = preflate_constants::MIN_MATCH
                     + preflate_constants::LENGTH_BASE_TABLE[lcode as usize] as u32
@@ -147,14 +146,14 @@ impl<R: Read> DeflateReader<R> {
 
                 let dcode = decoder.fetch_next_distance_char(&mut self.input)? as u32;
                 if dcode >= preflate_constants::DIST_CODE_COUNT as u32 {
-                    return Err(anyhow::Error::msg("Invalid distance code"));
+                    return err_exit_code(ExitCode::InvalidDeflate, "Invalid distance code");
                 }
                 let dist = 1
                     + preflate_constants::DIST_BASE_TABLE[dcode as usize] as u32
                     + self
                         .read_bits(preflate_constants::DIST_EXTRA_TABLE[dcode as usize].into())?;
                 if dist as usize > self.plain_text.len() {
-                    return Err(anyhow::Error::msg("Invalid distance"));
+                    return err_exit_code(ExitCode::InvalidDeflate, "Invalid distance");
                 }
                 self.write_reference(dist, len);
                 blk.add_reference(len, dist, irregular_258);

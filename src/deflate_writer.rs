@@ -4,7 +4,7 @@
  *  This software incorporates material from third parties. See NOTICE.txt for details.
  *--------------------------------------------------------------------------------------------*/
 
-use anyhow::Result;
+use crate::preflate_error::Result;
 
 use crate::{
     bit_writer::BitWriter,
