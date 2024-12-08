@@ -10,7 +10,7 @@ use crate::{
     deflate_reader::DeflateReader,
     deflate_writer::DeflateWriter,
     huffman_calc::HufftreeBitCalc,
-    preflate_error::{ExitCode, PreflateError},
+    preflate_error::PreflateError,
     preflate_input::PreflateInput,
     preflate_parameter_estimator::PreflateParameters,
     preflate_token::{BlockType, PreflateTokenBlock},

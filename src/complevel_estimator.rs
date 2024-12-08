@@ -243,7 +243,7 @@ impl<'a> CompLevelEstimatorState<'a> {
 
     fn recommend(&mut self) -> Result<CompLevelInfo> {
         if self.candidates.is_empty() {
-            return err_exit_code(ExitCode::PredictBlock, "no candidates found");
+            return err_exit_code(ExitCode::NoCompressionCandidates, "no candidates found");
         }
 
         let candidate = self
@@ -286,7 +286,7 @@ impl<'a> CompLevelEstimatorState<'a> {
 
         if candidate.max_chain_found() >= 4096 {
             return err_exit_code(
-                ExitCode::PredictBlock,
+                ExitCode::NoCompressionCandidates,
                 format!("max_chain_found too large: {}", candidate.max_chain_found()).as_str(),
             );
         }

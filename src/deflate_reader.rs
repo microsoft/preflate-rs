@@ -77,7 +77,7 @@ impl<R: Read> DeflateReader<R> {
                 let len = self.read_bits(16)?;
                 let ilen = self.read_bits(16)?;
                 if (len ^ ilen) != 0xffff {
-                    return err_exit_code(ExitCode::AnalyzeFailed, "Block length mismatch");
+                    return err_exit_code(ExitCode::InvalidDeflate, "Block length mismatch");
                 }
                 blk.context_len = 0;
 
@@ -148,13 +148,16 @@ impl<R: Read> DeflateReader<R> {
                 if dcode >= preflate_constants::DIST_CODE_COUNT as u32 {
                     return err_exit_code(ExitCode::InvalidDeflate, "Invalid distance code");
                 }
+
                 let dist = 1
                     + preflate_constants::DIST_BASE_TABLE[dcode as usize] as u32
                     + self
                         .read_bits(preflate_constants::DIST_EXTRA_TABLE[dcode as usize].into())?;
+
                 if dist as usize > self.plain_text.len() {
                     return err_exit_code(ExitCode::InvalidDeflate, "Invalid distance");
                 }
+
                 self.write_reference(dist, len);
                 blk.add_reference(len, dist, irregular_258);
 

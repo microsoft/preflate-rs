@@ -9,7 +9,6 @@ use std::io::ErrorKind;
 use std::num::TryFromIntError;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-#[allow(dead_code)]
 #[non_exhaustive]
 pub enum ExitCode {
     ReadDeflate = 1,
@@ -31,7 +30,16 @@ pub enum ExitCode {
     GeneralFailure = 18,
     InvalidIDat = 19,
     MatchNotFound = 20,
+
+    /// The deflate data stream is invalid or corrupt and cannot be properly read
+    /// or reconstructed.
     InvalidDeflate = 21,
+
+    /// We couldn't find a reasonable candidate for the version of the
+    /// deflate algorithm used to compress the data. No gain would be
+    /// had from recompressing the data since the amount of correction
+    /// data would be larger than the original data.
+    NoCompressionCandidates = 22,
 }
 
 impl Display for ExitCode {

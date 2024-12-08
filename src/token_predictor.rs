@@ -496,7 +496,7 @@ impl<'a> TokenPredictor<'a> {
         }
 
         err_exit_code(
-            ExitCode::MatchNotFound,
+            ExitCode::RecompressFailed,
             format!("Didnt find a match {:?}", match_token).as_str(),
         )
     }

@@ -94,6 +94,7 @@ pub trait HashChainHolder {
     fn hop_match(&self, len: u32, hops: u32, input: &PreflateInput) -> Result<u32>;
 
     /// debugging function to verify that the hash chain is correct
+    #[allow(dead_code)]
     fn verify_hash(&self, _dist: Option<PreflateTokenReference>);
 
     fn checksum(&self, checksum: &mut DebugHash);
@@ -177,7 +178,7 @@ impl<H: HashImplementation> HashChainHolder for HashChainHolderImpl<H> {
         let max_len = std::cmp::min(input.remaining(), MAX_MATCH);
 
         if max_len < target_reference.len() {
-            return err_exit_code(ExitCode::PredictBlock, "max_len < target_reference.len()");
+            return err_exit_code(ExitCode::InvalidDeflate, "max_len < target_reference.len()");
         }
 
         let max_chain_org = 0xffff; // max hash chain length
@@ -249,7 +250,7 @@ impl<H: HashImplementation> HashChainHolder for HashChainHolderImpl<H> {
             }
         }
 
-        err_exit_code(ExitCode::MatchNotFound, "no match found")
+        err_exit_code(ExitCode::RecompressFailed, "no match found")
     }
 
     /// debugging function to verify that the hash chain is correct
