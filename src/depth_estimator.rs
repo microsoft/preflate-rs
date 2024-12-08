@@ -66,7 +66,7 @@ impl<H: HashImplementation> HashTableDepthEstimatorImpl<H> {
 
     fn internal_update_hash(&mut self, chars: &[u8], pos: u32, length: u32) {
         debug_assert!(length as usize <= chars.len());
-        if length as usize + H::num_hash_bytes() - 1 >= chars.len() {
+        if length as usize + H::NUM_HASH_BYTES - 1 >= chars.len() {
             // reached on of the stream so there will be no more matches
             return;
         }

@@ -274,6 +274,7 @@ impl<H: HashImplementation> HashChainHolderImpl<H> {
         }
     }
 
+    #[inline(never)]
     fn match_token_offset<const OFFSET: u32>(
         &self,
         prev_len: u32,
@@ -285,7 +286,7 @@ impl<H: HashImplementation> HashChainHolderImpl<H> {
         if max_len
             < std::cmp::max(
                 prev_len + 1,
-                std::cmp::max(H::num_hash_bytes() as u32, MIN_MATCH),
+                std::cmp::max(H::NUM_HASH_BYTES as u32, MIN_MATCH),
             )
         {
             return MatchResult::NoInput;
@@ -374,8 +375,44 @@ impl<H: HashImplementation> HashChainHolderImpl<H> {
     }
 }
 
-#[inline]
+#[inline(always)]
 fn prefix_compare(s1: &[u8], s2: &[u8], best_len: u32, max_len: u32) -> u32 {
+    if max_len == 258 {
+        assert!(s1.len() >= 258 && s2.len() >= 258);
+
+        let c = comp_8_bytes(&s1[0..8], &s2[0..8]);
+        if c != 0 {
+            let d = calc_diff(c);
+            if d < 3 {
+                return 0;
+            } else {
+                return d;
+            }
+        }
+
+        for i in 0..7 {
+            let c = comp_8_bytes(
+                &s1[i as usize..(i + 8) as usize],
+                &s2[i as usize..(i + 8) as usize],
+            );
+            if c != 0 {
+                return calc_diff(c) + (i + 1) * 8;
+            }
+        }
+        if s1[256] != s2[256] {
+            return 256;
+        }
+        if s1[257] != s2[257] {
+            return 257;
+        }
+        return 258;
+    } else {
+        prefix_cmp_odd_size(max_len, s1, s2, best_len)
+    }
+}
+
+#[cold]
+fn prefix_cmp_odd_size(max_len: u32, s1: &[u8], s2: &[u8], best_len: u32) -> u32 {
     assert!(
         max_len >= 3
             && s1.len() >= max_len as usize
@@ -390,7 +427,8 @@ fn prefix_compare(s1: &[u8], s2: &[u8], best_len: u32, max_len: u32) -> u32 {
         return 0;
     }
 
-    let mut match_len = 3; // Initialize with the length of the fixed prefix
+    let mut match_len = 3;
+    // Initialize with the length of the fixed prefix
     for i in 3..max_len {
         if s1[i as usize] != s2[i as usize] {
             break;
@@ -399,4 +437,17 @@ fn prefix_compare(s1: &[u8], s2: &[u8], best_len: u32, max_len: u32) -> u32 {
     }
 
     match_len
+}
+
+fn comp_8_bytes(s1: &[u8], s2: &[u8]) -> u64 {
+    let a = u64::from_le_bytes(s1[0..8].try_into().unwrap());
+    let b = u64::from_le_bytes(s2[0..8].try_into().unwrap());
+    a ^ b
+}
+
+fn calc_diff(diff: u64) -> u32 {
+    if diff != 0 {
+        return diff.trailing_zeros() / 8;
+    }
+    return 8;
 }
