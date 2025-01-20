@@ -4,7 +4,10 @@
  *  This software incorporates material from third parties. See NOTICE.txt for details.
  *--------------------------------------------------------------------------------------------*/
 
-use crate::preflate_error::{err_exit_code, AddContext, ExitCode, Result};
+use crate::{
+    preflate_error::{err_exit_code, AddContext, ExitCode, Result},
+    preflate_token::{PreflateToken, PreflateTokenReference},
+};
 
 use std::io::Read;
 
@@ -12,7 +15,7 @@ use crate::{
     bit_reader::BitReader,
     huffman_encoding::{HuffmanOriginalEncoding, HuffmanReader},
     preflate_constants,
-    preflate_token::{BlockType, PreflateTokenBlock},
+    preflate_token::PreflateTokenBlock,
 };
 
 /// Used to read binary data in deflate format and convert it to plaintext and a list of tokenized blocks
@@ -62,51 +65,70 @@ impl<R: Read> DeflateReader<R> {
     }
 
     pub fn read_block(&mut self, last: &mut bool) -> Result<PreflateTokenBlock> {
-        let mut blk;
-
         *last = self.read_bit()?;
         let mode = self.read_bits(2)?;
 
         match mode {
             0 => {
-                blk = PreflateTokenBlock::new(BlockType::Stored);
-                blk.block_type = BlockType::Stored;
                 let padding_bit_count = 8 - self.input.bit_position_in_current_byte() as u8;
-                blk.padding_bits = self.read_bits(padding_bit_count.into())? as u8;
+                let padding_bits = self.read_bits(padding_bit_count.into())? as u8;
 
                 let len = self.read_bits(16)?;
                 let ilen = self.read_bits(16)?;
                 if (len ^ ilen) != 0xffff {
                     return err_exit_code(ExitCode::InvalidDeflate, "Block length mismatch");
                 }
-                blk.context_len = 0;
 
                 self.input.flush_buffer_to_byte_boundary();
 
+                let mut uncompressed = Vec::with_capacity(len as usize);
+
                 for _i in 0..len {
                     let b = self.input.read_byte()?;
-                    blk.uncompressed.push(b);
+                    uncompressed.push(b);
                     self.write_literal(b);
                 }
 
-                Ok(blk)
+                Ok(PreflateTokenBlock::Stored {
+                    uncompressed,
+                    padding_bits,
+                })
             }
             1 => {
-                blk = PreflateTokenBlock::new(BlockType::StaticHuff);
+                // some compressors don't flush blocks at all if they are using static huffman encoding
+                // since there's no need to keep track of statistics etc.
+
+                let mut tokens = Vec::new();
                 let decoder = HuffmanReader::create_fixed()?;
-                self.decode_block(&decoder, &mut blk)?;
-                Ok(blk)
+                if let Err(e) = self.decode_block(&decoder, &mut tokens) {
+                    if e.exit_code() == ExitCode::ShortRead {
+                        Ok(PreflateTokenBlock::StaticHuff {
+                            tokens,
+                            incomplete: true,
+                        })
+                    } else {
+                        Err(e)
+                    }
+                } else {
+                    Ok(PreflateTokenBlock::StaticHuff {
+                        tokens,
+                        incomplete: false,
+                    })
+                }
             }
 
             2 => {
-                blk = PreflateTokenBlock::new(BlockType::DynamicHuff);
+                let huffman_encoding = HuffmanOriginalEncoding::read(&mut self.input)?;
 
-                blk.huffman_encoding = HuffmanOriginalEncoding::read(&mut self.input)?;
+                let decoder = HuffmanReader::create_from_original_encoding(&huffman_encoding)?;
 
-                let decoder = HuffmanReader::create_from_original_encoding(&blk.huffman_encoding)?;
+                let mut tokens = Vec::new();
+                self.decode_block(&decoder, &mut tokens).context()?;
 
-                self.decode_block(&decoder, &mut blk).context()?;
-                Ok(blk)
+                Ok(PreflateTokenBlock::DynamicHuff {
+                    tokens,
+                    huffman_encoding,
+                })
             }
 
             _ => err_exit_code(ExitCode::InvalidDeflate, "Invalid block type"),
@@ -116,7 +138,7 @@ impl<R: Read> DeflateReader<R> {
     fn decode_block(
         &mut self,
         decoder: &HuffmanReader,
-        blk: &mut PreflateTokenBlock,
+        tokens: &mut Vec<PreflateToken>,
     ) -> Result<()> {
         let mut earliest_reference = i32::MAX;
         let mut cur_pos = 0;
@@ -125,11 +147,10 @@ impl<R: Read> DeflateReader<R> {
             let lit_len: u32 = decoder.fetch_next_literal_code(&mut self.input)?.into();
             if lit_len < 256 {
                 self.write_literal(lit_len as u8);
-                blk.add_literal(lit_len as u8);
+                tokens.push(PreflateToken::Literal(lit_len as u8));
                 cur_pos += 1;
             } else if lit_len == 256 {
-                blk.context_len = -earliest_reference;
-                break;
+                return Ok(());
             } else {
                 let lcode: u32 = lit_len - preflate_constants::NONLEN_CODE_COUNT as u32;
                 if lcode >= preflate_constants::LEN_CODE_COUNT as u32 {
@@ -141,7 +162,7 @@ impl<R: Read> DeflateReader<R> {
                         .read_bits(preflate_constants::LENGTH_EXTRA_TABLE[lcode as usize].into())?;
 
                 // length of 258 can be encoded two ways: 284 with 5 one bits (non-standard) or as 285 with 0 extra bits (standard)
-                let irregular_258 =
+                let irregular258 =
                     len == 258 && lcode != preflate_constants::LEN_CODE_COUNT as u32 - 1;
 
                 let dcode = decoder.fetch_next_distance_char(&mut self.input)? as u32;
@@ -159,12 +180,15 @@ impl<R: Read> DeflateReader<R> {
                 }
 
                 self.write_reference(dist, len);
-                blk.add_reference(len, dist, irregular_258);
+                tokens.push(PreflateToken::Reference(PreflateTokenReference::new(
+                    len,
+                    dist,
+                    irregular258,
+                )));
 
                 earliest_reference = std::cmp::min(earliest_reference, cur_pos - (dist as i32));
                 cur_pos += len as i32;
             }
         }
-        Ok(())
     }
 }

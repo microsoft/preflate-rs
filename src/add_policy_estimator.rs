@@ -8,7 +8,7 @@
 ///
 /// This will be the limit that we use when we decide whether to
 /// use skip_hash or update_hash.
-use crate::preflate_token::{BlockType, PreflateToken, PreflateTokenBlock};
+use crate::preflate_token::{PreflateToken, PreflateTokenBlock};
 
 #[derive(Default, Eq, PartialEq, Debug, Clone, Copy)]
 pub enum DictionaryAddPolicy {
@@ -122,16 +122,17 @@ pub fn estimate_add_policy(token_blocks: &[PreflateTokenBlock]) -> DictionaryAdd
     for i in 0..token_blocks.len() {
         let token_block = &token_blocks[i];
 
-        match token_block.block_type {
-            BlockType::Stored => {
+        match token_block {
+            PreflateTokenBlock::Stored { uncompressed, .. } => {
                 // we assume for stored blocks everything was added to the dictionary
-                for _i in 0..token_block.uncompressed.len() {
+                for _i in 0..uncompressed.len() {
                     current_window[current_offset as usize & WINDOW_MASK] = 0;
                     current_offset += 1;
                 }
             }
-            BlockType::StaticHuff | BlockType::DynamicHuff => {
-                for token in token_block.tokens.iter() {
+            PreflateTokenBlock::StaticHuff { tokens, .. }
+            | PreflateTokenBlock::DynamicHuff { tokens, .. } => {
+                for token in tokens.iter() {
                     match token {
                         PreflateToken::Literal(_) => {
                             current_window[current_offset as usize & WINDOW_MASK] = 0;

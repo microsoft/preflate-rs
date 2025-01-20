@@ -4,7 +4,7 @@
  *  This software incorporates material from third parties. See NOTICE.txt for details.
  *--------------------------------------------------------------------------------------------*/
 
-use crate::preflate_token::{BlockType, PreflateToken, PreflateTokenBlock};
+use crate::preflate_token::{PreflateToken, PreflateTokenBlock};
 
 pub struct PreflateStreamInfo {
     pub token_count: u32,
@@ -18,6 +18,33 @@ pub struct PreflateStreamInfo {
     pub count_huff_blocks: u32,
     pub count_rle_blocks: u32,
     pub count_static_huff_tree_blocks: u32,
+}
+
+fn process_tokens(tokens: &[PreflateToken], result: &mut PreflateStreamInfo) {
+    result.token_count += tokens.len() as u32;
+    result.max_tokens_per_block = std::cmp::max(result.max_tokens_per_block, tokens.len() as u32);
+    let mut block_max_dist = 0;
+    let mut block_min_len = u32::MAX;
+    for j in 0..tokens.len() {
+        match &tokens[j] {
+            PreflateToken::Literal(_) => {
+                result.literal_count += 1;
+            }
+            PreflateToken::Reference(t) => {
+                result.reference_count += 1;
+                block_max_dist = std::cmp::max(block_max_dist, t.dist());
+                block_min_len = std::cmp::min(block_min_len, t.len());
+            }
+        }
+    }
+    result.max_dist = std::cmp::max(result.max_dist, block_max_dist);
+    result.min_len = std::cmp::min(result.min_len, block_min_len);
+
+    if block_max_dist == 0 {
+        result.count_huff_blocks += 1;
+    } else if block_max_dist == 1 {
+        result.count_rle_blocks += 1;
+    }
 }
 
 pub fn extract_preflate_info(blocks: &[PreflateTokenBlock]) -> PreflateStreamInfo {
@@ -36,38 +63,17 @@ pub fn extract_preflate_info(blocks: &[PreflateTokenBlock]) -> PreflateStreamInf
     };
 
     for i in 0..blocks.len() {
-        let b = &blocks[i];
-        if b.block_type == BlockType::Stored {
-            result.count_stored_blocks += 1;
-            continue;
-        }
-        if b.block_type == BlockType::StaticHuff {
-            result.count_static_huff_tree_blocks += 1;
-        }
-        result.token_count += b.tokens.len() as u32;
-        result.max_tokens_per_block =
-            std::cmp::max(result.max_tokens_per_block, b.tokens.len() as u32);
-        let mut block_max_dist = 0;
-        let mut block_min_len = u32::MAX;
-        for j in 0..b.tokens.len() {
-            match &b.tokens[j] {
-                PreflateToken::Literal(_) => {
-                    result.literal_count += 1;
-                }
-                PreflateToken::Reference(t) => {
-                    result.reference_count += 1;
-                    block_max_dist = std::cmp::max(block_max_dist, t.dist());
-                    block_min_len = std::cmp::min(block_min_len, t.len());
-                }
+        match &blocks[i] {
+            PreflateTokenBlock::Stored { .. } => {
+                result.count_stored_blocks += 1;
             }
-        }
-        result.max_dist = std::cmp::max(result.max_dist, block_max_dist);
-        result.min_len = std::cmp::min(result.min_len, block_min_len);
-
-        if block_max_dist == 0 {
-            result.count_huff_blocks += 1;
-        } else if block_max_dist == 1 {
-            result.count_rle_blocks += 1;
+            PreflateTokenBlock::StaticHuff { tokens, .. } => {
+                result.count_static_huff_tree_blocks += 1;
+                process_tokens(&tokens, &mut result);
+            }
+            PreflateTokenBlock::DynamicHuff { tokens, .. } => {
+                process_tokens(&tokens, &mut result);
+            }
         }
     }
     result

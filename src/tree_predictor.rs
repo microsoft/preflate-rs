@@ -178,6 +178,8 @@ fn predict_ld_trees<D: PredictionEncoder>(
     predicted_bit_len: &[u8],
     actual_target_codes: &[(TreeCodeType, u8)],
 ) -> Result<()> {
+    encoder.encode_verify_state("predict_ld_trees", 0);
+
     let mut symbols = predicted_bit_len;
     let mut prev_code = None;
 
@@ -245,6 +247,8 @@ fn reconstruct_ld_trees<D: PredictionDecoder>(
     decoder: &mut D,
     sym_bit_len: &[u8],
 ) -> Result<Vec<(TreeCodeType, u8)>> {
+    decoder.decode_verify_state("predict_ld_trees", 0);
+
     let mut symbols = sym_bit_len;
     let mut prev_code = None;
     let mut result: Vec<(TreeCodeType, u8)> = Vec::new();

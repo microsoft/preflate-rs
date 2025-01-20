@@ -10,15 +10,20 @@ use crate::{
     cabac_codec::{decode_difference, encode_difference},
     hash_algorithm::HashAlgorithm,
     hash_chain_holder::{new_hash_chain_holder, HashChainHolder, MatchResult},
+    huffman_calc::HufftreeBitCalc,
     preflate_constants::MIN_MATCH,
     preflate_error::{err_exit_code, AddContext, ExitCode, Result},
     preflate_input::PreflateInput,
     preflate_parameter_estimator::PreflateStrategy,
     preflate_parse_config::MatchingType,
-    preflate_token::{BlockType, PreflateToken, PreflateTokenBlock, PreflateTokenReference},
+    preflate_token::{
+        PreflateToken, PreflateTokenBlock, PreflateTokenReference, TokenFrequency, BT_DYNAMICHUFF,
+        BT_STATICHUFF, BT_STORED,
+    },
     statistical_codec::{
         CodecCorrection, CodecMisprediction, PredictionDecoder, PredictionEncoder,
     },
+    tree_predictor::{predict_tree_for_block, recreate_tree_for_block},
 };
 
 const VERIFY: bool = false;
@@ -97,32 +102,53 @@ impl<'a> TokenPredictor<'a> {
 
         codec.encode_verify_state("blocktypestart", 0);
 
-        codec.encode_correction(
-            CodecCorrection::BlockTypeCorrection,
-            encode_difference(BlockType::DynamicHuff as u32, block.block_type as u32),
-        );
+        let tokens;
 
-        if block.block_type == BlockType::Stored {
-            codec.encode_value(block.uncompressed.len() as u16, 16);
+        match block {
+            PreflateTokenBlock::Stored {
+                uncompressed,
+                padding_bits,
+            } => {
+                codec.encode_correction(
+                    CodecCorrection::BlockTypeCorrection,
+                    encode_difference(BT_DYNAMICHUFF, BT_STORED),
+                );
 
-            codec.encode_correction(CodecCorrection::NonZeroPadding, block.padding_bits.into());
+                codec.encode_value(uncompressed.len() as u16, 16);
 
-            for _i in 0..block.uncompressed.len() {
-                self.state.update_hash(1, &self.input);
-                self.input.advance(1);
+                codec.encode_correction(CodecCorrection::NonZeroPadding, (*padding_bits).into());
+
+                for _i in 0..uncompressed.len() {
+                    self.state.update_hash(1, &self.input);
+                    self.input.advance(1);
+                }
+                return Ok(());
             }
+            PreflateTokenBlock::StaticHuff { tokens: t, .. } => {
+                codec.encode_correction(
+                    CodecCorrection::BlockTypeCorrection,
+                    encode_difference(BT_DYNAMICHUFF, BT_STATICHUFF),
+                );
 
-            return Ok(());
+                tokens = t
+            }
+            PreflateTokenBlock::DynamicHuff { tokens: t, .. } => {
+                codec.encode_correction(
+                    CodecCorrection::BlockTypeCorrection,
+                    encode_difference(BT_DYNAMICHUFF, BT_DYNAMICHUFF),
+                );
+                tokens = t
+            }
         }
 
         // if the block ends at an unexpected point, or it contains more tokens
         // than expected, we will need to encode the block size
-        if (!last_block && block.tokens.len() != self.max_token_count as usize)
-            || block.tokens.len() > self.max_token_count as usize
+        if (!last_block && tokens.len() != self.max_token_count as usize)
+            || tokens.len() > self.max_token_count as usize
         {
             codec.encode_correction(
                 CodecCorrection::TokenCount,
-                u32::try_from(block.tokens.len()).unwrap() + 1,
+                u32::try_from(tokens.len()).unwrap() + 1,
             );
         } else {
             codec.encode_correction(CodecCorrection::TokenCount, 0);
@@ -130,8 +156,10 @@ impl<'a> TokenPredictor<'a> {
 
         codec.encode_verify_state("start", if VERIFY { self.checksum().hash() } else { 0 });
 
-        for i in 0..block.tokens.len() {
-            let target_token = &block.tokens[i];
+        let mut freq = TokenFrequency::default();
+
+        for i in 0..tokens.len() {
+            let target_token = &tokens[i];
 
             codec.encode_verify_state(
                 "token",
@@ -247,7 +275,15 @@ impl<'a> TokenPredictor<'a> {
                 }
             }
 
-            self.commit_token(target_token, None);
+            self.commit_token(target_token);
+            freq.commit_token(target_token);
+        }
+
+        if let PreflateTokenBlock::DynamicHuff {
+            huffman_encoding, ..
+        } = block
+        {
+            predict_tree_for_block(huffman_encoding, &freq, codec, HufftreeBitCalc::Zlib)?;
         }
 
         codec.encode_verify_state("done", if VERIFY { self.checksum().hash() } else { 0 });
@@ -259,13 +295,8 @@ impl<'a> TokenPredictor<'a> {
         &mut self,
         codec: &mut D,
     ) -> Result<PreflateTokenBlock> {
-        let mut block;
         self.current_token_count = 0;
         self.pending_reference = None;
-
-        const BT_STORED: u32 = BlockType::Stored as u32;
-        const BT_DYNAMICHUFF: u32 = BlockType::DynamicHuff as u32;
-        const BT_STATICHUFF: u32 = BlockType::StaticHuff as u32;
 
         codec.decode_verify_state("blocktypestart", 0);
 
@@ -275,23 +306,23 @@ impl<'a> TokenPredictor<'a> {
         );
         match bt {
             BT_STORED => {
-                block = PreflateTokenBlock::new(BlockType::Stored);
                 let uncompressed_len = codec.decode_value(16).into();
-                block.padding_bits = codec.decode_correction(CodecCorrection::NonZeroPadding) as u8;
-                block.uncompressed.reserve(uncompressed_len as usize);
+                let padding_bits = codec.decode_correction(CodecCorrection::NonZeroPadding) as u8;
+                let mut uncompressed = Vec::with_capacity(uncompressed_len as usize);
 
                 for _i in 0..uncompressed_len {
-                    block.uncompressed.push(self.input.cur_char(0));
+                    uncompressed.push(self.input.cur_char(0));
                     self.state.update_hash(1, &self.input);
                     self.input.advance(1);
                 }
-                return Ok(block);
+
+                return Ok(PreflateTokenBlock::Stored {
+                    uncompressed,
+                    padding_bits,
+                });
             }
-            BT_STATICHUFF => {
-                block = PreflateTokenBlock::new(BlockType::StaticHuff);
-            }
-            BT_DYNAMICHUFF => {
-                block = PreflateTokenBlock::new(BlockType::DynamicHuff);
+            BT_STATICHUFF | BT_DYNAMICHUFF => {
+                // continue
             }
             _ => {
                 return err_exit_code(ExitCode::InvalidDeflate, "Invalid block type");
@@ -305,7 +336,8 @@ impl<'a> TokenPredictor<'a> {
             blocksize -= 1;
         }
 
-        block.tokens.reserve(blocksize as usize);
+        let mut tokens = Vec::with_capacity(blocksize as usize);
+        let mut freq = TokenFrequency::default();
 
         codec.decode_verify_state("start", if VERIFY { self.checksum().hash() } else { 0 });
 
@@ -325,7 +357,10 @@ impl<'a> TokenPredictor<'a> {
                     let not_ok =
                         codec.decode_misprediction(CodecMisprediction::LiteralPredictionWrong);
                     if !not_ok {
-                        self.commit_token(&PreflateToken::Literal(l), Some(&mut block));
+                        self.commit_token(&PreflateToken::Literal(l));
+                        freq.commit_token(&PreflateToken::Literal(l));
+
+                        tokens.push(PreflateToken::Literal(l));
                         continue;
                     }
 
@@ -340,10 +375,11 @@ impl<'a> TokenPredictor<'a> {
                     let not_ok =
                         codec.decode_misprediction(CodecMisprediction::ReferencePredictionWrong);
                     if not_ok {
-                        self.commit_token(
-                            &PreflateToken::Literal(self.input.cur_char(0)),
-                            Some(&mut block),
-                        );
+                        let c = self.input.cur_char(0);
+                        self.commit_token(&PreflateToken::Literal(c));
+                        freq.commit_token(&PreflateToken::Literal(c));
+
+                        tokens.push(PreflateToken::Literal(c));
                         continue;
                     }
 
@@ -355,6 +391,7 @@ impl<'a> TokenPredictor<'a> {
                 predicted_ref.len(),
                 codec.decode_correction(CodecCorrection::LenCorrection),
             );
+
             if new_len != predicted_ref.len() {
                 let hops = codec.decode_correction(CodecCorrection::DistAfterLenCorrection);
 
@@ -384,12 +421,28 @@ impl<'a> TokenPredictor<'a> {
                 predicted_ref.set_irregular258(true);
             }
 
-            self.commit_token(&PreflateToken::Reference(predicted_ref), Some(&mut block));
+            self.commit_token(&PreflateToken::Reference(predicted_ref));
+            freq.commit_token(&PreflateToken::Reference(predicted_ref));
+            tokens.push(PreflateToken::Reference(predicted_ref));
         }
+
+        let b = if bt == BT_STATICHUFF {
+            PreflateTokenBlock::StaticHuff {
+                tokens,
+                incomplete: false,
+            }
+        } else {
+            let huffman_encoding = recreate_tree_for_block(&freq, codec, HufftreeBitCalc::Zlib)?;
+
+            PreflateTokenBlock::DynamicHuff {
+                tokens,
+                huffman_encoding: huffman_encoding,
+            }
+        };
 
         codec.decode_verify_state("done", if VERIFY { self.checksum().hash() } else { 0 });
 
-        Ok(block)
+        Ok(b)
     }
 
     pub fn input_eof(&self) -> bool {
@@ -501,21 +554,13 @@ impl<'a> TokenPredictor<'a> {
         )
     }
 
-    fn commit_token(&mut self, token: &PreflateToken, block: Option<&mut PreflateTokenBlock>) {
+    fn commit_token(&mut self, token: &PreflateToken) {
         match token {
-            PreflateToken::Literal(lit) => {
-                if let Some(block) = block {
-                    block.add_literal(*lit);
-                }
-
+            PreflateToken::Literal(_) => {
                 self.state.update_hash(1, &self.input);
                 self.input.advance(1);
             }
             PreflateToken::Reference(t) => {
-                if let Some(block) = block {
-                    block.add_reference(t.len(), t.dist(), t.get_irregular258());
-                }
-
                 self.state.update_hash(t.len(), &self.input);
                 self.input.advance(t.len());
             }

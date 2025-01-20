@@ -9,16 +9,14 @@ use std::io::Cursor;
 use crate::{
     deflate_reader::DeflateReader,
     deflate_writer::DeflateWriter,
-    huffman_calc::HufftreeBitCalc,
     preflate_error::PreflateError,
     preflate_input::PreflateInput,
     preflate_parameter_estimator::PreflateParameters,
-    preflate_token::{BlockType, PreflateTokenBlock},
+    preflate_token::PreflateTokenBlock,
     statistical_codec::{
         CodecCorrection, CodecMisprediction, PredictionDecoder, PredictionEncoder,
     },
     token_predictor::TokenPredictor,
-    tree_predictor::{predict_tree_for_block, recreate_tree_for_block},
 };
 
 /// takes a deflate compressed stream, analyzes it, decoompresses it, and records
@@ -61,7 +59,25 @@ pub fn parse_deflate(
 
         if deflate_info_dump_level > 0 {
             // Log information about this deflate compressed block
-            println!("Block: tokens={}", block.tokens.len());
+            match &block {
+                PreflateTokenBlock::Stored {
+                    uncompressed,
+                    padding_bits,
+                } => {
+                    println!(
+                        "Block: stored, uncompressed={} padding_bits={}",
+                        uncompressed.len(),
+                        padding_bits
+                    );
+                }
+                PreflateTokenBlock::StaticHuff { tokens, .. } => {
+                    println!("StaticBlock: tokens={}", tokens.len());
+                }
+
+                PreflateTokenBlock::DynamicHuff { tokens, .. } => {
+                    println!("DynamicBlock: tokens={}", tokens.len());
+                }
+            }
         }
 
         blocks.push(block);
@@ -94,15 +110,6 @@ fn predict_blocks(
         }
 
         token_predictor_in.predict_block(&blocks[i], encoder, i == blocks.len() - 1)?;
-
-        if blocks[i].block_type == BlockType::DynamicHuff {
-            predict_tree_for_block(
-                &blocks[i].huffman_encoding,
-                &blocks[i].freq,
-                encoder,
-                HufftreeBitCalc::Zlib,
-            )?;
-        }
     }
     assert!(token_predictor_in.input_eof());
     Ok(())
@@ -139,12 +146,7 @@ fn recreate_blocks<D: PredictionDecoder>(
     let mut is_eof = token_predictor.input_eof()
         && !decoder.decode_misprediction(CodecMisprediction::EOFMisprediction);
     while !is_eof {
-        let mut block = token_predictor.recreate_block(decoder)?;
-
-        if block.block_type == BlockType::DynamicHuff {
-            block.huffman_encoding =
-                recreate_tree_for_block(&block.freq, decoder, HufftreeBitCalc::Zlib)?;
-        }
+        let block = token_predictor.recreate_block(decoder)?;
 
         is_eof = token_predictor.input_eof()
             && !decoder.decode_misprediction(CodecMisprediction::EOFMisprediction);
@@ -248,14 +250,14 @@ fn analyze_compressed_data_verify(
     };
     use cabac::debug::{DebugReader, DebugWriter};
 
-    fn compare<T: PartialEq + std::fmt::Debug>(a: &[T], b: &[T]) {
+    fn compare<T: PartialEq + std::fmt::Debug>(a: &[T], b: &[T], str: &str) {
         if a.len() != b.len() {
-            panic!("lengths differ");
+            panic!("lengths differ {}", str);
         }
 
         for i in 0..a.len() {
             if a[i] != b[i] {
-                panic!("index {} differs ({:?},{:?})", i, a[i], b[i]);
+                panic!("index {} differs ({:?},{:?}) {}", i, a[i], b[i], str);
             }
         }
     }
@@ -308,32 +310,47 @@ fn analyze_compressed_data_verify(
         .iter()
         .zip(recreated_blocks)
         .enumerate()
-        .for_each(|(index, (a, b))| {
-            assert_eq!(a.block_type, b.block_type, "block type differs {index}");
-            //assert_eq!(a.uncompressed_len, b.uncompressed_len);
-            assert_eq!(
-                a.padding_bits, b.padding_bits,
-                "padding bits differ {index}"
-            );
-            compare(&a.tokens, &b.tokens);
-            assert_eq!(
-                a.tokens.len(),
-                b.tokens.len(),
-                "token length differs {index}"
-            );
-            assert!(a.tokens == b.tokens, "tokens differ {index}");
-            assert_eq!(
-                a.freq.literal_codes, b.freq.literal_codes,
-                "literal code freq differ {index}"
-            );
-            assert_eq!(
-                a.freq.distance_codes, b.freq.distance_codes,
-                "distance code freq differ {index}"
-            );
-            assert_eq!(
-                a.huffman_encoding, b.huffman_encoding,
-                "huffman_encoding differs {index}"
-            );
+        .for_each(|(index, (a, b))| match (a, &b) {
+            (
+                PreflateTokenBlock::Stored {
+                    uncompressed: a,
+                    padding_bits: b,
+                },
+                PreflateTokenBlock::Stored {
+                    uncompressed: c,
+                    padding_bits: d,
+                },
+            ) => {
+                assert_eq!(a, c, "uncompressed data differs {index}");
+                assert_eq!(b, d, "padding bits differ {index}");
+            }
+            (
+                PreflateTokenBlock::StaticHuff {
+                    tokens: t1,
+                    incomplete: i1,
+                },
+                PreflateTokenBlock::StaticHuff {
+                    tokens: t2,
+                    incomplete: i2,
+                },
+            ) => {
+                compare(t1, t2, &format!("tokens differ {index}"));
+                assert_eq!(i1, i2, "incomplete flag differs {index}");
+            }
+            (
+                PreflateTokenBlock::DynamicHuff {
+                    tokens: t1,
+                    huffman_encoding: h1,
+                },
+                PreflateTokenBlock::DynamicHuff {
+                    tokens: t2,
+                    huffman_encoding: h2,
+                },
+            ) => {
+                compare(t1, t2, &format!("tokens differ {index}"));
+                assert_eq!(h1, h2, "huffman_encoding differs {index}");
+            }
+            _ => panic!("block type differs {index}"),
         });
 
     assert_eq!(
@@ -371,7 +388,7 @@ fn verify_longmatch() {
     do_analyze(
         None,
         &read_file("compressed_flate2_level1_longmatch.deflate"),
-        false,
+        true,
     );
 }
 

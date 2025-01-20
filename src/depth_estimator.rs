@@ -206,7 +206,7 @@ pub fn new_depth_estimator(hash_algorithm: HashAlgorithm) -> Box<dyn HashTableDe
 #[test]
 fn verify_max_chain_length() {
     use crate::{
-        preflate_token::{BlockType, PreflateToken},
+        preflate_token::{PreflateToken, PreflateTokenBlock},
         process::parse_deflate,
     };
 
@@ -261,16 +261,17 @@ fn verify_max_chain_length() {
         let mut input = PreflateInput::new(&parsed.plain_text);
         let mut max_depth = 0;
         for block in parsed.blocks {
-            match block.block_type {
-                BlockType::Stored => {
+            match block {
+                PreflateTokenBlock::Stored { uncompressed, .. } => {
                     estimator.update_hash(
                         DictionaryAddPolicy::AddAll,
                         &input,
-                        block.uncompressed.len() as u32,
+                        uncompressed.len() as u32,
                     );
                 }
-                BlockType::StaticHuff | BlockType::DynamicHuff => {
-                    for token in block.tokens {
+                PreflateTokenBlock::StaticHuff { tokens, .. }
+                | PreflateTokenBlock::DynamicHuff { tokens, .. } => {
+                    for token in tokens {
                         let len = match token {
                             PreflateToken::Literal(_) => 1,
                             PreflateToken::Reference(r) => {

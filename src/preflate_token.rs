@@ -25,12 +25,6 @@ pub enum PreflateToken {
     Reference(PreflateTokenReference),
 }
 
-impl PreflateToken {
-    pub fn new_reference(len: u32, dist: u32, irregular258: bool) -> PreflateToken {
-        PreflateToken::Reference(PreflateTokenReference::new(len, dist, irregular258))
-    }
-}
-
 impl PreflateTokenReference {
     pub fn new(len: u32, dist: u32, irregular258: bool) -> PreflateTokenReference {
         PreflateTokenReference {
@@ -57,24 +51,24 @@ impl PreflateTokenReference {
     }
 }
 
-#[derive(Copy, Clone, PartialEq, Eq, Debug)]
-#[repr(u8)]
-pub enum BlockType {
-    DynamicHuff = 0,
-    Stored = 1,
-    StaticHuff = 2,
-}
+pub const BT_STORED: u32 = 1;
+pub const BT_DYNAMICHUFF: u32 = 0;
+pub const BT_STATICHUFF: u32 = 2;
 
 #[derive(Debug)]
-pub struct PreflateTokenBlock {
-    pub block_type: BlockType,
-    // if this is an uncompressed block, then this is the length
-    pub uncompressed: Vec<u8>,
-    pub context_len: i32,
-    pub padding_bits: u8,
-    pub tokens: Vec<PreflateToken>,
-    pub huffman_encoding: HuffmanOriginalEncoding,
-    pub freq: TokenFrequency,
+pub enum PreflateTokenBlock {
+    DynamicHuff {
+        tokens: Vec<PreflateToken>,
+        huffman_encoding: HuffmanOriginalEncoding,
+    },
+    Stored {
+        uncompressed: Vec<u8>,
+        padding_bits: u8,
+    },
+    StaticHuff {
+        tokens: Vec<PreflateToken>,
+        incomplete: bool,
+    },
 }
 
 #[derive(Debug)]
@@ -97,33 +91,16 @@ impl Default for TokenFrequency {
     }
 }
 
-impl PreflateTokenBlock {
-    pub fn new(block_type: BlockType) -> PreflateTokenBlock {
-        PreflateTokenBlock {
-            block_type,
-            uncompressed: Vec::new(),
-            context_len: 0,
-            padding_bits: 0,
-            tokens: Vec::new(),
-            freq: TokenFrequency::default(),
-            huffman_encoding: HuffmanOriginalEncoding::default(),
-        }
-    }
-
-    pub fn add_literal(&mut self, lit: u8) {
-        self.tokens.push(PreflateToken::Literal(lit));
-        if self.block_type == BlockType::DynamicHuff {
-            self.freq.literal_codes[lit as usize] += 1;
-        }
-    }
-
-    pub fn add_reference(&mut self, len: u32, dist: u32, irregular258: bool) {
-        self.tokens
-            .push(PreflateToken::new_reference(len, dist, irregular258));
-
-        if self.block_type == BlockType::DynamicHuff {
-            self.freq.literal_codes[NONLEN_CODE_COUNT + quantize_length(len)] += 1;
-            self.freq.distance_codes[quantize_distance(dist)] += 1;
+impl TokenFrequency {
+    pub fn commit_token(&mut self, token: &PreflateToken) {
+        match token {
+            PreflateToken::Literal(lit) => {
+                self.literal_codes[*lit as usize] += 1;
+            }
+            PreflateToken::Reference(t) => {
+                self.literal_codes[NONLEN_CODE_COUNT + quantize_length(t.len())] += 1;
+                self.distance_codes[quantize_distance(t.dist())] += 1;
+            }
         }
     }
 }

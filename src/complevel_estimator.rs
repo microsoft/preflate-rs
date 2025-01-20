@@ -17,7 +17,7 @@ use crate::{
     preflate_parse_config::{
         MatchingType, SLOW_PREFLATE_PARSER_SETTINGS, ZLIB_PREFLATE_PARSER_SETTINGS,
     },
-    preflate_token::{BlockType, PreflateToken, PreflateTokenBlock, PreflateTokenReference},
+    preflate_token::{PreflateToken, PreflateTokenBlock, PreflateTokenReference},
 };
 
 #[derive(Default)]
@@ -221,20 +221,24 @@ impl<'a> CompLevelEstimatorState<'a> {
 
     fn check_dump(&mut self) {
         for (_i, b) in self.blocks.iter().enumerate() {
-            if b.block_type == BlockType::Stored {
-                for _i in 0..b.uncompressed.len() {
-                    self.update_candidate_hashes(1);
-                }
-                continue;
-            }
-            for (_j, t) in b.tokens.iter().enumerate() {
-                match t {
-                    PreflateToken::Literal(_) => {
+            match b {
+                PreflateTokenBlock::Stored { uncompressed, .. } => {
+                    for _i in 0..uncompressed.len() {
                         self.update_candidate_hashes(1);
                     }
-                    &PreflateToken::Reference(r) => {
-                        self.check_match(r);
-                        self.update_candidate_hashes(r.len());
+                }
+                PreflateTokenBlock::StaticHuff { tokens, .. }
+                | PreflateTokenBlock::DynamicHuff { tokens, .. } => {
+                    for (_j, t) in tokens.iter().enumerate() {
+                        match t {
+                            PreflateToken::Literal(_) => {
+                                self.update_candidate_hashes(1);
+                            }
+                            &PreflateToken::Reference(r) => {
+                                self.check_match(r);
+                                self.update_candidate_hashes(r.len());
+                            }
+                        }
                     }
                 }
             }

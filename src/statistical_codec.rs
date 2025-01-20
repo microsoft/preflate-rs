@@ -206,14 +206,13 @@ impl PredictionDecoder for VerifyPredictionDecoder {
     }
 
     fn decode_verify_state(&mut self, message: &'static str, checksum: u64) {
-        if let Some(x) = self.pop() {
-            assert_eq!(
-                x,
-                CodecAction::VerifyState(message, checksum),
-                "mismatch {} (left encode, right decode)",
-                self.index
-            );
-        }
+        let x = self.pop().unwrap();
+        assert_eq!(
+            x,
+            CodecAction::VerifyState(message, checksum),
+            "mismatch {} (left encode, right decode)",
+            self.index
+        );
     }
 
     fn decode_correction(&mut self, correction: CodecCorrection) -> u32 {

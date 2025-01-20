@@ -13,7 +13,7 @@ use crate::{
         quantize_distance, quantize_length, DIST_BASE_TABLE, DIST_EXTRA_TABLE, LENGTH_BASE_TABLE,
         LENGTH_EXTRA_TABLE, LITLEN_CODE_COUNT, MIN_MATCH, NONLEN_CODE_COUNT,
     },
-    preflate_token::{BlockType, PreflateToken, PreflateTokenBlock},
+    preflate_token::{PreflateToken, PreflateTokenBlock},
 };
 
 pub struct DeflateWriter {
@@ -40,32 +40,39 @@ impl DeflateWriter {
 
     pub fn encode_block(&mut self, block: &PreflateTokenBlock, last: bool) -> Result<()> {
         self.bitwriter.write(last as u32, 1, &mut self.output);
-        match block.block_type {
-            BlockType::Stored => {
+        match block {
+            PreflateTokenBlock::Stored {
+                uncompressed,
+                padding_bits,
+            } => {
                 self.bitwriter.write(0, 2, &mut self.output);
-                self.bitwriter.pad(block.padding_bits, &mut self.output);
+                self.bitwriter.pad(*padding_bits, &mut self.output);
                 self.bitwriter.flush_whole_bytes(&mut self.output);
 
                 self.output
-                    .extend_from_slice(&(block.uncompressed.len() as u16).to_le_bytes());
+                    .extend_from_slice(&(uncompressed.len() as u16).to_le_bytes());
                 self.output
-                    .extend_from_slice(&(!block.uncompressed.len() as u16).to_le_bytes());
+                    .extend_from_slice(&(!uncompressed.len() as u16).to_le_bytes());
 
-                self.output.extend_from_slice(&block.uncompressed);
+                self.output.extend_from_slice(&uncompressed);
             }
-            BlockType::StaticHuff => {
+            PreflateTokenBlock::StaticHuff { tokens, .. } => {
                 self.bitwriter.write(1, 2, &mut self.output);
                 let huffman_writer = HuffmanWriter::start_fixed_huffman_table();
-                self.encode_block_with_decoder(block, &huffman_writer);
+                self.encode_block_with_decoder(tokens, &huffman_writer);
             }
-            BlockType::DynamicHuff => {
+            PreflateTokenBlock::DynamicHuff {
+                tokens,
+                huffman_encoding,
+                ..
+            } => {
                 let huffman_writer = HuffmanWriter::start_dynamic_huffman_table(
                     &mut self.bitwriter,
-                    &block.huffman_encoding,
+                    &huffman_encoding,
                     &mut self.output,
                 )?;
 
-                self.encode_block_with_decoder(block, &huffman_writer);
+                self.encode_block_with_decoder(tokens, &huffman_writer);
             }
         }
 
@@ -79,10 +86,10 @@ impl DeflateWriter {
 
     fn encode_block_with_decoder(
         &mut self,
-        block: &PreflateTokenBlock,
+        tokens: &Vec<PreflateToken>,
         huffman_writer: &HuffmanWriter,
     ) {
-        for token in &block.tokens {
+        for token in tokens {
             match token {
                 PreflateToken::Literal(lit) => {
                     huffman_writer.write_literal(
