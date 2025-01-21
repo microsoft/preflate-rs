@@ -130,8 +130,7 @@ pub fn estimate_add_policy(token_blocks: &[PreflateTokenBlock]) -> DictionaryAdd
                     current_offset += 1;
                 }
             }
-            PreflateTokenBlock::StaticHuff { tokens, .. }
-            | PreflateTokenBlock::DynamicHuff { tokens, .. } => {
+            PreflateTokenBlock::Huffman { tokens, .. } => {
                 for token in tokens.iter() {
                     match token {
                         PreflateToken::Literal(_) => {

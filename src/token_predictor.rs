@@ -11,14 +11,15 @@ use crate::{
     hash_algorithm::HashAlgorithm,
     hash_chain_holder::{new_hash_chain_holder, HashChainHolder, MatchResult},
     huffman_calc::HufftreeBitCalc,
+    huffman_encoding,
     preflate_constants::MIN_MATCH,
     preflate_error::{err_exit_code, AddContext, ExitCode, Result},
     preflate_input::PreflateInput,
     preflate_parameter_estimator::PreflateStrategy,
     preflate_parse_config::MatchingType,
     preflate_token::{
-        PreflateToken, PreflateTokenBlock, PreflateTokenReference, TokenFrequency, BT_DYNAMICHUFF,
-        BT_STATICHUFF, BT_STORED,
+        PreflateHuffmanType, PreflateToken, PreflateTokenBlock, PreflateTokenReference,
+        TokenFrequency, BT_DYNAMICHUFF, BT_STATICHUFF, BT_STORED,
     },
     statistical_codec::{
         CodecCorrection, CodecMisprediction, PredictionDecoder, PredictionEncoder,
@@ -103,6 +104,7 @@ impl<'a> TokenPredictor<'a> {
         codec.encode_verify_state("blocktypestart", 0);
 
         let tokens;
+        let huffman_encoding;
 
         match block {
             PreflateTokenBlock::Stored {
@@ -124,19 +126,30 @@ impl<'a> TokenPredictor<'a> {
                 }
                 return Ok(());
             }
-            PreflateTokenBlock::StaticHuff { tokens: t, .. } => {
-                codec.encode_correction(
-                    CodecCorrection::BlockTypeCorrection,
-                    encode_difference(BT_DYNAMICHUFF, BT_STATICHUFF),
-                );
+            PreflateTokenBlock::Huffman {
+                tokens: t,
+                huffman_type,
+            } => {
+                match huffman_type {
+                    PreflateHuffmanType::Static { .. } => {
+                        codec.encode_correction(
+                            CodecCorrection::BlockTypeCorrection,
+                            encode_difference(BT_DYNAMICHUFF, BT_STATICHUFF),
+                        );
+                        huffman_encoding = None;
+                    }
+                    PreflateHuffmanType::Dynamic {
+                        huffman_encoding: h,
+                        ..
+                    } => {
+                        codec.encode_correction(
+                            CodecCorrection::BlockTypeCorrection,
+                            encode_difference(BT_DYNAMICHUFF, BT_DYNAMICHUFF),
+                        );
+                        huffman_encoding = Some(h);
+                    }
+                }
 
-                tokens = t
-            }
-            PreflateTokenBlock::DynamicHuff { tokens: t, .. } => {
-                codec.encode_correction(
-                    CodecCorrection::BlockTypeCorrection,
-                    encode_difference(BT_DYNAMICHUFF, BT_DYNAMICHUFF),
-                );
                 tokens = t
             }
         }
@@ -279,10 +292,7 @@ impl<'a> TokenPredictor<'a> {
             freq.commit_token(target_token);
         }
 
-        if let PreflateTokenBlock::DynamicHuff {
-            huffman_encoding, ..
-        } = block
-        {
+        if let Some(huffman_encoding) = huffman_encoding {
             predict_tree_for_block(huffman_encoding, &freq, codec, HufftreeBitCalc::Zlib)?;
         }
 
@@ -426,18 +436,15 @@ impl<'a> TokenPredictor<'a> {
             tokens.push(PreflateToken::Reference(predicted_ref));
         }
 
-        let b = if bt == BT_STATICHUFF {
-            PreflateTokenBlock::StaticHuff {
-                tokens,
-                incomplete: false,
-            }
-        } else {
-            let huffman_encoding = recreate_tree_for_block(&freq, codec, HufftreeBitCalc::Zlib)?;
-
-            PreflateTokenBlock::DynamicHuff {
-                tokens,
-                huffman_encoding: huffman_encoding,
-            }
+        let b = PreflateTokenBlock::Huffman {
+            tokens,
+            huffman_type: if bt == BT_STATICHUFF {
+                PreflateHuffmanType::Static { incomplete: false }
+            } else {
+                PreflateHuffmanType::Dynamic {
+                    huffman_encoding: recreate_tree_for_block(&freq, codec, HufftreeBitCalc::Zlib)?,
+                }
+            },
         };
 
         codec.decode_verify_state("done", if VERIFY { self.checksum().hash() } else { 0 });

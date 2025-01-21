@@ -269,8 +269,7 @@ fn verify_max_chain_length() {
                         uncompressed.len() as u32,
                     );
                 }
-                PreflateTokenBlock::StaticHuff { tokens, .. }
-                | PreflateTokenBlock::DynamicHuff { tokens, .. } => {
+                PreflateTokenBlock::Huffman { tokens, .. } => {
                     for token in tokens {
                         let len = match token {
                             PreflateToken::Literal(_) => 1,

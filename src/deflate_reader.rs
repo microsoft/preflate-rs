@@ -6,7 +6,7 @@
 
 use crate::{
     preflate_error::{err_exit_code, AddContext, ExitCode, Result},
-    preflate_token::{PreflateToken, PreflateTokenReference},
+    preflate_token::{PreflateHuffmanType, PreflateToken, PreflateTokenReference},
 };
 
 use std::io::Read;
@@ -102,17 +102,17 @@ impl<R: Read> DeflateReader<R> {
                 let decoder = HuffmanReader::create_fixed()?;
                 if let Err(e) = self.decode_block(&decoder, &mut tokens) {
                     if e.exit_code() == ExitCode::ShortRead {
-                        Ok(PreflateTokenBlock::StaticHuff {
+                        Ok(PreflateTokenBlock::Huffman {
                             tokens,
-                            incomplete: true,
+                            huffman_type: PreflateHuffmanType::Static { incomplete: true },
                         })
                     } else {
                         Err(e)
                     }
                 } else {
-                    Ok(PreflateTokenBlock::StaticHuff {
+                    Ok(PreflateTokenBlock::Huffman {
                         tokens,
-                        incomplete: false,
+                        huffman_type: PreflateHuffmanType::Static { incomplete: false },
                     })
                 }
             }
@@ -125,9 +125,9 @@ impl<R: Read> DeflateReader<R> {
                 let mut tokens = Vec::new();
                 self.decode_block(&decoder, &mut tokens).context()?;
 
-                Ok(PreflateTokenBlock::DynamicHuff {
+                Ok(PreflateTokenBlock::Huffman {
                     tokens,
-                    huffman_encoding,
+                    huffman_type: PreflateHuffmanType::Dynamic { huffman_encoding },
                 })
             }
 

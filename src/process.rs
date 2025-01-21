@@ -70,12 +70,8 @@ pub fn parse_deflate(
                         padding_bits
                     );
                 }
-                PreflateTokenBlock::StaticHuff { tokens, .. } => {
-                    println!("StaticBlock: tokens={}", tokens.len());
-                }
-
-                PreflateTokenBlock::DynamicHuff { tokens, .. } => {
-                    println!("DynamicBlock: tokens={}", tokens.len());
+                PreflateTokenBlock::Huffman { tokens, .. } => {
+                    println!("Block: tokens={}", tokens.len());
                 }
             }
         }
@@ -325,30 +321,17 @@ fn analyze_compressed_data_verify(
                 assert_eq!(b, d, "padding bits differ {index}");
             }
             (
-                PreflateTokenBlock::StaticHuff {
+                PreflateTokenBlock::Huffman {
                     tokens: t1,
-                    incomplete: i1,
+                    huffman_type: h1,
                 },
-                PreflateTokenBlock::StaticHuff {
+                PreflateTokenBlock::Huffman {
                     tokens: t2,
-                    incomplete: i2,
+                    huffman_type: h2,
                 },
             ) => {
                 compare(t1, t2, &format!("tokens differ {index}"));
-                assert_eq!(i1, i2, "incomplete flag differs {index}");
-            }
-            (
-                PreflateTokenBlock::DynamicHuff {
-                    tokens: t1,
-                    huffman_encoding: h1,
-                },
-                PreflateTokenBlock::DynamicHuff {
-                    tokens: t2,
-                    huffman_encoding: h2,
-                },
-            ) => {
-                compare(t1, t2, &format!("tokens differ {index}"));
-                assert_eq!(h1, h2, "huffman_encoding differs {index}");
+                assert_eq!(h1, h2, "huffman type differs {index}");
             }
             _ => panic!("block type differs {index}"),
         });

@@ -6,6 +6,7 @@
 
 use crate::preflate_error::Result;
 
+use crate::preflate_token::PreflateHuffmanType;
 use crate::{
     bit_writer::BitWriter,
     huffman_encoding::HuffmanWriter,
@@ -56,24 +57,27 @@ impl DeflateWriter {
 
                 self.output.extend_from_slice(&uncompressed);
             }
-            PreflateTokenBlock::StaticHuff { tokens, .. } => {
-                self.bitwriter.write(1, 2, &mut self.output);
-                let huffman_writer = HuffmanWriter::start_fixed_huffman_table();
-                self.encode_block_with_decoder(tokens, &huffman_writer);
-            }
-            PreflateTokenBlock::DynamicHuff {
+            PreflateTokenBlock::Huffman {
                 tokens,
-                huffman_encoding,
-                ..
-            } => {
-                let huffman_writer = HuffmanWriter::start_dynamic_huffman_table(
-                    &mut self.bitwriter,
-                    &huffman_encoding,
-                    &mut self.output,
-                )?;
+                huffman_type,
+            } => match huffman_type {
+                PreflateHuffmanType::Static { .. } => {
+                    self.bitwriter.write(1, 2, &mut self.output);
+                    let huffman_writer = HuffmanWriter::start_fixed_huffman_table();
+                    self.encode_block_with_decoder(tokens, &huffman_writer);
+                }
+                PreflateHuffmanType::Dynamic {
+                    huffman_encoding, ..
+                } => {
+                    let huffman_writer = HuffmanWriter::start_dynamic_huffman_table(
+                        &mut self.bitwriter,
+                        &huffman_encoding,
+                        &mut self.output,
+                    )?;
 
-                self.encode_block_with_decoder(tokens, &huffman_writer);
-            }
+                    self.encode_block_with_decoder(tokens, &huffman_writer);
+                }
+            },
         }
 
         Ok(())

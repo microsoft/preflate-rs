@@ -227,8 +227,7 @@ impl<'a> CompLevelEstimatorState<'a> {
                         self.update_candidate_hashes(1);
                     }
                 }
-                PreflateTokenBlock::StaticHuff { tokens, .. }
-                | PreflateTokenBlock::DynamicHuff { tokens, .. } => {
+                PreflateTokenBlock::Huffman { tokens, .. } => {
                     for (_j, t) in tokens.iter().enumerate() {
                         match t {
                             PreflateToken::Literal(_) => {

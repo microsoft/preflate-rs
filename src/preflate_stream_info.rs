@@ -4,7 +4,7 @@
  *  This software incorporates material from third parties. See NOTICE.txt for details.
  *--------------------------------------------------------------------------------------------*/
 
-use crate::preflate_token::{PreflateToken, PreflateTokenBlock};
+use crate::preflate_token::{PreflateHuffmanType, PreflateToken, PreflateTokenBlock};
 
 pub struct PreflateStreamInfo {
     pub token_count: u32,
@@ -67,11 +67,13 @@ pub fn extract_preflate_info(blocks: &[PreflateTokenBlock]) -> PreflateStreamInf
             PreflateTokenBlock::Stored { .. } => {
                 result.count_stored_blocks += 1;
             }
-            PreflateTokenBlock::StaticHuff { tokens, .. } => {
-                result.count_static_huff_tree_blocks += 1;
-                process_tokens(&tokens, &mut result);
-            }
-            PreflateTokenBlock::DynamicHuff { tokens, .. } => {
+            PreflateTokenBlock::Huffman {
+                tokens,
+                huffman_type,
+            } => {
+                if let PreflateHuffmanType::Static { .. } = huffman_type {
+                    result.count_static_huff_tree_blocks += 1;
+                }
                 process_tokens(&tokens, &mut result);
             }
         }

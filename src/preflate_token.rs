@@ -55,19 +55,25 @@ pub const BT_STORED: u32 = 1;
 pub const BT_DYNAMICHUFF: u32 = 0;
 pub const BT_STATICHUFF: u32 = 2;
 
+#[derive(Debug, PartialEq)]
+pub enum PreflateHuffmanType {
+    Dynamic {
+        huffman_encoding: HuffmanOriginalEncoding,
+    },
+    Static {
+        incomplete: bool,
+    },
+}
+
 #[derive(Debug)]
 pub enum PreflateTokenBlock {
-    DynamicHuff {
+    Huffman {
         tokens: Vec<PreflateToken>,
-        huffman_encoding: HuffmanOriginalEncoding,
+        huffman_type: PreflateHuffmanType,
     },
     Stored {
         uncompressed: Vec<u8>,
         padding_bits: u8,
-    },
-    StaticHuff {
-        tokens: Vec<PreflateToken>,
-        incomplete: bool,
     },
 }
 
