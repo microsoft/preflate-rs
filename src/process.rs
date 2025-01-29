@@ -366,6 +366,31 @@ fn do_analyze(crc: Option<u32>, compressed_data: &[u8], verify: bool) {
     }
 }
 
+/// verify that levels 1-6 of zlib are compressed without any correction data
+///
+/// Future work: figure out why level 7 and above are not perfect
+#[test]
+fn verify_zlib_perfect_compression() {
+    for i in 1..6 {
+        println!("iteration {}", i);
+        let compressed_data: &[u8] =
+            &read_file(format!("compressed_zlib_level{i}.deflate").as_str());
+
+        let compressed_data = compressed_data;
+        use crate::preflate_parameter_estimator::estimate_preflate_parameters;
+
+        let contents = parse_deflate(compressed_data, 1).unwrap();
+
+        let params = estimate_preflate_parameters(&contents.plain_text, &contents.blocks).unwrap();
+
+        println!("params: {:?}", params);
+
+        // this "encoder" just asserts if anything gets passed to it
+        let mut verify_encoder = crate::statistical_codec::AssertDefaultOnlyEncoder {};
+        encode_mispredictions(&contents, &params, &mut verify_encoder).unwrap();
+    }
+}
+
 #[test]
 fn verify_longmatch() {
     do_analyze(
@@ -378,4 +403,10 @@ fn verify_longmatch() {
 #[test]
 fn verify_zlibng() {
     do_analyze(None, &read_file("compressed_zlibng_level1.deflate"), false);
+}
+
+// this is the deflate stream extracted out of the
+#[test]
+fn verify_png_deflate() {
+    do_analyze(None, &read_file("treegdi.extract.deflate"), false);
 }

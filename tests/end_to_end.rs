@@ -40,6 +40,12 @@ fn end_to_end_compressed() {
 }
 
 #[test]
+fn treepng_deflate() {
+    let v = read_file("treepng.deflate");
+    verifyresult(&v);
+}
+
+#[test]
 fn test_matchnotfound() {
     test_file("sample3.bin");
 }

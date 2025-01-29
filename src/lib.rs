@@ -44,7 +44,7 @@ pub use preflate_container::{
 use preflate_error::ExitCode;
 pub use preflate_error::{PreflateError, Result};
 
-use std::io::{Cursor, Write};
+use std::io::Write;
 
 pub struct PreflateCompressionContext {
     content: Vec<u8>,

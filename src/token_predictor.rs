@@ -11,7 +11,6 @@ use crate::{
     hash_algorithm::HashAlgorithm,
     hash_chain_holder::{new_hash_chain_holder, HashChainHolder, MatchResult},
     huffman_calc::HufftreeBitCalc,
-    huffman_encoding,
     preflate_constants::MIN_MATCH,
     preflate_error::{err_exit_code, AddContext, ExitCode, Result},
     preflate_input::PreflateInput,

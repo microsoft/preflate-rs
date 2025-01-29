@@ -377,6 +377,10 @@ impl<H: HashImplementation> HashChainHolderImpl<H> {
 
 #[inline(always)]
 fn prefix_compare(s1: &[u8], s2: &[u8], best_len: u32, max_len: u32) -> u32 {
+    prefix_cmp_odd_size(max_len, s1, s2, best_len)
+    /*
+    not working yet
+
     if max_len == 258 {
         assert!(s1.len() >= 258 && s2.len() >= 258);
 
@@ -408,7 +412,7 @@ fn prefix_compare(s1: &[u8], s2: &[u8], best_len: u32, max_len: u32) -> u32 {
         return 258;
     } else {
         prefix_cmp_odd_size(max_len, s1, s2, best_len)
-    }
+    }*/
 }
 
 #[cold]
