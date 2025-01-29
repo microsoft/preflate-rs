@@ -34,120 +34,131 @@ mod statistical_codec;
 mod token_predictor;
 mod tree_predictor;
 
+pub mod unmanaged_api;
+
+use hash_algorithm::HashAlgorithm;
 pub use preflate_container::{
     compress_zstd, decompress_deflate_stream, decompress_zstd, expand_zlib_chunks,
     recompress_deflate_stream, recreated_zlib_chunks,
 };
-pub use preflate_error::PreflateError;
+use preflate_error::ExitCode;
+pub use preflate_error::{PreflateError, Result};
 
-use std::{io::Cursor, panic::catch_unwind};
+use std::io::{Cursor, Write};
 
-/// C ABI interface for compressing Zip file, exposed from DLL.
-#[no_mangle]
-pub unsafe extern "C" fn WrapperCompressZip(
-    input_buffer: *const u8,
-    input_buffer_size: u64,
-    output_buffer: *mut u8,
-    output_buffer_size: u64,
-    result_size: *mut u64,
-) -> i32 {
-    match catch_unwind(|| {
-        let input_buffer = std::slice::from_raw_parts(input_buffer, input_buffer_size as usize);
-        let output_buffer =
-            std::slice::from_raw_parts_mut(output_buffer, output_buffer_size as usize);
+pub struct PreflateCompressionContext {
+    content: Vec<u8>,
+    result: Option<Vec<u8>>,
+    result_pos: usize,
+    compression_stats: CompressionStats,
+}
 
-        let plain_text = expand_zlib_chunks(&input_buffer, 0)?;
+#[derive(Debug, Copy, Clone, Default)]
+pub struct CompressionStats {
+    compressed_size: u64,
+    uncompressed_size: u64,
+    overhead_bytes: u64,
+    hash_algorithm: HashAlgorithm,
+}
 
-        *result_size = zstd::bulk::compress_to_buffer(&plain_text, output_buffer, 9)? as u64;
+impl PreflateCompressionContext {
+    pub fn new() -> Self {
+        PreflateCompressionContext {
+            content: Vec::new(),
+            compression_stats: CompressionStats::default(),
+            result: None,
+            result_pos: 0,
+        }
+    }
 
-        Result::<(), PreflateError>::Ok(())
-    }) {
-        Ok(x) => {
-            if let Err(_) = x {
-                return -1;
+    fn process_buffer(
+        &mut self,
+        input: &[u8],
+        input_complete: bool,
+        writer: &mut impl Write,
+        max_output_write: usize,
+    ) -> Result<bool> {
+        self.content.extend_from_slice(input);
+
+        if input_complete {
+            if self.result.is_some() {
+                if input.len() > 0 {
+                    return Err(PreflateError::new(
+                        ExitCode::InvalidParameter,
+                        "more data provided after input_complete signaled",
+                    ));
+                }
+            } else {
+                self.result = Some(compress_zstd(
+                    &self.content,
+                    9,
+                    &mut self.compression_stats,
+                )?);
             }
-            return 0;
         }
-        Err(_) => {
-            return -2;
+
+        if let Some(result) = &mut self.result {
+            let amount_to_write = std::cmp::min(max_output_write, result.len() - self.result_pos);
+
+            writer.write(&result[self.result_pos..self.result_pos + amount_to_write])?;
+            self.result_pos += amount_to_write;
+            Ok(self.result_pos == result.len())
+        } else {
+            Ok(false)
         }
+    }
+
+    pub fn stats(&self) -> CompressionStats {
+        self.compression_stats
     }
 }
 
-/// C ABI interface for decompressing Zip, exposed from DLL
-#[no_mangle]
-pub unsafe extern "C" fn WrapperDecompressZip(
-    input_buffer: *const u8,
-    input_buffer_size: u64,
-    output_buffer: *mut u8,
-    output_buffer_size: u64,
-    result_size: *mut u64,
-) -> i32 {
-    match catch_unwind(|| {
-        let input = std::slice::from_raw_parts(input_buffer, input_buffer_size as usize);
-        let output = std::slice::from_raw_parts_mut(output_buffer, output_buffer_size as usize);
-
-        let compressed_data =
-            zstd::bulk::decompress(input, 1024 * 1024 * 128).map_err(PreflateError::from)?;
-
-        let mut source = Cursor::new(&compressed_data);
-        let mut destination = Cursor::new(output);
-
-        recreated_zlib_chunks(&mut source, &mut destination)?;
-        *result_size = destination.position();
-
-        Result::<(), PreflateError>::Ok(())
-    }) {
-        Ok(x) => {
-            if let Err(_) = x {
-                return -1;
-            }
-            return 0;
-        }
-        Err(_) => {
-            return -2;
-        }
-    }
+struct PreflateDecompressionContext {
+    capacity: usize,
+    content: Vec<u8>,
+    result: Option<Vec<u8>>,
+    result_pos: usize,
 }
 
-#[test]
-fn extern_interface() {
-    use crate::process::read_file;
-    let input = read_file("samplezip.zip");
-
-    let mut compressed = Vec::new();
-
-    compressed.resize(input.len() + 10000, 0);
-
-    let mut result_size: u64 = 0;
-
-    unsafe {
-        let retval = WrapperCompressZip(
-            input[..].as_ptr(),
-            input.len() as u64,
-            compressed[..].as_mut_ptr(),
-            compressed.len() as u64,
-            (&mut result_size) as *mut u64,
-        );
-
-        assert_eq!(retval, 0);
+impl PreflateDecompressionContext {
+    fn new(capacity: usize) -> Self {
+        PreflateDecompressionContext {
+            content: Vec::new(),
+            result: None,
+            result_pos: 0,
+            capacity,
+        }
     }
 
-    let mut original = Vec::new();
-    original.resize(input.len() + 10000, 0);
+    fn process_buffer(
+        &mut self,
+        input: &[u8],
+        input_complete: bool,
+        writer: &mut impl Write,
+        max_output_write: usize,
+    ) -> Result<bool> {
+        self.content.extend_from_slice(input);
+        if input_complete {
+            if self.result.is_some() {
+                if input.len() > 0 {
+                    return Err(PreflateError::new(
+                        ExitCode::InvalidParameter,
+                        "more data provided after input_complete signaled",
+                    ));
+                }
+            } else {
+                self.result = Some(decompress_zstd(&self.content, self.capacity)?);
+            }
+        }
 
-    let mut original_size: u64 = 0;
-    unsafe {
-        let retval = WrapperDecompressZip(
-            compressed[..].as_ptr(),
-            result_size,
-            original[..].as_mut_ptr(),
-            original.len() as u64,
-            (&mut original_size) as *mut u64,
-        );
+        if let Some(result) = &mut self.result {
+            let amount_to_write = std::cmp::min(max_output_write, result.len() - self.result_pos);
 
-        assert_eq!(retval, 0);
+            writer.write(&result[self.result_pos..self.result_pos + amount_to_write])?;
+            self.result_pos += amount_to_write;
+            Ok(self.result_pos == result.len())
+        } else {
+            Ok(false)
+        }
     }
-    assert_eq!(input.len() as u64, original_size);
-    assert_eq!(input[..], original[..(original_size as usize)]);
 }

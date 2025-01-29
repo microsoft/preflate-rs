@@ -43,15 +43,6 @@ pub struct PreflateParameters {
 
 const FILE_VERSION: u16 = 1;
 
-const HASH_ALGORITHM_NONE: u16 = 0;
-const HASH_ALGORITHM_ZLIB: u16 = 1;
-const HASH_ALGORITHM_MINIZ_FAST: u16 = 2;
-const HASH_ALGORITHM_LIBDEFLATE4: u16 = 3;
-const HASH_ALGORITHM_LIBDEFLATE4_FAST: u16 = 4;
-const HASH_ALGORITHM_ZLIBNG: u16 = 5;
-const HASH_ALGORITHM_RANDOMVECTOR: u16 = 6;
-const HASH_ALGORITHM_CRC32C: u16 = 7;
-
 impl PreflateParameters {
     pub fn read(decoder: &mut impl PredictionDecoder) -> core::result::Result<Self, PreflateError> {
         assert_eq!(FILE_VERSION, decoder.decode_value(8));
@@ -59,17 +50,7 @@ impl PreflateParameters {
         let huff_strategy = decoder.decode_value(4);
         let zlib_compatible = decoder.decode_value(1) != 0;
         let window_bits = decoder.decode_value(8);
-        let hash_algorithm = decoder.decode_value(4);
-
-        let hash_shift;
-        let hash_mask;
-        if hash_algorithm == HASH_ALGORITHM_ZLIB {
-            hash_shift = decoder.decode_value(8);
-            hash_mask = decoder.decode_value(16);
-        } else {
-            hash_shift = 0;
-            hash_mask = 0;
-        }
+        let hash_algorithm = HashAlgorithm::from_u16(decoder.decode_value(16));
 
         let max_token_count = decoder.decode_value(16);
         let max_dist_3_matches = decoder.decode_value(16);
@@ -137,18 +118,8 @@ impl PreflateParameters {
                 max_chain: max_chain.into(),
                 min_len: min_len.into(),
                 hash_algorithm: match hash_algorithm {
-                    HASH_ALGORITHM_NONE => HashAlgorithm::None,
-                    HASH_ALGORITHM_ZLIB => HashAlgorithm::Zlib {
-                        hash_shift: hash_shift.into(),
-                        hash_mask,
-                    },
-                    HASH_ALGORITHM_MINIZ_FAST => HashAlgorithm::MiniZFast,
-                    HASH_ALGORITHM_LIBDEFLATE4 => HashAlgorithm::Libdeflate4,
-                    HASH_ALGORITHM_LIBDEFLATE4_FAST => HashAlgorithm::Libdeflate4Fast,
-                    HASH_ALGORITHM_ZLIBNG => HashAlgorithm::ZlibNG,
-                    HASH_ALGORITHM_RANDOMVECTOR => HashAlgorithm::RandomVector,
-                    HASH_ALGORITHM_CRC32C => HashAlgorithm::Crc32cHash,
-                    _ => {
+                    Some(h) => h,
+                    None => {
                         return Err(PreflateError::new(
                             ExitCode::InvalidParameterHeader,
                             "invalid hash algorithm",
@@ -177,37 +148,7 @@ impl PreflateParameters {
         encoder.encode_value(u16::from(self.predictor.zlib_compatible), 1);
         encoder.encode_value(u16::try_from(self.predictor.window_bits).unwrap(), 8);
 
-        match self.predictor.hash_algorithm {
-            HashAlgorithm::None => {
-                encoder.encode_value(HASH_ALGORITHM_NONE, 4);
-            }
-            HashAlgorithm::Zlib {
-                hash_shift,
-                hash_mask,
-            } => {
-                encoder.encode_value(HASH_ALGORITHM_ZLIB, 4);
-                encoder.encode_value(u16::try_from(hash_shift).unwrap(), 8);
-                encoder.encode_value(hash_mask, 16);
-            }
-            HashAlgorithm::MiniZFast => {
-                encoder.encode_value(HASH_ALGORITHM_MINIZ_FAST, 4);
-            }
-            HashAlgorithm::Libdeflate4Fast => {
-                encoder.encode_value(HASH_ALGORITHM_LIBDEFLATE4_FAST, 4);
-            }
-            HashAlgorithm::Libdeflate4 => {
-                encoder.encode_value(HASH_ALGORITHM_LIBDEFLATE4, 4);
-            }
-            HashAlgorithm::ZlibNG => {
-                encoder.encode_value(HASH_ALGORITHM_ZLIBNG, 4);
-            }
-            HashAlgorithm::RandomVector => {
-                encoder.encode_value(HASH_ALGORITHM_RANDOMVECTOR, 4);
-            }
-            HashAlgorithm::Crc32cHash => {
-                encoder.encode_value(HASH_ALGORITHM_CRC32C, 4);
-            }
-        }
+        encoder.encode_value(self.predictor.hash_algorithm.to_u16(), 16);
 
         encoder.encode_value(self.predictor.max_token_count, 16);
         encoder.encode_value(self.predictor.max_dist_3_matches, 16);

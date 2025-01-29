@@ -19,6 +19,81 @@ pub enum HashAlgorithm {
     RandomVector,
     Crc32cHash,
 }
+
+const HASH_ALGORITHM_NONE: u16 = 0;
+const HASH_ALGORITHM_ZLIB: u16 = 1;
+const HASH_ALGORITHM_MINIZ_FAST: u16 = 2;
+const HASH_ALGORITHM_LIBDEFLATE4: u16 = 3;
+const HASH_ALGORITHM_LIBDEFLATE4_FAST: u16 = 4;
+const HASH_ALGORITHM_ZLIBNG: u16 = 5;
+const HASH_ALGORITHM_RANDOMVECTOR: u16 = 6;
+const HASH_ALGORITHM_CRC32C: u16 = 7;
+
+impl HashAlgorithm {
+    pub fn to_u16(self) -> u16 {
+        match self {
+            HashAlgorithm::None => HASH_ALGORITHM_NONE,
+            HashAlgorithm::Zlib {
+                hash_mask,
+                hash_shift,
+            } => {
+                HASH_ALGORITHM_ZLIB
+                    | ((hash_mask.trailing_ones() as u16) << 8)
+                    | ((hash_shift as u16) << 12)
+            }
+            HashAlgorithm::MiniZFast => HASH_ALGORITHM_MINIZ_FAST,
+            HashAlgorithm::Libdeflate4Fast => HASH_ALGORITHM_LIBDEFLATE4_FAST,
+            HashAlgorithm::Libdeflate4 => HASH_ALGORITHM_LIBDEFLATE4,
+            HashAlgorithm::ZlibNG => HASH_ALGORITHM_ZLIBNG,
+            HashAlgorithm::RandomVector => HASH_ALGORITHM_RANDOMVECTOR,
+            HashAlgorithm::Crc32cHash => HASH_ALGORITHM_CRC32C,
+        }
+    }
+
+    pub fn from_u16(v: u16) -> Option<Self> {
+        match v & 0xff {
+            HASH_ALGORITHM_NONE => Some(HashAlgorithm::None),
+            HASH_ALGORITHM_ZLIB => {
+                let hash_mask = (1 << ((v >> 8) & 0xf)) - 1;
+                let hash_shift = (v >> 12) & 0xf;
+                Some(HashAlgorithm::Zlib {
+                    hash_mask,
+                    hash_shift: hash_shift.into(),
+                })
+            }
+            HASH_ALGORITHM_MINIZ_FAST => Some(HashAlgorithm::MiniZFast),
+            HASH_ALGORITHM_LIBDEFLATE4_FAST => Some(HashAlgorithm::Libdeflate4Fast),
+            HASH_ALGORITHM_LIBDEFLATE4 => Some(HashAlgorithm::Libdeflate4),
+            HASH_ALGORITHM_ZLIBNG => Some(HashAlgorithm::ZlibNG),
+            HASH_ALGORITHM_RANDOMVECTOR => Some(HashAlgorithm::RandomVector),
+            HASH_ALGORITHM_CRC32C => Some(HashAlgorithm::Crc32cHash),
+            _ => None,
+        }
+    }
+}
+
+#[test]
+fn roundtrip_hash_algorithm_to_int() {
+    let test_hashes = [
+        HashAlgorithm::Zlib {
+            hash_mask: 0x7ff,
+            hash_shift: 3,
+        },
+        HashAlgorithm::MiniZFast,
+        HashAlgorithm::Libdeflate4Fast,
+        HashAlgorithm::Libdeflate4,
+        HashAlgorithm::ZlibNG,
+        HashAlgorithm::RandomVector,
+        HashAlgorithm::Crc32cHash,
+    ];
+
+    for &hash in test_hashes.iter() {
+        let hash_int = hash.to_u16();
+        let hash2 = HashAlgorithm::from_u16(hash_int).unwrap();
+        assert_eq!(hash, hash2);
+    }
+}
+
 pub trait HashImplementation: Default + Copy + Clone {
     const NUM_HASH_BYTES: usize;
 

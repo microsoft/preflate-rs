@@ -3,7 +3,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use preflate_rs::{compress_zstd, decompress_zstd};
+use preflate_rs::{compress_zstd, decompress_zstd, CompressionStats};
 
 fn enumerate_directory_recursively(path: &Path) -> Result<Vec<PathBuf>, std::io::Error> {
     let mut results = Vec::new();
@@ -49,7 +49,8 @@ fn main() {
 
         let zstdlen = zstd::bulk::compress(&file, 9).unwrap();
 
-        let preflatecompressed = compress_zstd(&file, 1).unwrap();
+        let mut stats = CompressionStats::default();
+        let preflatecompressed = compress_zstd(&file, 1, &mut stats).unwrap();
 
         totalseen += zstdlen.len() as u64;
         totalzstd += preflatecompressed.len() as u64;

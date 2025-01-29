@@ -23,7 +23,7 @@ pub struct IdatContents {
 }
 
 impl IdatContents {
-    pub fn read_from_bytestream(r: &mut impl Read) -> std::io::Result<IdatContents> {
+    pub fn read_from_bytestream(r: &mut impl Read) -> Result<IdatContents> {
         let mut chunk_sizes = Vec::new();
 
         loop {

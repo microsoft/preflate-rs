@@ -11,6 +11,7 @@ use crate::{
     process::{decode_mispredictions, encode_mispredictions, parse_deflate},
     scan_deflate::{split_into_deflate_streams, BlockChunk},
     statistical_codec::PredictionEncoder,
+    CompressionStats,
 };
 
 const COMPRESSED_WRAPPER_VERSION_1: u8 = 1;
@@ -78,6 +79,7 @@ fn test_variant_roundtrip() {
 fn write_chunk_block(
     block: BlockChunk,
     literal_data: &[u8],
+    compression_stats: &mut CompressionStats,
     destination: &mut impl Write,
 ) -> std::io::Result<usize> {
     match block {
@@ -96,6 +98,8 @@ fn write_chunk_block(
             write_varint(destination, res.prediction_corrections.len() as u32)?;
             destination.write_all(&res.prediction_corrections)?;
 
+            compression_stats.overhead_bytes += res.prediction_corrections.len() as u64;
+            compression_stats.hash_algorithm = res.parameters.predictor.hash_algorithm;
             Ok(res.compressed_size)
         }
 
@@ -106,6 +110,9 @@ fn write_chunk_block(
             destination.write_all(&res.plain_text)?;
             write_varint(destination, res.prediction_corrections.len() as u32)?;
             destination.write_all(&res.prediction_corrections)?;
+
+            compression_stats.overhead_bytes += res.prediction_corrections.len() as u64;
+            compression_stats.hash_algorithm = res.parameters.predictor.hash_algorithm;
 
             Ok(idat.total_chunk_length)
         }
@@ -171,7 +178,8 @@ fn read_chunk_block(
 fn roundtrip_chunk_block_literal() {
     let mut buffer = Vec::new();
 
-    write_chunk_block(BlockChunk::Literal(5), b"hello", &mut buffer).unwrap();
+    let mut stats = CompressionStats::default();
+    write_chunk_block(BlockChunk::Literal(5), b"hello", &mut stats, &mut buffer).unwrap();
 
     let mut read_cursor = std::io::Cursor::new(buffer);
     let mut destination = Vec::new();
@@ -187,7 +195,14 @@ fn roundtrip_chunk_block_deflate() {
 
     let mut buffer = Vec::new();
 
-    write_chunk_block(BlockChunk::DeflateStream(results), &[], &mut buffer).unwrap();
+    let mut stats = CompressionStats::default();
+    write_chunk_block(
+        BlockChunk::DeflateStream(results),
+        &[],
+        &mut stats,
+        &mut buffer,
+    )
+    .unwrap();
 
     let mut read_cursor = std::io::Cursor::new(buffer);
     let mut destination = Vec::new();
@@ -208,9 +223,11 @@ fn roundtrip_chunk_block_png() {
 
     let mut buffer = Vec::new();
 
+    let mut stats = CompressionStats::default();
     write_chunk_block(
         BlockChunk::IDATDeflate(idat_contents, results),
         &[],
+        &mut stats,
         &mut buffer,
     )
     .unwrap();
@@ -228,6 +245,7 @@ fn roundtrip_chunk_block_png() {
 pub fn expand_zlib_chunks(
     compressed_data: &[u8],
     loglevel: u32,
+    compression_stats: &mut CompressionStats,
 ) -> std::result::Result<Vec<u8>, PreflateError> {
     let mut locations_found = Vec::new();
 
@@ -241,7 +259,12 @@ pub fn expand_zlib_chunks(
 
     let mut index = 0;
     for loc in locations_found {
-        index += write_chunk_block(loc, &compressed_data[index..], &mut plain_text)?;
+        index += write_chunk_block(
+            loc,
+            &compressed_data[index..],
+            compression_stats,
+            &mut plain_text,
+        )?;
     }
 
     Ok(plain_text)
@@ -274,7 +297,8 @@ pub fn recreated_zlib_chunks(
 fn roundtrip_deflate_chunks(filename: &str) {
     let f = crate::process::read_file(filename);
 
-    let expanded = expand_zlib_chunks(&f, 1).unwrap();
+    let mut stats = CompressionStats::default();
+    let expanded = expand_zlib_chunks(&f, 1, &mut stats).unwrap();
 
     let mut read_cursor = std::io::Cursor::new(expanded);
 
@@ -487,7 +511,8 @@ fn verify_zip_compress() {
     use crate::process::read_file;
     let v = read_file("samplezip.zip");
 
-    let expanded = expand_zlib_chunks(&v, 1).unwrap();
+    let mut stats = CompressionStats::default();
+    let expanded = expand_zlib_chunks(&v, 1, &mut stats).unwrap();
 
     let mut recompressed = Vec::new();
     recreated_zlib_chunks(&mut Cursor::new(expanded), &mut recompressed).unwrap();
@@ -528,9 +553,17 @@ fn verify_file(filename: &str) {
 
 /// expands the Zlib compressed streams in the data and then recompresses the result
 /// with Zstd with the maximum level.
-pub fn compress_zstd(zlib_compressed_data: &[u8], loglevel: u32) -> Result<Vec<u8>, PreflateError> {
-    let plain_text = expand_zlib_chunks(zlib_compressed_data, loglevel)?;
-    Ok(zstd::bulk::compress(&plain_text, 9)?)
+pub fn compress_zstd(
+    zlib_compressed_data: &[u8],
+    loglevel: u32,
+    compression_stats: &mut CompressionStats,
+) -> Result<Vec<u8>, PreflateError> {
+    let plain_text = expand_zlib_chunks(zlib_compressed_data, loglevel, compression_stats)?;
+    compression_stats.uncompressed_size = plain_text.len() as u64;
+    let r = zstd::bulk::compress(&plain_text, 9)?;
+    compression_stats.compressed_size = r.len() as u64;
+
+    Ok(r)
 }
 
 /// decompresses the Zstd compressed data and then recompresses the result back
@@ -548,7 +581,8 @@ fn verify_zip_compress_zstd() {
     use crate::process::read_file;
     let v = read_file("samplezip.zip");
 
-    let compressed = compress_zstd(&v, 1).unwrap();
+    let mut stats = CompressionStats::default();
+    let compressed = compress_zstd(&v, 1, &mut stats).unwrap();
 
     let recreated = decompress_zstd(&compressed, 256 * 1024 * 1024).unwrap();
 

@@ -40,6 +40,11 @@ pub enum ExitCode {
     /// had from recompressing the data since the amount of correction
     /// data would be larger than the original data.
     NoCompressionCandidates = 22,
+
+    InvalidParameter = 23,
+
+    // panic in rust code
+    AssertionFailure = 24,
 }
 
 impl Display for ExitCode {

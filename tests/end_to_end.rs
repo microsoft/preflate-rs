@@ -71,7 +71,8 @@ fn test_docx() {
 
 fn test_container(filename: &str) {
     let v = read_file(filename);
-    let c = compress_zstd(&v, 1).unwrap();
+    let mut stats = preflate_rs::CompressionStats::default();
+    let c = compress_zstd(&v, 1, &mut stats).unwrap();
 
     let r = decompress_zstd(&c, 1024 * 1024 * 128).unwrap();
     assert!(v == r);
