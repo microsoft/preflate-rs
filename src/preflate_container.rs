@@ -558,10 +558,11 @@ pub fn compress_zstd(
     loglevel: u32,
     compression_stats: &mut CompressionStats,
 ) -> Result<Vec<u8>, PreflateError> {
+    compression_stats.deflate_compressed_size += zlib_compressed_data.len() as u64;
     let plain_text = expand_zlib_chunks(zlib_compressed_data, loglevel, compression_stats)?;
-    compression_stats.uncompressed_size = plain_text.len() as u64;
+    compression_stats.uncompressed_size += plain_text.len() as u64;
     let r = zstd::bulk::compress(&plain_text, 9)?;
-    compression_stats.compressed_size = r.len() as u64;
+    compression_stats.zstd_compressed_size += r.len() as u64;
 
     Ok(r)
 }

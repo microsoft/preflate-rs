@@ -51,23 +51,27 @@ pub struct PreflateCompressionContext {
     result: Option<Vec<u8>>,
     result_pos: usize,
     compression_stats: CompressionStats,
+    test_baseline: bool,
 }
 
 #[derive(Debug, Copy, Clone, Default)]
 pub struct CompressionStats {
-    compressed_size: u64,
+    deflate_compressed_size: u64,
+    zstd_compressed_size: u64,
     uncompressed_size: u64,
     overhead_bytes: u64,
     hash_algorithm: HashAlgorithm,
+    zstd_baseline_size: u64,
 }
 
 impl PreflateCompressionContext {
-    pub fn new() -> Self {
+    pub fn new(test_baseline: bool) -> Self {
         PreflateCompressionContext {
             content: Vec::new(),
             compression_stats: CompressionStats::default(),
             result: None,
             result_pos: 0,
+            test_baseline,
         }
     }
 
@@ -89,6 +93,11 @@ impl PreflateCompressionContext {
                     ));
                 }
             } else {
+                if self.test_baseline {
+                    self.compression_stats.zstd_baseline_size +=
+                        zstd::bulk::compress(&self.content, 9)?.len() as u64;
+                }
+
                 self.result = Some(compress_zstd(
                     &self.content,
                     9,

@@ -69,8 +69,9 @@ fn test_copy_cstring_utf8_to_buffer() {
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn create_compression_context(_flags: u32) -> *mut std::ffi::c_void {
-    let context = Box::new((12345678u32, PreflateCompressionContext::new()));
+pub unsafe extern "C" fn create_compression_context(flags: u32) -> *mut std::ffi::c_void {
+    let test_baseline = (flags & 1) != 0;
+    let context = Box::new((12345678u32, PreflateCompressionContext::new(test_baseline)));
     Box::into_raw(context) as *mut std::ffi::c_void
 }
 
@@ -144,7 +145,9 @@ pub unsafe extern "C" fn compress_buffer(
 #[no_mangle]
 pub unsafe extern "C" fn get_compression_stats(
     context: *mut std::ffi::c_void,
-    compressed_size: *mut u64,
+    deflate_compressed_size: *mut u64,
+    zstd_compressed_size: *mut u64,
+    zstd_baseline_size: *mut u64,
     uncompressed_size: *mut u64,
     overhead_bytes: *mut u64,
     hash_algorithm: *mut u32,
@@ -153,7 +156,9 @@ pub unsafe extern "C" fn get_compression_stats(
     let (magic, context) = &*context;
     assert_eq!(*magic, 12345678, "invalid context passed in");
 
-    *compressed_size = context.compression_stats.compressed_size;
+    *deflate_compressed_size = context.compression_stats.deflate_compressed_size;
+    *zstd_compressed_size = context.compression_stats.zstd_compressed_size;
+    *zstd_baseline_size = context.compression_stats.zstd_baseline_size;
     *uncompressed_size = context.compression_stats.uncompressed_size;
     *overhead_bytes = context.compression_stats.overhead_bytes;
     *hash_algorithm = context.compression_stats.hash_algorithm.to_u16() as u32;
@@ -246,7 +251,7 @@ fn extern_interface() {
     let mut compressed = Vec::new();
 
     unsafe {
-        let compression_context = create_compression_context(0);
+        let compression_context = create_compression_context(1);
 
         let mut compressed_chunk = Vec::new();
         compressed_chunk.resize(10000, 0);
@@ -294,18 +299,22 @@ fn extern_interface() {
 
         let mut overhead_bytes = 0;
         let mut uncompressed_size = 0;
-        let mut compressed_size = 0;
+        let mut deflate_compressed_size = 0;
+        let mut zstd_compressed_size = 0;
+        let mut zstd_baseline_size = 0;
         let mut hash_algorithm = 0;
 
         get_compression_stats(
             compression_context,
-            &mut compressed_size,
+            &mut deflate_compressed_size,
+            &mut zstd_compressed_size,
+            &mut zstd_baseline_size,
             &mut uncompressed_size,
             &mut overhead_bytes,
             &mut hash_algorithm,
         );
 
-        println!("stats: overhead={overhead_bytes}, uncompressed={uncompressed_size}, compressed={compressed_size} hash_algorithm={hash_algorithm}");
+        println!("stats: overhead={overhead_bytes}, uncompressed={uncompressed_size}, deflate_compressed={deflate_compressed_size} zstd_compressed={zstd_compressed_size}, zstd_baseline={zstd_baseline_size} hash_algorithm={hash_algorithm}");
 
         free_compression_context(compression_context);
     }
