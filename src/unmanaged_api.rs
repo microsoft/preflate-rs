@@ -1,6 +1,7 @@
 use std::{
     io::Cursor,
     panic::{catch_unwind, AssertUnwindSafe},
+    ptr::{null, null_mut},
 };
 
 use crate::{
@@ -101,8 +102,16 @@ pub unsafe extern "C" fn compress_buffer(
         let (magic, context) = &mut *context;
         assert_eq!(*magic, 12345678, "invalid context passed in");
 
-        let input = std::slice::from_raw_parts(input_buffer, input_buffer_size as usize);
-        let output = std::slice::from_raw_parts_mut(output_buffer, output_buffer_size as usize);
+        let input = if input_buffer == null() {
+            &[]
+        } else {
+            std::slice::from_raw_parts(input_buffer, input_buffer_size as usize)
+        };
+        let output = if output_buffer == null_mut() {
+            &mut []
+        } else {
+            std::slice::from_raw_parts_mut(output_buffer, output_buffer_size as usize)
+        };
 
         let mut writer = Cursor::new(output);
         let done = context.process_buffer(
@@ -190,8 +199,16 @@ pub unsafe extern "C" fn decompress_buffer(
         let (magic, context) = &mut *context;
         assert_eq!(*magic, 87654321, "invalid context passed in");
 
-        let input = std::slice::from_raw_parts(input_buffer, input_buffer_size as usize);
-        let output = std::slice::from_raw_parts_mut(output_buffer, output_buffer_size as usize);
+        let input = if input_buffer == null() {
+            &[]
+        } else {
+            std::slice::from_raw_parts(input_buffer, input_buffer_size as usize)
+        };
+        let output = if output_buffer == null_mut() {
+            &mut []
+        } else {
+            std::slice::from_raw_parts_mut(output_buffer, output_buffer_size as usize)
+        };
 
         let mut writer = Cursor::new(output);
         let done = context.process_buffer(
@@ -227,7 +244,6 @@ fn extern_interface() {
     let input = read_file("samplezip.zip");
 
     let mut compressed = Vec::new();
-    let empty = Vec::new();
 
     unsafe {
         let compression_context = create_compression_context(0);
@@ -259,7 +275,7 @@ fn extern_interface() {
 
             let retval = compress_buffer(
                 compression_context,
-                empty.as_ptr(),
+                null(),
                 0,
                 true,
                 compressed_chunk.as_mut_ptr(),
@@ -326,7 +342,7 @@ fn extern_interface() {
 
             let retval = decompress_buffer(
                 decompression_context,
-                empty.as_ptr(),
+                null(),
                 0,
                 true,
                 decompressed_chunk.as_mut_ptr(),
