@@ -7,6 +7,9 @@ use crate::{
     preflate_error::{err_exit_code, ExitCode},
 };
 
+/// The contents of a PNG IDat stream. These are treated specially since they
+/// contain a Zlib stream that is split into multiple chunks and would be
+/// treated as corrupt if we just tried to parse it without removing the boundary headers.
 #[derive(Debug, PartialEq)]
 pub struct IdatContents {
     /// the sizes of the IDAT chunks

@@ -6,11 +6,10 @@
 
 use crate::{
     bit_helper::bit_length,
+    deflate::{deflate_constants, deflate_token::DeflateTokenBlock},
     estimator::{add_policy_estimator::DictionaryAddPolicy, preflate_parse_config::MatchingType},
     hash_algorithm::HashAlgorithm,
-    preflate_constants::{self},
     preflate_error::{ExitCode, Result},
-    preflate_token::PreflateTokenBlock,
     statistical_codec::{PredictionDecoder, PredictionEncoder},
     token_predictor::TokenPredictorParameters,
     PreflateError,
@@ -202,7 +201,7 @@ impl PreflateParameters {
     /// From the plain text and the preflate blocks, estimate the preflate parameters
     pub fn estimate_preflate_parameters(
         plain_text: &[u8],
-        blocks: &Vec<PreflateTokenBlock>,
+        blocks: &Vec<DeflateTokenBlock>,
     ) -> Result<Self> {
         let info = extract_preflate_info(blocks);
 
@@ -285,7 +284,7 @@ fn estimate_preflate_mem_level(max_block_size_: u32) -> u32 {
 
 fn estimate_preflate_window_bits(max_dist_: u32) -> u32 {
     let mut max_dist = max_dist_;
-    max_dist += preflate_constants::MIN_LOOKAHEAD;
+    max_dist += deflate_constants::MIN_LOOKAHEAD;
     let wbits = bit_length(max_dist - 1);
     std::cmp::min(std::cmp::max(wbits, 9), 15)
 }

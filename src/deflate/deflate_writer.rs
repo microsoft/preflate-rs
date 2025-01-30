@@ -6,13 +6,13 @@
 
 use crate::preflate_error::Result;
 
-use crate::preflate_token::PreflateHuffmanType;
-use crate::{
-    preflate_constants::{
+use super::deflate_token::DeflateHuffmanType;
+use super::{
+    deflate_constants::{
         quantize_distance, quantize_length, DIST_BASE_TABLE, DIST_EXTRA_TABLE, LENGTH_BASE_TABLE,
         LENGTH_EXTRA_TABLE, LITLEN_CODE_COUNT, MIN_MATCH, NONLEN_CODE_COUNT,
     },
-    preflate_token::{PreflateToken, PreflateTokenBlock},
+    deflate_token::{DeflateToken, DeflateTokenBlock},
 };
 
 use super::bit_writer::BitWriter;
@@ -41,10 +41,10 @@ impl DeflateWriter {
         o
     }
 
-    pub fn encode_block(&mut self, block: &PreflateTokenBlock, last: bool) -> Result<()> {
+    pub fn encode_block(&mut self, block: &DeflateTokenBlock, last: bool) -> Result<()> {
         self.bitwriter.write(last as u32, 1, &mut self.output);
         match block {
-            PreflateTokenBlock::Stored {
+            DeflateTokenBlock::Stored {
                 uncompressed,
                 padding_bits,
             } => {
@@ -59,16 +59,16 @@ impl DeflateWriter {
 
                 self.output.extend_from_slice(&uncompressed);
             }
-            PreflateTokenBlock::Huffman {
+            DeflateTokenBlock::Huffman {
                 tokens,
                 huffman_type,
             } => match huffman_type {
-                PreflateHuffmanType::Static { .. } => {
+                DeflateHuffmanType::Static { .. } => {
                     self.bitwriter.write(1, 2, &mut self.output);
                     let huffman_writer = HuffmanWriter::start_fixed_huffman_table();
                     self.encode_block_with_decoder(tokens, &huffman_writer);
                 }
-                PreflateHuffmanType::Dynamic {
+                DeflateHuffmanType::Dynamic {
                     huffman_encoding, ..
                 } => {
                     let huffman_writer = HuffmanWriter::start_dynamic_huffman_table(
@@ -92,19 +92,19 @@ impl DeflateWriter {
 
     fn encode_block_with_decoder(
         &mut self,
-        tokens: &Vec<PreflateToken>,
+        tokens: &Vec<DeflateToken>,
         huffman_writer: &HuffmanWriter,
     ) {
         for token in tokens {
             match token {
-                PreflateToken::Literal(lit) => {
+                DeflateToken::Literal(lit) => {
                     huffman_writer.write_literal(
                         &mut self.bitwriter,
                         &mut self.output,
                         u16::from(*lit),
                     );
                 }
-                PreflateToken::Reference(reference) => {
+                DeflateToken::Reference(reference) => {
                     if reference.get_irregular258() {
                         huffman_writer.write_literal(
                             &mut self.bitwriter,

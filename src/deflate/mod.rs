@@ -5,7 +5,10 @@ mod bit_reader;
 mod bit_writer;
 mod huffman_helper;
 
+pub mod deflate_constants;
+
 pub mod deflate_reader;
+pub mod deflate_token;
 pub mod deflate_writer;
 pub mod huffman_calc;
 pub mod huffman_encoding;

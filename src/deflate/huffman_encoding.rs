@@ -6,13 +6,11 @@
 
 use crate::preflate_error::{err_exit_code, ExitCode, Result};
 
-use crate::{
-    deflate::{
-        bit_reader::ReadBits,
-        bit_writer::BitWriter,
-        huffman_helper::{calc_huffman_codes, calculate_huffman_code_tree, decode_symbol},
-    },
-    preflate_constants::TREE_CODE_ORDER_TABLE,
+use crate::deflate::{
+    bit_reader::ReadBits,
+    bit_writer::BitWriter,
+    deflate_constants::TREE_CODE_ORDER_TABLE,
+    huffman_helper::{calc_huffman_codes, calculate_huffman_code_tree, decode_symbol},
 };
 
 #[derive(PartialEq, Eq, Clone, Copy, Debug)]

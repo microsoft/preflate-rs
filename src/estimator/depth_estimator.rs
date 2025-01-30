@@ -1,7 +1,7 @@
 use default_boxed::DefaultBoxed;
 
 use crate::{
-    hash_algorithm::*, preflate_input::PreflateInput, preflate_token::PreflateTokenReference,
+    deflate::deflate_token::DeflateTokenReference, hash_algorithm::*, preflate_input::PreflateInput,
 };
 
 use super::add_policy_estimator::DictionaryAddPolicy;
@@ -12,7 +12,7 @@ pub trait HashTableDepthEstimator {
     /// sees how many matches we need to walk to reach match_pos, which we
     /// do by subtracting the depth of the current node from the depth of the
     /// match node.
-    fn match_depth(&self, token: PreflateTokenReference, input: &PreflateInput) -> u32;
+    fn match_depth(&self, token: DeflateTokenReference, input: &PreflateInput) -> u32;
 }
 
 #[derive(DefaultBoxed)]
@@ -102,7 +102,7 @@ impl<H: HashImplementation> HashTableDepthEstimator for HashTableDepthEstimatorI
     /// sees how many matches we need to walk to reach match_pos, which we
     /// do by subtracting the depth of the current node from the depth of the
     /// match node.
-    fn match_depth(&self, token: PreflateTokenReference, input: &PreflateInput) -> u32 {
+    fn match_depth(&self, token: DeflateTokenReference, input: &PreflateInput) -> u32 {
         let match_pos = (input.pos() - token.dist()) as u16;
 
         let h = self.hash.get_hash(input.cur_chars(0));
@@ -166,7 +166,7 @@ impl HashTableDepthEstimator for HashTableDepthEstimatorLibdeflate {
     /// sees how many matches we need to walk to reach match_pos, which we
     /// do by subtracting the depth of the current node from the depth of the
     /// match node.
-    fn match_depth(&self, token: PreflateTokenReference, input: &PreflateInput) -> u32 {
+    fn match_depth(&self, token: DeflateTokenReference, input: &PreflateInput) -> u32 {
         let length3hash = LIB_DEFLATE3_HASH.get_hash(input.cur_chars(0));
         let distance3 = input.pos() - self.head3[usize::from(length3hash)];
 
@@ -207,7 +207,7 @@ pub fn new_depth_estimator(hash_algorithm: HashAlgorithm) -> Box<dyn HashTableDe
 #[test]
 fn verify_max_chain_length() {
     use crate::{
-        preflate_token::{PreflateToken, PreflateTokenBlock},
+        deflate::deflate_token::{DeflateToken, DeflateTokenBlock},
         process::parse_deflate,
     };
 
@@ -263,18 +263,18 @@ fn verify_max_chain_length() {
         let mut max_depth = 0;
         for block in parsed.blocks {
             match block {
-                PreflateTokenBlock::Stored { uncompressed, .. } => {
+                DeflateTokenBlock::Stored { uncompressed, .. } => {
                     estimator.update_hash(
                         DictionaryAddPolicy::AddAll,
                         &input,
                         uncompressed.len() as u32,
                     );
                 }
-                PreflateTokenBlock::Huffman { tokens, .. } => {
+                DeflateTokenBlock::Huffman { tokens, .. } => {
                     for token in tokens {
                         let len = match token {
-                            PreflateToken::Literal(_) => 1,
-                            PreflateToken::Reference(r) => {
+                            DeflateToken::Literal(_) => 1,
+                            DeflateToken::Reference(r) => {
                                 max_depth = max_depth.max(estimator.match_depth(r, &input));
                                 assert!(max_depth <= 4096, "max depth {} too high", max_depth);
                                 r.len()

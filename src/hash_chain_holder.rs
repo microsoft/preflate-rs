@@ -5,23 +5,23 @@
  *--------------------------------------------------------------------------------------------*/
 
 use crate::bit_helper::DebugHash;
+use crate::deflate::deflate_constants::{MAX_MATCH, MIN_LOOKAHEAD, MIN_MATCH};
+use crate::deflate::deflate_token::DeflateTokenReference;
 use crate::estimator::preflate_parameter_estimator::PreflateStrategy;
 use crate::hash_algorithm::{
     Crc32cHash, HashAlgorithm, HashImplementation, LibdeflateHash4, LibdeflateHash4Fast, MiniZHash,
     RandomVectorHash, ZlibNGHash, ZlibRotatingHash,
 };
 use crate::hash_chain::{HashChain, MAX_UPDATE_HASH_BATCH};
-use crate::preflate_constants::{MAX_MATCH, MIN_LOOKAHEAD, MIN_MATCH};
 use crate::preflate_error::{err_exit_code, ExitCode, Result};
 use crate::preflate_input::PreflateInput;
-use crate::preflate_token::PreflateTokenReference;
 use crate::token_predictor::TokenPredictorParameters;
 
 use std::cmp;
 
 #[derive(Debug, Copy, Clone)]
 pub enum MatchResult {
-    Success(PreflateTokenReference),
+    Success(DeflateTokenReference),
     DistanceLargerThanHop0(u32, u32),
     NoInput,
     NoMoreMatchesFound,
@@ -85,7 +85,7 @@ pub trait HashChainHolder {
     /// or none if it wasn't found
     fn calculate_hops(
         &self,
-        target_reference: &PreflateTokenReference,
+        target_reference: &DeflateTokenReference,
         input: &PreflateInput,
     ) -> Result<u32>;
 
@@ -95,7 +95,7 @@ pub trait HashChainHolder {
 
     /// debugging function to verify that the hash chain is correct
     #[allow(dead_code)]
-    fn verify_hash(&self, _dist: Option<PreflateTokenReference>);
+    fn verify_hash(&self, _dist: Option<DeflateTokenReference>);
 
     fn checksum(&self, checksum: &mut DebugHash);
 }
@@ -125,7 +125,7 @@ impl HashChainHolder for () {
 
     fn calculate_hops(
         &self,
-        _target_reference: &PreflateTokenReference,
+        _target_reference: &DeflateTokenReference,
         _input: &PreflateInput,
     ) -> Result<u32> {
         unimplemented!()
@@ -135,7 +135,7 @@ impl HashChainHolder for () {
         unimplemented!()
     }
 
-    fn verify_hash(&self, _dist: Option<PreflateTokenReference>) {}
+    fn verify_hash(&self, _dist: Option<DeflateTokenReference>) {}
 
     fn checksum(&self, _checksum: &mut DebugHash) {}
 }
@@ -172,7 +172,7 @@ impl<H: HashImplementation> HashChainHolder for HashChainHolderImpl<H> {
     /// or none if it wasn't found
     fn calculate_hops(
         &self,
-        target_reference: &PreflateTokenReference,
+        target_reference: &DeflateTokenReference,
         input: &PreflateInput,
     ) -> Result<u32> {
         let max_len = std::cmp::min(input.remaining(), MAX_MATCH);
@@ -255,7 +255,7 @@ impl<H: HashImplementation> HashChainHolder for HashChainHolderImpl<H> {
 
     /// debugging function to verify that the hash chain is correct
     #[allow(dead_code)]
-    fn verify_hash(&self, _dist: Option<PreflateTokenReference>) {
+    fn verify_hash(&self, _dist: Option<DeflateTokenReference>) {
         //self.hash.verify_hash(dist, &self.input);
     }
 
@@ -327,7 +327,7 @@ impl<H: HashImplementation> HashChainHolderImpl<H> {
 
         let input_chars = input.cur_chars(OFFSET as i32);
         let mut best_len = prev_len;
-        let mut best_match: Option<PreflateTokenReference> = None;
+        let mut best_match: Option<DeflateTokenReference> = None;
         let mut first = true;
 
         for dist in self.hash.iterate(input, OFFSET) {
@@ -346,7 +346,7 @@ impl<H: HashImplementation> HashChainHolderImpl<H> {
 
             let match_length = prefix_compare(match_start, input_chars, best_len, max_len);
             if match_length > best_len {
-                let r = PreflateTokenReference::new(match_length, dist, false);
+                let r = DeflateTokenReference::new(match_length, dist, false);
 
                 if match_length >= nice_length && (match_length > 3 || dist <= max_dist_3_matches) {
                     return MatchResult::Success(r);
