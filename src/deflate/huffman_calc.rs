@@ -11,6 +11,13 @@ pub enum HufftreeBitCalc {
     Miniz,
 }
 
+/// Calculates the Huffman bit lengths for a given distribution of symbols. 
+/// 
+/// There is no one-size-fits-all solution for calculating Huffman bit lengths and 
+/// each library has its own. 
+/// 
+/// If we can get the right algorithm, it will minimize the amount of corrections 
+/// that we later need to write when encoding the data back to the compressed format.
 pub fn calc_bit_lengths(
     bit_calc: HufftreeBitCalc,
     sym_count: &[u16],

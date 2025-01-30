@@ -8,17 +8,16 @@
 /// Getting the parameters correct means that the resulting diff between the deflate stream
 /// and the predicted deflate stream will be as small as possible.
 use crate::{
-    add_policy_estimator::DictionaryAddPolicy,
-    depth_estimator::{new_depth_estimator, HashTableDepthEstimator},
     hash_algorithm::HashAlgorithm,
     preflate_constants,
     preflate_error::{err_exit_code, ExitCode, Result},
     preflate_input::PreflateInput,
-    preflate_parse_config::{
-        MatchingType, SLOW_PREFLATE_PARSER_SETTINGS, ZLIB_PREFLATE_PARSER_SETTINGS,
-    },
     preflate_token::{PreflateToken, PreflateTokenBlock, PreflateTokenReference},
 };
+
+use super::{add_policy_estimator::DictionaryAddPolicy, depth_estimator::{new_depth_estimator, HashTableDepthEstimator}, preflate_parse_config::{
+    MatchingType, SLOW_PREFLATE_PARSER_SETTINGS, ZLIB_PREFLATE_PARSER_SETTINGS,
+}};
 
 #[derive(Default)]
 pub struct CompLevelInfo {

@@ -8,8 +8,6 @@ use crate::preflate_error::Result;
 
 use crate::preflate_token::PreflateHuffmanType;
 use crate::{
-    bit_writer::BitWriter,
-    huffman_encoding::HuffmanWriter,
     preflate_constants::{
         quantize_distance, quantize_length, DIST_BASE_TABLE, DIST_EXTRA_TABLE, LENGTH_BASE_TABLE,
         LENGTH_EXTRA_TABLE, LITLEN_CODE_COUNT, MIN_MATCH, NONLEN_CODE_COUNT,
@@ -17,6 +15,10 @@ use crate::{
     preflate_token::{PreflateToken, PreflateTokenBlock},
 };
 
+use super::bit_writer::BitWriter;
+use super::huffman_encoding::HuffmanWriter;
+
+/// Takes a tokenized block and writes it to the original compressed output. 
 pub struct DeflateWriter {
     /// bit writer to write partial bits to output
     bitwriter: BitWriter,

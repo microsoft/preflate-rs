@@ -4,9 +4,10 @@
  *  This software incorporates material from third parties. See NOTICE.txt for details.
  *--------------------------------------------------------------------------------------------*/
 
-use crate::bit_reader::ReadBits;
 use crate::preflate_error::{err_exit_code, ExitCode, Result};
 use std::vec;
+
+use super::bit_reader::ReadBits;
 
 /// Calculates Huffman code array given an array of Huffman Code Lengths using the RFC 1951 algorithm
 pub fn calc_huffman_codes(code_lengths: &[u8]) -> Result<Vec<u16>> {
@@ -184,8 +185,8 @@ impl ReadBits for SingleCode {
 }
 
 #[cfg(test)]
-fn roundtrip(frequencies: &[u16], huffcalc: crate::huffman_calc::HufftreeBitCalc) {
-    use crate::huffman_calc::calc_bit_lengths;
+fn roundtrip(frequencies: &[u16], huffcalc: super::huffman_calc::HufftreeBitCalc) {
+    use super::huffman_calc::calc_bit_lengths;
 
     let code_lengths = calc_bit_lengths(huffcalc, frequencies, 7);
 
@@ -212,15 +213,15 @@ fn roundtrip(frequencies: &[u16], huffcalc: crate::huffman_calc::HufftreeBitCalc
 fn roundtrip_huffman_code() {
     roundtrip(
         &[1, 0, 2, 3, 5, 8, 13, 0],
-        crate::huffman_calc::HufftreeBitCalc::Miniz,
+        super::huffman_calc::HufftreeBitCalc::Miniz,
     );
     roundtrip(
         &[1, 0, 2, 3, 5, 8, 13, 0],
-        crate::huffman_calc::HufftreeBitCalc::Zlib,
+        super::huffman_calc::HufftreeBitCalc::Zlib,
     );
 
     roundtrip(
         &[1, 0, 2, 3, 5, 1008, 113, 1, 1, 1, 100, 10000],
-        crate::huffman_calc::HufftreeBitCalc::Zlib,
+        super::huffman_calc::HufftreeBitCalc::Zlib,
     );
 }

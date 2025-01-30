@@ -5,19 +5,10 @@
  *--------------------------------------------------------------------------------------------*/
 
 use crate::{
-    add_policy_estimator::{estimate_add_policy, DictionaryAddPolicy},
-    bit_helper::bit_length,
-    complevel_estimator::estimate_preflate_comp_level,
-    hash_algorithm::HashAlgorithm,
-    preflate_constants::{self},
-    preflate_error::{ExitCode, Result},
-    preflate_parse_config::MatchingType,
-    preflate_stream_info::{extract_preflate_info, PreflateStreamInfo},
-    preflate_token::PreflateTokenBlock,
-    statistical_codec::{PredictionDecoder, PredictionEncoder},
-    token_predictor::TokenPredictorParameters,
-    PreflateError,
+    bit_helper::bit_length, estimator::{add_policy_estimator::DictionaryAddPolicy, preflate_parse_config::MatchingType}, hash_algorithm::HashAlgorithm, preflate_constants::{self}, preflate_error::{ExitCode, Result},  preflate_token::PreflateTokenBlock, statistical_codec::{PredictionDecoder, PredictionEncoder}, token_predictor::TokenPredictorParameters, PreflateError
 };
+
+use super::{add_policy_estimator::estimate_add_policy, complevel_estimator::estimate_preflate_comp_level, preflate_stream_info::{extract_preflate_info, PreflateStreamInfo}};
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum PreflateStrategy {
@@ -312,7 +303,7 @@ pub fn estimate_preflate_parameters(
 #[test]
 fn verify_zlib_recognition() {
     use crate::{
-        preflate_parse_config::{SLOW_PREFLATE_PARSER_SETTINGS, ZLIB_PREFLATE_PARSER_SETTINGS},
+        estimator::preflate_parse_config::{SLOW_PREFLATE_PARSER_SETTINGS, ZLIB_PREFLATE_PARSER_SETTINGS},
         process::{parse_deflate, read_file},
     };
 

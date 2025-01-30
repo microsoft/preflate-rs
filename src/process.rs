@@ -7,11 +7,10 @@
 use std::io::Cursor;
 
 use crate::{
-    deflate_reader::DeflateReader,
-    deflate_writer::DeflateWriter,
+    deflate::{deflate_reader::DeflateReader,    deflate_writer::DeflateWriter},
     preflate_error::PreflateError,
     preflate_input::PreflateInput,
-    preflate_parameter_estimator::PreflateParameters,
+    estimator::preflate_parameter_estimator::PreflateParameters,
     preflate_token::PreflateTokenBlock,
     statistical_codec::{
         CodecCorrection, CodecMisprediction, PredictionDecoder, PredictionEncoder,
@@ -185,7 +184,7 @@ fn analyze_compressed_data_fast(
     uncompressed_size: &mut u64,
 ) {
     use crate::cabac_codec::{PredictionDecoderCabac, PredictionEncoderCabac};
-    use crate::preflate_parameter_estimator::estimate_preflate_parameters;
+    use crate::estimator::preflate_parameter_estimator::estimate_preflate_parameters;
 
     use cabac::vp8::{VP8Reader, VP8Writer};
 
@@ -239,7 +238,7 @@ fn analyze_compressed_data_verify(
     _deflate_info_dump_level: i32,
     uncompressed_size: &mut u64,
 ) {
-    use crate::preflate_parameter_estimator::estimate_preflate_parameters;
+    use crate::estimator::preflate_parameter_estimator::estimate_preflate_parameters;
     use crate::{
         cabac_codec::{PredictionDecoderCabac, PredictionEncoderCabac},
         statistical_codec::{VerifyPredictionDecoder, VerifyPredictionEncoder},
@@ -377,7 +376,7 @@ fn verify_zlib_perfect_compression() {
             &read_file(format!("compressed_zlib_level{i}.deflate").as_str());
 
         let compressed_data = compressed_data;
-        use crate::preflate_parameter_estimator::estimate_preflate_parameters;
+        use crate::estimator::preflate_parameter_estimator::estimate_preflate_parameters;
 
         let contents = parse_deflate(compressed_data, 1).unwrap();
 

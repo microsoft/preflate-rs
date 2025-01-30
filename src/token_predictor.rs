@@ -5,17 +5,15 @@
  *--------------------------------------------------------------------------------------------*/
 
 use crate::{
-    add_policy_estimator::DictionaryAddPolicy,
     bit_helper::DebugHash,
     cabac_codec::{decode_difference, encode_difference},
+    estimator::{add_policy_estimator::DictionaryAddPolicy, preflate_parameter_estimator::PreflateStrategy, preflate_parse_config::MatchingType},
     hash_algorithm::HashAlgorithm,
     hash_chain_holder::{new_hash_chain_holder, HashChainHolder, MatchResult},
-    huffman_calc::HufftreeBitCalc,
+    deflate::huffman_calc::HufftreeBitCalc,
     preflate_constants::MIN_MATCH,
     preflate_error::{err_exit_code, AddContext, ExitCode, Result},
     preflate_input::PreflateInput,
-    preflate_parameter_estimator::PreflateStrategy,
-    preflate_parse_config::MatchingType,
     preflate_token::{
         PreflateHuffmanType, PreflateToken, PreflateTokenBlock, PreflateTokenReference,
         TokenFrequency, BT_DYNAMICHUFF, BT_STATICHUFF, BT_STORED,

@@ -5,7 +5,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 use crate::{
-    huffman_encoding::HuffmanOriginalEncoding,
+    deflate::huffman_encoding::HuffmanOriginalEncoding,
     preflate_constants::{
         quantize_distance, quantize_length, DIST_CODE_COUNT, LITLENDIST_CODE_COUNT,
         NONLEN_CODE_COUNT,

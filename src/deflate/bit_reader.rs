@@ -12,6 +12,7 @@ pub trait ReadBits {
     fn get(&mut self, cbit: u32) -> Result<u32>;
 }
 
+/// BitReader reads a variable number of bits from a byte stream.
 pub struct BitReader<R> {
     binary_reader: R,
     bits_read: u32,

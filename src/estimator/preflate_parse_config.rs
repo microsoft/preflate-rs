@@ -4,7 +4,7 @@
  *  This software incorporates material from third parties. See NOTICE.txt for details.
  *--------------------------------------------------------------------------------------------*/
 
-use crate::add_policy_estimator::DictionaryAddPolicy;
+use crate::estimator::add_policy_estimator::DictionaryAddPolicy;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Default)]
 pub enum MatchingType {

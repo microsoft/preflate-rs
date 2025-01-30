@@ -12,13 +12,13 @@ use crate::{
 use std::io::Read;
 
 use crate::{
-    bit_reader::BitReader,
-    huffman_encoding::{HuffmanOriginalEncoding, HuffmanReader},
     preflate_constants,
     preflate_token::PreflateTokenBlock,
 };
 
-/// Used to read binary data in deflate format and convert it to plaintext and a list of tokenized blocks
+use super::{bit_reader::BitReader, huffman_encoding::{HuffmanOriginalEncoding, HuffmanReader}};
+
+/// Used to read binary data in DEFLATE format and convert it to plaintext and a list of tokenized blocks
 /// containing the literals and distance codes that were used to compress the file
 pub struct DeflateReader<R> {
     input: BitReader<R>,

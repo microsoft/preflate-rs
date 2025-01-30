@@ -1,9 +1,11 @@
 use default_boxed::DefaultBoxed;
 
 use crate::{
-    add_policy_estimator::DictionaryAddPolicy, hash_algorithm::*, preflate_input::PreflateInput,
+    hash_algorithm::*, preflate_input::PreflateInput,
     preflate_token::PreflateTokenReference,
 };
+
+use super::add_policy_estimator::DictionaryAddPolicy;
 
 pub trait HashTableDepthEstimator {
     fn update_hash(&mut self, add_policy: DictionaryAddPolicy, input: &PreflateInput, length: u32);
@@ -248,7 +250,7 @@ fn verify_max_chain_length() {
 
         let parsed = parse_deflate(&compressed_data, 0).unwrap();
 
-        let add_policy_estimator = crate::add_policy_estimator::estimate_add_policy(&parsed.blocks);
+        let add_policy_estimator = super::add_policy_estimator::estimate_add_policy(&parsed.blocks);
 
         assert_eq!(
             add_policy_estimator, level.2,

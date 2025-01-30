@@ -7,7 +7,7 @@ use crate::{
     idat_parse::{recreate_idat, IdatContents},
     preflate_error::{AddContext, ExitCode, PreflateError},
     preflate_input::PreflateInput,
-    preflate_parameter_estimator::{estimate_preflate_parameters, PreflateParameters},
+    estimator::preflate_parameter_estimator::{estimate_preflate_parameters, PreflateParameters},
     process::{decode_mispredictions, encode_mispredictions, parse_deflate},
     scan_deflate::{split_into_deflate_streams, BlockChunk},
     statistical_codec::PredictionEncoder,
