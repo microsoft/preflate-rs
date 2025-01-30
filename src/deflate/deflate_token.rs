@@ -18,6 +18,15 @@ pub enum DeflateToken {
     Reference(DeflateTokenReference),
 }
 
+impl DeflateToken {
+    pub fn new_ref(len: u32, dist: u32, irregular258: bool) -> DeflateToken {
+        DeflateToken::Reference(DeflateTokenReference::new(len, dist, irregular258))
+    }
+    pub fn new_lit(lit: u8) -> DeflateToken {
+        DeflateToken::Literal(lit)
+    }
+}
+
 /// In the case of a distance and length, the length is the number of bytes to copy from the
 /// previous bytes, and the distance is the number of bytes back to start copying from.
 ///
@@ -70,7 +79,7 @@ pub enum DeflateHuffmanType {
     },
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum DeflateTokenBlock {
     Huffman {
         tokens: Vec<DeflateToken>,
