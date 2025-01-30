@@ -6,11 +6,11 @@
 
 use crate::preflate_error::{err_exit_code, ExitCode, Result};
 
-use crate::{
+use crate::deflate::{
     bit_reader::ReadBits,
     bit_writer::BitWriter,
+    deflate_constants::TREE_CODE_ORDER_TABLE,
     huffman_helper::{calc_huffman_codes, calculate_huffman_code_tree, decode_symbol},
-    preflate_constants::TREE_CODE_ORDER_TABLE,
 };
 
 #[derive(PartialEq, Eq, Clone, Copy, Debug)]
@@ -25,6 +25,7 @@ pub enum TreeCodeType {
     ZeroLong = 18,
 }
 
+/// Represents the original encoding of the huffman table as it was read from the file
 #[derive(Debug, Clone, Eq, PartialEq, Default)]
 pub struct HuffmanOriginalEncoding {
     /// Huffman literal/distance lengths as RLE encoded in the file
@@ -230,12 +231,12 @@ impl HuffmanOriginalEncoding {
     }
 }
 
-pub struct HuffmanReader {
+pub(super) struct HuffmanReader {
     lit_huff_code_tree: Vec<i32>,
     dist_huff_code_tree: Vec<i32>,
 }
 
-pub struct HuffmanWriter {
+pub(super) struct HuffmanWriter {
     lit_code_lengths: Vec<u8>,
     lit_huffman_codes: Vec<u16>,
     dist_code_lengths: Vec<u8>,
@@ -353,7 +354,7 @@ impl HuffmanWriter {
 
 #[test]
 fn roundtrip_huffman_bitreadwrite() {
-    use crate::bit_reader::BitReader;
+    use crate::deflate::bit_reader::BitReader;
     use std::io::Cursor;
 
     let code_lengths = [1, 0, 3, 3, 4, 4, 3, 0];
@@ -454,7 +455,7 @@ fn roundtrip_huffman_table() {
 
 #[cfg(test)]
 fn rountrip_test(encoding: HuffmanOriginalEncoding) {
-    use crate::bit_reader::BitReader;
+    use super::bit_reader::BitReader;
     use std::io::Cursor;
 
     let mut output_buffer = Vec::new();

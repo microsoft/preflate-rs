@@ -4,6 +4,7 @@
  *  This software incorporates material from third parties. See NOTICE.txt for details.
  *--------------------------------------------------------------------------------------------*/
 
+/// Used to write a variable number of bits to a byte buffer.
 #[derive(Default)]
 pub struct BitWriter {
     pub bit_buffer: u32,
@@ -61,7 +62,7 @@ fn write_simple() {
 /// write various bit patterns and see if the result matches the input
 #[test]
 fn write_roundtrip() {
-    use crate::bit_reader::BitReader;
+    use super::bit_reader::BitReader;
 
     let mut b = BitWriter::default();
     let mut data_buffer = Vec::new();

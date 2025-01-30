@@ -5,20 +5,20 @@
  *--------------------------------------------------------------------------------------------*/
 
 use crate::{
+    deflate::deflate_token::{DeflateHuffmanType, DeflateToken, DeflateTokenReference},
     preflate_error::{err_exit_code, AddContext, ExitCode, Result},
-    preflate_token::{PreflateHuffmanType, PreflateToken, PreflateTokenReference},
 };
 
 use std::io::Read;
 
-use crate::{
+use super::{deflate_constants, deflate_token::DeflateTokenBlock};
+
+use super::{
     bit_reader::BitReader,
     huffman_encoding::{HuffmanOriginalEncoding, HuffmanReader},
-    preflate_constants,
-    preflate_token::PreflateTokenBlock,
 };
 
-/// Used to read binary data in deflate format and convert it to plaintext and a list of tokenized blocks
+/// Used to read binary data in DEFLATE format and convert it to plaintext and a list of tokenized blocks
 /// containing the literals and distance codes that were used to compress the file
 pub struct DeflateReader<R> {
     input: BitReader<R>,
@@ -64,7 +64,7 @@ impl<R: Read> DeflateReader<R> {
         }
     }
 
-    pub fn read_block(&mut self, last: &mut bool) -> Result<PreflateTokenBlock> {
+    pub fn read_block(&mut self, last: &mut bool) -> Result<DeflateTokenBlock> {
         *last = self.read_bit()?;
         let mode = self.read_bits(2)?;
 
@@ -89,7 +89,7 @@ impl<R: Read> DeflateReader<R> {
                     self.write_literal(b);
                 }
 
-                Ok(PreflateTokenBlock::Stored {
+                Ok(DeflateTokenBlock::Stored {
                     uncompressed,
                     padding_bits,
                 })
@@ -102,17 +102,17 @@ impl<R: Read> DeflateReader<R> {
                 let decoder = HuffmanReader::create_fixed()?;
                 if let Err(e) = self.decode_block(&decoder, &mut tokens) {
                     if e.exit_code() == ExitCode::ShortRead {
-                        Ok(PreflateTokenBlock::Huffman {
+                        Ok(DeflateTokenBlock::Huffman {
                             tokens,
-                            huffman_type: PreflateHuffmanType::Static { incomplete: true },
+                            huffman_type: DeflateHuffmanType::Static { incomplete: true },
                         })
                     } else {
                         Err(e)
                     }
                 } else {
-                    Ok(PreflateTokenBlock::Huffman {
+                    Ok(DeflateTokenBlock::Huffman {
                         tokens,
-                        huffman_type: PreflateHuffmanType::Static { incomplete: false },
+                        huffman_type: DeflateHuffmanType::Static { incomplete: false },
                     })
                 }
             }
@@ -125,9 +125,9 @@ impl<R: Read> DeflateReader<R> {
                 let mut tokens = Vec::new();
                 self.decode_block(&decoder, &mut tokens).context()?;
 
-                Ok(PreflateTokenBlock::Huffman {
+                Ok(DeflateTokenBlock::Huffman {
                     tokens,
-                    huffman_type: PreflateHuffmanType::Dynamic { huffman_encoding },
+                    huffman_type: DeflateHuffmanType::Dynamic { huffman_encoding },
                 })
             }
 
@@ -138,7 +138,7 @@ impl<R: Read> DeflateReader<R> {
     fn decode_block(
         &mut self,
         decoder: &HuffmanReader,
-        tokens: &mut Vec<PreflateToken>,
+        tokens: &mut Vec<DeflateToken>,
     ) -> Result<()> {
         let mut earliest_reference = i32::MAX;
         let mut cur_pos = 0;
@@ -147,40 +147,39 @@ impl<R: Read> DeflateReader<R> {
             let lit_len: u32 = decoder.fetch_next_literal_code(&mut self.input)?.into();
             if lit_len < 256 {
                 self.write_literal(lit_len as u8);
-                tokens.push(PreflateToken::Literal(lit_len as u8));
+                tokens.push(DeflateToken::Literal(lit_len as u8));
                 cur_pos += 1;
             } else if lit_len == 256 {
                 return Ok(());
             } else {
-                let lcode: u32 = lit_len - preflate_constants::NONLEN_CODE_COUNT as u32;
-                if lcode >= preflate_constants::LEN_CODE_COUNT as u32 {
+                let lcode: u32 = lit_len - deflate_constants::NONLEN_CODE_COUNT as u32;
+                if lcode >= deflate_constants::LEN_CODE_COUNT as u32 {
                     return err_exit_code(ExitCode::InvalidDeflate, "Invalid length code");
                 }
-                let len: u32 = preflate_constants::MIN_MATCH
-                    + preflate_constants::LENGTH_BASE_TABLE[lcode as usize] as u32
+                let len: u32 = deflate_constants::MIN_MATCH
+                    + deflate_constants::LENGTH_BASE_TABLE[lcode as usize] as u32
                     + self
-                        .read_bits(preflate_constants::LENGTH_EXTRA_TABLE[lcode as usize].into())?;
+                        .read_bits(deflate_constants::LENGTH_EXTRA_TABLE[lcode as usize].into())?;
 
                 // length of 258 can be encoded two ways: 284 with 5 one bits (non-standard) or as 285 with 0 extra bits (standard)
                 let irregular258 =
-                    len == 258 && lcode != preflate_constants::LEN_CODE_COUNT as u32 - 1;
+                    len == 258 && lcode != deflate_constants::LEN_CODE_COUNT as u32 - 1;
 
                 let dcode = decoder.fetch_next_distance_char(&mut self.input)? as u32;
-                if dcode >= preflate_constants::DIST_CODE_COUNT as u32 {
+                if dcode >= deflate_constants::DIST_CODE_COUNT as u32 {
                     return err_exit_code(ExitCode::InvalidDeflate, "Invalid distance code");
                 }
 
                 let dist = 1
-                    + preflate_constants::DIST_BASE_TABLE[dcode as usize] as u32
-                    + self
-                        .read_bits(preflate_constants::DIST_EXTRA_TABLE[dcode as usize].into())?;
+                    + deflate_constants::DIST_BASE_TABLE[dcode as usize] as u32
+                    + self.read_bits(deflate_constants::DIST_EXTRA_TABLE[dcode as usize].into())?;
 
                 if dist as usize > self.plain_text.len() {
                     return err_exit_code(ExitCode::InvalidDeflate, "Invalid distance");
                 }
 
                 self.write_reference(dist, len);
-                tokens.push(PreflateToken::Reference(PreflateTokenReference::new(
+                tokens.push(DeflateToken::Reference(DeflateTokenReference::new(
                     len,
                     dist,
                     irregular258,

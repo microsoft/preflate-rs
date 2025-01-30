@@ -4,30 +4,35 @@
  *  This software incorporates material from third parties. See NOTICE.txt for details.
  *--------------------------------------------------------------------------------------------*/
 
-use crate::{
-    huffman_encoding::HuffmanOriginalEncoding,
-    preflate_constants::{
-        quantize_distance, quantize_length, DIST_CODE_COUNT, LITLENDIST_CODE_COUNT,
-        NONLEN_CODE_COUNT,
-    },
+use crate::deflate::huffman_encoding::HuffmanOriginalEncoding;
+
+use super::deflate_constants::{
+    quantize_distance, quantize_length, DIST_CODE_COUNT, LITLENDIST_CODE_COUNT, NONLEN_CODE_COUNT,
 };
 
+/// In a DEFLATE stream, tokens are either literals (bytes) or references to previous bytes
+/// with a distance and length.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub struct PreflateTokenReference {
+pub enum DeflateToken {
+    Literal(u8),
+    Reference(DeflateTokenReference),
+}
+
+/// In the case of a distance and length, the length is the number of bytes to copy from the
+/// previous bytes, and the distance is the number of bytes back to start copying from.
+///
+/// the irregular258 field is used to indicate that the 258 length code was used but in a
+/// suboptimal way (the RFC allows for two different ways to encode 258)
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct DeflateTokenReference {
     len: u8,
     dist: u16,
     irregular258: bool,
 }
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub enum PreflateToken {
-    Literal(u8),
-    Reference(PreflateTokenReference),
-}
-
-impl PreflateTokenReference {
-    pub fn new(len: u32, dist: u32, irregular258: bool) -> PreflateTokenReference {
-        PreflateTokenReference {
+impl DeflateTokenReference {
+    pub fn new(len: u32, dist: u32, irregular258: bool) -> DeflateTokenReference {
+        DeflateTokenReference {
             len: (len - 3) as u8,
             dist: dist as u16,
             irregular258,
@@ -56,7 +61,7 @@ pub const BT_DYNAMICHUFF: u32 = 0;
 pub const BT_STATICHUFF: u32 = 2;
 
 #[derive(Debug, PartialEq)]
-pub enum PreflateHuffmanType {
+pub enum DeflateHuffmanType {
     Dynamic {
         huffman_encoding: HuffmanOriginalEncoding,
     },
@@ -66,10 +71,10 @@ pub enum PreflateHuffmanType {
 }
 
 #[derive(Debug)]
-pub enum PreflateTokenBlock {
+pub enum DeflateTokenBlock {
     Huffman {
-        tokens: Vec<PreflateToken>,
-        huffman_type: PreflateHuffmanType,
+        tokens: Vec<DeflateToken>,
+        huffman_type: DeflateHuffmanType,
     },
     Stored {
         uncompressed: Vec<u8>,
@@ -77,6 +82,8 @@ pub enum PreflateTokenBlock {
     },
 }
 
+/// Used to track the frequence of tokens in the DEFLATE stream
+/// which are later used to build the huffman encoding.
 #[derive(Debug)]
 pub struct TokenFrequency {
     pub literal_codes: [u16; LITLENDIST_CODE_COUNT],
@@ -98,12 +105,12 @@ impl Default for TokenFrequency {
 }
 
 impl TokenFrequency {
-    pub fn commit_token(&mut self, token: &PreflateToken) {
+    pub fn commit_token(&mut self, token: &DeflateToken) {
         match token {
-            PreflateToken::Literal(lit) => {
+            DeflateToken::Literal(lit) => {
                 self.literal_codes[*lit as usize] += 1;
             }
-            PreflateToken::Reference(t) => {
+            DeflateToken::Reference(t) => {
                 self.literal_codes[NONLEN_CODE_COUNT + quantize_length(t.len())] += 1;
                 self.distance_codes[quantize_distance(t.dist())] += 1;
             }

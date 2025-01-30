@@ -7,12 +7,11 @@
 use std::io::Cursor;
 
 use crate::{
-    deflate_reader::DeflateReader,
-    deflate_writer::DeflateWriter,
+    deflate::deflate_token::DeflateTokenBlock,
+    deflate::{deflate_reader::DeflateReader, deflate_writer::DeflateWriter},
+    estimator::preflate_parameter_estimator::PreflateParameters,
     preflate_error::PreflateError,
     preflate_input::PreflateInput,
-    preflate_parameter_estimator::PreflateParameters,
-    preflate_token::PreflateTokenBlock,
     statistical_codec::{
         CodecCorrection, CodecMisprediction, PredictionDecoder, PredictionEncoder,
     },
@@ -42,7 +41,7 @@ pub fn encode_mispredictions(
 pub struct DeflateContents {
     pub compressed_size: usize,
     pub plain_text: Vec<u8>,
-    pub blocks: Vec<PreflateTokenBlock>,
+    pub blocks: Vec<DeflateTokenBlock>,
     pub eof_padding: u8,
 }
 
@@ -60,7 +59,7 @@ pub fn parse_deflate(
         if deflate_info_dump_level > 0 {
             // Log information about this deflate compressed block
             match &block {
-                PreflateTokenBlock::Stored {
+                DeflateTokenBlock::Stored {
                     uncompressed,
                     padding_bits,
                 } => {
@@ -70,7 +69,7 @@ pub fn parse_deflate(
                         padding_bits
                     );
                 }
-                PreflateTokenBlock::Huffman { tokens, .. } => {
+                DeflateTokenBlock::Huffman { tokens, .. } => {
                     println!("Block: tokens={}", tokens.len());
                 }
             }
@@ -96,7 +95,7 @@ pub fn parse_deflate(
 }
 
 fn predict_blocks(
-    blocks: &[PreflateTokenBlock],
+    blocks: &[DeflateTokenBlock],
     mut token_predictor_in: TokenPredictor,
     encoder: &mut impl PredictionEncoder,
 ) -> Result<(), PreflateError> {
@@ -115,7 +114,7 @@ pub fn decode_mispredictions(
     params: &PreflateParameters,
     plain_text: PreflateInput,
     decoder: &mut impl PredictionDecoder,
-) -> Result<(Vec<u8>, Vec<PreflateTokenBlock>), PreflateError> {
+) -> Result<(Vec<u8>, Vec<DeflateTokenBlock>), PreflateError> {
     let mut deflate_writer: DeflateWriter = DeflateWriter::new();
 
     let output_blocks = recreate_blocks(
@@ -137,7 +136,7 @@ fn recreate_blocks<D: PredictionDecoder>(
     mut token_predictor: TokenPredictor,
     decoder: &mut D,
     deflate_writer: &mut DeflateWriter,
-) -> Result<Vec<PreflateTokenBlock>, PreflateError> {
+) -> Result<Vec<DeflateTokenBlock>, PreflateError> {
     let mut output_blocks = Vec::new();
     let mut is_eof = token_predictor.input_eof()
         && !decoder.decode_misprediction(CodecMisprediction::EOFMisprediction);
@@ -185,7 +184,6 @@ fn analyze_compressed_data_fast(
     uncompressed_size: &mut u64,
 ) {
     use crate::cabac_codec::{PredictionDecoderCabac, PredictionEncoderCabac};
-    use crate::preflate_parameter_estimator::estimate_preflate_parameters;
 
     use cabac::vp8::{VP8Reader, VP8Writer};
 
@@ -195,7 +193,9 @@ fn analyze_compressed_data_fast(
 
     let contents = parse_deflate(compressed_data, 1).unwrap();
 
-    let params = estimate_preflate_parameters(&contents.plain_text, &contents.blocks).unwrap();
+    let params =
+        PreflateParameters::estimate_preflate_parameters(&contents.plain_text, &contents.blocks)
+            .unwrap();
 
     println!("params: {:?}", params);
 
@@ -239,7 +239,6 @@ fn analyze_compressed_data_verify(
     _deflate_info_dump_level: i32,
     uncompressed_size: &mut u64,
 ) {
-    use crate::preflate_parameter_estimator::estimate_preflate_parameters;
     use crate::{
         cabac_codec::{PredictionDecoderCabac, PredictionEncoderCabac},
         statistical_codec::{VerifyPredictionDecoder, VerifyPredictionEncoder},
@@ -267,7 +266,9 @@ fn analyze_compressed_data_verify(
 
     let contents = parse_deflate(compressed_data, 1).unwrap();
 
-    let params = estimate_preflate_parameters(&contents.plain_text, &contents.blocks).unwrap();
+    let params =
+        PreflateParameters::estimate_preflate_parameters(&contents.plain_text, &contents.blocks)
+            .unwrap();
 
     println!("params: {:?}", params);
 
@@ -308,11 +309,11 @@ fn analyze_compressed_data_verify(
         .enumerate()
         .for_each(|(index, (a, b))| match (a, &b) {
             (
-                PreflateTokenBlock::Stored {
+                DeflateTokenBlock::Stored {
                     uncompressed: a,
                     padding_bits: b,
                 },
-                PreflateTokenBlock::Stored {
+                DeflateTokenBlock::Stored {
                     uncompressed: c,
                     padding_bits: d,
                 },
@@ -321,11 +322,11 @@ fn analyze_compressed_data_verify(
                 assert_eq!(b, d, "padding bits differ {index}");
             }
             (
-                PreflateTokenBlock::Huffman {
+                DeflateTokenBlock::Huffman {
                     tokens: t1,
                     huffman_type: h1,
                 },
-                PreflateTokenBlock::Huffman {
+                DeflateTokenBlock::Huffman {
                     tokens: t2,
                     huffman_type: h2,
                 },
@@ -377,11 +378,14 @@ fn verify_zlib_perfect_compression() {
             &read_file(format!("compressed_zlib_level{i}.deflate").as_str());
 
         let compressed_data = compressed_data;
-        use crate::preflate_parameter_estimator::estimate_preflate_parameters;
 
         let contents = parse_deflate(compressed_data, 1).unwrap();
 
-        let params = estimate_preflate_parameters(&contents.plain_text, &contents.blocks).unwrap();
+        let params = PreflateParameters::estimate_preflate_parameters(
+            &contents.plain_text,
+            &contents.blocks,
+        )
+        .unwrap();
 
         println!("params: {:?}", params);
 

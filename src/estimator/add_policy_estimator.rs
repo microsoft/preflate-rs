@@ -8,7 +8,7 @@
 ///
 /// This will be the limit that we use when we decide whether to
 /// use skip_hash or update_hash.
-use crate::preflate_token::{PreflateToken, PreflateTokenBlock};
+use crate::deflate::deflate_token::{DeflateToken, DeflateTokenBlock};
 
 #[derive(Default, Eq, PartialEq, Debug, Clone, Copy)]
 pub enum DictionaryAddPolicy {
@@ -92,7 +92,7 @@ fn is_at_32k_boundary(length: u32, pos: u32) -> bool {
 /// only add smaller strings in their entirety (ie a substring starting
 /// at each position). This function is designed to measure this
 /// and determine the policy that should be used.
-pub fn estimate_add_policy(token_blocks: &[PreflateTokenBlock]) -> DictionaryAddPolicy {
+pub(super) fn estimate_add_policy(token_blocks: &[DeflateTokenBlock]) -> DictionaryAddPolicy {
     const WINDOW_MASK: usize = 0x7fff;
 
     // used to see if we have the special case of not adding matches on the edge
@@ -123,21 +123,21 @@ pub fn estimate_add_policy(token_blocks: &[PreflateTokenBlock]) -> DictionaryAdd
         let token_block = &token_blocks[i];
 
         match token_block {
-            PreflateTokenBlock::Stored { uncompressed, .. } => {
+            DeflateTokenBlock::Stored { uncompressed, .. } => {
                 // we assume for stored blocks everything was added to the dictionary
                 for _i in 0..uncompressed.len() {
                     current_window[current_offset as usize & WINDOW_MASK] = 0;
                     current_offset += 1;
                 }
             }
-            PreflateTokenBlock::Huffman { tokens, .. } => {
+            DeflateTokenBlock::Huffman { tokens, .. } => {
                 for token in tokens.iter() {
                     match token {
-                        PreflateToken::Literal(_) => {
+                        DeflateToken::Literal(_) => {
                             current_window[current_offset as usize & WINDOW_MASK] = 0;
                             current_offset += 1;
                         }
-                        PreflateToken::Reference(r) => {
+                        DeflateToken::Reference(r) => {
                             // track if we saw something  on the of the 4k boundary
                             if (current_offset & 4095) >= 4093 {
                                 block_4k = false;

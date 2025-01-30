@@ -8,16 +8,19 @@
 /// Getting the parameters correct means that the resulting diff between the deflate stream
 /// and the predicted deflate stream will be as small as possible.
 use crate::{
-    add_policy_estimator::DictionaryAddPolicy,
-    depth_estimator::{new_depth_estimator, HashTableDepthEstimator},
+    deflate::deflate_constants,
+    deflate::deflate_token::{DeflateToken, DeflateTokenBlock, DeflateTokenReference},
     hash_algorithm::HashAlgorithm,
-    preflate_constants,
     preflate_error::{err_exit_code, ExitCode, Result},
     preflate_input::PreflateInput,
+};
+
+use super::{
+    add_policy_estimator::DictionaryAddPolicy,
+    depth_estimator::{new_depth_estimator, HashTableDepthEstimator},
     preflate_parse_config::{
         MatchingType, SLOW_PREFLATE_PARSER_SETTINGS, ZLIB_PREFLATE_PARSER_SETTINGS,
     },
-    preflate_token::{PreflateToken, PreflateTokenBlock, PreflateTokenReference},
 };
 
 #[derive(Default)]
@@ -56,7 +59,7 @@ impl CandidateInfo {
         }
     }
 
-    fn match_depth(&mut self, token: PreflateTokenReference, input: &PreflateInput) -> bool {
+    fn match_depth(&mut self, token: DeflateTokenReference, input: &PreflateInput) -> bool {
         let mdepth = self.depth_estimator.match_depth(token, input);
 
         // remove element if the match was impossible due to matching the
@@ -113,7 +116,7 @@ struct CompLevelEstimatorState<'a> {
 
     add_policy: DictionaryAddPolicy,
 
-    blocks: &'a Vec<PreflateTokenBlock>,
+    blocks: &'a Vec<DeflateTokenBlock>,
     wsize: u16,
     reference_count: u32,
     unfound_references: u32,
@@ -130,7 +133,7 @@ impl<'a> CompLevelEstimatorState<'a> {
         plain_text: &'a [u8],
         add_policy: DictionaryAddPolicy,
         min_len: u32,
-        blocks: &'a Vec<PreflateTokenBlock>,
+        blocks: &'a Vec<DeflateTokenBlock>,
     ) -> Self {
         let hash_bits = mem_level + 7;
         let mem_hash_shift = (hash_bits + 2) / 3;
@@ -199,7 +202,7 @@ impl<'a> CompLevelEstimatorState<'a> {
         self.input.advance(length);
     }
 
-    fn check_match(&mut self, token: PreflateTokenReference) {
+    fn check_match(&mut self, token: DeflateTokenReference) {
         self.reference_count += 1;
 
         if self.input.pos() < token.dist() || self.candidates.is_empty() {
@@ -222,18 +225,18 @@ impl<'a> CompLevelEstimatorState<'a> {
     fn check_dump(&mut self) {
         for (_i, b) in self.blocks.iter().enumerate() {
             match b {
-                PreflateTokenBlock::Stored { uncompressed, .. } => {
+                DeflateTokenBlock::Stored { uncompressed, .. } => {
                     for _i in 0..uncompressed.len() {
                         self.update_candidate_hashes(1);
                     }
                 }
-                PreflateTokenBlock::Huffman { tokens, .. } => {
+                DeflateTokenBlock::Huffman { tokens, .. } => {
                     for (_j, t) in tokens.iter().enumerate() {
                         match t {
-                            PreflateToken::Literal(_) => {
+                            DeflateToken::Literal(_) => {
                                 self.update_candidate_hashes(1);
                             }
-                            &PreflateToken::Reference(r) => {
+                            &DeflateToken::Reference(r) => {
                                 self.check_match(r);
                                 self.update_candidate_hashes(r.len());
                             }
@@ -295,8 +298,8 @@ impl<'a> CompLevelEstimatorState<'a> {
         }
 
         let very_far_matches = longest_dist_at_hop_0
-            > self.window_size() - preflate_constants::MIN_LOOKAHEAD
-            || longest_dist_at_hop_1_plus >= self.window_size() - preflate_constants::MIN_LOOKAHEAD;
+            > self.window_size() - deflate_constants::MIN_LOOKAHEAD
+            || longest_dist_at_hop_1_plus >= self.window_size() - deflate_constants::MIN_LOOKAHEAD;
 
         Ok(CompLevelInfo {
             reference_count: self.reference_count,
@@ -328,7 +331,7 @@ pub fn estimate_preflate_comp_level(
     min_len: u32,
     plain_text: &[u8],
     add_policy: DictionaryAddPolicy,
-    blocks: &Vec<PreflateTokenBlock>,
+    blocks: &Vec<DeflateTokenBlock>,
 ) -> Result<CompLevelInfo> {
     let mut state =
         CompLevelEstimatorState::new(wbits, mem_level, plain_text, add_policy, min_len, blocks);

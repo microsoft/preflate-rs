@@ -6,11 +6,13 @@
 
 use crate::{
     cabac_codec::{decode_difference, encode_difference},
-    huffman_calc::{calc_bit_lengths, HufftreeBitCalc},
-    huffman_encoding::{HuffmanOriginalEncoding, TreeCodeType},
-    preflate_constants::{CODETREE_CODE_COUNT, NONLEN_CODE_COUNT, TREE_CODE_ORDER_TABLE},
+    deflate::deflate_constants::{CODETREE_CODE_COUNT, NONLEN_CODE_COUNT, TREE_CODE_ORDER_TABLE},
+    deflate::deflate_token::TokenFrequency,
+    deflate::{
+        huffman_calc::{calc_bit_lengths, HufftreeBitCalc},
+        huffman_encoding::{HuffmanOriginalEncoding, TreeCodeType},
+    },
     preflate_error::{err_exit_code, ExitCode, Result},
-    preflate_token::TokenFrequency,
     statistical_codec::{
         CodecCorrection, CodecMisprediction, PredictionDecoder, PredictionEncoder,
     },

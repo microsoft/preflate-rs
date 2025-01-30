@@ -4,7 +4,7 @@
  *  This software incorporates material from third parties. See NOTICE.txt for details.
  *--------------------------------------------------------------------------------------------*/
 
-use crate::preflate_token::{PreflateHuffmanType, PreflateToken, PreflateTokenBlock};
+use crate::deflate::deflate_token::{DeflateHuffmanType, DeflateToken, DeflateTokenBlock};
 
 pub struct PreflateStreamInfo {
     pub token_count: u32,
@@ -20,17 +20,17 @@ pub struct PreflateStreamInfo {
     pub count_static_huff_tree_blocks: u32,
 }
 
-fn process_tokens(tokens: &[PreflateToken], result: &mut PreflateStreamInfo) {
+fn process_tokens(tokens: &[DeflateToken], result: &mut PreflateStreamInfo) {
     result.token_count += tokens.len() as u32;
     result.max_tokens_per_block = std::cmp::max(result.max_tokens_per_block, tokens.len() as u32);
     let mut block_max_dist = 0;
     let mut block_min_len = u32::MAX;
     for j in 0..tokens.len() {
         match &tokens[j] {
-            PreflateToken::Literal(_) => {
+            DeflateToken::Literal(_) => {
                 result.literal_count += 1;
             }
-            PreflateToken::Reference(t) => {
+            DeflateToken::Reference(t) => {
                 result.reference_count += 1;
                 block_max_dist = std::cmp::max(block_max_dist, t.dist());
                 block_min_len = std::cmp::min(block_min_len, t.len());
@@ -47,7 +47,7 @@ fn process_tokens(tokens: &[PreflateToken], result: &mut PreflateStreamInfo) {
     }
 }
 
-pub fn extract_preflate_info(blocks: &[PreflateTokenBlock]) -> PreflateStreamInfo {
+pub(crate) fn extract_preflate_info(blocks: &[DeflateTokenBlock]) -> PreflateStreamInfo {
     let mut result: PreflateStreamInfo = PreflateStreamInfo {
         count_blocks: blocks.len() as u32,
         count_stored_blocks: 0,
@@ -64,14 +64,14 @@ pub fn extract_preflate_info(blocks: &[PreflateTokenBlock]) -> PreflateStreamInf
 
     for i in 0..blocks.len() {
         match &blocks[i] {
-            PreflateTokenBlock::Stored { .. } => {
+            DeflateTokenBlock::Stored { .. } => {
                 result.count_stored_blocks += 1;
             }
-            PreflateTokenBlock::Huffman {
+            DeflateTokenBlock::Huffman {
                 tokens,
                 huffman_type,
             } => {
-                if let PreflateHuffmanType::Static { .. } = huffman_type {
+                if let DeflateHuffmanType::Static { .. } = huffman_type {
                     result.count_static_huff_tree_blocks += 1;
                 }
                 process_tokens(&tokens, &mut result);

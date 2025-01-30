@@ -4,30 +4,17 @@
  *  This software incorporates material from third parties. See NOTICE.txt for details.
  *--------------------------------------------------------------------------------------------*/
 
-mod add_policy_estimator;
 mod bit_helper;
-mod bit_reader;
-mod bit_writer;
 mod cabac_codec;
-mod complevel_estimator;
-mod deflate_reader;
-mod deflate_writer;
-mod depth_estimator;
+mod deflate;
+mod estimator;
 mod hash_algorithm;
 mod hash_chain;
 mod hash_chain_holder;
-mod huffman_calc;
-mod huffman_encoding;
-mod huffman_helper;
 mod idat_parse;
-mod preflate_constants;
 mod preflate_container;
 mod preflate_error;
 mod preflate_input;
-mod preflate_parameter_estimator;
-mod preflate_parse_config;
-mod preflate_stream_info;
-mod preflate_token;
 mod process;
 mod scan_deflate;
 mod statistical_codec;

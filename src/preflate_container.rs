@@ -4,10 +4,10 @@ use std::io::{Cursor, Read, Write};
 
 use crate::{
     cabac_codec::{PredictionDecoderCabac, PredictionEncoderCabac},
+    estimator::preflate_parameter_estimator::PreflateParameters,
     idat_parse::{recreate_idat, IdatContents},
     preflate_error::{AddContext, ExitCode, PreflateError},
     preflate_input::PreflateInput,
-    preflate_parameter_estimator::{estimate_preflate_parameters, PreflateParameters},
     process::{decode_mispredictions, encode_mispredictions, parse_deflate},
     scan_deflate::{split_into_deflate_streams, BlockChunk},
     statistical_codec::PredictionEncoder,
@@ -375,7 +375,9 @@ pub fn decompress_deflate_stream(
     //process::write_file("c:\\temp\\lastop.deflate", compressed_data);
     //process::write_file("c:\\temp\\lastop.bin", contents.plain_text.as_slice());
 
-    let params = estimate_preflate_parameters(&contents.plain_text, &contents.blocks).context()?;
+    let params =
+        PreflateParameters::estimate_preflate_parameters(&contents.plain_text, &contents.blocks)
+            .context()?;
 
     if loglevel > 0 {
         println!("params: {:?}", params);
@@ -451,7 +453,9 @@ pub fn decompress_deflate_stream_assert(
 
     let contents = parse_deflate(compressed_data, 0)?;
 
-    let params = estimate_preflate_parameters(&contents.plain_text, &contents.blocks).context()?;
+    let params =
+        PreflateParameters::estimate_preflate_parameters(&contents.plain_text, &contents.blocks)
+            .context()?;
 
     params.write(&mut cabac_encoder);
     encode_mispredictions(&contents, &params, &mut cabac_encoder)?;
