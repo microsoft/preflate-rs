@@ -7,9 +7,11 @@
 use crate::preflate_error::{err_exit_code, ExitCode, Result};
 
 use crate::{
-    deflate::{bit_reader::ReadBits,
-    bit_writer::BitWriter,
-    huffman_helper::{calc_huffman_codes, calculate_huffman_code_tree, decode_symbol}},
+    deflate::{
+        bit_reader::ReadBits,
+        bit_writer::BitWriter,
+        huffman_helper::{calc_huffman_codes, calculate_huffman_code_tree, decode_symbol},
+    },
     preflate_constants::TREE_CODE_ORDER_TABLE,
 };
 
@@ -231,12 +233,12 @@ impl HuffmanOriginalEncoding {
     }
 }
 
-pub struct HuffmanReader {
+pub(super) struct HuffmanReader {
     lit_huff_code_tree: Vec<i32>,
     dist_huff_code_tree: Vec<i32>,
 }
 
-pub struct HuffmanWriter {
+pub(super) struct HuffmanWriter {
     lit_code_lengths: Vec<u8>,
     lit_huffman_codes: Vec<u16>,
     dist_code_lengths: Vec<u8>,

@@ -2,9 +2,10 @@
 //! parameters right, it will minimize or even eliminate the need to encode any corrections when we
 //! recompress the stream.
 
+mod complevel_estimator;
+mod depth_estimator;
+mod preflate_stream_info;
+
 pub mod add_policy_estimator;
-pub mod complevel_estimator;
-pub mod depth_estimator;
 pub mod preflate_parameter_estimator;
 pub mod preflate_parse_config;
-pub mod preflate_stream_info;

@@ -4,10 +4,10 @@
  *  This software incorporates material from third parties. See NOTICE.txt for details.
  *--------------------------------------------------------------------------------------------*/
 
-mod estimator;
-mod deflate;
 mod bit_helper;
 mod cabac_codec;
+mod deflate;
+mod estimator;
 mod hash_algorithm;
 mod hash_chain;
 mod hash_chain_holder;

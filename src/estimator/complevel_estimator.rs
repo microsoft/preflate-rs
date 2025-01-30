@@ -15,9 +15,13 @@ use crate::{
     preflate_token::{PreflateToken, PreflateTokenBlock, PreflateTokenReference},
 };
 
-use super::{add_policy_estimator::DictionaryAddPolicy, depth_estimator::{new_depth_estimator, HashTableDepthEstimator}, preflate_parse_config::{
-    MatchingType, SLOW_PREFLATE_PARSER_SETTINGS, ZLIB_PREFLATE_PARSER_SETTINGS,
-}};
+use super::{
+    add_policy_estimator::DictionaryAddPolicy,
+    depth_estimator::{new_depth_estimator, HashTableDepthEstimator},
+    preflate_parse_config::{
+        MatchingType, SLOW_PREFLATE_PARSER_SETTINGS, ZLIB_PREFLATE_PARSER_SETTINGS,
+    },
+};
 
 #[derive(Default)]
 pub struct CompLevelInfo {

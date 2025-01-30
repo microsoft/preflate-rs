@@ -1,8 +1,7 @@
 use default_boxed::DefaultBoxed;
 
 use crate::{
-    hash_algorithm::*, preflate_input::PreflateInput,
-    preflate_token::PreflateTokenReference,
+    hash_algorithm::*, preflate_input::PreflateInput, preflate_token::PreflateTokenReference,
 };
 
 use super::add_policy_estimator::DictionaryAddPolicy;

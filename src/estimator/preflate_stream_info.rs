@@ -47,7 +47,7 @@ fn process_tokens(tokens: &[PreflateToken], result: &mut PreflateStreamInfo) {
     }
 }
 
-pub fn extract_preflate_info(blocks: &[PreflateTokenBlock]) -> PreflateStreamInfo {
+pub(crate) fn extract_preflate_info(blocks: &[PreflateTokenBlock]) -> PreflateStreamInfo {
     let mut result: PreflateStreamInfo = PreflateStreamInfo {
         count_blocks: blocks.len() as u32,
         count_stored_blocks: 0,

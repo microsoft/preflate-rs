@@ -18,7 +18,7 @@ use crate::{
 use super::bit_writer::BitWriter;
 use super::huffman_encoding::HuffmanWriter;
 
-/// Takes a tokenized block and writes it to the original compressed output. 
+/// Takes a tokenized block and writes it to the original compressed output.
 pub struct DeflateWriter {
     /// bit writer to write partial bits to output
     bitwriter: BitWriter,

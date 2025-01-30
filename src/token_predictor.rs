@@ -7,10 +7,13 @@
 use crate::{
     bit_helper::DebugHash,
     cabac_codec::{decode_difference, encode_difference},
-    estimator::{add_policy_estimator::DictionaryAddPolicy, preflate_parameter_estimator::PreflateStrategy, preflate_parse_config::MatchingType},
+    deflate::huffman_calc::HufftreeBitCalc,
+    estimator::{
+        add_policy_estimator::DictionaryAddPolicy, preflate_parameter_estimator::PreflateStrategy,
+        preflate_parse_config::MatchingType,
+    },
     hash_algorithm::HashAlgorithm,
     hash_chain_holder::{new_hash_chain_holder, HashChainHolder, MatchResult},
-    deflate::huffman_calc::HufftreeBitCalc,
     preflate_constants::MIN_MATCH,
     preflate_error::{err_exit_code, AddContext, ExitCode, Result},
     preflate_input::PreflateInput,

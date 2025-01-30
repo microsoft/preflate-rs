@@ -5,10 +5,22 @@
  *--------------------------------------------------------------------------------------------*/
 
 use crate::{
-    bit_helper::bit_length, estimator::{add_policy_estimator::DictionaryAddPolicy, preflate_parse_config::MatchingType}, hash_algorithm::HashAlgorithm, preflate_constants::{self}, preflate_error::{ExitCode, Result},  preflate_token::PreflateTokenBlock, statistical_codec::{PredictionDecoder, PredictionEncoder}, token_predictor::TokenPredictorParameters, PreflateError
+    bit_helper::bit_length,
+    estimator::{add_policy_estimator::DictionaryAddPolicy, preflate_parse_config::MatchingType},
+    hash_algorithm::HashAlgorithm,
+    preflate_constants::{self},
+    preflate_error::{ExitCode, Result},
+    preflate_token::PreflateTokenBlock,
+    statistical_codec::{PredictionDecoder, PredictionEncoder},
+    token_predictor::TokenPredictorParameters,
+    PreflateError,
 };
 
-use super::{add_policy_estimator::estimate_add_policy, complevel_estimator::estimate_preflate_comp_level, preflate_stream_info::{extract_preflate_info, PreflateStreamInfo}};
+use super::{
+    add_policy_estimator::estimate_add_policy,
+    complevel_estimator::estimate_preflate_comp_level,
+    preflate_stream_info::{extract_preflate_info, PreflateStreamInfo},
+};
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum PreflateStrategy {
@@ -186,6 +198,78 @@ impl PreflateParameters {
             }
         }
     }
+
+    /// From the plain text and the preflate blocks, estimate the preflate parameters
+    pub fn estimate_preflate_parameters(
+        plain_text: &[u8],
+        blocks: &Vec<PreflateTokenBlock>,
+    ) -> Result<Self> {
+        let info = extract_preflate_info(blocks);
+
+        let preflate_strategy = estimate_preflate_strategy(&info);
+        let huff_strategy = estimate_preflate_huff_strategy(&info);
+
+        if preflate_strategy == PreflateStrategy::Store
+            || preflate_strategy == PreflateStrategy::HuffOnly
+        {
+            // No dictionary used
+            return Ok(PreflateParameters {
+                predictor: TokenPredictorParameters {
+                    window_bits: 0,
+                    very_far_matches_detected: false,
+                    matches_to_start_detected: false,
+                    strategy: preflate_strategy,
+                    nice_length: 0,
+                    add_policy: DictionaryAddPolicy::AddAll,
+                    max_token_count: 16386,
+                    zlib_compatible: true,
+                    max_dist_3_matches: 0,
+                    matching_type: MatchingType::Greedy,
+                    max_chain: 0,
+                    min_len: 0,
+                    hash_algorithm: HashAlgorithm::None,
+                },
+                huff_strategy,
+            });
+        }
+
+        let window_bits = estimate_preflate_window_bits(info.max_dist);
+        let mem_level = estimate_preflate_mem_level(info.max_tokens_per_block);
+        let add_policy = estimate_add_policy(blocks);
+
+        //let hash_shift = 5;
+        //let hash_mask = 32767;
+
+        let max_token_count = (1 << (6 + mem_level)) - 1;
+
+        let cl = estimate_preflate_comp_level(
+            window_bits,
+            mem_level,
+            info.min_len,
+            plain_text,
+            add_policy,
+            blocks,
+        )?;
+
+        Ok(PreflateParameters {
+            predictor: TokenPredictorParameters {
+                window_bits,
+                very_far_matches_detected: cl.very_far_matches_detected,
+                matches_to_start_detected: cl.matches_to_start_detected,
+                strategy: estimate_preflate_strategy(&info),
+                nice_length: cl.nice_length,
+                add_policy: cl.add_policy,
+                max_token_count,
+                zlib_compatible: cl.zlib_compatible,
+                max_dist_3_matches: cl.max_dist_3_matches,
+                matching_type: cl.match_type,
+                max_chain: cl.max_chain,
+                min_len: cl.min_len,
+                hash_algorithm: cl.hash_algorithm,
+            },
+            huff_strategy: estimate_preflate_huff_strategy(&info),
+        })
+    }
 }
 
 fn estimate_preflate_mem_level(max_block_size_: u32) -> u32 {
@@ -199,14 +283,14 @@ fn estimate_preflate_mem_level(max_block_size_: u32) -> u32 {
     mbits - 6
 }
 
-pub fn estimate_preflate_window_bits(max_dist_: u32) -> u32 {
+fn estimate_preflate_window_bits(max_dist_: u32) -> u32 {
     let mut max_dist = max_dist_;
     max_dist += preflate_constants::MIN_LOOKAHEAD;
     let wbits = bit_length(max_dist - 1);
     std::cmp::min(std::cmp::max(wbits, 9), 15)
 }
 
-pub fn estimate_preflate_strategy(info: &PreflateStreamInfo) -> PreflateStrategy {
+fn estimate_preflate_strategy(info: &PreflateStreamInfo) -> PreflateStrategy {
     if info.count_stored_blocks == info.count_blocks {
         return PreflateStrategy::Store;
     }
@@ -219,7 +303,7 @@ pub fn estimate_preflate_strategy(info: &PreflateStreamInfo) -> PreflateStrategy
     PreflateStrategy::Default
 }
 
-pub fn estimate_preflate_huff_strategy(info: &PreflateStreamInfo) -> PreflateHuffStrategy {
+fn estimate_preflate_huff_strategy(info: &PreflateStreamInfo) -> PreflateHuffStrategy {
     if info.count_static_huff_tree_blocks == info.count_blocks {
         return PreflateHuffStrategy::Static;
     }
@@ -229,81 +313,12 @@ pub fn estimate_preflate_huff_strategy(info: &PreflateStreamInfo) -> PreflateHuf
     PreflateHuffStrategy::Mixed
 }
 
-pub fn estimate_preflate_parameters(
-    unpacked_output: &[u8],
-    blocks: &Vec<PreflateTokenBlock>,
-) -> Result<PreflateParameters> {
-    let info = extract_preflate_info(blocks);
-
-    let preflate_strategy = estimate_preflate_strategy(&info);
-    let huff_strategy = estimate_preflate_huff_strategy(&info);
-
-    if preflate_strategy == PreflateStrategy::Store
-        || preflate_strategy == PreflateStrategy::HuffOnly
-    {
-        // No dictionary used
-        return Ok(PreflateParameters {
-            predictor: TokenPredictorParameters {
-                window_bits: 0,
-                very_far_matches_detected: false,
-                matches_to_start_detected: false,
-                strategy: preflate_strategy,
-                nice_length: 0,
-                add_policy: DictionaryAddPolicy::AddAll,
-                max_token_count: 16386,
-                zlib_compatible: true,
-                max_dist_3_matches: 0,
-                matching_type: MatchingType::Greedy,
-                max_chain: 0,
-                min_len: 0,
-                hash_algorithm: HashAlgorithm::None,
-            },
-            huff_strategy,
-        });
-    }
-
-    let window_bits = estimate_preflate_window_bits(info.max_dist);
-    let mem_level = estimate_preflate_mem_level(info.max_tokens_per_block);
-    let add_policy = estimate_add_policy(blocks);
-
-    //let hash_shift = 5;
-    //let hash_mask = 32767;
-
-    let max_token_count = (1 << (6 + mem_level)) - 1;
-
-    let cl = estimate_preflate_comp_level(
-        window_bits,
-        mem_level,
-        info.min_len,
-        unpacked_output,
-        add_policy,
-        blocks,
-    )?;
-
-    Ok(PreflateParameters {
-        predictor: TokenPredictorParameters {
-            window_bits,
-            very_far_matches_detected: cl.very_far_matches_detected,
-            matches_to_start_detected: cl.matches_to_start_detected,
-            strategy: estimate_preflate_strategy(&info),
-            nice_length: cl.nice_length,
-            add_policy: cl.add_policy,
-            max_token_count,
-            zlib_compatible: cl.zlib_compatible,
-            max_dist_3_matches: cl.max_dist_3_matches,
-            matching_type: cl.match_type,
-            max_chain: cl.max_chain,
-            min_len: cl.min_len,
-            hash_algorithm: cl.hash_algorithm,
-        },
-        huff_strategy: estimate_preflate_huff_strategy(&info),
-    })
-}
-
 #[test]
 fn verify_zlib_recognition() {
     use crate::{
-        estimator::preflate_parse_config::{SLOW_PREFLATE_PARSER_SETTINGS, ZLIB_PREFLATE_PARSER_SETTINGS},
+        estimator::preflate_parse_config::{
+            SLOW_PREFLATE_PARSER_SETTINGS, ZLIB_PREFLATE_PARSER_SETTINGS,
+        },
         process::{parse_deflate, read_file},
     };
 
@@ -311,7 +326,11 @@ fn verify_zlib_recognition() {
         let v = read_file(&format!("compressed_zlib_level{}.deflate", i));
         let contents = parse_deflate(&v, 1).unwrap();
 
-        let params = estimate_preflate_parameters(&contents.plain_text, &contents.blocks).unwrap();
+        let params = PreflateParameters::estimate_preflate_parameters(
+            &contents.plain_text,
+            &contents.blocks,
+        )
+        .unwrap();
 
         assert_eq!(params.predictor.zlib_compatible, true);
         if i == 0 {
@@ -352,7 +371,11 @@ fn verify_miniz_recognition() {
         let v = read_file(&format!("compressed_flate2_level{}.deflate", i));
         let contents = parse_deflate(&v, 1).unwrap();
 
-        let params = estimate_preflate_parameters(&contents.plain_text, &contents.blocks).unwrap();
+        let params = PreflateParameters::estimate_preflate_parameters(
+            &contents.plain_text,
+            &contents.blocks,
+        )
+        .unwrap();
 
         if i == 0 {
             assert_eq!(params.predictor.strategy, PreflateStrategy::Store);
@@ -372,7 +395,11 @@ fn verify_zlibng_recognition() {
         let v = read_file(&format!("compressed_zlibng_level{}.deflate", i));
         let contents = parse_deflate(&v, 1).unwrap();
 
-        let params = estimate_preflate_parameters(&contents.plain_text, &contents.blocks).unwrap();
+        let params = PreflateParameters::estimate_preflate_parameters(
+            &contents.plain_text,
+            &contents.blocks,
+        )
+        .unwrap();
 
         if i == 0 {
             assert_eq!(params.predictor.strategy, PreflateStrategy::Store);

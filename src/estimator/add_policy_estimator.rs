@@ -92,7 +92,7 @@ fn is_at_32k_boundary(length: u32, pos: u32) -> bool {
 /// only add smaller strings in their entirety (ie a substring starting
 /// at each position). This function is designed to measure this
 /// and determine the policy that should be used.
-pub fn estimate_add_policy(token_blocks: &[PreflateTokenBlock]) -> DictionaryAddPolicy {
+pub(super) fn estimate_add_policy(token_blocks: &[PreflateTokenBlock]) -> DictionaryAddPolicy {
     const WINDOW_MASK: usize = 0x7fff;
 
     // used to see if we have the special case of not adding matches on the edge

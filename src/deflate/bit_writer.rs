@@ -4,7 +4,7 @@
  *  This software incorporates material from third parties. See NOTICE.txt for details.
  *--------------------------------------------------------------------------------------------*/
 
- /// Used to write a variable number of bits to a byte buffer. 
+/// Used to write a variable number of bits to a byte buffer.
 #[derive(Default)]
 pub struct BitWriter {
     pub bit_buffer: u32,
