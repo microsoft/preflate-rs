@@ -40,9 +40,8 @@ fn end_to_end_compressed() {
 }
 
 #[test]
-fn treepng_deflate() {
-    let v = read_file("treepng.deflate");
-    verifyresult(&v);
+fn test_treepng() {
+    test_container("treegdi.png");
 }
 
 #[test]
