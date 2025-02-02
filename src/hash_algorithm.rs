@@ -1,6 +1,8 @@
+use bitcode::{Decode, Encode};
+
 use crate::hash_chain::{HashChain, HashChainNormalize, HashChainNormalizeLibflate4};
 
-#[derive(Debug, Copy, Clone, Eq, PartialEq, Default)]
+#[derive(Encode, Decode, Debug, Copy, Clone, Eq, PartialEq, Default)]
 pub enum HashAlgorithm {
     #[default]
     None,

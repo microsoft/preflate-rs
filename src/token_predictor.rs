@@ -4,6 +4,8 @@
  *  This software incorporates material from third parties. See NOTICE.txt for details.
  *--------------------------------------------------------------------------------------------*/
 
+use bitcode::{Decode, Encode};
+
 use crate::{
     bit_helper::DebugHash,
     cabac_codec::{decode_difference, encode_difference},
@@ -38,7 +40,7 @@ pub struct TokenPredictor<'a> {
     input: PreflateInput<'a>,
 }
 
-#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+#[derive(Encode, Decode, Debug, Copy, Clone, Eq, PartialEq)]
 pub struct TokenPredictorParameters {
     /// Zlib does not match to first byte of a file in order to reserve 0 for the end of chain
     pub matches_to_start_detected: bool,
