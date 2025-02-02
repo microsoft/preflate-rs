@@ -4,19 +4,41 @@
  *  This software incorporates material from third parties. See NOTICE.txt for details.
  *--------------------------------------------------------------------------------------------*/
 
+use bitcode::{Decode, Encode};
+
 use std::io::Cursor;
 
 use crate::{
-    deflate::deflate_token::DeflateTokenBlock,
-    deflate::{deflate_reader::DeflateReader, deflate_writer::DeflateWriter},
+    deflate::{
+        deflate_reader::DeflateReader, deflate_token::DeflateTokenBlock,
+        deflate_writer::DeflateWriter,
+    },
     estimator::preflate_parameter_estimator::PreflateParameters,
-    preflate_error::PreflateError,
+    preflate_error::{ExitCode, PreflateError},
     preflate_input::PreflateInput,
     statistical_codec::{
         CodecCorrection, CodecMisprediction, PredictionDecoder, PredictionEncoder,
     },
     token_predictor::TokenPredictor,
 };
+
+/// the data required to reconstruct the deflate stream exactly the way that it was
+#[derive(Encode, Decode)]
+pub struct ReconstructionData {
+    pub parameters: PreflateParameters,
+    pub corrections: Vec<u8>,
+}
+
+impl ReconstructionData {
+    pub fn read(data: &[u8]) -> Result<Self, PreflateError> {
+        bitcode::decode(data).map_err(|e| {
+            PreflateError::new(
+                ExitCode::InvalidCompressedWrapper,
+                format!("{:?}", e).as_str(),
+            )
+        })
+    }
+}
 
 /// takes a deflate compressed stream, analyzes it, decoompresses it, and records
 /// any differences in the encoder codec
@@ -199,7 +221,6 @@ fn analyze_compressed_data_fast(
 
     println!("params: {:?}", params);
 
-    params.write(&mut cabac_encoder);
     encode_mispredictions(&contents, &params, &mut cabac_encoder).unwrap();
 
     if let Some(crc) = header_crc32 {
@@ -217,8 +238,6 @@ fn analyze_compressed_data_fast(
 
     let mut cabac_decoder =
         PredictionDecoderCabac::new(VP8Reader::new(Cursor::new(&buffer)).unwrap());
-
-    let params = PreflateParameters::read(&mut cabac_decoder).unwrap();
 
     let (recompressed, _recreated_blocks) = decode_mispredictions(
         &params,
@@ -272,7 +291,6 @@ fn analyze_compressed_data_verify(
 
     println!("params: {:?}", params);
 
-    params.write(&mut combined_encoder);
     encode_mispredictions(&contents, &params, &mut combined_encoder).unwrap();
 
     assert_eq!(contents.compressed_size, compressed_data.len());
@@ -291,11 +309,8 @@ fn analyze_compressed_data_verify(
 
     let mut combined_decoder = (debug_decoder, cabac_decoder);
 
-    let params_reread = PreflateParameters::read(&mut combined_decoder).unwrap();
-    assert_eq!(params, params_reread);
-
     let (recompressed, recreated_blocks) = decode_mispredictions(
-        &params_reread,
+        &params,
         PreflateInput::new(&contents.plain_text),
         &mut combined_decoder,
     )
@@ -392,6 +407,8 @@ fn verify_zlib_perfect_compression() {
         // this "encoder" just asserts if anything gets passed to it
         let mut verify_encoder = crate::statistical_codec::AssertDefaultOnlyEncoder {};
         encode_mispredictions(&contents, &params, &mut verify_encoder).unwrap();
+
+        println!("params buffer length {}", bitcode::encode(&params).len());
     }
 }
 

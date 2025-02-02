@@ -8,9 +8,11 @@
 ///
 /// This will be the limit that we use when we decide whether to
 /// use skip_hash or update_hash.
+use bitcode::{Decode, Encode};
+
 use crate::deflate::deflate_token::{DeflateToken, DeflateTokenBlock};
 
-#[derive(Default, Eq, PartialEq, Debug, Clone, Copy)]
+#[derive(Encode, Decode, Default, Eq, PartialEq, Debug, Clone, Copy)]
 pub enum DictionaryAddPolicy {
     /// Add all substrings of a match to the dictionary
     #[default]

@@ -4,15 +4,15 @@
  *  This software incorporates material from third parties. See NOTICE.txt for details.
  *--------------------------------------------------------------------------------------------*/
 
+use bitcode::{Decode, Encode};
+
 use crate::{
     bit_helper::bit_length,
     deflate::{deflate_constants, deflate_token::DeflateTokenBlock},
     estimator::{add_policy_estimator::DictionaryAddPolicy, preflate_parse_config::MatchingType},
     hash_algorithm::HashAlgorithm,
-    preflate_error::{ExitCode, Result},
-    statistical_codec::{PredictionDecoder, PredictionEncoder},
+    preflate_error::Result,
     token_predictor::TokenPredictorParameters,
-    PreflateError,
 };
 
 use super::{
@@ -21,7 +21,8 @@ use super::{
     preflate_stream_info::{extract_preflate_info, PreflateStreamInfo},
 };
 
-#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+#[derive(Encode, Decode, Debug, Copy, Clone, Eq, PartialEq)]
+#[repr(u8)]
 pub enum PreflateStrategy {
     Default,
     RleOnly,
@@ -29,175 +30,22 @@ pub enum PreflateStrategy {
     Store,
 }
 
-#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+#[derive(Encode, Decode, Debug, Copy, Clone, Eq, PartialEq)]
+#[repr(u8)]
 pub enum PreflateHuffStrategy {
     Dynamic,
     Mixed,
     Static,
 }
 
-#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+#[derive(Encode, Decode, Debug, Copy, Clone, Eq, PartialEq)]
 pub struct PreflateParameters {
     pub huff_strategy: PreflateHuffStrategy,
 
     pub predictor: TokenPredictorParameters,
 }
 
-const FILE_VERSION: u16 = 1;
-
 impl PreflateParameters {
-    pub fn read(decoder: &mut impl PredictionDecoder) -> core::result::Result<Self, PreflateError> {
-        assert_eq!(FILE_VERSION, decoder.decode_value(8));
-        let strategy = decoder.decode_value(4);
-        let huff_strategy = decoder.decode_value(4);
-        let zlib_compatible = decoder.decode_value(1) != 0;
-        let window_bits = decoder.decode_value(8);
-        let hash_algorithm = HashAlgorithm::from_u16(decoder.decode_value(16));
-
-        let max_token_count = decoder.decode_value(16);
-        let max_dist_3_matches = decoder.decode_value(16);
-        let very_far_matches_detected = decoder.decode_value(1) != 0;
-        let matches_to_start_detected = decoder.decode_value(1) != 0;
-        let good_length = decoder.decode_value(16);
-        let max_lazy = decoder.decode_value(16);
-        let nice_length = decoder.decode_value(16);
-        let max_chain = decoder.decode_value(16);
-        let min_len = decoder.decode_value(16);
-
-        let add_policy = match decoder.decode_value(3) {
-            0 => DictionaryAddPolicy::AddAll,
-            1 => DictionaryAddPolicy::AddFirst(decoder.decode_value(8)),
-            2 => DictionaryAddPolicy::AddFirstAndLast(decoder.decode_value(8)),
-            3 => DictionaryAddPolicy::AddFirstExcept4kBoundary,
-            4 => DictionaryAddPolicy::AddFirstWith32KBoundary,
-            _ => {
-                return Err(PreflateError::new(
-                    ExitCode::InvalidParameterHeader,
-                    "invalid add policy",
-                ))
-            }
-        };
-
-        const STRATEGY_DEFAULT: u16 = PreflateStrategy::Default as u16;
-        const STRATEGY_RLE_ONLY: u16 = PreflateStrategy::RleOnly as u16;
-        const STRATEGY_HUFF_ONLY: u16 = PreflateStrategy::HuffOnly as u16;
-        const STRATEGY_STORE: u16 = PreflateStrategy::Store as u16;
-
-        const HUFF_STRATEGY_DYNAMIC: u16 = PreflateHuffStrategy::Dynamic as u16;
-        const HUFF_STRATEGY_MIXED: u16 = PreflateHuffStrategy::Mixed as u16;
-        const HUFF_STRATEGY_STATIC: u16 = PreflateHuffStrategy::Static as u16;
-
-        Ok(PreflateParameters {
-            predictor: TokenPredictorParameters {
-                strategy: match strategy {
-                    STRATEGY_DEFAULT => PreflateStrategy::Default,
-                    STRATEGY_RLE_ONLY => PreflateStrategy::RleOnly,
-                    STRATEGY_HUFF_ONLY => PreflateStrategy::HuffOnly,
-                    STRATEGY_STORE => PreflateStrategy::Store,
-                    _ => {
-                        return Err(PreflateError::new(
-                            ExitCode::InvalidParameterHeader,
-                            "invalid strategy",
-                        ))
-                    }
-                },
-                window_bits: window_bits.into(),
-                very_far_matches_detected,
-                matches_to_start_detected,
-                nice_length: nice_length.into(),
-                add_policy,
-                max_token_count,
-                zlib_compatible,
-                max_dist_3_matches,
-                matching_type: if max_lazy > 0 {
-                    MatchingType::Lazy {
-                        good_length,
-                        max_lazy,
-                    }
-                } else {
-                    MatchingType::Greedy
-                },
-                max_chain: max_chain.into(),
-                min_len: min_len.into(),
-                hash_algorithm: match hash_algorithm {
-                    Some(h) => h,
-                    None => {
-                        return Err(PreflateError::new(
-                            ExitCode::InvalidParameterHeader,
-                            "invalid hash algorithm",
-                        ))
-                    }
-                },
-            },
-            huff_strategy: match huff_strategy {
-                HUFF_STRATEGY_DYNAMIC => PreflateHuffStrategy::Dynamic,
-                HUFF_STRATEGY_MIXED => PreflateHuffStrategy::Mixed,
-                HUFF_STRATEGY_STATIC => PreflateHuffStrategy::Static,
-                _ => {
-                    return Err(PreflateError::new(
-                        ExitCode::InvalidParameterHeader,
-                        "invalid huff strategy",
-                    ))
-                }
-            },
-        })
-    }
-
-    pub fn write<E: PredictionEncoder>(&self, encoder: &mut E) {
-        encoder.encode_value(FILE_VERSION, 8);
-        encoder.encode_value(self.predictor.strategy as u16, 4);
-        encoder.encode_value(self.huff_strategy as u16, 4);
-        encoder.encode_value(u16::from(self.predictor.zlib_compatible), 1);
-        encoder.encode_value(u16::try_from(self.predictor.window_bits).unwrap(), 8);
-
-        encoder.encode_value(self.predictor.hash_algorithm.to_u16(), 16);
-
-        encoder.encode_value(self.predictor.max_token_count, 16);
-        encoder.encode_value(self.predictor.max_dist_3_matches, 16);
-        encoder.encode_value(u16::from(self.predictor.very_far_matches_detected), 1);
-        encoder.encode_value(u16::from(self.predictor.matches_to_start_detected), 1);
-
-        let good_length;
-        let max_lazy;
-        match self.predictor.matching_type {
-            MatchingType::Greedy => {
-                good_length = 0;
-                max_lazy = 0;
-            }
-            MatchingType::Lazy {
-                good_length: gl,
-                max_lazy: ml,
-            } => {
-                good_length = gl;
-                max_lazy = ml;
-            }
-        }
-
-        encoder.encode_value(good_length, 16);
-        encoder.encode_value(max_lazy, 16);
-        encoder.encode_value(u16::try_from(self.predictor.nice_length).unwrap(), 16);
-        encoder.encode_value(u16::try_from(self.predictor.max_chain).unwrap(), 16);
-        encoder.encode_value(u16::try_from(self.predictor.min_len).unwrap(), 16);
-
-        match self.predictor.add_policy {
-            DictionaryAddPolicy::AddAll => encoder.encode_value(0, 3),
-            DictionaryAddPolicy::AddFirst(v) => {
-                encoder.encode_value(1, 3);
-                encoder.encode_value(v as u16, 8);
-            }
-            DictionaryAddPolicy::AddFirstAndLast(v) => {
-                encoder.encode_value(2, 3);
-                encoder.encode_value(v as u16, 8);
-            }
-            DictionaryAddPolicy::AddFirstExcept4kBoundary => {
-                encoder.encode_value(3, 3);
-            }
-            DictionaryAddPolicy::AddFirstWith32KBoundary => {
-                encoder.encode_value(4, 3);
-            }
-        }
-    }
-
     /// From the plain text and the preflate blocks, estimate the preflate parameters
     pub fn estimate_preflate_parameters(
         plain_text: &[u8],

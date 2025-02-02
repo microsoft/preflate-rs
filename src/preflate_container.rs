@@ -8,7 +8,7 @@ use crate::{
     idat_parse::{recreate_idat, IdatContents},
     preflate_error::{AddContext, ExitCode, PreflateError},
     preflate_input::PreflateInput,
-    process::{decode_mispredictions, encode_mispredictions, parse_deflate},
+    process::{decode_mispredictions, encode_mispredictions, parse_deflate, ReconstructionData},
     scan_deflate::{split_into_deflate_streams, BlockChunk},
     statistical_codec::PredictionEncoder,
     CompressionStats,
@@ -367,9 +367,6 @@ pub fn decompress_deflate_stream(
 ) -> Result<DecompressResult, PreflateError> {
     let mut cabac_encoded = Vec::new();
 
-    let mut cabac_encoder =
-        PredictionEncoderCabac::new(VP8Writer::new(&mut cabac_encoded).unwrap());
-
     let contents = parse_deflate(compressed_data, 0)?;
 
     //process::write_file("c:\\temp\\lastop.deflate", compressed_data);
@@ -383,7 +380,9 @@ pub fn decompress_deflate_stream(
         println!("params: {:?}", params);
     }
 
-    params.write(&mut cabac_encoder);
+    let mut cabac_encoder =
+        PredictionEncoderCabac::new(VP8Writer::new(&mut cabac_encoded).unwrap());
+
     encode_mispredictions(&contents, &params, &mut cabac_encoder)?;
 
     cabac_encoder.finish();
@@ -392,11 +391,24 @@ pub fn decompress_deflate_stream(
         cabac_encoder.print();
     }
 
-    if verify {
-        let mut cabac_decoder =
-            PredictionDecoderCabac::new(VP8Reader::new(Cursor::new(&cabac_encoded[..])).unwrap());
+    let reconstruction_data = bitcode::encode(&ReconstructionData {
+        parameters: params,
+        corrections: cabac_encoded,
+    });
 
-        let reread_params = PreflateParameters::read(&mut cabac_decoder).context()?;
+    if verify {
+        let r: ReconstructionData = bitcode::decode(&reconstruction_data).map_err(|e| {
+            PreflateError::new(
+                ExitCode::InvalidCompressedWrapper,
+                format!("{:?}", e).as_str(),
+            )
+        })?;
+
+        let mut cabac_decoder =
+            PredictionDecoderCabac::new(VP8Reader::new(Cursor::new(&r.corrections[..])).unwrap());
+
+        let reread_params = r.parameters;
+
         assert_eq!(params, reread_params);
 
         let (recompressed, _recreated_blocks) = decode_mispredictions(
@@ -415,7 +427,7 @@ pub fn decompress_deflate_stream(
 
     Ok(DecompressResult {
         plain_text: contents.plain_text,
-        prediction_corrections: cabac_encoded,
+        prediction_corrections: reconstruction_data,
         compressed_size: contents.compressed_size,
         parameters: params,
     })
@@ -426,12 +438,16 @@ pub fn recompress_deflate_stream(
     plain_text: &[u8],
     prediction_corrections: &[u8],
 ) -> Result<Vec<u8>, PreflateError> {
-    let mut cabac_decoder =
-        PredictionDecoderCabac::new(VP8Reader::new(Cursor::new(prediction_corrections)).unwrap());
+    let r = ReconstructionData::read(prediction_corrections)?;
 
-    let params = PreflateParameters::read(&mut cabac_decoder).context()?;
-    let (recompressed, _recreated_blocks) =
-        decode_mispredictions(&params, PreflateInput::new(plain_text), &mut cabac_decoder)?;
+    let mut cabac_decoder =
+        PredictionDecoderCabac::new(VP8Reader::new(Cursor::new(r.corrections)).unwrap());
+
+    let (recompressed, _recreated_blocks) = decode_mispredictions(
+        &r.parameters,
+        PreflateInput::new(plain_text),
+        &mut cabac_decoder,
+    )?;
     Ok(recompressed)
 }
 
@@ -457,17 +473,22 @@ pub fn decompress_deflate_stream_assert(
         PreflateParameters::estimate_preflate_parameters(&contents.plain_text, &contents.blocks)
             .context()?;
 
-    params.write(&mut cabac_encoder);
     encode_mispredictions(&contents, &params, &mut cabac_encoder)?;
-
     assert_eq!(contents.compressed_size, compressed_data.len());
     cabac_encoder.finish();
 
-    if verify {
-        let mut cabac_decoder =
-            PredictionDecoderCabac::new(DebugReader::new(Cursor::new(&cabac_encoded)).unwrap());
+    let reconstruction_data = bitcode::encode(&ReconstructionData {
+        parameters: params,
+        corrections: cabac_encoded,
+    });
 
-        let params = PreflateParameters::read(&mut cabac_decoder)?;
+    if verify {
+        let r = ReconstructionData::read(&reconstruction_data)?;
+
+        let mut cabac_decoder =
+            PredictionDecoderCabac::new(DebugReader::new(Cursor::new(&r.corrections)).unwrap());
+
+        let params = r.parameters;
         let (recompressed, _recreated_blocks) = decode_mispredictions(
             &params,
             PreflateInput::new(&contents.plain_text),
@@ -484,7 +505,7 @@ pub fn decompress_deflate_stream_assert(
 
     Ok(DecompressResult {
         plain_text: contents.plain_text,
-        prediction_corrections: cabac_encoded,
+        prediction_corrections: reconstruction_data,
         compressed_size: contents.compressed_size,
         parameters: params,
     })
@@ -499,14 +520,16 @@ pub fn recompress_deflate_stream_assert(
 ) -> Result<Vec<u8>, PreflateError> {
     use cabac::debug::DebugReader;
 
-    let mut cabac_decoder = PredictionDecoderCabac::new(
-        DebugReader::new(Cursor::new(&prediction_corrections)).unwrap(),
-    );
+    let r = ReconstructionData::read(prediction_corrections)?;
 
-    let params = PreflateParameters::read(&mut cabac_decoder)?;
+    let mut cabac_decoder =
+        PredictionDecoderCabac::new(DebugReader::new(Cursor::new(&r.corrections)).unwrap());
 
-    let (recompressed, _recreated_blocks) =
-        decode_mispredictions(&params, PreflateInput::new(plain_text), &mut cabac_decoder)?;
+    let (recompressed, _recreated_blocks) = decode_mispredictions(
+        &r.parameters,
+        PreflateInput::new(plain_text),
+        &mut cabac_decoder,
+    )?;
     Ok(recompressed)
 }
 

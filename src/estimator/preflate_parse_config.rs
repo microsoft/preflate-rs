@@ -4,9 +4,11 @@
  *  This software incorporates material from third parties. See NOTICE.txt for details.
  *--------------------------------------------------------------------------------------------*/
 
+use bitcode::{Decode, Encode};
+
 use crate::estimator::add_policy_estimator::DictionaryAddPolicy;
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Default)]
+#[derive(Encode, Decode, Debug, Copy, Clone, PartialEq, Eq, Default)]
 pub enum MatchingType {
     #[default]
     Greedy,
