@@ -25,12 +25,8 @@ use super::{
 
 #[derive(Default)]
 pub struct CompLevelInfo {
-    pub zlib_compatible: bool,
-    pub reference_count: u32,
-    pub unfound_references: u32,
     pub matches_to_start_detected: bool,
     pub very_far_matches_detected: bool,
-    pub max_dist_3_matches: u32,
     pub hash_algorithm: HashAlgorithm,
     pub match_type: MatchingType,
     pub nice_length: u32,
@@ -106,6 +102,19 @@ impl CandidateInfo {
     }
 }
 
+fn update_candidate_hashes(
+    length: u32,
+    candidates: &mut Vec<Box<CandidateInfo>>,
+    add_policy: DictionaryAddPolicy,
+    input: &mut PreflateInput,
+) {
+    for i in candidates {
+        i.depth_estimator.update_hash(add_policy, &input, length);
+    }
+
+    input.advance(length);
+}
+
 pub fn estimate_preflate_comp_level(
     wbits: u32,
     mem_level: u32,
@@ -114,19 +123,6 @@ pub fn estimate_preflate_comp_level(
     add_policy: DictionaryAddPolicy,
     blocks: &Vec<DeflateTokenBlock>,
 ) -> Result<CompLevelInfo> {
-    fn update_candidate_hashes(
-        length: u32,
-        candidates: &mut Vec<Box<CandidateInfo>>,
-        add_policy: DictionaryAddPolicy,
-        input: &mut PreflateInput,
-    ) {
-        for i in candidates {
-            i.depth_estimator.update_hash(add_policy, &input, length);
-        }
-
-        input.advance(length);
-    }
-
     let hash_bits = mem_level + 7;
     let mem_hash_shift = (hash_bits + 2) / 3;
     let mem_hash_mask = ((1u32 << hash_bits) - 1) as u16;
@@ -171,10 +167,7 @@ pub fn estimate_preflate_comp_level(
         candidates.push(Box::new(CandidateInfo::new(HashAlgorithm::Crc32cHash)));
     }
 
-    let mut reference_count = 0;
-    let mut unfound_references = 0;
     let mut matches_to_start_detected = false;
-    let mut max_dist_3_matches = 0;
 
     for (_i, b) in blocks.iter().enumerate() {
         match b {
@@ -190,23 +183,12 @@ pub fn estimate_preflate_comp_level(
                             update_candidate_hashes(1, &mut candidates, add_policy, &mut input);
                         }
                         &DeflateToken::Reference(token) => {
-                            reference_count += 1;
-
-                            if input.pos() < token.dist() || candidates.is_empty() {
-                                unfound_references += 1;
-                            }
-
                             candidates.retain_mut(|c| c.match_depth(token, &input));
 
                             if token.dist() == input.pos() {
                                 // zlib doesn't match to the very first byte in order to reserve
                                 // 0 as a sentinel for end-of-hashchain
                                 matches_to_start_detected = true;
-                            }
-
-                            if token.len() == 3 {
-                                max_dist_3_matches =
-                                    std::cmp::max(max_dist_3_matches, token.dist());
                             }
 
                             update_candidate_hashes(
@@ -266,7 +248,7 @@ pub fn estimate_preflate_comp_level(
     if candidate.max_chain_found() >= 4096 {
         return err_exit_code(
             ExitCode::NoCompressionCandidates,
-            format!("max_chain_found too large: {}", candidate.max_chain_found()).as_str(),
+            format!("max_chain_found too large: {}", candidate.max_chain_found()),
         );
     }
 
@@ -275,17 +257,11 @@ pub fn estimate_preflate_comp_level(
         || longest_dist_at_hop_1_plus >= wsize - deflate_constants::MIN_LOOKAHEAD;
 
     Ok(CompLevelInfo {
-        reference_count,
-        unfound_references,
         matches_to_start_detected,
         very_far_matches_detected,
-        max_dist_3_matches,
         match_type,
         nice_length,
         max_chain,
         hash_algorithm,
-        zlib_compatible: !matches_to_start_detected
-            && !very_far_matches_detected
-            && (max_dist_3_matches < 4096 || add_policy != DictionaryAddPolicy::AddAll),
     })
 }

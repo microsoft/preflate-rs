@@ -98,6 +98,10 @@ impl PreflateParameters {
             blocks,
         )?;
 
+        let zlib_compatible = !cl.matches_to_start_detected
+            && !cl.very_far_matches_detected
+            && (info.max_dist_3_matches < 4096 || add_policy != DictionaryAddPolicy::AddAll);
+
         Ok(PreflateParameters {
             predictor: TokenPredictorParameters {
                 window_bits,
@@ -107,8 +111,8 @@ impl PreflateParameters {
                 nice_length: cl.nice_length,
                 add_policy: add_policy,
                 max_token_count,
-                zlib_compatible: cl.zlib_compatible,
-                max_dist_3_matches: cl.max_dist_3_matches,
+                zlib_compatible,
+                max_dist_3_matches: info.max_dist_3_matches,
                 matching_type: cl.match_type,
                 max_chain: cl.max_chain,
                 min_len: info.min_len,
