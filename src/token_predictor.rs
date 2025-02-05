@@ -60,7 +60,7 @@ pub struct TokenPredictorParameters {
     pub max_token_count: u16,
 
     pub zlib_compatible: bool,
-    pub max_dist_3_matches: u16,
+    pub max_dist_3_matches: u32,
     pub matching_type: MatchingType,
     pub max_chain: u32,
     pub min_len: u32,
