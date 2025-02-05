@@ -259,9 +259,22 @@ fn verify_max_chain_length() {
 
         let mut estimator = new_depth_estimator(level.1);
 
-        let mut input = PreflateInput::new(&parsed.plain_text);
+        let mut plaintext = Vec::new();
+        for block in parsed.blocks.iter() {
+            block.append_to_plaintext(&mut plaintext);
+        }
+
+        assert_eq!(
+            plaintext.len(),
+            parsed.plain_text.len(),
+            "decompression for file {} is incorrect",
+            level.0,
+        );
+
+        let mut input = PreflateInput::new(&plaintext);
+
         let mut max_depth = 0;
-        for block in parsed.blocks {
+        for block in &parsed.blocks {
             match block {
                 DeflateTokenBlock::Stored { uncompressed, .. } => {
                     estimator.update_hash(
@@ -275,7 +288,7 @@ fn verify_max_chain_length() {
                         let len = match token {
                             DeflateToken::Literal(_) => 1,
                             DeflateToken::Reference(r) => {
-                                max_depth = max_depth.max(estimator.match_depth(r, &input));
+                                max_depth = max_depth.max(estimator.match_depth(*r, &input));
                                 assert!(max_depth <= 4096, "max depth {} too high", max_depth);
                                 r.len()
                             }
