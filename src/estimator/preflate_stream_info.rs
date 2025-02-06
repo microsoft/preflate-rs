@@ -18,6 +18,7 @@ pub struct PreflateStreamInfo {
     pub count_huff_blocks: u32,
     pub count_rle_blocks: u32,
     pub count_static_huff_tree_blocks: u32,
+    pub max_dist_3_matches: u32,
 }
 
 fn process_tokens(tokens: &[DeflateToken], result: &mut PreflateStreamInfo) {
@@ -25,6 +26,7 @@ fn process_tokens(tokens: &[DeflateToken], result: &mut PreflateStreamInfo) {
     result.max_tokens_per_block = std::cmp::max(result.max_tokens_per_block, tokens.len() as u32);
     let mut block_max_dist = 0;
     let mut block_min_len = u32::MAX;
+
     for j in 0..tokens.len() {
         match &tokens[j] {
             DeflateToken::Literal(_) => {
@@ -34,6 +36,10 @@ fn process_tokens(tokens: &[DeflateToken], result: &mut PreflateStreamInfo) {
                 result.reference_count += 1;
                 block_max_dist = std::cmp::max(block_max_dist, t.dist());
                 block_min_len = std::cmp::min(block_min_len, t.len());
+
+                if t.len() == 3 {
+                    result.max_dist_3_matches = std::cmp::max(result.max_dist_3_matches, t.dist());
+                }
             }
         }
     }
@@ -60,6 +66,7 @@ pub(crate) fn extract_preflate_info(blocks: &[DeflateTokenBlock]) -> PreflateStr
         max_dist: 0,
         count_huff_blocks: 0,
         count_rle_blocks: 0,
+        max_dist_3_matches: 0,
     };
 
     for i in 0..blocks.len() {

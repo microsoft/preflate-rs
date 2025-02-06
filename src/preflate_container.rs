@@ -6,7 +6,7 @@ use crate::{
     cabac_codec::{PredictionDecoderCabac, PredictionEncoderCabac},
     estimator::preflate_parameter_estimator::PreflateParameters,
     idat_parse::{recreate_idat, IdatContents},
-    preflate_error::{AddContext, ExitCode, PreflateError},
+    preflate_error::{err_exit_code, AddContext, ExitCode, PreflateError},
     preflate_input::PreflateInput,
     process::{decode_mispredictions, encode_mispredictions, parse_deflate, ReconstructionData},
     scan_deflate::{split_into_deflate_streams, BlockChunk},
@@ -278,10 +278,10 @@ pub fn recreated_zlib_chunks(
 ) -> std::result::Result<(), PreflateError> {
     let version = source.read_u8()?;
     if version != COMPRESSED_WRAPPER_VERSION_1 {
-        return Err(PreflateError::new(
+        return err_exit_code(
             ExitCode::InvalidCompressedWrapper,
-            format!("Invalid version {version}").as_str(),
-        ));
+            format!("Invalid version {version}"),
+        );
     }
 
     loop {
@@ -398,10 +398,7 @@ pub fn decompress_deflate_stream(
 
     if verify {
         let r: ReconstructionData = bitcode::decode(&reconstruction_data).map_err(|e| {
-            PreflateError::new(
-                ExitCode::InvalidCompressedWrapper,
-                format!("{:?}", e).as_str(),
-            )
+            PreflateError::new(ExitCode::InvalidCompressedWrapper, format!("{:?}", e))
         })?;
 
         let mut cabac_decoder =

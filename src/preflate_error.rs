@@ -83,11 +83,11 @@ impl Display for PreflateError {
 }
 
 impl PreflateError {
-    pub fn new(exit_code: ExitCode, message: &str) -> PreflateError {
+    pub fn new(exit_code: ExitCode, message: impl AsRef<str>) -> PreflateError {
         PreflateError {
             i: Box::new(PreflateErrorInternal {
                 exit_code,
-                message: message.to_owned(),
+                message: message.as_ref().to_owned(),
             }),
         }
     }
@@ -112,8 +112,8 @@ impl PreflateError {
 
 #[cold]
 #[track_caller]
-pub fn err_exit_code<T>(error_code: ExitCode, message: &str) -> Result<T> {
-    let mut e = PreflateError::new(error_code, message);
+pub fn err_exit_code<T>(error_code: ExitCode, message: impl AsRef<str>) -> Result<T> {
+    let mut e = PreflateError::new(error_code, message.as_ref());
     e.add_context();
     return Err(e);
 }

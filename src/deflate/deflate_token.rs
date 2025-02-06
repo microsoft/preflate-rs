@@ -91,6 +91,35 @@ pub enum DeflateTokenBlock {
     },
 }
 
+impl DeflateTokenBlock {
+    pub fn append_to_plaintext(&self, dest: &mut Vec<u8>) {
+        match self {
+            DeflateTokenBlock::Huffman { tokens, .. } => {
+                for &token in tokens.iter() {
+                    match token {
+                        DeflateToken::Literal(l) => {
+                            dest.push(l);
+                        }
+                        DeflateToken::Reference(r) => {
+                            assert!(dest.len() >= r.dist() as usize);
+
+                            let mut index = dest.len() - r.dist() as usize;
+                            for _i in 0..r.len() {
+                                let l = dest[index];
+                                dest.push(l);
+                                index += 1;
+                            }
+                        }
+                    }
+                }
+            }
+            DeflateTokenBlock::Stored { uncompressed, .. } => {
+                dest.extend_from_slice(&uncompressed);
+            }
+        }
+    }
+}
+
 /// Used to track the frequence of tokens in the DEFLATE stream
 /// which are later used to build the huffman encoding.
 #[derive(Debug)]
