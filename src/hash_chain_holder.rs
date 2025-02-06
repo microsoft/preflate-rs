@@ -354,6 +354,11 @@ impl<H: HashImplementation> HashChainHolderImpl<H> {
 
                 best_len = match_length;
                 best_match = Some(r);
+
+                // if we found the maximum length, we can stop since we won't find anything better
+                if best_len == max_len {
+                    break;
+                }
             }
 
             max_chain -= 1;
