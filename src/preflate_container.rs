@@ -630,3 +630,4 @@ fn verify_roundtrip_assert() {
         recompress_deflate_stream_assert(&r.plain_text, &r.prediction_corrections).unwrap();
     assert!(v == recompressed);
 }
+
