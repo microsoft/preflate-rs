@@ -24,6 +24,67 @@ pub trait HashTableDepthEstimator {
 }
 
 #[derive(DefaultBoxed)]
+struct MinizDepthEstimator {
+    positions: [u32; 4096],
+
+    zero_chain_found: u32,
+    nonzero_chain_found: u32,
+}
+
+impl HashTableDepthEstimator for MinizDepthEstimator {
+    fn update_hash(&mut self, add_policy: DictionaryAddPolicy, input: &PreflateInput, length: u32) {
+        add_policy.update_hash(
+            input.cur_chars(0),
+            input.pos(),
+            length,
+            |chars, pos, length| {
+                if length as usize + 2 >= chars.len() {
+                    // reached on of the stream so there will be no more matches
+                    return;
+                }
+
+                for i in 0..length {
+                    let length3hash = MiniZHash::default().get_hash(&chars[i as usize..]);
+                    self.positions[usize::from(length3hash)] = pos + i;
+                }
+            },
+        );
+    }
+
+    fn match_depth(&mut self, token: DeflateTokenReference, input: &PreflateInput) -> bool {
+        let length3hash = MiniZHash::default().get_hash(input.cur_chars(0));
+        let dictpos = self.positions[usize::from(length3hash)];
+        let distance3 = input.pos() - dictpos;
+
+        if distance3 == token.dist() {
+            self.zero_chain_found += 1;
+        } else {
+            self.nonzero_chain_found += 1;
+        }
+
+        true
+    }
+
+    /// The maximum chain length found, in this case if non-zero chains
+    /// make up more than 1/256 of the total chains, then we return
+    fn max_chain_found(&self) -> u32 {
+        if self.zero_chain_found / 256 > self.nonzero_chain_found {
+            0
+        } else {
+            u32::MAX
+        }
+    }
+
+    fn very_far_matches_detected(&self, _wsize: u32) -> bool {
+        true
+    }
+
+    fn hash_algorithm(&self) -> HashAlgorithm {
+        HashAlgorithm::MiniZFast
+    }
+}
+
+#[derive(DefaultBoxed)]
 struct HashTableDepthEstimatorImpl<H: HashImplementation> {
     /// Represents the head of the hash chain for a given hash value.
     head: [u16; 65536],
@@ -256,7 +317,7 @@ pub fn new_depth_estimator(hash_algorithm: HashAlgorithm) -> Box<dyn HashTableDe
             hash_mask,
             hash_shift,
         }),
-        HashAlgorithm::MiniZFast => HashTableDepthEstimatorImpl::box_new(MiniZHash {}),
+        HashAlgorithm::MiniZFast => MinizDepthEstimator::default_boxed(),
         HashAlgorithm::Libdeflate4 => HashTableDepthEstimatorLibdeflate::default_boxed(),
         HashAlgorithm::Libdeflate4Fast => {
             HashTableDepthEstimatorImpl::box_new(LibdeflateHash4Fast {})
@@ -304,7 +365,7 @@ fn verify_max_chain_length() {
         ("compressed_zlib_level7.deflate", zlib, DictionaryAddPolicy::AddAll, 255),
         ("compressed_zlib_level8.deflate", zlib, DictionaryAddPolicy::AddAll, 1022),
         ("compressed_zlib_level9.deflate", zlib, DictionaryAddPolicy::AddAll, 3986),
-        ("compressed_minizoxide_level1.deflate", HashAlgorithm::MiniZFast, DictionaryAddPolicy::AddFirstExcept4kBoundary, 2),
+        ("compressed_minizoxide_level1.deflate", HashAlgorithm::MiniZFast, DictionaryAddPolicy::AddFirstExcept4kBoundary, 0),
 
     ];
 

@@ -8,8 +8,7 @@
 /// Getting the parameters correct means that the resulting diff between the deflate stream
 /// and the predicted deflate stream will be as small as possible.
 use crate::{
-    deflate::deflate_constants,
-    deflate::deflate_token::{DeflateToken, DeflateTokenBlock, DeflateTokenReference},
+    deflate::deflate_token::{DeflateToken, DeflateTokenBlock},
     hash_algorithm::HashAlgorithm,
     preflate_error::{err_exit_code, ExitCode, Result},
     preflate_input::PreflateInput,

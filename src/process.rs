@@ -426,6 +426,15 @@ fn verify_zlibng() {
     do_analyze(None, &read_file("compressed_zlibng_level1.deflate"), false);
 }
 
+#[test]
+fn verify_miniz() {
+    do_analyze(
+        None,
+        &read_file("compressed_minizoxide_level1.deflate"),
+        false,
+    );
+}
+
 // this is the deflate stream extracted out of the
 #[test]
 fn verify_png_deflate() {
