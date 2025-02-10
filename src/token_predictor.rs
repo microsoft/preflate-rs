@@ -22,9 +22,7 @@ use crate::{
     hash_chain_holder::{new_hash_chain_holder, HashChainHolder, MatchResult},
     preflate_error::{err_exit_code, AddContext, ExitCode, Result},
     preflate_input::PreflateInput,
-    statistical_codec::{
-        CodecCorrection, CodecMisprediction, PredictionDecoder, PredictionEncoder,
-    },
+    statistical_codec::{CodecCorrection, PredictionDecoder, PredictionEncoder},
     tree_predictor::{predict_tree_for_block, recreate_tree_for_block},
 };
 
@@ -223,14 +221,14 @@ impl<'a> TokenPredictor<'a> {
                     match predicted_token {
                         DeflateToken::Literal(_) => {
                             codec.encode_misprediction(
-                                CodecMisprediction::LiteralPredictionWrong,
+                                CodecCorrection::LiteralPredictionWrong,
                                 false,
                             );
                         }
                         DeflateToken::Reference(..) => {
                             // target had a literal, so we were wrong if we predicted a reference
                             codec.encode_misprediction(
-                                CodecMisprediction::ReferencePredictionWrong,
+                                CodecCorrection::ReferencePredictionWrong,
                                 true,
                             );
                         }
@@ -241,7 +239,7 @@ impl<'a> TokenPredictor<'a> {
                         DeflateToken::Literal(_) => {
                             // target had a reference, so we were wrong if we predicted a literal
                             codec.encode_misprediction(
-                                CodecMisprediction::LiteralPredictionWrong,
+                                CodecCorrection::LiteralPredictionWrong,
                                 true,
                             );
                             self.repredict_reference(Some(*target_ref))
@@ -255,7 +253,7 @@ impl<'a> TokenPredictor<'a> {
                         DeflateToken::Reference(r) => {
                             // we predicted a reference correctly, so verify that the length/dist was correct
                             codec.encode_misprediction(
-                                CodecMisprediction::ReferencePredictionWrong,
+                                CodecCorrection::ReferencePredictionWrong,
                                 false,
                             );
                             r
@@ -293,7 +291,7 @@ impl<'a> TokenPredictor<'a> {
 
                     if target_ref.len() == 258 {
                         codec.encode_misprediction(
-                            CodecMisprediction::IrregularLen258,
+                            CodecCorrection::IrregularLen258,
                             target_ref.get_irregular258(),
                         );
                     }
@@ -376,7 +374,7 @@ impl<'a> TokenPredictor<'a> {
             match self.predict_token() {
                 DeflateToken::Literal(l) => {
                     let not_ok =
-                        codec.decode_misprediction(CodecMisprediction::LiteralPredictionWrong);
+                        codec.decode_misprediction(CodecCorrection::LiteralPredictionWrong);
                     if !not_ok {
                         self.commit_token(&DeflateToken::Literal(l));
                         freq.commit_token(&DeflateToken::Literal(l));
@@ -394,7 +392,7 @@ impl<'a> TokenPredictor<'a> {
                 }
                 DeflateToken::Reference(r) => {
                     let not_ok =
-                        codec.decode_misprediction(CodecMisprediction::ReferencePredictionWrong);
+                        codec.decode_misprediction(CodecCorrection::ReferencePredictionWrong);
                     if not_ok {
                         let c = self.input.cur_char(0);
                         self.commit_token(&DeflateToken::Literal(c));
@@ -435,7 +433,7 @@ impl<'a> TokenPredictor<'a> {
             }
 
             if predicted_ref.len() == 258
-                && codec.decode_misprediction(CodecMisprediction::IrregularLen258)
+                && codec.decode_misprediction(CodecCorrection::IrregularLen258)
             {
                 predicted_ref.set_irregular258(true);
             }

@@ -9,8 +9,7 @@ use cabac::traits::{CabacReader, CabacWriter};
 use crate::{
     bit_helper::bit_length,
     statistical_codec::{
-        CodecCorrection, CodecMisprediction, CountNonDefaultActions, PredictionDecoder,
-        PredictionEncoder,
+        CodecCorrection, CountNonDefaultActions, PredictionDecoder, PredictionEncoder,
     },
 };
 
@@ -50,8 +49,6 @@ struct PredictionCabacContext<CTX> {
     default_encoding_nbits: [CTX; 16],
     correction: [[CTX; 8]; CodecCorrection::MAX as usize],
     correction_bits: [[CTX; 8]; CodecCorrection::MAX as usize],
-
-    non_default_ops_mis: [u32; CodecMisprediction::MAX as usize],
 
     bypass_bits: u32,
     //debug_ops: VecDeque<DebugOps>,
@@ -106,25 +103,6 @@ impl<CTX> PredictionCabacContext<CTX> {
         self.default_count = 0;
     }
 
-    fn encode_misprediction<W: CabacWriter<CTX>>(
-        &mut self,
-        misprediction: bool,
-        context: CodecMisprediction,
-        writer: &mut W,
-    ) {
-        if self.default_count > 0 {
-            self.write_default(writer);
-        }
-
-        if misprediction {
-            self.write_default(writer);
-
-            self.non_default_ops_mis[context as usize] += 1;
-        } else {
-            self.default_count += 1;
-        }
-    }
-
     fn encode_correction<W: CabacWriter<CTX>>(
         &mut self,
         val: u32,
@@ -167,23 +145,6 @@ impl<CTX> PredictionCabacContext<CTX> {
         self.default_count = c;
 
         //assert_eq!(DebugOps::Default(c), self.debug_ops.pop_front().unwrap());
-    }
-
-    pub fn decode_misprediction<R: CabacReader<CTX>>(
-        &mut self,
-        _context: CodecMisprediction,
-        reader: &mut R,
-    ) -> bool {
-        if self.default_count == 0 {
-            self.read_default(reader);
-        }
-
-        if self.default_count > 0 {
-            self.default_count -= 1;
-            false
-        } else {
-            true
-        }
     }
 
     fn decode_correction<R: CabacReader<CTX>>(
@@ -244,12 +205,6 @@ impl<W: CabacWriter<CTX>, CTX> PredictionEncoder for PredictionEncoderCabac<W, C
         self.count.record_correction(action, value);
     }
 
-    fn encode_misprediction(&mut self, action: CodecMisprediction, value: bool) {
-        self.context
-            .encode_misprediction(value, action, &mut self.writer);
-        self.count.record_misprediction(action, value);
-    }
-
     fn finish(&mut self) {
         self.context.flush_encode(&mut self.writer);
         self.writer.finish().unwrap();
@@ -275,11 +230,6 @@ impl<R: CabacReader<CTX>, CTX> PredictionDecoder for PredictionDecoderCabac<R, C
 
     fn decode_correction(&mut self, correction: CodecCorrection) -> u32 {
         self.context.decode_correction(correction, &mut self.reader)
-    }
-
-    fn decode_misprediction(&mut self, misprediction: CodecMisprediction) -> bool {
-        self.context
-            .decode_misprediction(misprediction, &mut self.reader)
     }
 }
 
@@ -313,7 +263,6 @@ fn roundtree_cabac_decoding() {
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 enum Operation {
     Correction(u32, CodecCorrection),
-    Misprediction(bool, CodecMisprediction),
 }
 
 #[test]
@@ -333,10 +282,10 @@ fn roundtree_cabac_correction() {
         Operation::Correction(0, CodecCorrection::DistOnlyCorrection),
         Operation::Correction(7, CodecCorrection::LDTypeCorrection),
         Operation::Correction(9, CodecCorrection::LenCorrection),
-        Operation::Misprediction(false, CodecMisprediction::LiteralPredictionWrong),
+        Operation::Correction(0, CodecCorrection::LiteralPredictionWrong),
         Operation::Correction(100000, CodecCorrection::TokenCount),
-        Operation::Misprediction(false, CodecMisprediction::IrregularLen258),
-        Operation::Misprediction(false, CodecMisprediction::ReferencePredictionWrong),
+        Operation::Correction(0, CodecCorrection::IrregularLen258),
+        Operation::Correction(1, CodecCorrection::ReferencePredictionWrong),
     ];
 
     let mut buffer = Vec::new();
@@ -348,9 +297,6 @@ fn roundtree_cabac_correction() {
         match o {
             Operation::Correction(val, context_type) => {
                 context.encode_correction(val, context_type, &mut writer);
-            }
-            Operation::Misprediction(val, context_type) => {
-                context.encode_misprediction(val, context_type, &mut writer);
             }
         }
     }
@@ -368,14 +314,6 @@ fn roundtree_cabac_correction() {
                 assert_eq!(
                     val,
                     context.decode_correction(context_type, &mut reader),
-                    "operation {}",
-                    i
-                );
-            }
-            Operation::Misprediction(val, context_type) => {
-                assert_eq!(
-                    val,
-                    context.decode_misprediction(context_type, &mut reader),
                     "operation {}",
                     i
                 );

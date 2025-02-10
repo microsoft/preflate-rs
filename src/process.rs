@@ -16,9 +16,7 @@ use crate::{
     estimator::preflate_parameter_estimator::PreflateParameters,
     preflate_error::{ExitCode, PreflateError},
     preflate_input::PreflateInput,
-    statistical_codec::{
-        CodecCorrection, CodecMisprediction, PredictionDecoder, PredictionEncoder,
-    },
+    statistical_codec::{CodecCorrection, PredictionDecoder, PredictionEncoder},
     token_predictor::TokenPredictor,
 };
 
@@ -53,7 +51,7 @@ pub fn encode_mispredictions(
         encoder,
     )?;
 
-    encoder.encode_misprediction(CodecMisprediction::EOFMisprediction, false);
+    encoder.encode_misprediction(CodecCorrection::EOFMisprediction, false);
 
     encoder.encode_correction(CodecCorrection::NonZeroPadding, deflate.eof_padding.into());
 
@@ -123,7 +121,7 @@ fn predict_blocks(
 ) -> Result<(), PreflateError> {
     for i in 0..blocks.len() {
         if token_predictor_in.input_eof() {
-            encoder.encode_misprediction(CodecMisprediction::EOFMisprediction, true);
+            encoder.encode_misprediction(CodecCorrection::EOFMisprediction, true);
         }
 
         token_predictor_in.predict_block(&blocks[i], encoder, i == blocks.len() - 1)?;
@@ -161,12 +159,12 @@ fn recreate_blocks<D: PredictionDecoder>(
 ) -> Result<Vec<DeflateTokenBlock>, PreflateError> {
     let mut output_blocks = Vec::new();
     let mut is_eof = token_predictor.input_eof()
-        && !decoder.decode_misprediction(CodecMisprediction::EOFMisprediction);
+        && !decoder.decode_misprediction(CodecCorrection::EOFMisprediction);
     while !is_eof {
         let block = token_predictor.recreate_block(decoder)?;
 
         is_eof = token_predictor.input_eof()
-            && !decoder.decode_misprediction(CodecMisprediction::EOFMisprediction);
+            && !decoder.decode_misprediction(CodecCorrection::EOFMisprediction);
 
         deflate_writer.encode_block(&block, is_eof)?;
 
