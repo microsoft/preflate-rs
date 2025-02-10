@@ -33,13 +33,13 @@ pub enum CodecCorrection {
     TreeCodeCountCorrection,
     LiteralCountCorrection,
     DistanceCountCorrection,
+    UncompressBlockLenCorrection,
     MAX,
 }
 
 pub trait PredictionEncoder {
     fn encode_correction(&mut self, action: CodecCorrection, value: u32);
     fn encode_misprediction(&mut self, action: CodecMisprediction, value: bool);
-    fn encode_value(&mut self, value: u16, max_bits: u8);
 
     fn encode_verify_state(&mut self, message: &'static str, checksum: u64);
 
@@ -56,7 +56,6 @@ pub trait PredictionEncoder {
 }
 
 pub trait PredictionDecoder {
-    fn decode_value(&mut self, max_bits_orig: u8) -> u16;
     fn decode_correction(&mut self, correction: CodecCorrection) -> u32;
 
     fn decode_misprediction(&mut self, misprediction: CodecMisprediction) -> bool;
@@ -72,7 +71,6 @@ pub trait PredictionDecoder {
 pub enum CodecAction {
     Misprediction(CodecMisprediction, bool),
     Correction(CodecCorrection, u32),
-    Value(u16, u8),
     VerifyState(&'static str, u64),
 }
 
@@ -173,10 +171,6 @@ impl VerifyPredictionEncoder {
 }
 
 impl PredictionEncoder for VerifyPredictionEncoder {
-    fn encode_value(&mut self, value: u16, max_bits: u8) {
-        self.actions.push(CodecAction::Value(value, max_bits));
-    }
-
     fn encode_verify_state(&mut self, message: &'static str, checksum: u64) {
         self.actions
             .push(CodecAction::VerifyState(message, checksum));
@@ -213,15 +207,6 @@ impl VerifyPredictionDecoder {
 }
 
 impl PredictionDecoder for VerifyPredictionDecoder {
-    fn decode_value(&mut self, max_bits_orig: u8) -> u16 {
-        let x = self.pop().unwrap();
-        if let CodecAction::Value(value, max_bits) = x {
-            assert_eq!(max_bits, max_bits_orig);
-            return value;
-        }
-        unreachable!("{:?}", x);
-    }
-
     fn decode_verify_state(&mut self, message: &'static str, checksum: u64) {
         let x = self.pop().unwrap();
         assert_eq!(
@@ -255,9 +240,6 @@ impl PredictionDecoder for VerifyPredictionDecoder {
 pub fn drive_encoder<T: PredictionEncoder>(encoder: &mut T, actions: &[CodecAction]) {
     for action in actions {
         match action {
-            &CodecAction::Value(value, max_bits) => {
-                encoder.encode_value(value, max_bits);
-            }
             &CodecAction::Correction(correction, value) => {
                 encoder.encode_correction(correction, value);
             }
@@ -275,10 +257,6 @@ pub fn drive_encoder<T: PredictionEncoder>(encoder: &mut T, actions: &[CodecActi
 pub fn verify_decoder<T: PredictionDecoder>(decoder: &mut T, actions: &[CodecAction]) {
     for action in actions {
         match action {
-            &CodecAction::Value(value, max_bits) => {
-                let x = decoder.decode_value(max_bits);
-                assert_eq!(x, value);
-            }
             &CodecAction::Correction(correction, value) => {
                 let x = decoder.decode_correction(correction);
                 assert_eq!(x, value);
@@ -310,8 +288,6 @@ impl PredictionEncoder for AssertDefaultOnlyEncoder {
         assert_eq!(false, value, "unexpected misprediction {:?}", action);
     }
 
-    fn encode_value(&mut self, _value: u16, _max_bits: u8) {}
-
     fn encode_verify_state(&mut self, _message: &'static str, _checksum: u64) {}
 
     fn finish(&mut self) {}
@@ -323,10 +299,6 @@ pub struct AssertDefaultOnlyDecoder {}
 
 #[cfg(test)]
 impl PredictionDecoder for AssertDefaultOnlyDecoder {
-    fn decode_value(&mut self, _max_bits_orig: u8) -> u16 {
-        unimplemented!()
-    }
-
     fn decode_correction(&mut self, _correction: CodecCorrection) -> u32 {
         0
     }
@@ -345,11 +317,6 @@ where
     A: PredictionEncoder,
     B: PredictionEncoder,
 {
-    fn encode_value(&mut self, value: u16, max_bits: u8) {
-        self.0.encode_value(value, max_bits);
-        self.1.encode_value(value, max_bits);
-    }
-
     fn encode_verify_state(&mut self, message: &'static str, checksum: u64) {
         self.0.encode_verify_state(message, checksum);
         self.1.encode_verify_state(message, checksum);
@@ -378,13 +345,6 @@ where
     A: PredictionDecoder,
     B: PredictionDecoder,
 {
-    fn decode_value(&mut self, max_bits_orig: u8) -> u16 {
-        let a = self.0.decode_value(max_bits_orig);
-        let b = self.1.decode_value(max_bits_orig);
-        assert_eq!(a, b);
-        a
-    }
-
     fn decode_correction(&mut self, correction: CodecCorrection) -> u32 {
         let a = self.0.decode_correction(correction);
         let b = self.1.decode_correction(correction);

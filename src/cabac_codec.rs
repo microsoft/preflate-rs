@@ -276,10 +276,6 @@ impl<W: CabacWriter<CTX>, CTX: Default> PredictionEncoderCabac<W, CTX> {
 }
 
 impl<W: CabacWriter<CTX>, CTX> PredictionEncoder for PredictionEncoderCabac<W, CTX> {
-    fn encode_value(&mut self, value: u16, max_bits: u8) {
-        self.context.encode_value(value, max_bits, &mut self.writer);
-    }
-
     fn encode_verify_state(&mut self, _message: &'static str, _checksum: u64) {}
 
     fn encode_correction(&mut self, action: CodecCorrection, value: u32) {
@@ -315,9 +311,6 @@ impl<R: CabacReader<CTX>, CTX: Default> PredictionDecoderCabac<R, CTX> {
 }
 
 impl<R: CabacReader<CTX>, CTX> PredictionDecoder for PredictionDecoderCabac<R, CTX> {
-    fn decode_value(&mut self, max_bits_orig: u8) -> u16 {
-        self.context.decode_value(max_bits_orig, &mut self.reader)
-    }
     fn decode_verify_state(&mut self, _message: &'static str, _checksum: u64) {}
 
     fn decode_correction(&mut self, correction: CodecCorrection) -> u32 {
@@ -339,7 +332,6 @@ fn roundtree_cabac_decoding() {
     let mut buffer = Vec::new();
 
     let test_codec_actions = [
-        CodecAction::Value(200, 8),
         CodecAction::Correction(CodecCorrection::DistanceCountCorrection, 1),
         CodecAction::Correction(CodecCorrection::TokenCount, 100000),
         CodecAction::Correction(CodecCorrection::BlockTypeCorrection, 5),

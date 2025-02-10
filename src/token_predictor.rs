@@ -118,7 +118,11 @@ impl<'a> TokenPredictor<'a> {
                     BT_DYNAMICHUFF,
                 );
 
-                codec.encode_value(uncompressed.len() as u16, 16);
+                codec.encode_correction_diff(
+                    CodecCorrection::UncompressBlockLenCorrection,
+                    uncompressed.len() as u32,
+                    65535,
+                );
 
                 codec.encode_correction(CodecCorrection::NonZeroPadding, (*padding_bits).into());
 
@@ -322,7 +326,8 @@ impl<'a> TokenPredictor<'a> {
 
         match bt {
             BT_STORED => {
-                let uncompressed_len = codec.decode_value(16).into();
+                let uncompressed_len = codec
+                    .decode_correction_diff(CodecCorrection::UncompressBlockLenCorrection, 65535);
                 let padding_bits = codec.decode_correction(CodecCorrection::NonZeroPadding) as u8;
                 let mut uncompressed = Vec::with_capacity(uncompressed_len as usize);
 
