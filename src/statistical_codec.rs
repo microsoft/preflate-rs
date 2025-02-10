@@ -77,7 +77,6 @@ pub enum CodecAction {
 pub struct CountNonDefaultActions {
     pub total_non_default: u32,
 
-    pub mispredictions_count: [u32; CodecCorrection::MAX as usize],
     pub corrections_count: [u32; CodecCorrection::MAX as usize],
 }
 
@@ -85,13 +84,6 @@ impl CountNonDefaultActions {
     pub fn record_correction(&mut self, correction: CodecCorrection, value: u32) {
         if value != 0 {
             self.corrections_count[correction as usize] += 1;
-            self.total_non_default += 1;
-        }
-    }
-
-    pub fn record_misprediction(&mut self, misprediction: CodecCorrection, value: bool) {
-        if value {
-            self.mispredictions_count[misprediction as usize] += 1;
             self.total_non_default += 1;
         }
     }

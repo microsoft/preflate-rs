@@ -43,14 +43,13 @@ fn test_encode_decode_difference() {
 
 #[derive(Default)]
 struct PredictionCabacContext<CTX> {
-    default_count: u32,
+    default_signal_ctx: [CTX; CodecCorrection::MAX as usize],
 
-    default_encoding: [CTX; 16],
-    default_encoding_nbits: [CTX; 16],
-    correction: [[CTX; 8]; CodecCorrection::MAX as usize],
-    correction_bits: [[CTX; 8]; CodecCorrection::MAX as usize],
+    default_ctx: [[CTX; 32]; CodecCorrection::MAX as usize],
+    default_ctx_bits: [[CTX; 32]; CodecCorrection::MAX as usize],
 
-    bypass_bits: u32,
+    correction_ctx: [[CTX; 32]; CodecCorrection::MAX as usize],
+    correction_ctx_bits: [[CTX; 32]; CodecCorrection::MAX as usize],
     //debug_ops: VecDeque<DebugOps>,
 }
 
@@ -88,93 +87,21 @@ impl<CTX> PredictionCabacContext<CTX> {
             }
         }
     }
+}
 
-    fn write_default<W: CabacWriter<CTX>>(&mut self, writer: &mut W) {
-        Self::write_exp_encoded(
-            self.default_count,
-            &mut self.default_encoding,
-            &mut self.default_encoding_nbits,
-            writer,
-        );
-
-        /*self.debug_ops
-        .push_back(DebugOps::Default(self.default_count));*/
-
-        self.default_count = 0;
-    }
-
-    fn encode_correction<W: CabacWriter<CTX>>(
-        &mut self,
-        val: u32,
-        context: CodecCorrection,
-        writer: &mut W,
-    ) {
-        if self.default_count > 0 {
-            self.write_default(writer);
-        }
-
-        if val != 0 {
-            self.write_default(writer);
-
-            //self.debug_ops.push_back(DebugOps::Correction(val, context));
-
-            Self::write_exp_encoded(
-                val,
-                &mut self.correction[context as usize],
-                &mut self.correction_bits[context as usize],
-                writer,
-            );
-        } else {
-            self.default_count += 1;
-        }
-    }
-
-    fn flush_encode(&mut self, writer: &mut impl CabacWriter<CTX>) {
-        if self.default_count > 0 {
-            self.write_default(writer);
-        }
-    }
-
-    fn read_default<R: CabacReader<CTX>>(&mut self, reader: &mut R) {
-        let c = Self::read_exp_value(
-            &mut self.default_encoding,
-            &mut self.default_encoding_nbits,
-            reader,
-        );
-
-        self.default_count = c;
-
-        //assert_eq!(DebugOps::Default(c), self.debug_ops.pop_front().unwrap());
-    }
-
-    fn decode_correction<R: CabacReader<CTX>>(
-        &mut self,
-        context: CodecCorrection,
-        reader: &mut R,
-    ) -> u32 {
-        if self.default_count == 0 {
-            self.read_default(reader);
-        }
-
-        if self.default_count > 0 {
-            self.default_count -= 1;
-            0
-        } else {
-            /*assert_eq!(
-                DebugOps::Correction(r, context),
-                self.debug_ops.pop_front().unwrap()
-            );*/
-            Self::read_exp_value(
-                &mut self.correction[context as usize],
-                &mut self.correction_bits[context as usize],
-                reader,
-            )
-        }
-    }
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum Actions {
+    Default(CodecCorrection, u32),
+    Correction(CodecCorrection, u32),
 }
 
 pub struct PredictionEncoderCabac<W, CTX> {
     context: PredictionCabacContext<CTX>,
+
+    actions: Vec<Actions>,
+
+    last_action: [Option<usize>; CodecCorrection::MAX as usize],
+
     count: CountNonDefaultActions,
     writer: W,
 }
@@ -184,6 +111,8 @@ impl<W: CabacWriter<CTX>, CTX: Default> PredictionEncoderCabac<W, CTX> {
         Self {
             context: PredictionCabacContext::<CTX>::default(),
             writer,
+            actions: Default::default(),
+            last_action: Default::default(),
             count: CountNonDefaultActions::default(),
         }
     }
@@ -192,21 +121,69 @@ impl<W: CabacWriter<CTX>, CTX: Default> PredictionEncoderCabac<W, CTX> {
     #[allow(dead_code)]
     pub fn print(&self) {
         self.count.print();
-        println!("bypass bits: {} bytes", self.context.bypass_bits / 8)
     }
 }
 
 impl<W: CabacWriter<CTX>, CTX> PredictionEncoder for PredictionEncoderCabac<W, CTX> {
     fn encode_verify_state(&mut self, _message: &'static str, _checksum: u64) {}
 
-    fn encode_correction(&mut self, action: CodecCorrection, value: u32) {
-        self.context
-            .encode_correction(value, action, &mut self.writer);
-        self.count.record_correction(action, value);
+    fn encode_correction(&mut self, c: CodecCorrection, value: u32) {
+        let i = c as usize;
+
+        // if it is a non-zero correction, then we just insert it
+        if value != 0 {
+            self.last_action[i] = Some(self.actions.len());
+            self.actions.push(Actions::Correction(c, value));
+
+            self.count.record_correction(c, value);
+            return;
+        }
+
+        // otherwise we look to see if the last action was a default action
+        // and if so, just increment it
+        if let Some(l) = self.last_action[i] {
+            let a = &mut self.actions[l];
+            if let Actions::Default(_, x) = a {
+                *x += 1;
+                return;
+            }
+        }
+
+        // otherwise we add a new default action
+        self.last_action[c as usize] = Some(self.actions.len());
+        self.actions.push(Actions::Default(c, 1));
     }
 
     fn finish(&mut self) {
-        self.context.flush_encode(&mut self.writer);
+        for &a in self.actions.iter() {
+            match a {
+                Actions::Default(c, value) => {
+                    let i = c as usize;
+                    self.writer
+                        .put(true, &mut self.context.default_signal_ctx[i])
+                        .unwrap();
+                    PredictionCabacContext::write_exp_encoded(
+                        value,
+                        &mut self.context.default_ctx[i],
+                        &mut self.context.default_ctx_bits[i],
+                        &mut self.writer,
+                    );
+                }
+                Actions::Correction(c, value) => {
+                    let i = c as usize;
+                    self.writer
+                        .put(false, &mut self.context.default_signal_ctx[i])
+                        .unwrap();
+                    PredictionCabacContext::write_exp_encoded(
+                        value,
+                        &mut self.context.correction_ctx[i],
+                        &mut self.context.correction_ctx_bits[i],
+                        &mut self.writer,
+                    );
+                }
+            }
+        }
+
         self.writer.finish().unwrap();
     }
 }
@@ -214,12 +191,15 @@ impl<W: CabacWriter<CTX>, CTX> PredictionEncoder for PredictionEncoderCabac<W, C
 pub struct PredictionDecoderCabac<R, CTX> {
     context: PredictionCabacContext<CTX>,
     reader: R,
+
+    default_actions: [u32; CodecCorrection::MAX as usize],
 }
 
 impl<R: CabacReader<CTX>, CTX: Default> PredictionDecoderCabac<R, CTX> {
     pub fn new(reader: R) -> Self {
         Self {
             context: PredictionCabacContext::<CTX>::default(),
+            default_actions: Default::default(),
             reader,
         }
     }
@@ -229,7 +209,34 @@ impl<R: CabacReader<CTX>, CTX> PredictionDecoder for PredictionDecoderCabac<R, C
     fn decode_verify_state(&mut self, _message: &'static str, _checksum: u64) {}
 
     fn decode_correction(&mut self, correction: CodecCorrection) -> u32 {
-        self.context.decode_correction(correction, &mut self.reader)
+        let i = correction as usize;
+        if self.default_actions[i] > 0 {
+            self.default_actions[i] -= 1;
+            return 0;
+        }
+
+        if self
+            .reader
+            .get(&mut self.context.default_signal_ctx[i])
+            .unwrap()
+        {
+            let value = PredictionCabacContext::read_exp_value(
+                &mut self.context.default_ctx[i],
+                &mut self.context.default_ctx_bits[i],
+                &mut self.reader,
+            );
+
+            self.default_actions[i] = value - 1;
+            return 0;
+        } else {
+            let value = PredictionCabacContext::read_exp_value(
+                &mut self.context.correction_ctx[i],
+                &mut self.context.correction_ctx_bits[i],
+                &mut self.reader,
+            );
+
+            return value;
+        }
     }
 }
 
@@ -290,30 +297,30 @@ fn roundtree_cabac_correction() {
 
     let mut buffer = Vec::new();
 
-    let mut context = PredictionCabacContext::default();
-    let mut writer = DebugWriter::new(&mut buffer).unwrap();
+    let writer = DebugWriter::new(&mut buffer).unwrap();
+
+    let mut encoder = PredictionEncoderCabac::new(writer);
 
     for &o in operations.iter() {
         match o {
             Operation::Correction(val, context_type) => {
-                context.encode_correction(val, context_type, &mut writer);
+                encoder.encode_correction(context_type, val);
             }
         }
     }
 
-    context.flush_encode(&mut writer);
-    writer.finish().unwrap();
+    encoder.finish();
 
-    context = PredictionCabacContext::default();
+    let reader = DebugReader::new(Cursor::new(&buffer)).unwrap();
 
-    let mut reader = DebugReader::new(Cursor::new(&buffer)).unwrap();
+    let mut decoder = PredictionDecoderCabac::new(reader);
 
     for (i, &o) in operations.iter().enumerate() {
         match o {
             Operation::Correction(val, context_type) => {
                 assert_eq!(
                     val,
-                    context.decode_correction(context_type, &mut reader),
+                    decoder.decode_correction(context_type),
                     "operation {}",
                     i
                 );
