@@ -13,9 +13,7 @@ use crate::{
         huffman_encoding::{HuffmanOriginalEncoding, TreeCodeType},
     },
     preflate_error::{err_exit_code, ExitCode, Result},
-    statistical_codec::{
-        CodecCorrection, CodecMisprediction, PredictionDecoder, PredictionEncoder,
-    },
+    statistical_codec::{CodecCorrection, PredictionDecoder, PredictionEncoder},
 };
 
 pub fn predict_tree_for_block<D: PredictionEncoder>(

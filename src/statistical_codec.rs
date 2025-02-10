@@ -77,6 +77,7 @@ pub enum CodecAction {
 #[derive(Default)]
 pub struct CountNonDefaultActions {
     pub total_non_default: u32,
+
     pub mispredictions_count: [u32; CodecMisprediction::MAX as usize],
     pub corrections_count: [u32; CodecCorrection::MAX as usize],
 }
