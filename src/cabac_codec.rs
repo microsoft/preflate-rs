@@ -102,6 +102,8 @@ pub struct PredictionEncoderCabac<W, CTX> {
 
     last_action: [Option<usize>; CodecCorrection::MAX as usize],
 
+    action_seen: [bool; CodecCorrection::MAX as usize],
+
     count: CountNonDefaultActions,
     writer: W,
 }
@@ -114,6 +116,7 @@ impl<W: CabacWriter<CTX>, CTX: Default> PredictionEncoderCabac<W, CTX> {
             actions: Default::default(),
             last_action: Default::default(),
             count: CountNonDefaultActions::default(),
+            action_seen: Default::default(),
         }
     }
 
@@ -124,7 +127,7 @@ impl<W: CabacWriter<CTX>, CTX: Default> PredictionEncoderCabac<W, CTX> {
     }
 }
 
-impl<W: CabacWriter<CTX>, CTX> PredictionEncoder for PredictionEncoderCabac<W, CTX> {
+impl<W: CabacWriter<CTX>, CTX: Default> PredictionEncoder for PredictionEncoderCabac<W, CTX> {
     fn encode_verify_state(&mut self, _message: &'static str, _checksum: u64) {}
 
     fn encode_correction(&mut self, c: CodecCorrection, value: u32) {
@@ -134,6 +137,7 @@ impl<W: CabacWriter<CTX>, CTX> PredictionEncoder for PredictionEncoderCabac<W, C
         if value != 0 {
             self.last_action[i] = Some(self.actions.len());
             self.actions.push(Actions::Correction(c, value));
+            self.action_seen[i] = true;
 
             self.count.record_correction(c, value);
             return;
@@ -155,19 +159,36 @@ impl<W: CabacWriter<CTX>, CTX> PredictionEncoder for PredictionEncoderCabac<W, C
     }
 
     fn finish(&mut self) {
+        // Now that we've collected everything, we can write out the actions
+        // in the correct order so that the callers can just read them in order
+        //
+        // This is necessary since the reads are done the first time we need
+        // something, so we can't write them out in the same order that we get them.
+
+        // first write the bit set of things we've seen so we can completely exclude
+        let mut actions_seen_ctx = CTX::default();
+        for &s in self.action_seen.iter() {
+            self.writer.put(s, &mut actions_seen_ctx).unwrap();
+        }
+
+        // now write all the actions
         for &a in self.actions.iter() {
             match a {
                 Actions::Default(c, value) => {
                     let i = c as usize;
-                    self.writer
-                        .put(true, &mut self.context.default_signal_ctx[i])
-                        .unwrap();
-                    PredictionCabacContext::write_exp_encoded(
-                        value,
-                        &mut self.context.default_ctx[i],
-                        &mut self.context.default_ctx_bits[i],
-                        &mut self.writer,
-                    );
+
+                    if self.action_seen[i] {
+                        self.writer
+                            .put(true, &mut self.context.default_signal_ctx[i])
+                            .unwrap();
+
+                        PredictionCabacContext::write_exp_encoded(
+                            value - 1,
+                            &mut self.context.default_ctx[i],
+                            &mut self.context.default_ctx_bits[i],
+                            &mut self.writer,
+                        );
+                    }
                 }
                 Actions::Correction(c, value) => {
                     let i = c as usize;
@@ -175,7 +196,7 @@ impl<W: CabacWriter<CTX>, CTX> PredictionEncoder for PredictionEncoderCabac<W, C
                         .put(false, &mut self.context.default_signal_ctx[i])
                         .unwrap();
                     PredictionCabacContext::write_exp_encoded(
-                        value,
+                        value - 1,
                         &mut self.context.correction_ctx[i],
                         &mut self.context.correction_ctx_bits[i],
                         &mut self.writer,
@@ -192,14 +213,22 @@ pub struct PredictionDecoderCabac<R, CTX> {
     context: PredictionCabacContext<CTX>,
     reader: R,
 
+    actions_seen: [bool; CodecCorrection::MAX as usize],
     default_actions: [u32; CodecCorrection::MAX as usize],
 }
 
 impl<R: CabacReader<CTX>, CTX: Default> PredictionDecoderCabac<R, CTX> {
-    pub fn new(reader: R) -> Self {
+    pub fn new(mut reader: R) -> Self {
+        let mut actions_seen = [false; CodecCorrection::MAX as usize];
+        let mut actions_seen_ctx = CTX::default();
+        for i in 0..actions_seen.len() {
+            actions_seen[i] = reader.get(&mut actions_seen_ctx).unwrap();
+        }
+
         Self {
             context: PredictionCabacContext::<CTX>::default(),
             default_actions: Default::default(),
+            actions_seen,
             reader,
         }
     }
@@ -209,12 +238,19 @@ impl<R: CabacReader<CTX>, CTX> PredictionDecoder for PredictionDecoderCabac<R, C
     fn decode_verify_state(&mut self, _message: &'static str, _checksum: u64) {}
 
     fn decode_correction(&mut self, correction: CodecCorrection) -> u32 {
+        // if the action hasn't been seen at all, then always return 0
+        if !self.actions_seen[correction as usize] {
+            return 0;
+        }
+
+        // otherwise if we still have default actions left, use those
         let i = correction as usize;
         if self.default_actions[i] > 0 {
             self.default_actions[i] -= 1;
             return 0;
         }
 
+        // otherwise we need to decide whether we are a default action or not
         if self
             .reader
             .get(&mut self.context.default_signal_ctx[i])
@@ -224,7 +260,7 @@ impl<R: CabacReader<CTX>, CTX> PredictionDecoder for PredictionDecoderCabac<R, C
                 &mut self.context.default_ctx[i],
                 &mut self.context.default_ctx_bits[i],
                 &mut self.reader,
-            );
+            ) + 1;
 
             self.default_actions[i] = value - 1;
             return 0;
@@ -233,7 +269,7 @@ impl<R: CabacReader<CTX>, CTX> PredictionDecoder for PredictionDecoderCabac<R, C
                 &mut self.context.correction_ctx[i],
                 &mut self.context.correction_ctx_bits[i],
                 &mut self.reader,
-            );
+            ) + 1;
 
             return value;
         }

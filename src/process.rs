@@ -415,7 +415,7 @@ fn verify_longmatch() {
     do_analyze(
         None,
         &read_file("compressed_flate2_level1_longmatch.deflate"),
-        true,
+        false,
     );
 }
 

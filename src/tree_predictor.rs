@@ -6,7 +6,7 @@
 
 use crate::{
     cabac_codec::{decode_difference, encode_difference},
-    deflate::deflate_constants::{CODETREE_CODE_COUNT, NONLEN_CODE_COUNT, TREE_CODE_ORDER_TABLE},
+    deflate::deflate_constants::{CODETREE_CODE_COUNT, TREE_CODE_ORDER_TABLE},
     deflate::deflate_token::TokenFrequency,
     deflate::{
         huffman_calc::{calc_bit_lengths, HufftreeBitCalc},
