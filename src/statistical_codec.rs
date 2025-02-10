@@ -4,6 +4,8 @@
  *  This software incorporates material from third parties. See NOTICE.txt for details.
  *--------------------------------------------------------------------------------------------*/
 
+use crate::cabac_codec::{decode_difference, encode_difference};
+
 /// boolean misprediction indictions
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum CodecMisprediction {
@@ -11,10 +13,6 @@ pub enum CodecMisprediction {
     LiteralPredictionWrong,
     ReferencePredictionWrong,
     IrregularLen258,
-
-    TreeCodeCountMisprediction,
-    LiteralCountMisprediction,
-    DistanceCountMisprediction,
     MAX,
 }
 
@@ -31,6 +29,10 @@ pub enum CodecCorrection {
     LDTypeCorrection,
     RepeatCountCorrection,
     LDBitLengthCorrection,
+
+    TreeCodeCountCorrection,
+    LiteralCountCorrection,
+    DistanceCountCorrection,
     MAX,
 }
 
@@ -42,13 +44,28 @@ pub trait PredictionEncoder {
     fn encode_verify_state(&mut self, message: &'static str, checksum: u64);
 
     fn finish(&mut self);
+
+    fn encode_correction_diff(
+        &mut self,
+        action: CodecCorrection,
+        actual_value: u32,
+        predicted_value: u32,
+    ) {
+        self.encode_correction(action, encode_difference(predicted_value, actual_value));
+    }
 }
 
 pub trait PredictionDecoder {
     fn decode_value(&mut self, max_bits_orig: u8) -> u16;
     fn decode_correction(&mut self, correction: CodecCorrection) -> u32;
+
     fn decode_misprediction(&mut self, misprediction: CodecMisprediction) -> bool;
     fn decode_verify_state(&mut self, message: &'static str, checksum: u64);
+
+    fn decode_correction_diff(&mut self, correction: CodecCorrection, predicted_value: u32) -> u32 {
+        let actual_value = self.decode_correction(correction);
+        decode_difference(predicted_value, actual_value)
+    }
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -95,6 +112,9 @@ impl CountNonDefaultActions {
             RepeatCountCorrection,
             LDBitLengthCorrection,
             NonZeroPadding,
+            TreeCodeCountCorrection,
+            LiteralCountCorrection,
+            DistanceCountCorrection,
         ];
 
         let mispred = [
@@ -102,9 +122,6 @@ impl CountNonDefaultActions {
             LiteralPredictionWrong,
             ReferencePredictionWrong,
             IrregularLen258,
-            TreeCodeCountMisprediction,
-            LiteralCountMisprediction,
-            DistanceCountMisprediction,
         ];
 
         for i in corr {

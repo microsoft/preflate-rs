@@ -340,7 +340,7 @@ fn roundtree_cabac_decoding() {
 
     let test_codec_actions = [
         CodecAction::Value(200, 8),
-        CodecAction::Misprediction(CodecMisprediction::DistanceCountMisprediction, true),
+        CodecAction::Correction(CodecCorrection::DistanceCountCorrection, 1),
         CodecAction::Correction(CodecCorrection::TokenCount, 100000),
         CodecAction::Correction(CodecCorrection::BlockTypeCorrection, 5),
         CodecAction::Correction(CodecCorrection::DistAfterLenCorrection, 0),
@@ -373,7 +373,7 @@ fn roundtree_cabac_correction() {
 
     // generate a random set of operations
     let operations = [
-        Operation::Misprediction(false, CodecMisprediction::DistanceCountMisprediction),
+        Operation::Correction(5, CodecCorrection::DistanceCountCorrection),
         Operation::Value(10, 4),
         Operation::Value(10, 4),
         Operation::Correction(1, CodecCorrection::BlockTypeCorrection),
@@ -386,11 +386,11 @@ fn roundtree_cabac_correction() {
         Operation::Correction(0, CodecCorrection::DistOnlyCorrection),
         Operation::Correction(7, CodecCorrection::LDTypeCorrection),
         Operation::Correction(9, CodecCorrection::LenCorrection),
-        Operation::Misprediction(false, CodecMisprediction::DistanceCountMisprediction),
+        Operation::Misprediction(false, CodecMisprediction::LiteralPredictionWrong),
         Operation::Correction(100000, CodecCorrection::TokenCount),
         Operation::Misprediction(false, CodecMisprediction::IrregularLen258),
         Operation::Value(10, 4),
-        Operation::Misprediction(false, CodecMisprediction::DistanceCountMisprediction),
+        Operation::Misprediction(false, CodecMisprediction::ReferencePredictionWrong),
         //Operation::Misprediction(true, CodecMisprediction::DistanceCountMisprediction),
     ];
 

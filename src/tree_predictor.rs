@@ -38,33 +38,21 @@ pub fn predict_tree_for_block<D: PredictionEncoder>(
      assert_eq!(bit_lengths[..], ao[..]);
     */
 
-    encoder.encode_misprediction(
-        CodecMisprediction::LiteralCountMisprediction,
-        bit_lengths.len() != huffman_encoding.num_literals,
+    encoder.encode_correction_diff(
+        CodecCorrection::LiteralCountCorrection,
+        huffman_encoding.num_literals as u32,
+        bit_lengths.len() as u32,
     );
-
-    // if incorrect, include the actual size
-    if bit_lengths.len() != huffman_encoding.num_literals {
-        encoder.encode_value(huffman_encoding.num_literals as u16 - 257, 5);
-
-        bit_lengths.resize(huffman_encoding.num_literals, 0);
-    }
 
     // now predict the size of the distance tree
     let mut distance_code_lengths = calc_bit_lengths(huffcalc, &freq.distance_codes, 15);
     //assert_eq!(distance_code_lengths[..], bo[..]);
 
-    encoder.encode_misprediction(
-        CodecMisprediction::DistanceCountMisprediction,
-        distance_code_lengths.len() != huffman_encoding.num_dist,
+    encoder.encode_correction_diff(
+        CodecCorrection::DistanceCountCorrection,
+        huffman_encoding.num_dist as u32,
+        distance_code_lengths.len() as u32,
     );
-
-    // if incorrect, include the actual size
-    if distance_code_lengths.len() != huffman_encoding.num_dist {
-        encoder.encode_value(huffman_encoding.num_dist as u16 - 1, 5);
-
-        distance_code_lengths.resize(huffman_encoding.num_dist, 0);
-    }
 
     bit_lengths.append(&mut distance_code_lengths);
 
@@ -79,12 +67,11 @@ pub fn predict_tree_for_block<D: PredictionEncoder>(
 
     let tc_code_tree_len = calc_tc_lengths_without_trailing_zeros(&tc_code_tree);
 
-    if tc_code_tree_len != huffman_encoding.num_code_lengths {
-        encoder.encode_misprediction(CodecMisprediction::TreeCodeCountMisprediction, true);
-        encoder.encode_value(huffman_encoding.num_code_lengths as u16 - 4, 4);
-    } else {
-        encoder.encode_misprediction(CodecMisprediction::TreeCodeCountMisprediction, false);
-    }
+    encoder.encode_correction_diff(
+        CodecCorrection::TreeCodeBitLengthCorrection,
+        huffman_encoding.num_code_lengths as u32,
+        tc_code_tree_len as u32,
+    );
 
     // resize so that when we walk through in TREE_CODE_ORDER_TABLE order, we
     // don't go out of range.
@@ -115,19 +102,25 @@ pub fn recreate_tree_for_block<D: PredictionDecoder>(
 
     let mut bit_lengths = calc_bit_lengths(huffcalc, &freq.literal_codes, 15);
 
-    if codec.decode_misprediction(CodecMisprediction::LiteralCountMisprediction) {
-        let corrected_num_literals = codec.decode_value(5) as usize + NONLEN_CODE_COUNT;
-        bit_lengths.resize(corrected_num_literals, 0);
-    }
+    bit_lengths.resize(
+        codec.decode_correction_diff(
+            CodecCorrection::LiteralCountCorrection,
+            bit_lengths.len() as u32,
+        ) as usize,
+        0,
+    );
 
     result.num_literals = bit_lengths.len();
 
     let mut distance_code_lengths = calc_bit_lengths(huffcalc, &freq.distance_codes, 15);
 
-    if codec.decode_misprediction(CodecMisprediction::DistanceCountMisprediction) {
-        let corrected_num_distance = codec.decode_value(5) as usize + 1;
-        distance_code_lengths.resize(corrected_num_distance, 0);
-    }
+    distance_code_lengths.resize(
+        codec.decode_correction_diff(
+            CodecCorrection::DistanceCountCorrection,
+            distance_code_lengths.len() as u32,
+        ) as usize,
+        0,
+    );
 
     result.num_dist = distance_code_lengths.len();
 
@@ -142,9 +135,10 @@ pub fn recreate_tree_for_block<D: PredictionDecoder>(
 
     let mut tc_code_tree_len = calc_tc_lengths_without_trailing_zeros(&tc_code_tree);
 
-    if codec.decode_misprediction(CodecMisprediction::TreeCodeCountMisprediction) {
-        tc_code_tree_len = codec.decode_value(4) as usize + 4;
-    }
+    tc_code_tree_len = codec.decode_correction_diff(
+        CodecCorrection::TreeCodeBitLengthCorrection,
+        tc_code_tree_len as u32,
+    ) as usize;
 
     result.num_code_lengths = tc_code_tree_len;
 
