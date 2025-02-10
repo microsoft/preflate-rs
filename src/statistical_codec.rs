@@ -92,6 +92,8 @@ impl CountNonDefaultActions {
         use CodecCorrection::*;
 
         let corr = [
+            TokenCount,
+            NonZeroPadding,
             BlockTypeCorrection,
             LenCorrection,
             DistOnlyCorrection,
@@ -100,15 +102,21 @@ impl CountNonDefaultActions {
             LDTypeCorrection,
             RepeatCountCorrection,
             LDBitLengthCorrection,
-            NonZeroPadding,
             TreeCodeCountCorrection,
             LiteralCountCorrection,
             DistanceCountCorrection,
+            UncompressBlockLenCorrection,
             EOFMisprediction,
             LiteralPredictionWrong,
             ReferencePredictionWrong,
             IrregularLen258,
         ];
+
+        assert_eq!(
+            corr.len(),
+            CodecCorrection::MAX as usize,
+            "need to update array if you add an enum"
+        );
 
         for i in corr {
             if self.corrections_count[i as usize] != 0 {
