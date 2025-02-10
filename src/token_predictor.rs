@@ -8,7 +8,6 @@ use bitcode::{Decode, Encode};
 
 use crate::{
     bit_helper::DebugHash,
-    cabac_codec::{decode_difference, encode_difference},
     deflate::deflate_constants::MIN_MATCH,
     deflate::deflate_token::{
         DeflateHuffmanType, DeflateToken, DeflateTokenBlock, DeflateTokenReference, TokenFrequency,
@@ -113,9 +112,10 @@ impl<'a> TokenPredictor<'a> {
                 uncompressed,
                 padding_bits,
             } => {
-                codec.encode_correction(
+                codec.encode_correction_diff(
                     CodecCorrection::BlockTypeCorrection,
-                    encode_difference(BT_DYNAMICHUFF, BT_STORED),
+                    BT_STORED,
+                    BT_DYNAMICHUFF,
                 );
 
                 codec.encode_value(uncompressed.len() as u16, 16);
@@ -134,9 +134,10 @@ impl<'a> TokenPredictor<'a> {
             } => {
                 match huffman_type {
                     DeflateHuffmanType::Static { .. } => {
-                        codec.encode_correction(
+                        codec.encode_correction_diff(
                             CodecCorrection::BlockTypeCorrection,
-                            encode_difference(BT_DYNAMICHUFF, BT_STATICHUFF),
+                            BT_STATICHUFF,
+                            BT_DYNAMICHUFF,
                         );
                         huffman_encoding = None;
                     }
@@ -144,9 +145,10 @@ impl<'a> TokenPredictor<'a> {
                         huffman_encoding: h,
                         ..
                     } => {
-                        codec.encode_correction(
+                        codec.encode_correction_diff(
                             CodecCorrection::BlockTypeCorrection,
-                            encode_difference(BT_DYNAMICHUFF, BT_DYNAMICHUFF),
+                            BT_DYNAMICHUFF,
+                            BT_DYNAMICHUFF,
                         );
                         huffman_encoding = Some(h);
                     }
@@ -256,9 +258,10 @@ impl<'a> TokenPredictor<'a> {
                         }
                     };
 
-                    codec.encode_correction(
+                    codec.encode_correction_diff(
                         CodecCorrection::LenCorrection,
-                        encode_difference(predicted_ref.len(), target_ref.len()),
+                        target_ref.len(),
+                        predicted_ref.len(),
                     );
 
                     if predicted_ref.len() != target_ref.len() {
@@ -315,10 +318,8 @@ impl<'a> TokenPredictor<'a> {
 
         codec.decode_verify_state("blocktypestart", 0);
 
-        let bt = decode_difference(
-            BT_DYNAMICHUFF,
-            codec.decode_correction(CodecCorrection::BlockTypeCorrection),
-        );
+        let bt = codec.decode_correction_diff(CodecCorrection::BlockTypeCorrection, BT_DYNAMICHUFF);
+
         match bt {
             BT_STORED => {
                 let uncompressed_len = codec.decode_value(16).into();
@@ -402,10 +403,8 @@ impl<'a> TokenPredictor<'a> {
                 }
             }
 
-            let new_len = decode_difference(
-                predicted_ref.len(),
-                codec.decode_correction(CodecCorrection::LenCorrection),
-            );
+            let new_len =
+                codec.decode_correction_diff(CodecCorrection::LenCorrection, predicted_ref.len());
 
             if new_len != predicted_ref.len() {
                 let hops = codec.decode_correction(CodecCorrection::DistAfterLenCorrection) + 1;

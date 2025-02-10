@@ -147,9 +147,9 @@ pub fn recreate_tree_for_block<D: PredictionDecoder>(
     tc_code_tree.resize(CODETREE_CODE_COUNT, 0);
 
     for i in 0..tc_code_tree_len {
-        result.code_lengths[TREE_CODE_ORDER_TABLE[i]] = decode_difference(
+        result.code_lengths[TREE_CODE_ORDER_TABLE[i]] = codec.decode_correction_diff(
+            CodecCorrection::TreeCodeBitLengthCorrection,
             tc_code_tree[TREE_CODE_ORDER_TABLE[i]].into(),
-            codec.decode_correction(CodecCorrection::TreeCodeBitLengthCorrection),
         ) as u8;
     }
 
