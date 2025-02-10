@@ -40,16 +40,25 @@ pub enum DictionaryAddPolicy {
 impl DictionaryAddPolicy {
     /// Updates the hash based on the dictionary add policy
     pub fn update_hash<U: FnMut(&[u8], u32, u32)>(
-        &self,
+        self,
         input: &[u8],
         pos: u32,
         length: u32,
         mut update_fn: U,
     ) {
         if length == 1 {
-            update_fn(input, pos, 1);
+            match self {
+                DictionaryAddPolicy::AddFirstExcept4kBoundary => {
+                    if (pos & 4095) < 4093 {
+                        update_fn(input, pos, 1);
+                    }
+                }
+                _ => {
+                    update_fn(input, pos, 1);
+                }
+            }
         } else {
-            match *self {
+            match self {
                 DictionaryAddPolicy::AddAll => update_fn(input, pos, length),
                 DictionaryAddPolicy::AddFirst(limit) => {
                     if length <= u32::from(limit) {

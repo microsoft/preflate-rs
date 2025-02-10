@@ -557,6 +557,15 @@ impl<'a> TokenPredictor<'a> {
             }
         }
 
+        // If we didn't find a match, try again with a larger chain
+        let match_token = self.state.match_token_0(0, 4096, &self.input);
+
+        if let MatchResult::Success(m) = match_token {
+            if m.len() >= MIN_MATCH {
+                return Ok(m);
+            }
+        }
+
         err_exit_code(
             ExitCode::RecompressFailed,
             format!("Didnt find a match {:?}", match_token).as_str(),

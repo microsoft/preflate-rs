@@ -1,7 +1,9 @@
 use default_boxed::DefaultBoxed;
 
 use crate::{
-    deflate::deflate_token::DeflateTokenReference, hash_algorithm::*, preflate_input::PreflateInput,
+    deflate::{deflate_constants, deflate_token::DeflateTokenReference},
+    hash_algorithm::*,
+    preflate_input::PreflateInput,
 };
 
 use super::add_policy_estimator::DictionaryAddPolicy;
@@ -12,7 +14,74 @@ pub trait HashTableDepthEstimator {
     /// sees how many matches we need to walk to reach match_pos, which we
     /// do by subtracting the depth of the current node from the depth of the
     /// match node.
-    fn match_depth(&self, token: DeflateTokenReference, input: &PreflateInput) -> u32;
+    fn match_depth(&mut self, token: DeflateTokenReference, input: &PreflateInput) -> bool;
+
+    fn max_chain_found(&self) -> u32;
+
+    fn very_far_matches_detected(&self, wsize: u32) -> bool;
+
+    fn hash_algorithm(&self) -> HashAlgorithm;
+}
+
+#[derive(DefaultBoxed)]
+struct MinizDepthEstimator {
+    positions: [u32; 4096],
+
+    zero_chain_found: u32,
+    nonzero_chain_found: u32,
+}
+
+impl HashTableDepthEstimator for MinizDepthEstimator {
+    fn update_hash(&mut self, add_policy: DictionaryAddPolicy, input: &PreflateInput, length: u32) {
+        add_policy.update_hash(
+            input.cur_chars(0),
+            input.pos(),
+            length,
+            |chars, pos, length| {
+                if length as usize + 2 >= chars.len() {
+                    // reached on of the stream so there will be no more matches
+                    return;
+                }
+
+                for i in 0..length {
+                    let length3hash = MiniZHash::default().get_hash(&chars[i as usize..]);
+                    self.positions[usize::from(length3hash)] = pos + i;
+                }
+            },
+        );
+    }
+
+    fn match_depth(&mut self, token: DeflateTokenReference, input: &PreflateInput) -> bool {
+        let length3hash = MiniZHash::default().get_hash(input.cur_chars(0));
+        let dictpos = self.positions[usize::from(length3hash)];
+        let distance3 = input.pos() - dictpos;
+
+        if distance3 == token.dist() {
+            self.zero_chain_found += 1;
+        } else {
+            self.nonzero_chain_found += 1;
+        }
+
+        true
+    }
+
+    /// The maximum chain length found, in this case if non-zero chains
+    /// make up more than 1/256 of the total chains, then we return
+    fn max_chain_found(&self) -> u32 {
+        if self.zero_chain_found / 256 > self.nonzero_chain_found {
+            0
+        } else {
+            u32::MAX
+        }
+    }
+
+    fn very_far_matches_detected(&self, _wsize: u32) -> bool {
+        true
+    }
+
+    fn hash_algorithm(&self) -> HashAlgorithm {
+        HashAlgorithm::MiniZFast
+    }
 }
 
 #[derive(DefaultBoxed)]
@@ -42,6 +111,13 @@ struct HashTableDepthEstimatorImpl<H: HashImplementation> {
 
     /// the dictionary add policy used to update the hash
     add_policy: DictionaryAddPolicy,
+
+    /// the maximum chain length found
+    max_chain_found: u32,
+
+    longest_dist_at_hop_0: u32,
+
+    longest_dist_at_hop_1_plus: u32,
 }
 
 impl<H: HashImplementation> HashTableDepthEstimatorImpl<H> {
@@ -86,23 +162,8 @@ impl<H: HashImplementation> HashTableDepthEstimatorImpl<H> {
             pos = pos.wrapping_add(1);
         }
     }
-}
 
-impl<H: HashImplementation> HashTableDepthEstimator for HashTableDepthEstimatorImpl<H> {
-    fn update_hash(&mut self, add_policy: DictionaryAddPolicy, input: &PreflateInput, length: u32) {
-        self.add_policy = add_policy;
-        add_policy.update_hash(
-            input.cur_chars(0),
-            input.pos(),
-            length,
-            |chars, pos, len| self.internal_update_hash(chars, pos, len),
-        );
-    }
-
-    /// sees how many matches we need to walk to reach match_pos, which we
-    /// do by subtracting the depth of the current node from the depth of the
-    /// match node.
-    fn match_depth(&self, token: DeflateTokenReference, input: &PreflateInput) -> u32 {
+    fn match_depth_internal(&self, token: DeflateTokenReference, input: &PreflateInput<'_>) -> u32 {
         let match_pos = (input.pos() - token.dist()) as u16;
 
         let h = self.hash.get_hash(input.cur_chars(0));
@@ -124,12 +185,57 @@ impl<H: HashImplementation> HashTableDepthEstimator for HashTableDepthEstimatorI
     }
 }
 
+impl<H: HashImplementation> HashTableDepthEstimator for HashTableDepthEstimatorImpl<H> {
+    fn update_hash(&mut self, add_policy: DictionaryAddPolicy, input: &PreflateInput, length: u32) {
+        self.add_policy = add_policy;
+        add_policy.update_hash(
+            input.cur_chars(0),
+            input.pos(),
+            length,
+            |chars, pos, len| self.internal_update_hash(chars, pos, len),
+        );
+    }
+
+    /// sees how many matches we need to walk to reach match_pos, which we
+    /// do by subtracting the depth of the current node from the depth of the
+    /// match node.
+    fn match_depth(&mut self, token: DeflateTokenReference, input: &PreflateInput) -> bool {
+        let mdepth = self.match_depth_internal(token, input);
+
+        self.max_chain_found = std::cmp::max(self.max_chain_found, mdepth);
+
+        if mdepth == 0 {
+            self.longest_dist_at_hop_0 = std::cmp::max(self.longest_dist_at_hop_0, token.dist());
+        } else {
+            self.longest_dist_at_hop_1_plus =
+                std::cmp::max(self.longest_dist_at_hop_1_plus, token.dist());
+        }
+
+        mdepth < 4096
+    }
+
+    fn hash_algorithm(&self) -> HashAlgorithm {
+        self.hash.algorithm()
+    }
+
+    fn max_chain_found(&self) -> u32 {
+        self.max_chain_found
+    }
+
+    fn very_far_matches_detected(&self, wsize: u32) -> bool {
+        self.longest_dist_at_hop_0 > wsize - deflate_constants::MIN_LOOKAHEAD
+            || self.longest_dist_at_hop_1_plus >= wsize - deflate_constants::MIN_LOOKAHEAD
+    }
+}
+
 /// Libdeflate is a bit special because it uses the first candidate of the 3 byte match,
 /// but then continues with the next 4 bytes.
 #[derive(DefaultBoxed)]
 struct HashTableDepthEstimatorLibdeflate {
     length4: HashTableDepthEstimatorImpl<LibdeflateHash4>,
     head3: [u32; 65536],
+
+    max_chain_found: u32,
 }
 
 const LIB_DEFLATE3_HASH: LibdeflateHash3Secondary = LibdeflateHash3Secondary {};
@@ -166,20 +272,37 @@ impl HashTableDepthEstimator for HashTableDepthEstimatorLibdeflate {
     /// sees how many matches we need to walk to reach match_pos, which we
     /// do by subtracting the depth of the current node from the depth of the
     /// match node.
-    fn match_depth(&self, token: DeflateTokenReference, input: &PreflateInput) -> u32 {
+    fn match_depth(&mut self, token: DeflateTokenReference, input: &PreflateInput) -> bool {
         let length3hash = LIB_DEFLATE3_HASH.get_hash(input.cur_chars(0));
         let distance3 = input.pos() - self.head3[usize::from(length3hash)];
 
-        if distance3 == token.dist() {
-            return 1;
+        let mdepth = if distance3 == token.dist() {
+            1
         } else {
             // anything length 3 should have matched before
             if token.len() == 3 {
-                return 65535;
+                65535
+            } else {
+                (if distance3 < 32768 { 1 } else { 0 })
+                    + self.length4.match_depth_internal(token, input)
             }
+        };
 
-            return if distance3 < 32768 { 1 } else { 0 } + self.length4.match_depth(token, input);
-        }
+        self.max_chain_found = std::cmp::max(self.max_chain_found, mdepth);
+
+        mdepth < 4096
+    }
+
+    fn max_chain_found(&self) -> u32 {
+        self.max_chain_found
+    }
+
+    fn very_far_matches_detected(&self, _wsize: u32) -> bool {
+        true // allowed to have very far matches
+    }
+
+    fn hash_algorithm(&self) -> HashAlgorithm {
+        HashAlgorithm::Libdeflate4
     }
 }
 
@@ -194,9 +317,11 @@ pub fn new_depth_estimator(hash_algorithm: HashAlgorithm) -> Box<dyn HashTableDe
             hash_mask,
             hash_shift,
         }),
-        HashAlgorithm::MiniZFast => HashTableDepthEstimatorImpl::box_new(MiniZHash {}),
+        HashAlgorithm::MiniZFast => MinizDepthEstimator::default_boxed(),
         HashAlgorithm::Libdeflate4 => HashTableDepthEstimatorLibdeflate::default_boxed(),
-        HashAlgorithm::Libdeflate4Fast => HashTableDepthEstimatorImpl::box_new(LibdeflateHash4 {}),
+        HashAlgorithm::Libdeflate4Fast => {
+            HashTableDepthEstimatorImpl::box_new(LibdeflateHash4Fast {})
+        }
 
         HashAlgorithm::ZlibNG => HashTableDepthEstimatorImpl::box_new(ZlibNGHash {}),
         HashAlgorithm::RandomVector => HashTableDepthEstimatorImpl::box_new(RandomVectorHash {}),
@@ -240,24 +365,24 @@ fn verify_max_chain_length() {
         ("compressed_zlib_level7.deflate", zlib, DictionaryAddPolicy::AddAll, 255),
         ("compressed_zlib_level8.deflate", zlib, DictionaryAddPolicy::AddAll, 1022),
         ("compressed_zlib_level9.deflate", zlib, DictionaryAddPolicy::AddAll, 3986),
-        ("compressed_minizoxide_level1.deflate", HashAlgorithm::MiniZFast, DictionaryAddPolicy::AddFirstExcept4kBoundary, 2),
+        ("compressed_minizoxide_level1.deflate", HashAlgorithm::MiniZFast, DictionaryAddPolicy::AddFirstExcept4kBoundary, 0),
 
     ];
 
-    for level in levels {
-        let compressed_data = crate::process::read_file(level.0);
+    for (filename, hash_algorithm, add_policy, max_chain_length) in levels {
+        let compressed_data = crate::process::read_file(filename);
 
         let parsed = parse_deflate(&compressed_data, 0).unwrap();
 
         let add_policy_estimator = super::add_policy_estimator::estimate_add_policy(&parsed.blocks);
 
         assert_eq!(
-            add_policy_estimator, level.2,
+            add_policy_estimator, add_policy,
             "add policy for file {} is incorrect (should be {:?})",
-            level.0, level.2
+            filename, add_policy
         );
 
-        let mut estimator = new_depth_estimator(level.1);
+        let mut estimator = new_depth_estimator(hash_algorithm);
 
         let mut plaintext = Vec::new();
         for block in parsed.blocks.iter() {
@@ -268,12 +393,11 @@ fn verify_max_chain_length() {
             plaintext.len(),
             parsed.plain_text.len(),
             "decompression for file {} is incorrect",
-            level.0,
+            filename,
         );
 
         let mut input = PreflateInput::new(&plaintext);
 
-        let mut max_depth = 0;
         for block in &parsed.blocks {
             match block {
                 DeflateTokenBlock::Stored { uncompressed, .. } => {
@@ -288,22 +412,24 @@ fn verify_max_chain_length() {
                         let len = match token {
                             DeflateToken::Literal(_) => 1,
                             DeflateToken::Reference(r) => {
-                                max_depth = max_depth.max(estimator.match_depth(*r, &input));
-                                assert!(max_depth <= 4096, "max depth {} too high", max_depth);
+                                assert!(estimator.match_depth(*r, &input));
                                 r.len()
                             }
                         };
 
-                        estimator.update_hash(level.2, &input, len);
+                        estimator.update_hash(add_policy, &input, len);
                         input.advance(len);
                     }
                 }
             }
         }
         assert_eq!(
-            max_depth, level.3,
+            estimator.max_chain_found(),
+            max_chain_length,
             "max depth {} for file {} is incorrect (should be {})",
-            max_depth, level.0, level.3
+            estimator.max_chain_found(),
+            filename,
+            max_chain_length
         );
     }
 }
