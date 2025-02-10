@@ -268,7 +268,10 @@ impl<'a> TokenPredictor<'a> {
                             .with_context(|| {
                                 format!("calculate_hops p={:?}, t={:?}", predicted_ref, target_ref)
                             })?;
-                        codec.encode_correction(CodecCorrection::DistAfterLenCorrection, rematch);
+                        codec.encode_correction(
+                            CodecCorrection::DistAfterLenCorrection,
+                            rematch - 1,
+                        );
                     } else if target_ref.dist() != predicted_ref.dist() {
                         let rematch = self
                             .state
@@ -405,7 +408,7 @@ impl<'a> TokenPredictor<'a> {
             );
 
             if new_len != predicted_ref.len() {
-                let hops = codec.decode_correction(CodecCorrection::DistAfterLenCorrection);
+                let hops = codec.decode_correction(CodecCorrection::DistAfterLenCorrection) + 1;
 
                 predicted_ref = DeflateTokenReference::new(
                     new_len,
