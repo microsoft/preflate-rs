@@ -29,6 +29,26 @@ The following differences are corrected:
 
 Note that the data formats of the recompression information are different and incompatible to the original preflate implemenation, as this library uses a different arithmetic encoder (shared from the Lepton JPEG compression library).
 
+### Overhead
+
+In order to faithfully recreate the exact deflate stream, the library stores
+a stream of corrections to its predictive model. Depending on how good the
+predictive model is, the corrections can take up more or less space. If you
+want to improve the library, it's probably worth targetting the lower compression
+levels that currently have significant overhead.
+
+The amount of overhead vs uncompressed data is approximately the following,
+depending on the compression level. If you want to benefit from using this
+library, whatever better compression algorithm you use needs to be at least
+that much better to make it worthwhile to recompress. 
+
+| Library            | 0      | 1      | 2      | 3      | 4      | 5      | 6      | 7      | 8      | 9     |
+|--------------------|--------|--------|--------|--------|--------|--------|--------|--------|--------|--------|
+| **zlib**           | 0.01%  | 0.01%  | 0.01%  | 0.01%  | 0.01%  | 0.01%  | 0.01%  | 0.08%  | 0.03%  | 0.01%  |
+| **libngz**      | 0.01%  | 0.01%  | 0.01%  | 0.01%  | 0.97%  | 1.07%  | 0.90%  | 0.01%  | 0.01%  | NoCompressionCandidates |
+| **libdeflate**     | 0.01%  | 0.25%  | 1.04%  | 0.91%  | 1.51%  | 1.04%  | 0.96%  | 0.87%  | 1.04%  | 1.03%  |
+| **miniz_oxide**    | 0.01%  | 0.06%  | 2.70%  | 1.78%  | 0.53%  | 0.30%  | 0.09%  | 0.06%  | 0.08%  | 0.07%  |
+
 ## How to Use This Library
 
 #### Building From Source

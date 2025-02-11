@@ -28,7 +28,7 @@ pub use preflate_container::{
     compress_zstd, decompress_deflate_stream, decompress_zstd, expand_zlib_chunks,
     recompress_deflate_stream, recreated_zlib_chunks,
 };
-use preflate_error::ExitCode;
+pub use preflate_error::ExitCode;
 pub use preflate_error::{PreflateError, Result};
 
 use std::io::Write;
@@ -69,28 +69,28 @@ impl PreflateCompressionContext {
         writer: &mut impl Write,
         max_output_write: usize,
     ) -> Result<bool> {
+        if self.result.is_some() {
+            if input.len() > 0 {
+                return Err(PreflateError::new(
+                    ExitCode::InvalidParameter,
+                    "more data provided after input_complete signaled",
+                ));
+            }
+        }
+
         self.content.extend_from_slice(input);
 
         if input_complete {
-            if self.result.is_some() {
-                if input.len() > 0 {
-                    return Err(PreflateError::new(
-                        ExitCode::InvalidParameter,
-                        "more data provided after input_complete signaled",
-                    ));
-                }
-            } else {
-                if self.test_baseline {
-                    self.compression_stats.zstd_baseline_size +=
-                        zstd::bulk::compress(&self.content, 9)?.len() as u64;
-                }
-
-                self.result = Some(compress_zstd(
-                    &self.content,
-                    9,
-                    &mut self.compression_stats,
-                )?);
+            if self.test_baseline {
+                self.compression_stats.zstd_baseline_size +=
+                    zstd::bulk::compress(&self.content, 9)?.len() as u64;
             }
+
+            self.result = Some(compress_zstd(
+                &self.content,
+                9,
+                &mut self.compression_stats,
+            )?);
         }
 
         if let Some(result) = &mut self.result {
@@ -133,18 +133,19 @@ impl PreflateDecompressionContext {
         writer: &mut impl Write,
         max_output_write: usize,
     ) -> Result<bool> {
-        self.content.extend_from_slice(input);
-        if input_complete {
-            if self.result.is_some() {
-                if input.len() > 0 {
-                    return Err(PreflateError::new(
-                        ExitCode::InvalidParameter,
-                        "more data provided after input_complete signaled",
-                    ));
-                }
-            } else {
-                self.result = Some(decompress_zstd(&self.content, self.capacity)?);
+        if self.result.is_some() {
+            if input.len() > 0 {
+                return Err(PreflateError::new(
+                    ExitCode::InvalidParameter,
+                    "more data provided after input_complete signaled",
+                ));
             }
+        }
+
+        self.content.extend_from_slice(input);
+
+        if input_complete {
+            self.result = Some(decompress_zstd(&self.content, self.capacity)?);
         }
 
         if let Some(result) = &mut self.result {
