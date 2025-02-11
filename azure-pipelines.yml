@@ -112,7 +112,7 @@ steps:
   displayName: 'NuGet pack'
   inputs:
     command: pack
-    packagesToPack: package/PreflateRs.nuspec
+    packagesToPack: package/Preflate.Rust.nuspec
 
 - task: NuGetCommand@2
   displayName: 'NuGet push'
