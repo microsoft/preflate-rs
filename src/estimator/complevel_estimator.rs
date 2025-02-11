@@ -143,6 +143,13 @@ pub fn estimate_preflate_comp_level(
         .min_by(|&a, &b| a.max_chain_found().cmp(&b.max_chain_found()))
         .unwrap();
 
+    if candidate.max_chain_found() > 4096 {
+        return err_exit_code(
+            ExitCode::NoCompressionCandidates,
+            "no candidate found with reasonable chain length",
+        );
+    }
+
     let mut match_type = MatchingType::Greedy;
     let mut nice_length = 258;
 

@@ -2,6 +2,7 @@ use std::{
     io::Cursor,
     panic::{catch_unwind, AssertUnwindSafe},
     ptr::{null, null_mut},
+    result,
 };
 
 use crate::{
@@ -125,19 +126,15 @@ pub unsafe extern "C" fn compress_buffer(
         *result_size = writer.position().into();
         Ok(done)
     }) {
-        Ok(done) => {
-            if done {
-                0
-            } else {
-                -1
-            }
-        }
+        Ok(done) => done as i32,
         Err(e) => {
-            copy_cstring_utf8_to_buffer(
-                e.message(),
-                std::slice::from_raw_parts_mut(error_string, error_string_buffer_len as usize),
-            );
-            e.exit_code().as_integer_error_code()
+            if error_string != null_mut() {
+                copy_cstring_utf8_to_buffer(
+                    e.message(),
+                    std::slice::from_raw_parts_mut(error_string, error_string_buffer_len as usize),
+                );
+            }
+            -e.exit_code().as_integer_error_code()
         }
     }
 }
@@ -226,19 +223,13 @@ pub unsafe extern "C" fn decompress_buffer(
         *result_size = writer.position().into();
         Ok(done)
     }) {
-        Ok(done) => {
-            if done {
-                0
-            } else {
-                -1
-            }
-        }
+        Ok(done) => done as i32,
         Err(e) => {
             copy_cstring_utf8_to_buffer(
                 e.message(),
                 std::slice::from_raw_parts_mut(error_string, error_string_buffer_len as usize),
             );
-            e.exit_code().as_integer_error_code()
+            -e.exit_code().as_integer_error_code()
         }
     }
 }
@@ -270,7 +261,7 @@ fn extern_interface() {
                 std::ptr::null_mut(),
                 0,
             );
-            assert_eq!(retval, -1);
+            assert_eq!(retval, 0);
 
             compressed.extend_from_slice(&compressed_chunk[..(result_size as usize)]);
         });
@@ -289,10 +280,11 @@ fn extern_interface() {
                 std::ptr::null_mut(),
                 0,
             );
+            assert!(retval >= 0, "not expecting an error");
 
             compressed.extend_from_slice(&compressed_chunk[..(result_size as usize)]);
 
-            if retval == 0 {
+            if retval == 1 {
                 break;
             }
         }
@@ -341,7 +333,7 @@ fn extern_interface() {
                 std::ptr::null_mut(),
                 0,
             );
-            assert_eq!(retval, -1);
+            assert_eq!(retval, 0);
 
             original.extend_from_slice(&decompressed_chunk[..(result_size as usize)]);
         });
@@ -360,10 +352,11 @@ fn extern_interface() {
                 std::ptr::null_mut(),
                 0,
             );
+            assert!(retval >= 0, "not expecting an error");
 
             original.extend_from_slice(&decompressed_chunk[..(result_size as usize)]);
 
-            if retval == 0 {
+            if retval == 1 {
                 break;
             }
         }
@@ -373,4 +366,53 @@ fn extern_interface() {
 
     assert_eq!(input.len() as u64, original.len() as u64);
     assert_eq!(input[..], original[..]);
+}
+
+/// tests the error message translation
+#[test]
+fn test_error_translation() {
+    unsafe {
+        let compression_context = create_compression_context(1);
+
+        let chunk = vec![1, 2, 3];
+        let mut result_size: u64 = 0;
+        let mut error_string = [0u8; 100];
+
+        let retval = compress_buffer(
+            compression_context,
+            chunk.as_ptr(),
+            chunk.len() as u64,
+            true,
+            null_mut(),
+            0,
+            (&mut result_size) as *mut u64,
+            error_string.as_mut_ptr(),
+            error_string.len() as u64,
+        );
+
+        assert!(retval == 0, "expecting no error");
+
+        let retval = compress_buffer(
+            compression_context,
+            chunk.as_ptr(),
+            chunk.len() as u64,
+            false,
+            null_mut(),
+            0,
+            (&mut result_size) as *mut u64,
+            error_string.as_mut_ptr(),
+            error_string.len() as u64,
+        );
+
+        assert!(retval == -(ExitCode::InvalidParameter as i32));
+
+        let len = error_string.iter().position(|&x| x == 0).unwrap();
+
+        let error_string = std::ffi::CStr::from_bytes_with_nul(&error_string[0..len + 1]).unwrap();
+
+        assert_eq!(
+            error_string.to_str().unwrap(),
+            "more data provided after input_complete signaled"
+        );
+    }
 }

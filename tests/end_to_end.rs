@@ -11,7 +11,8 @@ use std::{mem, ptr};
 
 use libdeflate_sys::{libdeflate_alloc_compressor, libdeflate_deflate_compress};
 use preflate_rs::{
-    compress_zstd, decompress_deflate_stream, decompress_zstd, recompress_deflate_stream,
+    compress_zstd, decompress_deflate_stream, decompress_zstd, expand_zlib_chunks,
+    recompress_deflate_stream,
 };
 
 #[cfg(test)]
@@ -342,4 +343,154 @@ fn libngzsys_compress(input_data: &[u8], level: i32) -> Vec<u8> {
         assert_eq!(Z_OK, deflateEnd(&mut z_stream));
     }
     output
+}
+
+/// Tests the overhead of matching each of popular DEFLATE
+/// algorithms. The overhead is the size of the prediction
+/// corrections that are needed to encode the data.
+///
+/// If this test fails, it means that there was a change in the
+/// behavior of the prediction encoder/decoder, which should
+/// be checked to make sure there isn't a regression in the efficiency
+/// of the encoding.
+#[test]
+fn compression_benchmark_overhead_size() {
+    let original = read_file("sample1.bin");
+
+    fn zlib(v: &[u8], level: i32) -> Vec<u8> {
+        let output = libzsys_compress(v, level, Strategy::Default);
+
+        // remove header and trailer. Just testing pure deflate
+        output[2..output.len() - 4].to_vec()
+    }
+
+    fn libdeflate(v: &[u8], level: i32) -> Vec<u8> {
+        libdeflate_compress(v, level)
+    }
+
+    fn libngzsys(v: &[u8], level: i32) -> Vec<u8> {
+        let output = libngzsys_compress(v, level);
+
+        // remove header and trailer. Just testing pure deflate
+        output[2..output.len() - 4].to_vec()
+    }
+
+    fn miniz_oxide(v: &[u8], level: i32) -> Vec<u8> {
+        miniz_oxide::deflate::compress_to_vec(v, level as u8)
+    }
+
+    use preflate_rs::ExitCode;
+
+    struct BenchmarkResult {
+        name: &'static str,
+        compress_fn: fn(&[u8], i32) -> Vec<u8>,
+        overhead: [Result<usize, ExitCode>; 10],
+    }
+
+    // The expected overhead for each compression level.
+    // The lower compression levels are more important since
+    // they are better recompressed and give more bang-for-buck.
+    let bench = [
+        BenchmarkResult {
+            name: "libngzsys",
+            compress_fn: libngzsys,
+            overhead: [
+                Ok(32),
+                Ok(39),
+                Ok(25),
+                Ok(27),
+                Ok(4071),
+                Ok(4474),
+                Ok(3760),
+                Ok(49),
+                Ok(37),
+                Err(ExitCode::NoCompressionCandidates),
+            ],
+        },
+        BenchmarkResult {
+            name: "zlib",
+            compress_fn: zlib,
+            overhead: [
+                Ok(32),
+                Ok(30),
+                Ok(30),
+                Ok(30),
+                Ok(32),
+                Ok(32),
+                Ok(32),
+                Ok(329),
+                Ok(131),
+                Ok(30),
+            ],
+        },
+        BenchmarkResult {
+            name: "libdeflate",
+            compress_fn: libdeflate,
+            overhead: [
+                Ok(32),
+                Ok(1031),
+                Ok(4371),
+                Ok(3818),
+                Ok(6311),
+                Ok(4352),
+                Ok(4022),
+                Ok(3626),
+                Ok(4365),
+                Ok(4331),
+            ],
+        },
+        BenchmarkResult {
+            name: "miniz_oxide",
+            compress_fn: miniz_oxide,
+            overhead: [
+                Ok(50),
+                Ok(260),
+                Ok(11316),
+                Ok(7454),
+                Ok(2225),
+                Ok(1265),
+                Ok(360),
+                Ok(258),
+                Ok(338),
+                Ok(282),
+            ],
+        },
+    ];
+
+    for i in bench.iter() {
+        let mut result = Vec::new();
+
+        for level in 0..=9 {
+            let compressed = (i.compress_fn)(&original, level);
+
+            let r = decompress_deflate_stream(&compressed, true, 0);
+
+            match r {
+                Ok(r) => {
+                    result.push(Ok(r.prediction_corrections.len()));
+                }
+                Err(e) => {
+                    result.push(Err(e.exit_code()));
+                }
+            }
+        }
+
+        assert_eq!(
+            result, i.overhead,
+            "compression overhead mismatch for {}",
+            i.name
+        );
+    }
+
+    for i in bench.iter() {
+        print!("{}: [", i.name);
+
+        for i in i.overhead.iter() {
+            match i {
+                Ok(v) => print!("{:.2}%, ", (*v as f32) * 100.0 / (original.len() as f32)),
+                Err(e) => print!("{:?}, ", e),
+            }
+        }
+        println!("]");
+    }
 }

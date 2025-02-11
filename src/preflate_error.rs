@@ -69,9 +69,16 @@ struct PreflateErrorInternal {
 }
 
 /// Standard error returned by Preflate library
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct PreflateError {
     i: Box<PreflateErrorInternal>,
+}
+
+/// don't show internal indirrection in debug output
+impl std::fmt::Debug for PreflateError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.i.fmt(f)
+    }
 }
 
 pub type Result<T> = std::result::Result<T, PreflateError>;
