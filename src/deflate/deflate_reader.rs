@@ -44,6 +44,10 @@ impl<R: Read> DeflateReader<R> {
         std::mem::take(&mut self.plain_text)
     }
 
+    pub fn plain_text_size(&self) -> usize {
+        self.plain_text.len()
+    }
+
     fn read_bit(&mut self) -> Result<bool> {
         Ok(self.input.get(1)? != 0)
     }

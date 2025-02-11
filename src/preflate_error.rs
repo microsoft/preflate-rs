@@ -45,6 +45,9 @@ pub enum ExitCode {
 
     // panic in rust code
     AssertionFailure = 24,
+
+    /// plaintext is too big to process
+    PlaintextTooBig = 25,
 }
 
 impl Display for ExitCode {

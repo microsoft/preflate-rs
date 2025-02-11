@@ -74,6 +74,15 @@ pub fn parse_deflate(
     let mut blocks = Vec::new();
     let mut last = false;
     while !last {
+        // hardcoded limit for now. We are going to make this streaming later, so the limit is for safety for now
+        // so that we don't run out of memory while trying to decode a file.
+        if block_decoder.plain_text_size() > 1024 * 1024 * 256 {
+            return Err(PreflateError::new(
+                ExitCode::PlaintextTooBig,
+                "Deflate stream too large",
+            ));
+        }
+
         let block = block_decoder.read_block(&mut last)?;
 
         if deflate_info_dump_level > 0 {
