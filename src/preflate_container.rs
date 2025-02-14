@@ -1,6 +1,9 @@
 use byteorder::ReadBytesExt;
 use cabac::vp8::{VP8Reader, VP8Writer};
-use std::io::{Cursor, Read, Write};
+use std::{
+    collections::VecDeque,
+    io::{BufReader, Cursor, Read, Write},
+};
 
 use crate::{
     cabac_codec::{PredictionDecoderCabac, PredictionEncoderCabac},
@@ -643,7 +646,7 @@ pub struct CompressionStats {
 
 pub struct PreflateCompressionContext {
     content: Vec<u8>,
-    result: Option<Vec<u8>>,
+    result: Option<zstd::stream::write::Encoder<'static, VecDeque<u8>>>,
     result_pos: usize,
     compression_stats: CompressionStats,
 
@@ -654,6 +657,8 @@ pub struct PreflateCompressionContext {
     /// since Zstd does compress the data a bit, especially if there is a lot of non-Deflate streams
     /// in the file.
     test_baseline: Option<zstd::stream::write::Encoder<'static, MeasureWriteLength>>,
+
+    log_level: u32,
 }
 
 struct MeasureWriteLength {
@@ -680,6 +685,7 @@ impl PreflateCompressionContext {
             compression_stats: CompressionStats::default(),
             result: None,
             result_pos: 0,
+            log_level: 0,
             test_baseline: if test_baseline {
                 Some(
                     zstd::stream::write::Encoder::new(MeasureWriteLength { length: 0 }, ZSTD_LEVEL)
@@ -696,7 +702,7 @@ impl PreflateCompressionContext {
         input: &[u8],
         input_complete: bool,
         writer: &mut impl Write,
-        max_output_write: usize,
+        mut max_output_write: usize,
     ) -> Result<bool> {
         if self.result.is_some() {
             if input.len() > 0 {
@@ -713,26 +719,42 @@ impl PreflateCompressionContext {
             self.content.extend_from_slice(input);
         }
 
-        if input_complete {
+        if input_complete && self.result.is_none() {
             if let Some(encoder) = &mut self.test_baseline {
                 encoder.do_finish().context()?;
                 self.compression_stats.zstd_baseline_size = encoder.get_ref().length as u64;
                 self.test_baseline = None;
             }
 
-            self.result = Some(compress_zstd(
-                &self.content,
-                9,
-                &mut self.compression_stats,
-            )?);
+            let plain_text =
+                expand_zlib_chunks(&self.content, self.log_level, &mut self.compression_stats)?;
+
+            let mut comp =
+                zstd::stream::write::Encoder::new(VecDeque::new(), ZSTD_LEVEL).context()?;
+
+            comp.write_all(&plain_text).context()?;
+            comp.do_finish().context()?;
+
+            self.result = Some(comp);
         }
 
         if let Some(result) = &mut self.result {
-            let amount_to_write = std::cmp::min(max_output_write, result.len() - self.result_pos);
+            let w = result.get_mut();
+            let slices = w.as_mut_slices();
 
-            writer.write(&result[self.result_pos..self.result_pos + amount_to_write])?;
-            self.result_pos += amount_to_write;
-            Ok(self.result_pos == result.len())
+            let mut amount_written = 0;
+            let len = slices.0.len().min(max_output_write);
+            writer.write_all(&slices.0[..len])?;
+            amount_written += len;
+
+            if amount_written < max_output_write {
+                let len = slices.1.len().min(max_output_write - amount_written);
+                writer.write_all(&slices.1[..len])?;
+                amount_written += len;
+            }
+
+            w.drain(..amount_written);
+            Ok(w.len() == 0)
         } else {
             Ok(false)
         }
@@ -826,7 +848,7 @@ fn roundtrip_contexts() {
         pos += amount_to_write;
 
         let done = context
-            .process_buffer(input, pos == v.len(), &mut buffer, 1024)
+            .process_buffer(input, pos == v.len(), &mut buffer, 333)
             .unwrap();
         if done {
             break;
@@ -850,7 +872,7 @@ fn roundtrip_contexts() {
         pos += amount_to_write;
 
         let done = context
-            .process_buffer(input, pos == buffer.len(), &mut buffer2, 1024)
+            .process_buffer(input, pos == buffer.len(), &mut buffer2, 517)
             .unwrap();
         if done {
             break;
