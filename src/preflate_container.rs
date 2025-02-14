@@ -2,7 +2,7 @@ use byteorder::ReadBytesExt;
 use cabac::vp8::{VP8Reader, VP8Writer};
 use std::{
     collections::VecDeque,
-    io::{BufReader, Cursor, Read, Write},
+    io::{Cursor, Read, Write},
 };
 
 use crate::{
@@ -585,11 +585,10 @@ pub fn compress_zstd(
     loglevel: u32,
     compression_stats: &mut CompressionStats,
 ) -> Result<Vec<u8>> {
-    compression_stats.deflate_compressed_size += zlib_compressed_data.len() as u64;
-    let plain_text = expand_zlib_chunks(zlib_compressed_data, loglevel, compression_stats)?;
-    compression_stats.uncompressed_size += plain_text.len() as u64;
-    let r = zstd::bulk::compress(&plain_text, 9)?;
-    compression_stats.zstd_compressed_size += r.len() as u64;
+    let mut ctx = PreflateCompressionContext::new(false, loglevel, 9);
+    let r = ctx.process_vec(zlib_compressed_data)?;
+
+    *compression_stats = ctx.stats();
 
     Ok(r)
 }
@@ -597,11 +596,9 @@ pub fn compress_zstd(
 /// decompresses the Zstd compressed data and then recompresses the result back
 /// to the original Zlib compressed streams.
 pub fn decompress_zstd(compressed_data: &[u8], capacity: usize) -> Result<Vec<u8>> {
-    let compressed_data = zstd::bulk::decompress(compressed_data, capacity)?;
+    let mut ctx = PreflateDecompressionContext::new(capacity);
 
-    let mut result = Vec::new();
-    recreated_zlib_chunks(&mut Cursor::new(compressed_data), &mut result)?;
-    Ok(result)
+    Ok(ctx.process_vec(compressed_data)?)
 }
 
 #[test]
@@ -644,10 +641,28 @@ pub struct CompressionStats {
     pub zstd_baseline_size: u64,
 }
 
+pub trait ProcessBuffer {
+    fn process_buffer(
+        &mut self,
+        input: &[u8],
+        input_complete: bool,
+        writer: &mut impl Write,
+        max_output_write: usize,
+    ) -> Result<bool>;
+
+    fn process_vec(&mut self, input: &[u8]) -> Result<Vec<u8>> {
+        let mut writer = Vec::new();
+        let mut done = self.process_buffer(input, true, &mut writer, usize::MAX)?;
+        while !done {
+            done = self.process_buffer(&[], true, &mut writer, usize::MAX)?;
+        }
+        Ok(writer)
+    }
+}
+
 pub struct PreflateCompressionContext {
     content: Vec<u8>,
     result: Option<zstd::stream::write::Encoder<'static, VecDeque<u8>>>,
-    result_pos: usize,
     compression_stats: CompressionStats,
 
     /// if set, the encoder will write all the input to a null zstd encoder to see how much
@@ -656,16 +671,19 @@ pub struct PreflateCompressionContext {
     /// This gives a fairer comparison of the compression ratio of Preflate + Zstandard vs. Zstandard
     /// since Zstd does compress the data a bit, especially if there is a lot of non-Deflate streams
     /// in the file.
-    test_baseline: Option<zstd::stream::write::Encoder<'static, MeasureWriteLength>>,
+    test_baseline: Option<zstd::stream::write::Encoder<'static, MeasureWriteSink>>,
 
     log_level: u32,
+
+    compression_level: i32,
 }
 
-struct MeasureWriteLength {
+/// used to measure the length of the output without storing it anyway
+struct MeasureWriteSink {
     pub length: usize,
 }
 
-impl Write for MeasureWriteLength {
+impl Write for MeasureWriteSink {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         self.length += buf.len();
         Ok(buf.len())
@@ -676,20 +694,21 @@ impl Write for MeasureWriteLength {
     }
 }
 
-const ZSTD_LEVEL: i32 = 9;
-
 impl PreflateCompressionContext {
-    pub fn new(test_baseline: bool) -> Self {
+    pub fn new(test_baseline: bool, log_level: u32, compression_level: i32) -> Self {
         PreflateCompressionContext {
             content: Vec::new(),
             compression_stats: CompressionStats::default(),
             result: None,
-            result_pos: 0,
-            log_level: 0,
+            log_level,
+            compression_level,
             test_baseline: if test_baseline {
                 Some(
-                    zstd::stream::write::Encoder::new(MeasureWriteLength { length: 0 }, ZSTD_LEVEL)
-                        .unwrap(),
+                    zstd::stream::write::Encoder::new(
+                        MeasureWriteSink { length: 0 },
+                        compression_level,
+                    )
+                    .unwrap(),
                 )
             } else {
                 None
@@ -697,12 +716,18 @@ impl PreflateCompressionContext {
         }
     }
 
-    pub fn process_buffer(
+    pub fn stats(&self) -> CompressionStats {
+        self.compression_stats
+    }
+}
+
+impl ProcessBuffer for PreflateCompressionContext {
+    fn process_buffer(
         &mut self,
         input: &[u8],
         input_complete: bool,
         writer: &mut impl Write,
-        mut max_output_write: usize,
+        max_output_write: usize,
     ) -> Result<bool> {
         if self.result.is_some() {
             if input.len() > 0 {
@@ -730,7 +755,8 @@ impl PreflateCompressionContext {
                 expand_zlib_chunks(&self.content, self.log_level, &mut self.compression_stats)?;
 
             let mut comp =
-                zstd::stream::write::Encoder::new(VecDeque::new(), ZSTD_LEVEL).context()?;
+                zstd::stream::write::Encoder::new(VecDeque::new(), self.compression_level)
+                    .context()?;
 
             comp.write_all(&plain_text).context()?;
             comp.do_finish().context()?;
@@ -759,10 +785,6 @@ impl PreflateCompressionContext {
             Ok(false)
         }
     }
-
-    pub fn stats(&self) -> CompressionStats {
-        self.compression_stats
-    }
 }
 
 pub struct PreflateDecompressionContext {
@@ -781,8 +803,10 @@ impl PreflateDecompressionContext {
             capacity,
         }
     }
+}
 
-    pub fn process_buffer(
+impl ProcessBuffer for PreflateDecompressionContext {
+    fn process_buffer(
         &mut self,
         input: &[u8],
         input_complete: bool,
@@ -838,7 +862,7 @@ fn roundtrip_contexts() {
 
     let v = read_file("samplezip.zip");
 
-    let mut context = PreflateCompressionContext::new(true);
+    let mut context = PreflateCompressionContext::new(true, 1, 9);
 
     let mut buffer = Vec::new();
     let mut pos = 0;

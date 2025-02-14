@@ -5,8 +5,8 @@ use std::{
 };
 
 use crate::{
-    preflate_error::ExitCode, PreflateCompressionContext, PreflateDecompressionContext,
-    PreflateError,
+    preflate_container::ProcessBuffer, preflate_error::ExitCode, PreflateCompressionContext,
+    PreflateDecompressionContext, PreflateError,
 };
 
 /// Helper function to catch panics and convert them into the appropriate LeptonError
@@ -72,7 +72,10 @@ fn test_copy_cstring_utf8_to_buffer() {
 pub unsafe extern "C" fn create_compression_context(flags: u32) -> *mut std::ffi::c_void {
     match catch_unwind_result(|| {
         let test_baseline = (flags & 1) != 0;
-        let context = Box::new((12345678u32, PreflateCompressionContext::new(test_baseline)));
+        let context = Box::new((
+            12345678u32,
+            PreflateCompressionContext::new(test_baseline, 0, 9),
+        ));
         Ok(Box::into_raw(context) as *mut std::ffi::c_void)
     }) {
         Ok(context) => context,
