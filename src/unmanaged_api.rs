@@ -2,7 +2,6 @@ use std::{
     io::Cursor,
     panic::{catch_unwind, AssertUnwindSafe},
     ptr::{null, null_mut},
-    result,
 };
 
 use crate::{
@@ -71,16 +70,24 @@ fn test_copy_cstring_utf8_to_buffer() {
 
 #[no_mangle]
 pub unsafe extern "C" fn create_compression_context(flags: u32) -> *mut std::ffi::c_void {
-    let test_baseline = (flags & 1) != 0;
-    let context = Box::new((12345678u32, PreflateCompressionContext::new(test_baseline)));
-    Box::into_raw(context) as *mut std::ffi::c_void
+    match catch_unwind_result(|| {
+        let test_baseline = (flags & 1) != 0;
+        let context = Box::new((12345678u32, PreflateCompressionContext::new(test_baseline)));
+        Ok(Box::into_raw(context) as *mut std::ffi::c_void)
+    }) {
+        Ok(context) => context,
+        Err(e) => {
+            eprintln!("error creating compression context: {}", e.message());
+            null_mut()
+        }
+    }
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn free_compression_context(context: *mut std::ffi::c_void) {
     let x = Box::from_raw(context as *mut (u32, PreflateCompressionContext));
     assert_eq!(x.0, 12345678, "invalid context passed in");
-    // let Box destroy the object
+    // let Box destroy the object. If this asserts, we have some kind of memory corruption so better to just kill the process.
 }
 
 /// Compresses a file using the preflate algorithm.
@@ -153,12 +160,14 @@ pub unsafe extern "C" fn get_compression_stats(
     let (magic, context) = &*context;
     assert_eq!(*magic, 12345678, "invalid context passed in");
 
-    *deflate_compressed_size = context.compression_stats.deflate_compressed_size;
-    *zstd_compressed_size = context.compression_stats.zstd_compressed_size;
-    *zstd_baseline_size = context.compression_stats.zstd_baseline_size;
-    *uncompressed_size = context.compression_stats.uncompressed_size;
-    *overhead_bytes = context.compression_stats.overhead_bytes;
-    *hash_algorithm = context.compression_stats.hash_algorithm.to_u16() as u32;
+    let stats = context.stats();
+
+    *deflate_compressed_size = stats.deflate_compressed_size;
+    *zstd_compressed_size = stats.zstd_compressed_size;
+    *zstd_baseline_size = stats.zstd_baseline_size;
+    *uncompressed_size = stats.uncompressed_size;
+    *overhead_bytes = stats.overhead_bytes;
+    *hash_algorithm = stats.hash_algorithm.to_u16() as u32;
 }
 
 #[no_mangle]
@@ -166,11 +175,19 @@ pub unsafe extern "C" fn create_decompression_context(
     _flags: u32,
     capacity: u64,
 ) -> *mut std::ffi::c_void {
-    let context = Box::new((
-        87654321u32,
-        PreflateDecompressionContext::new(capacity as usize),
-    ));
-    Box::into_raw(context) as *mut std::ffi::c_void
+    match catch_unwind_result(|| {
+        let context = Box::new((
+            87654321u32,
+            PreflateDecompressionContext::new(capacity as usize),
+        ));
+        Ok(Box::into_raw(context) as *mut std::ffi::c_void)
+    }) {
+        Ok(context) => context,
+        Err(e) => {
+            eprintln!("error creating decompression context: {}", e.message());
+            null_mut()
+        }
+    }
 }
 
 #[no_mangle]

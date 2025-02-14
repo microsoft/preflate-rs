@@ -5,13 +5,13 @@ use std::io::{Cursor, Read, Write};
 use crate::{
     cabac_codec::{PredictionDecoderCabac, PredictionEncoderCabac},
     estimator::preflate_parameter_estimator::PreflateParameters,
+    hash_algorithm::HashAlgorithm,
     idat_parse::{recreate_idat, IdatContents},
-    preflate_error::{err_exit_code, AddContext, ExitCode, PreflateError},
+    preflate_error::{err_exit_code, AddContext, ExitCode, PreflateError, Result},
     preflate_input::PreflateInput,
     process::{decode_mispredictions, encode_mispredictions, parse_deflate, ReconstructionData},
     scan_deflate::{split_into_deflate_streams, BlockChunk},
     statistical_codec::PredictionEncoder,
-    CompressionStats,
 };
 
 const COMPRESSED_WRAPPER_VERSION_1: u8 = 1;
@@ -364,7 +364,7 @@ pub fn decompress_deflate_stream(
     compressed_data: &[u8],
     verify: bool,
     loglevel: u32,
-) -> Result<DecompressResult, PreflateError> {
+) -> Result<DecompressResult> {
     let mut cabac_encoded = Vec::new();
 
     let contents = parse_deflate(compressed_data, 0)?;
@@ -434,7 +434,7 @@ pub fn decompress_deflate_stream(
 pub fn recompress_deflate_stream(
     plain_text: &[u8],
     prediction_corrections: &[u8],
-) -> Result<Vec<u8>, PreflateError> {
+) -> Result<Vec<u8>> {
     let r = ReconstructionData::read(prediction_corrections)?;
 
     let mut cabac_decoder =
@@ -454,7 +454,7 @@ pub fn recompress_deflate_stream(
 pub fn decompress_deflate_stream_assert(
     compressed_data: &[u8],
     verify: bool,
-) -> Result<DecompressResult, PreflateError> {
+) -> Result<DecompressResult> {
     use cabac::debug::{DebugReader, DebugWriter};
 
     use crate::preflate_error::AddContext;
@@ -514,7 +514,7 @@ pub fn decompress_deflate_stream_assert(
 pub fn recompress_deflate_stream_assert(
     plain_text: &[u8],
     prediction_corrections: &[u8],
-) -> Result<Vec<u8>, PreflateError> {
+) -> Result<Vec<u8>> {
     use cabac::debug::DebugReader;
 
     let r = ReconstructionData::read(prediction_corrections)?;
@@ -581,7 +581,7 @@ pub fn compress_zstd(
     zlib_compressed_data: &[u8],
     loglevel: u32,
     compression_stats: &mut CompressionStats,
-) -> Result<Vec<u8>, PreflateError> {
+) -> Result<Vec<u8>> {
     compression_stats.deflate_compressed_size += zlib_compressed_data.len() as u64;
     let plain_text = expand_zlib_chunks(zlib_compressed_data, loglevel, compression_stats)?;
     compression_stats.uncompressed_size += plain_text.len() as u64;
@@ -593,7 +593,7 @@ pub fn compress_zstd(
 
 /// decompresses the Zstd compressed data and then recompresses the result back
 /// to the original Zlib compressed streams.
-pub fn decompress_zstd(compressed_data: &[u8], capacity: usize) -> Result<Vec<u8>, PreflateError> {
+pub fn decompress_zstd(compressed_data: &[u8], capacity: usize) -> Result<Vec<u8>> {
     let compressed_data = zstd::bulk::decompress(compressed_data, capacity)?;
 
     let mut result = Vec::new();
@@ -629,4 +629,233 @@ fn verify_roundtrip_assert() {
     let recompressed =
         recompress_deflate_stream_assert(&r.plain_text, &r.prediction_corrections).unwrap();
     assert!(v == recompressed);
+}
+
+#[derive(Debug, Copy, Clone, Default)]
+pub struct CompressionStats {
+    pub deflate_compressed_size: u64,
+    pub zstd_compressed_size: u64,
+    pub uncompressed_size: u64,
+    pub overhead_bytes: u64,
+    pub hash_algorithm: HashAlgorithm,
+    pub zstd_baseline_size: u64,
+}
+
+pub struct PreflateCompressionContext {
+    content: Vec<u8>,
+    result: Option<Vec<u8>>,
+    result_pos: usize,
+    compression_stats: CompressionStats,
+
+    /// if set, the encoder will write all the input to a null zstd encoder to see how much
+    /// compression we would get if we just used Zstandard without any Preflate processing.
+    ///
+    /// This gives a fairer comparison of the compression ratio of Preflate + Zstandard vs. Zstandard
+    /// since Zstd does compress the data a bit, especially if there is a lot of non-Deflate streams
+    /// in the file.
+    test_baseline: Option<zstd::stream::write::Encoder<'static, MeasureWriteLength>>,
+}
+
+struct MeasureWriteLength {
+    pub length: usize,
+}
+
+impl Write for MeasureWriteLength {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.length += buf.len();
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+const ZSTD_LEVEL: i32 = 9;
+
+impl PreflateCompressionContext {
+    pub fn new(test_baseline: bool) -> Self {
+        PreflateCompressionContext {
+            content: Vec::new(),
+            compression_stats: CompressionStats::default(),
+            result: None,
+            result_pos: 0,
+            test_baseline: if test_baseline {
+                Some(
+                    zstd::stream::write::Encoder::new(MeasureWriteLength { length: 0 }, ZSTD_LEVEL)
+                        .unwrap(),
+                )
+            } else {
+                None
+            },
+        }
+    }
+
+    pub fn process_buffer(
+        &mut self,
+        input: &[u8],
+        input_complete: bool,
+        writer: &mut impl Write,
+        max_output_write: usize,
+    ) -> Result<bool> {
+        if self.result.is_some() {
+            if input.len() > 0 {
+                return Err(PreflateError::new(
+                    ExitCode::InvalidParameter,
+                    "more data provided after input_complete signaled",
+                ));
+            }
+        } else {
+            if let Some(encoder) = &mut self.test_baseline {
+                encoder.write_all(input).context()?;
+            }
+
+            self.content.extend_from_slice(input);
+        }
+
+        if input_complete {
+            if let Some(encoder) = &mut self.test_baseline {
+                encoder.do_finish().context()?;
+                self.compression_stats.zstd_baseline_size = encoder.get_ref().length as u64;
+                self.test_baseline = None;
+            }
+
+            self.result = Some(compress_zstd(
+                &self.content,
+                9,
+                &mut self.compression_stats,
+            )?);
+        }
+
+        if let Some(result) = &mut self.result {
+            let amount_to_write = std::cmp::min(max_output_write, result.len() - self.result_pos);
+
+            writer.write(&result[self.result_pos..self.result_pos + amount_to_write])?;
+            self.result_pos += amount_to_write;
+            Ok(self.result_pos == result.len())
+        } else {
+            Ok(false)
+        }
+    }
+
+    pub fn stats(&self) -> CompressionStats {
+        self.compression_stats
+    }
+}
+
+pub struct PreflateDecompressionContext {
+    capacity: usize,
+    zstd_decompress: zstd::stream::write::Decoder<'static, Vec<u8>>,
+    result: Option<Vec<u8>>,
+    result_pos: usize,
+}
+
+impl PreflateDecompressionContext {
+    pub fn new(capacity: usize) -> Self {
+        PreflateDecompressionContext {
+            zstd_decompress: zstd::stream::write::Decoder::new(Vec::new()).unwrap(),
+            result: None,
+            result_pos: 0,
+            capacity,
+        }
+    }
+
+    pub fn process_buffer(
+        &mut self,
+        input: &[u8],
+        input_complete: bool,
+        writer: &mut impl Write,
+        max_output_write: usize,
+    ) -> Result<bool> {
+        if self.result.is_some() {
+            if input.len() > 0 {
+                return Err(PreflateError::new(
+                    ExitCode::InvalidParameter,
+                    "more data provided after input_complete signaled",
+                ));
+            }
+        } else {
+            self.zstd_decompress.write_all(input).context()?;
+
+            if self.zstd_decompress.get_ref().len() > self.capacity {
+                return Err(PreflateError::new(
+                    ExitCode::InvalidParameter,
+                    "input data exceeds capacity",
+                ));
+            }
+        }
+
+        if input_complete {
+            self.zstd_decompress.flush().context()?;
+
+            let mut result = Vec::new();
+            recreated_zlib_chunks(
+                &mut Cursor::new(&self.zstd_decompress.get_ref()),
+                &mut result,
+            )
+            .context()?;
+
+            self.result = Some(result);
+        }
+
+        if let Some(result) = &mut self.result {
+            let amount_to_write = std::cmp::min(max_output_write, result.len() - self.result_pos);
+
+            writer.write(&result[self.result_pos..self.result_pos + amount_to_write])?;
+            self.result_pos += amount_to_write;
+            Ok(self.result_pos == result.len())
+        } else {
+            Ok(false)
+        }
+    }
+}
+
+#[test]
+fn roundtrip_contexts() {
+    use crate::process::read_file;
+
+    let v = read_file("samplezip.zip");
+
+    let mut context = PreflateCompressionContext::new(true);
+
+    let mut buffer = Vec::new();
+    let mut pos = 0;
+    loop {
+        let amount_to_write = std::cmp::min(1024, v.len() - pos);
+        let input = &v[pos..pos + amount_to_write];
+        pos += amount_to_write;
+
+        let done = context
+            .process_buffer(input, pos == v.len(), &mut buffer, 1024)
+            .unwrap();
+        if done {
+            break;
+        }
+    }
+
+    let stats = context.stats();
+    println!("stats: {:?}", stats);
+    println!(
+        "zstd baseline size: {} -> comp {}",
+        stats.zstd_baseline_size,
+        buffer.len()
+    );
+
+    let mut context = PreflateDecompressionContext::new(256 * 1024 * 1024);
+    let mut buffer2 = Vec::new();
+    let mut pos = 0;
+    loop {
+        let amount_to_write = std::cmp::min(1024, buffer.len() - pos);
+        let input = &buffer[pos..pos + amount_to_write];
+        pos += amount_to_write;
+
+        let done = context
+            .process_buffer(input, pos == buffer.len(), &mut buffer2, 1024)
+            .unwrap();
+        if done {
+            break;
+        }
+    }
+
+    assert!(v == buffer2);
 }
