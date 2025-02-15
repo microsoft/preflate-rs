@@ -662,7 +662,7 @@ pub trait ProcessBuffer {
 
 pub struct PreflateCompressionContext {
     content: Vec<u8>,
-    result: Option<zstd::stream::write::Encoder<'static, VecDeque<u8>>>,
+    result: zstd::stream::write::Encoder<'static, VecDeque<u8>>,
     compression_stats: CompressionStats,
 
     /// if set, the encoder will write all the input to a null zstd encoder to see how much
@@ -676,6 +676,8 @@ pub struct PreflateCompressionContext {
     log_level: u32,
 
     compression_level: i32,
+
+    input_complete: bool,
 }
 
 /// used to measure the length of the output without storing it anyway
@@ -699,9 +701,10 @@ impl PreflateCompressionContext {
         PreflateCompressionContext {
             content: Vec::new(),
             compression_stats: CompressionStats::default(),
-            result: None,
+            result: zstd::stream::write::Encoder::new(VecDeque::new(), compression_level).unwrap(),
             log_level,
             compression_level,
+            input_complete: false,
             test_baseline: if test_baseline {
                 Some(
                     zstd::stream::write::Encoder::new(
@@ -729,14 +732,14 @@ impl ProcessBuffer for PreflateCompressionContext {
         writer: &mut impl Write,
         max_output_write: usize,
     ) -> Result<bool> {
-        if self.result.is_some() {
-            if input.len() > 0 {
-                return Err(PreflateError::new(
-                    ExitCode::InvalidParameter,
-                    "more data provided after input_complete signaled",
-                ));
-            }
-        } else {
+        if self.input_complete && (input.len() > 0 || !input_complete) {
+            return Err(PreflateError::new(
+                ExitCode::InvalidParameter,
+                "more data provided after input_complete signaled",
+            ));
+        }
+
+        if input.len() > 0 {
             if let Some(encoder) = &mut self.test_baseline {
                 encoder.write_all(input).context()?;
             }
@@ -744,7 +747,9 @@ impl ProcessBuffer for PreflateCompressionContext {
             self.content.extend_from_slice(input);
         }
 
-        if input_complete && self.result.is_none() {
+        if input_complete && !self.input_complete {
+            self.input_complete = true;
+
             if let Some(encoder) = &mut self.test_baseline {
                 encoder.do_finish().context()?;
                 self.compression_stats.zstd_baseline_size = encoder.get_ref().length as u64;
@@ -754,19 +759,14 @@ impl ProcessBuffer for PreflateCompressionContext {
             let plain_text =
                 expand_zlib_chunks(&self.content, self.log_level, &mut self.compression_stats)?;
 
-            let mut comp =
-                zstd::stream::write::Encoder::new(VecDeque::new(), self.compression_level)
-                    .context()?;
-
-            comp.write_all(&plain_text).context()?;
-            comp.do_finish().context()?;
-
-            self.result = Some(comp);
+            self.result.write_all(&plain_text).context()?;
+            self.result.do_finish().context()?;
         }
 
-        if let Some(result) = &mut self.result {
-            let w = result.get_mut();
-            let slices = w.as_mut_slices();
+        // write any output we have pending in the queue into the output buffer
+        let pending_output = self.result.get_mut();
+        if pending_output.len() > 0 {
+            let slices = pending_output.as_mut_slices();
 
             let mut amount_written = 0;
             let len = slices.0.len().min(max_output_write);
@@ -779,11 +779,9 @@ impl ProcessBuffer for PreflateCompressionContext {
                 amount_written += len;
             }
 
-            w.drain(..amount_written);
-            Ok(w.len() == 0)
-        } else {
-            Ok(false)
+            pending_output.drain(..amount_written);
         }
+        Ok(self.input_complete && pending_output.len() == 0)
     }
 }
 
@@ -792,6 +790,7 @@ pub struct PreflateDecompressionContext {
     zstd_decompress: zstd::stream::write::Decoder<'static, Vec<u8>>,
     result: Option<Vec<u8>>,
     result_pos: usize,
+    input_complete: bool,
 }
 
 impl PreflateDecompressionContext {
@@ -801,6 +800,7 @@ impl PreflateDecompressionContext {
             result: None,
             result_pos: 0,
             capacity,
+            input_complete: false,
         }
     }
 }
@@ -813,14 +813,14 @@ impl ProcessBuffer for PreflateDecompressionContext {
         writer: &mut impl Write,
         max_output_write: usize,
     ) -> Result<bool> {
-        if self.result.is_some() {
-            if input.len() > 0 {
-                return Err(PreflateError::new(
-                    ExitCode::InvalidParameter,
-                    "more data provided after input_complete signaled",
-                ));
-            }
-        } else {
+        if self.input_complete && (input.len() > 0 || !input_complete) {
+            return Err(PreflateError::new(
+                ExitCode::InvalidParameter,
+                "more data provided after input_complete signaled",
+            ));
+        }
+
+        if input.len() > 0 {
             self.zstd_decompress.write_all(input).context()?;
 
             if self.zstd_decompress.get_ref().len() > self.capacity {
@@ -832,6 +832,7 @@ impl ProcessBuffer for PreflateDecompressionContext {
         }
 
         if input_complete {
+            self.input_complete = true;
             self.zstd_decompress.flush().context()?;
 
             let mut result = Vec::new();
