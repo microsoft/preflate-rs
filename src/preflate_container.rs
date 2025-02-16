@@ -249,7 +249,8 @@ pub fn expand_zlib_chunks(
     compressed_data: &[u8],
     loglevel: u32,
     compression_stats: &mut CompressionStats,
-) -> std::result::Result<Vec<u8>, PreflateError> {
+    write: &mut impl Write,
+) -> Result<()> {
     let mut locations_found = Vec::new();
 
     split_into_deflate_streams(compressed_data, &mut locations_found, loglevel);
@@ -257,20 +258,14 @@ pub fn expand_zlib_chunks(
         println!("locations found: {:?}", locations_found);
     }
 
-    let mut plain_text = Vec::new();
-    plain_text.push(COMPRESSED_WRAPPER_VERSION_1); // version 1 of format. Definitely will improved.
+    write.write(&[COMPRESSED_WRAPPER_VERSION_1]); // version 1 of format. Definitely will improved.
 
     let mut index = 0;
     for loc in locations_found {
-        index += write_chunk_block(
-            loc,
-            &compressed_data[index..],
-            compression_stats,
-            &mut plain_text,
-        )?;
+        index += write_chunk_block(loc, &compressed_data[index..], compression_stats, write)?;
     }
 
-    Ok(plain_text)
+    Ok(())
 }
 
 /// takes a binary chunk of data that was created by expand_zlib_chunks and recompresses it back to its
@@ -301,7 +296,8 @@ fn roundtrip_deflate_chunks(filename: &str) {
     let f = crate::process::read_file(filename);
 
     let mut stats = CompressionStats::default();
-    let expanded = expand_zlib_chunks(&f, 1, &mut stats).unwrap();
+    let mut expanded = Vec::new();
+    expand_zlib_chunks(&f, 1, &mut stats, &mut expanded).unwrap();
 
     let mut read_cursor = std::io::Cursor::new(expanded);
 
@@ -539,7 +535,8 @@ fn verify_zip_compress() {
     let v = read_file("samplezip.zip");
 
     let mut stats = CompressionStats::default();
-    let expanded = expand_zlib_chunks(&v, 1, &mut stats).unwrap();
+    let mut expanded = Vec::new();
+    expand_zlib_chunks(&v, 1, &mut stats, &mut expanded).unwrap();
 
     let mut recompressed = Vec::new();
     recreated_zlib_chunks(&mut Cursor::new(expanded), &mut recompressed).unwrap();
@@ -756,10 +753,14 @@ impl ProcessBuffer for PreflateCompressionContext {
                 self.test_baseline = None;
             }
 
-            let plain_text =
-                expand_zlib_chunks(&self.content, self.log_level, &mut self.compression_stats)?;
+            expand_zlib_chunks(
+                &self.content,
+                self.log_level,
+                &mut self.compression_stats,
+                &mut self.result,
+            )
+            .context()?;
 
-            self.result.write_all(&plain_text).context()?;
             self.result.do_finish().context()?;
         }
 
