@@ -258,7 +258,7 @@ pub fn expand_zlib_chunks(
         println!("locations found: {:?}", locations_found);
     }
 
-    write.write(&[COMPRESSED_WRAPPER_VERSION_1]); // version 1 of format. Definitely will improved.
+    write.write_all(&[COMPRESSED_WRAPPER_VERSION_1])?; // version 1 of format. Definitely will improved.
 
     let mut index = 0;
     for loc in locations_found {
@@ -655,6 +655,33 @@ pub trait ProcessBuffer {
         }
         Ok(writer)
     }
+
+    /// reads everything from input and writes it to the output
+    fn copy_to_end(&mut self, input: &mut impl Read, output: &mut impl Write) -> Result<()> {
+        let mut buffer = [0; 65536];
+        let mut input_complete = false;
+        loop {
+            let amount_read;
+
+            if input_complete {
+                amount_read = 0;
+            } else {
+                amount_read = input.read(&mut buffer).context()?;
+                if amount_read == 0 {
+                    input_complete = true
+                }
+            };
+
+            let done = self
+                .process_buffer(&buffer[0..amount_read], input_complete, output, usize::MAX)
+                .context()?;
+            if done {
+                break;
+            }
+        }
+
+        Ok(())
+    }
 }
 
 pub struct PreflateCompressionContext {
@@ -781,6 +808,8 @@ impl ProcessBuffer for PreflateCompressionContext {
             }
 
             pending_output.drain(..amount_written);
+
+            self.compression_stats.zstd_compressed_size += amount_written as u64;
         }
         Ok(self.input_complete && pending_output.len() == 0)
     }
@@ -856,6 +885,26 @@ impl ProcessBuffer for PreflateDecompressionContext {
             Ok(false)
         }
     }
+}
+
+#[test]
+fn test_baseline_calc() {
+    use crate::process::read_file;
+
+    let v = read_file("samplezip.zip");
+
+    let mut context = PreflateCompressionContext::new(true, 0, 9);
+
+    let r = context.process_vec(&v).unwrap();
+
+    let stats = context.stats();
+
+    println!("stats: {:?}", stats);
+
+    // these change if the compression algorithm is altered, update them
+    assert!(stats.zstd_baseline_size == 13661);
+    assert!(stats.zstd_compressed_size == 12452);
+    assert!(stats.overhead_bytes == 466);
 }
 
 #[test]

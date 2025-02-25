@@ -109,7 +109,7 @@ pub fn split_into_deflate_streams(
             }
 
             Signature::ZipLocalFileHeader => {
-                if let Ok((header_size, res)) = parse_zip_stream(&src[index..]) {
+                if let Ok((header_size, res)) = parse_zip_stream(&src[index..], loglevel) {
                     if res.plain_text.len() > MIN_BLOCKSIZE {
                         locations_found.push(BlockChunk::Literal(index - prev_index + header_size));
 
@@ -295,7 +295,7 @@ impl ZipLocalFileHeader {
 }
 
 /// parses the zip stream and returns the size of the header, followed by the decompressed contents
-fn parse_zip_stream(contents: &[u8]) -> Result<(usize, DecompressResult)> {
+fn parse_zip_stream(contents: &[u8], loglevel: u32) -> Result<(usize, DecompressResult)> {
     let mut binary_reader = Cursor::new(&contents);
 
     // read the signature
@@ -319,7 +319,9 @@ fn parse_zip_stream(contents: &[u8]) -> Result<(usize, DecompressResult)> {
     if zip_local_file_header.compression_method == 8 {
         let deflate_start_position = binary_reader.stream_position()? as usize;
 
-        if let Ok(res) = decompress_deflate_stream(&contents[deflate_start_position..], true, 1) {
+        if let Ok(res) =
+            decompress_deflate_stream(&contents[deflate_start_position..], true, loglevel)
+        {
             return Ok((deflate_start_position, res));
         }
     }

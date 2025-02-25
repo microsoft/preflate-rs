@@ -31,4 +31,6 @@ pub use preflate_error::ExitCode;
 pub use preflate_error::{PreflateError, Result};
 
 pub use preflate_container::CompressionStats;
-pub use preflate_container::{PreflateCompressionContext, PreflateDecompressionContext};
+pub use preflate_container::{
+    PreflateCompressionContext, PreflateDecompressionContext, ProcessBuffer,
+};

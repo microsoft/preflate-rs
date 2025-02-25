@@ -42,6 +42,9 @@ pub fn predict_tree_for_block<D: PredictionEncoder>(
         bit_lengths.len() as u32,
     );
 
+    // resize to the actual size
+    bit_lengths.resize(huffman_encoding.num_literals, 0);
+
     // now predict the size of the distance tree
     let mut distance_code_lengths = calc_bit_lengths(huffcalc, &freq.distance_codes, 15);
     //assert_eq!(distance_code_lengths[..], bo[..]);
@@ -51,6 +54,9 @@ pub fn predict_tree_for_block<D: PredictionEncoder>(
         huffman_encoding.num_dist as u32,
         distance_code_lengths.len() as u32,
     );
+
+    // resize to the actual size
+    distance_code_lengths.resize(huffman_encoding.num_dist, 0);
 
     bit_lengths.append(&mut distance_code_lengths);
 
