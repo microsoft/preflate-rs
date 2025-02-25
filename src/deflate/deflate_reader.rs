@@ -9,7 +9,7 @@ use crate::{
     preflate_error::{err_exit_code, AddContext, ExitCode, Result},
 };
 
-use std::io::Read;
+use std::io::{Cursor, Read};
 
 use super::{deflate_constants, deflate_token::DeflateTokenBlock};
 
@@ -190,4 +190,61 @@ impl<R: Read> DeflateReader<R> {
             }
         }
     }
+}
+
+/// represents the complete deflate stream
+pub struct DeflateContents {
+    pub compressed_size: usize,
+    pub plain_text: Vec<u8>,
+    pub blocks: Vec<DeflateTokenBlock>,
+    pub eof_padding: u8,
+}
+
+pub fn parse_deflate(
+    compressed_data: &[u8],
+    deflate_info_dump_level: u32,
+) -> Result<DeflateContents> {
+    let mut input_stream = Cursor::new(compressed_data);
+    let mut block_decoder = DeflateReader::new(&mut input_stream);
+    let mut blocks = Vec::new();
+    let mut last = false;
+    while !last {
+        let block = block_decoder.read_block(&mut last)?;
+
+        if deflate_info_dump_level > 0 {
+            // Log information about this deflate compressed block
+            match &block {
+                DeflateTokenBlock::Stored {
+                    uncompressed,
+                    padding_bits,
+                } => {
+                    println!(
+                        "Block: stored, uncompressed={} padding_bits={}",
+                        uncompressed.len(),
+                        padding_bits
+                    );
+                }
+                DeflateTokenBlock::Huffman { tokens, .. } => {
+                    println!("Block: tokens={}", tokens.len());
+                }
+            }
+        }
+
+        blocks.push(block);
+    }
+    let eof_padding = block_decoder.read_eof_padding();
+    let plain_text = block_decoder.move_plain_text();
+    let compressed_size = input_stream.position() as usize;
+
+    /*// write to file
+     let mut f = std::fs::File::create("c:\\temp\\treegdi.deflate")
+    .unwrap();
+    std::io::Write::write_all(&mut f, &compressed_data[0..compressed_size]).unwrap();*/
+
+    Ok(DeflateContents {
+        compressed_size,
+        plain_text,
+        blocks,
+        eof_padding,
+    })
 }

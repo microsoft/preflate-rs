@@ -6,11 +6,9 @@
 
 use bitcode::{Decode, Encode};
 
-use std::io::Cursor;
-
 use crate::{
     deflate::{
-        deflate_reader::DeflateReader, deflate_token::DeflateTokenBlock,
+        deflate_reader::DeflateContents, deflate_token::DeflateTokenBlock,
         deflate_writer::DeflateWriter,
     },
     estimator::preflate_parameter_estimator::PreflateParameters,
@@ -56,62 +54,6 @@ pub fn encode_mispredictions(
     encoder.encode_correction(CodecCorrection::NonZeroPadding, deflate.eof_padding.into());
 
     Ok(())
-}
-
-pub struct DeflateContents {
-    pub compressed_size: usize,
-    pub plain_text: Vec<u8>,
-    pub blocks: Vec<DeflateTokenBlock>,
-    pub eof_padding: u8,
-}
-
-pub fn parse_deflate(
-    compressed_data: &[u8],
-    deflate_info_dump_level: u32,
-) -> Result<DeflateContents, PreflateError> {
-    let mut input_stream = Cursor::new(compressed_data);
-    let mut block_decoder = DeflateReader::new(&mut input_stream);
-    let mut blocks = Vec::new();
-    let mut last = false;
-    while !last {
-        let block = block_decoder.read_block(&mut last)?;
-
-        if deflate_info_dump_level > 0 {
-            // Log information about this deflate compressed block
-            match &block {
-                DeflateTokenBlock::Stored {
-                    uncompressed,
-                    padding_bits,
-                } => {
-                    println!(
-                        "Block: stored, uncompressed={} padding_bits={}",
-                        uncompressed.len(),
-                        padding_bits
-                    );
-                }
-                DeflateTokenBlock::Huffman { tokens, .. } => {
-                    println!("Block: tokens={}", tokens.len());
-                }
-            }
-        }
-
-        blocks.push(block);
-    }
-    let eof_padding = block_decoder.read_eof_padding();
-    let plain_text = block_decoder.move_plain_text();
-    let compressed_size = input_stream.position() as usize;
-
-    /*// write to file
-     let mut f = std::fs::File::create("c:\\temp\\treegdi.deflate")
-    .unwrap();
-    std::io::Write::write_all(&mut f, &compressed_data[0..compressed_size]).unwrap();*/
-
-    Ok(DeflateContents {
-        compressed_size,
-        plain_text,
-        blocks,
-        eof_padding,
-    })
 }
 
 fn predict_blocks(
@@ -203,7 +145,11 @@ fn analyze_compressed_data_fast(
     header_crc32: Option<u32>,
     uncompressed_size: &mut u64,
 ) {
-    use crate::cabac_codec::{PredictionDecoderCabac, PredictionEncoderCabac};
+    use crate::{
+        cabac_codec::{PredictionDecoderCabac, PredictionEncoderCabac},
+        deflate::deflate_reader::parse_deflate,
+    };
+    use std::io::Cursor;
 
     use cabac::vp8::{VP8Reader, VP8Writer};
 
@@ -213,9 +159,7 @@ fn analyze_compressed_data_fast(
 
     let contents = parse_deflate(compressed_data, 1).unwrap();
 
-    let params =
-        PreflateParameters::estimate_preflate_parameters(&contents.plain_text, &contents.blocks)
-            .unwrap();
+    let params = PreflateParameters::estimate_preflate_parameters(&contents).unwrap();
 
     println!("params: {:?}", params);
 
@@ -258,9 +202,11 @@ fn analyze_compressed_data_verify(
 ) {
     use crate::{
         cabac_codec::{PredictionDecoderCabac, PredictionEncoderCabac},
+        deflate::deflate_reader::parse_deflate,
         statistical_codec::{VerifyPredictionDecoder, VerifyPredictionEncoder},
     };
     use cabac::debug::{DebugReader, DebugWriter};
+    use std::io::Cursor;
 
     fn compare<T: PartialEq + std::fmt::Debug>(a: &[T], b: &[T], str: &str) {
         if a.len() != b.len() {
@@ -283,9 +229,7 @@ fn analyze_compressed_data_verify(
 
     let contents = parse_deflate(compressed_data, 1).unwrap();
 
-    let params =
-        PreflateParameters::estimate_preflate_parameters(&contents.plain_text, &contents.blocks)
-            .unwrap();
+    let params = PreflateParameters::estimate_preflate_parameters(&contents).unwrap();
 
     println!("params: {:?}", params);
 
@@ -385,6 +329,8 @@ fn do_analyze(crc: Option<u32>, compressed_data: &[u8], verify: bool) {
 /// Future work: figure out why level 7 and above are not perfect
 #[test]
 fn verify_zlib_perfect_compression() {
+    use crate::deflate::deflate_reader::parse_deflate;
+
     for i in 1..6 {
         println!("iteration {}", i);
         let compressed_data: &[u8] =
@@ -394,11 +340,7 @@ fn verify_zlib_perfect_compression() {
 
         let contents = parse_deflate(compressed_data, 1).unwrap();
 
-        let params = PreflateParameters::estimate_preflate_parameters(
-            &contents.plain_text,
-            &contents.blocks,
-        )
-        .unwrap();
+        let params = PreflateParameters::estimate_preflate_parameters(&contents).unwrap();
 
         println!("params: {:?}", params);
 

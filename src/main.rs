@@ -4,9 +4,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use preflate_rs::{
-    compress_zstd, decompress_zstd, CompressionStats, PreflateCompressionContext, ProcessBuffer,
-};
+use preflate_rs::{decompress_zstd, PreflateCompressionContext, ProcessBuffer};
 
 fn enumerate_directory_recursively(path: &Path) -> Result<Vec<PathBuf>, std::io::Error> {
     let mut results = Vec::new();

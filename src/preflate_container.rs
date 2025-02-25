@@ -7,12 +7,13 @@ use std::{
 
 use crate::{
     cabac_codec::{PredictionDecoderCabac, PredictionEncoderCabac},
+    deflate::deflate_reader::parse_deflate,
     estimator::preflate_parameter_estimator::PreflateParameters,
     hash_algorithm::HashAlgorithm,
     idat_parse::{recreate_idat, IdatContents},
     preflate_error::{err_exit_code, AddContext, ExitCode, PreflateError, Result},
     preflate_input::PreflateInput,
-    process::{decode_mispredictions, encode_mispredictions, parse_deflate, ReconstructionData},
+    process::{decode_mispredictions, encode_mispredictions, ReconstructionData},
     scan_deflate::{split_into_deflate_streams, BlockChunk},
     statistical_codec::PredictionEncoder,
 };
@@ -371,9 +372,7 @@ pub fn decompress_deflate_stream(
     //process::write_file("c:\\temp\\lastop.deflate", compressed_data);
     //process::write_file("c:\\temp\\lastop.bin", contents.plain_text.as_slice());
 
-    let params =
-        PreflateParameters::estimate_preflate_parameters(&contents.plain_text, &contents.blocks)
-            .context()?;
+    let params = PreflateParameters::estimate_preflate_parameters(&contents).context()?;
 
     if loglevel > 0 {
         println!("params: {:?}", params);
@@ -465,9 +464,7 @@ pub fn decompress_deflate_stream_assert(
 
     let contents = parse_deflate(compressed_data, 0)?;
 
-    let params =
-        PreflateParameters::estimate_preflate_parameters(&contents.plain_text, &contents.blocks)
-            .context()?;
+    let params = PreflateParameters::estimate_preflate_parameters(&contents).context()?;
 
     encode_mispredictions(&contents, &params, &mut cabac_encoder)?;
     assert_eq!(contents.compressed_size, compressed_data.len());
@@ -895,7 +892,7 @@ fn test_baseline_calc() {
 
     let mut context = PreflateCompressionContext::new(true, 0, 9);
 
-    let r = context.process_vec(&v).unwrap();
+    let _r = context.process_vec(&v).unwrap();
 
     let stats = context.stats();
 
