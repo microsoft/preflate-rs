@@ -332,6 +332,7 @@ impl HuffmanWriter {
         }
     }
 
+    #[inline(always)]
     pub fn write_literal(&self, bitwriter: &mut BitWriter, output_buffer: &mut Vec<u8>, lit: u16) {
         let code = self.lit_huffman_codes[lit as usize];
         let c_bits = self.lit_code_lengths[lit as usize];
@@ -339,6 +340,7 @@ impl HuffmanWriter {
         bitwriter.write(code.into(), c_bits.into(), output_buffer);
     }
 
+    #[inline(always)]
     pub fn write_distance(
         &self,
         bitwriter: &mut BitWriter,

@@ -7,7 +7,7 @@
 /// Used to write a variable number of bits to a byte buffer.
 #[derive(Default)]
 pub struct BitWriter {
-    pub bit_buffer: u32,
+    pub bit_buffer: u64,
     pub bits_in: u32,
 }
 
@@ -16,10 +16,12 @@ impl BitWriter {
     #[inline(always)]
     pub fn write(&mut self, bits: u32, len: u32, data_buffer: &mut Vec<u8>) {
         assert!(bits <= ((1u32 << len) - 1u32));
-        self.bit_buffer |= bits << self.bits_in;
+        self.bit_buffer |= u64::from(bits) << self.bits_in;
         self.bits_in += len;
 
-        self.flush_whole_bytes(data_buffer);
+        if self.bits_in > 32 {
+            self.flush_whole_bytes(data_buffer);
+        }
     }
 
     pub fn pad(&mut self, fillbit: u8, data_buffer: &mut Vec<u8>) {
@@ -28,8 +30,11 @@ impl BitWriter {
             self.write(if (fillbit & offset) != 0 { 1 } else { 0 }, 1, data_buffer);
             offset <<= 1;
         }
+
+        self.flush_whole_bytes(data_buffer);
     }
 
+    #[cold]
     pub fn flush_whole_bytes(&mut self, data_buffer: &mut Vec<u8>) {
         while self.bits_in >= 8 {
             data_buffer.push(self.bit_buffer as u8);
@@ -55,6 +60,8 @@ fn write_simple() {
     b.write(0x9f, 8, &mut data_buffer);
     b.write(0xfe, 8, &mut data_buffer);
     b.write(0xe, 4, &mut data_buffer);
+
+    b.flush_whole_bytes(&mut data_buffer);
 
     assert_eq!(data_buffer[..], [0x21, 0x43, 0x64, 0x85, 0xf7, 0xe9, 0xef]);
 }

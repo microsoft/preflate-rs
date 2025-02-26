@@ -57,10 +57,25 @@ impl<R: Read> DeflateReader<R> {
     }
 
     fn write_reference(&mut self, dist: u32, len: u32) {
-        let start = self.plain_text.len() - dist as usize;
-        for i in 0..len {
-            let byte = self.plain_text[start + i as usize];
-            self.plain_text.push(byte);
+        if dist == 1 {
+            let byte = self.plain_text[self.plain_text.len() - 1];
+            self.plain_text
+                .resize(self.plain_text.len() + len as usize, byte);
+        } else if dist >= len {
+            self.plain_text.extend_from_within(
+                self.plain_text.len() - dist as usize
+                    ..self.plain_text.len() - dist as usize + len as usize,
+            );
+        } else {
+            let start = self.plain_text.len() - dist as usize;
+
+            self.plain_text.reserve(len as usize);
+            assert!(start + len as usize <= self.plain_text.capacity());
+
+            for i in 0..len {
+                let byte = self.plain_text[start + i as usize];
+                self.plain_text.push(byte);
+            }
         }
     }
 
