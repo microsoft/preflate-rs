@@ -189,7 +189,7 @@ impl<H: HashImplementation> HashChainHolder for HashChainHolderImpl<H> {
 
         let cur_max_dist = std::cmp::min(input.pos(), self.window_bytes);
 
-        for dist in self.hash.iterate(input, 0) {
+        for dist in self.hash.iterate::<0>(input) {
             if dist > cur_max_dist {
                 break;
             }
@@ -231,7 +231,7 @@ impl<H: HashImplementation> HashChainHolder for HashChainHolderImpl<H> {
         let cur_max_dist = std::cmp::min(input.pos(), self.window_bytes);
         let mut current_hop = 0;
 
-        for dist in self.hash.iterate(input, 0) {
+        for dist in self.hash.iterate::<0>(input) {
             if dist > cur_max_dist {
                 break;
             }
@@ -331,7 +331,7 @@ impl<H: HashImplementation> HashChainHolderImpl<H> {
         let mut best_match: Option<DeflateTokenReference> = None;
         let mut first = true;
 
-        for dist in self.hash.iterate(input, OFFSET) {
+        for dist in self.hash.iterate::<OFFSET>(input) {
             // first entry gets a special treatment to make sure it doesn't exceed
             // the limits we calculated for the first hop
             if first {

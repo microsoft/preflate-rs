@@ -91,11 +91,11 @@ impl HashTable {
 
         for i in 0..length {
             {
-                let h = hash.get_hash(&chars[i as usize..]);
+                let h = usize::from(hash.get_hash(&chars[i as usize..]));
 
-                self.prev[pos.to_index()] = self.head[usize::from(h)];
+                self.prev[pos.to_index()] = self.head[h];
 
-                self.head[usize::from(h)] = pos;
+                self.head[h] = pos;
             }
 
             pos = pos.inc();
@@ -125,7 +125,10 @@ impl HashTable {
 }
 
 pub trait HashChain {
-    fn iterate<'a>(&'a self, input: &PreflateInput, offset: u32) -> impl Iterator<Item = u32> + 'a;
+    fn iterate<'a, const OFFSET: u32>(
+        &'a self,
+        input: &PreflateInput,
+    ) -> impl Iterator<Item = u32> + 'a;
 
     fn update_hash(&mut self, input: &[u8], pos: u32, length: u32);
 
@@ -162,8 +165,12 @@ impl<H: HashImplementation> HashChainNormalize<H> {
 
 impl<H: HashImplementation> HashChain for HashChainNormalize<H> {
     #[inline]
-    fn iterate<'a>(&'a self, input: &PreflateInput, offset: u32) -> impl Iterator<Item = u32> + 'a {
-        let ref_pos = InternalPosition::from_absolute(input.pos() + offset, self.total_shift);
+    fn iterate<'a, const OFFSET: u32>(
+        &'a self,
+        input: &PreflateInput,
+    ) -> impl Iterator<Item = u32> + 'a {
+        let ref_pos: InternalPosition =
+            InternalPosition::from_absolute(input.pos() + OFFSET, self.total_shift);
 
         // if we have a match that needs to be inserted at the head first before
         // we start walking the chain
@@ -173,10 +180,10 @@ impl<H: HashImplementation> HashChain for HashChainNormalize<H> {
 
         let curr_hash;
 
-        if offset == 0 {
+        if OFFSET == 0 {
             curr_hash = h1;
         } else {
-            assert_eq!(offset, 1);
+            assert_eq!(OFFSET, 1);
 
             // current hash is the next hash since we are starting at offset 1
             curr_hash = self.hash.get_hash(input.cur_chars(1));
@@ -258,8 +265,11 @@ const LIBFLATE_HASH_3: LibdeflateHash3Secondary = LibdeflateHash3Secondary {};
 const LIBFLATE_HASH_4: LibdeflateHash4 = LibdeflateHash4 {};
 
 impl HashChain for HashChainNormalizeLibflate4 {
-    fn iterate<'a>(&'a self, input: &PreflateInput, offset: u32) -> impl Iterator<Item = u32> + 'a {
-        let ref_pos = InternalPosition::from_absolute(input.pos() + offset, self.total_shift);
+    fn iterate<'a, const OFFSET: u32>(
+        &'a self,
+        input: &PreflateInput,
+    ) -> impl Iterator<Item = u32> + 'a {
+        let ref_pos = InternalPosition::from_absolute(input.pos() + OFFSET, self.total_shift);
 
         // if we have a match that needs to be inserted at the head first before
         // we start walking the chain
@@ -267,7 +277,7 @@ impl HashChain for HashChainNormalizeLibflate4 {
 
         let mut cur_pos;
 
-        if offset == 0 {
+        if OFFSET == 0 {
             // for libflate, we look once at the 3 length hash table for a match
             // and then walk the length 4 hash table
             let curr_hash = LIBFLATE_HASH_3.get_hash(input.cur_chars(0));
@@ -280,7 +290,7 @@ impl HashChain for HashChainNormalizeLibflate4 {
             let curr_hash = LIBFLATE_HASH_4.get_hash(input.cur_chars(0));
             cur_pos = self.hash_table.get_head(curr_hash);
         } else {
-            assert_eq!(offset, 1);
+            assert_eq!(OFFSET, 1);
 
             // current hash is the next hash since we are starting at offset 1
             let curr_hash = LIBFLATE_HASH_4.get_hash(input.cur_chars(1));

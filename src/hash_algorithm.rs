@@ -117,6 +117,8 @@ impl HashImplementation for ZlibRotatingHash {
     const NUM_HASH_BYTES: usize = 3;
 
     fn get_hash(&self, b: &[u8]) -> u16 {
+        assert!(b.len() >= 3);
+
         let c = u16::from(b[0]);
         let c = (c << self.hash_shift) ^ u16::from(b[1]);
         let c = (c << self.hash_shift) ^ u16::from(b[2]);
@@ -146,6 +148,8 @@ impl HashImplementation for MiniZHash {
     const NUM_HASH_BYTES: usize = 3;
 
     fn get_hash(&self, b: &[u8]) -> u16 {
+        assert!(b.len() >= 3);
+
         let hash = u32::from(b[0]) | (u32::from(b[1]) << 8) | (u32::from(b[2]) << 16);
 
         ((hash ^ (hash >> 17)) & u32::from(MINIZ_LEVEL1_HASH_SIZE_MASK)) as u16
@@ -217,6 +221,8 @@ impl HashImplementation for LibdeflateHash3Secondary {
     const NUM_HASH_BYTES: usize = 3;
 
     fn get_hash(&self, b: &[u8]) -> u16 {
+        assert!(b.len() >= 3);
+
         let hash = u32::from(b[0]) | (u32::from(b[1]) << 8) | (u32::from(b[2]) << 16);
 
         (hash.wrapping_mul(0x1E35A7BD) >> 17) as u16
@@ -391,6 +397,8 @@ impl HashImplementation for RandomVectorHash {
     type HashChainType = HashChainNormalize<RandomVectorHash>;
 
     fn get_hash(&self, b: &[u8]) -> u16 {
+        assert!(b.len() >= 3);
+
         RANDOM_VECTOR[b[0] as usize]
             ^ RANDOM_VECTOR[b[1] as usize + 256]
             ^ RANDOM_VECTOR[b[2] as usize + 512]

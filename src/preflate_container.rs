@@ -899,9 +899,9 @@ fn test_baseline_calc() {
     println!("stats: {:?}", stats);
 
     // these change if the compression algorithm is altered, update them
-    assert!(stats.zstd_baseline_size == 13661);
-    assert!(stats.zstd_compressed_size == 12452);
-    assert!(stats.overhead_bytes == 466);
+    assert_eq!(stats.zstd_baseline_size, 13661);
+    assert_eq!(stats.overhead_bytes, 466);
+    assert_eq!(stats.zstd_compressed_size, 12452);
 }
 
 #[test]

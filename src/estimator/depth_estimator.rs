@@ -49,7 +49,7 @@ impl HashTableDepthEstimator for MinizDepthEstimator {
 
                 for i in 0..length {
                     let length3hash = MiniZHash::default().get_hash(&chars[i as usize..]);
-                    self.positions[usize::from(length3hash)] = pos + i;
+                    self.positions[length3hash as usize] = pos + i;
                 }
             },
         );
@@ -57,7 +57,7 @@ impl HashTableDepthEstimator for MinizDepthEstimator {
 
     fn match_depth(&mut self, token: DeflateTokenReference, input: &PreflateInput) -> bool {
         let length3hash = MiniZHash::default().get_hash(input.cur_chars(0));
-        let dictpos = self.positions[usize::from(length3hash)];
+        let dictpos = self.positions[length3hash as usize];
         let distance3 = input.pos() - dictpos;
 
         if distance3 == token.dist() {
@@ -158,10 +158,10 @@ impl<H: HashImplementation> HashTableDepthEstimatorImpl<H> {
             let h = self.hash.get_hash(&chars[i as usize..]);
 
             self.chain_depth[usize::from(pos)] =
-                self.chain_depth[self.head[usize::from(h)] as usize] + 1;
-            self.chain_depth_hash_verify[usize::from(pos)] = h;
+                self.chain_depth[self.head[h as usize] as usize] + 1;
+            self.chain_depth_hash_verify[usize::from(pos)] = h as u16;
 
-            self.head[usize::from(h)] = pos;
+            self.head[h as usize] = pos;
 
             pos = pos.wrapping_add(1);
         }
@@ -171,12 +171,12 @@ impl<H: HashImplementation> HashTableDepthEstimatorImpl<H> {
         let match_pos = (input.pos() - token.dist()) as u16;
 
         let h = self.hash.get_hash(input.cur_chars(0));
-        let head = self.head[usize::from(h)];
+        let head = self.head[h as usize];
 
         // since we already calculated the dictionary add policy, we should
         // always be on the same chain as the the head
-        let cur_depth = self.get_node_depth(head, h);
-        let match_depth = self.get_node_depth(match_pos, h);
+        let cur_depth = self.get_node_depth(head, h as u16);
+        let match_depth = self.get_node_depth(match_pos, h as u16);
 
         debug_assert!(
             cur_depth >= match_depth,
@@ -255,7 +255,7 @@ impl HashTableDepthEstimatorLibdeflate {
         for i in 0..length {
             let h = LIB_DEFLATE3_HASH.get_hash(&chars[i as usize..]);
 
-            self.head3[usize::from(h)] = pos + i;
+            self.head3[h as usize] = pos + i;
         }
     }
 }
@@ -278,7 +278,7 @@ impl HashTableDepthEstimator for HashTableDepthEstimatorLibdeflate {
     /// match node.
     fn match_depth(&mut self, token: DeflateTokenReference, input: &PreflateInput) -> bool {
         let length3hash = LIB_DEFLATE3_HASH.get_hash(input.cur_chars(0));
-        let distance3 = input.pos() - self.head3[usize::from(length3hash)];
+        let distance3 = input.pos() - self.head3[length3hash as usize];
 
         let mdepth = if distance3 == token.dist() {
             1
