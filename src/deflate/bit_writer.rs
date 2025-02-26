@@ -15,7 +15,7 @@ pub struct BitWriter {
 impl BitWriter {
     #[inline(always)]
     pub fn write(&mut self, bits: u32, len: u32, data_buffer: &mut Vec<u8>) {
-        assert!(bits <= ((1u32 << len) - 1u32));
+        debug_assert!(bits <= ((1u32 << len) - 1u32) && len <= 32);
         self.bit_buffer |= u64::from(bits) << self.bits_in;
         self.bits_in += len;
 
