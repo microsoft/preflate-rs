@@ -160,6 +160,7 @@ impl<H: HashImplementation> HashChainHolder for HashChainHolderImpl<H> {
             },
         );
     }
+
     fn match_token_0(&self, prev_len: u32, max_depth: u32, input: &PreflateInput) -> MatchResult {
         self.match_token_offset::<0>(prev_len, max_depth, input)
     }

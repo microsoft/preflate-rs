@@ -102,13 +102,24 @@ impl HashTable {
         }
     }
 
+    fn reshift_block<const DELTA: usize>(src: &[InternalPosition], dst: &mut [InternalPosition]) {
+        for i in 0..16 {
+            dst[i] = src[i].reshift(DELTA as u16);
+        }
+    }
+
     fn reshift<const DELTA: usize>(&mut self) {
         for x in self.head.iter_mut() {
             *x = x.reshift(DELTA as u16);
         }
 
-        for i in DELTA..=65535 {
-            self.prev[i - DELTA] = self.prev[i].reshift(DELTA as u16);
+        assert!((DELTA % 16) == 0, "assuming we can do blocks of 16");
+
+        for i in DELTA / 16..65536 / 16 {
+            let (a, b) = self.prev.split_at_mut(i * 16);
+
+            // optimizer turns this into SSE2 saturated subtraction
+            Self::reshift_block::<DELTA>(b, &mut a[i * 16 - DELTA..]);
         }
     }
 }
