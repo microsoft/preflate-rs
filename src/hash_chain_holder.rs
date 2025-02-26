@@ -266,6 +266,13 @@ impl<H: HashImplementation> HashChainHolder for HashChainHolderImpl<H> {
     }
 }
 
+// Read the two bytes starting at pos and interpret them as an u16.
+#[inline(always)]
+fn read_u16_le(slice: &[u8], pos: usize) -> u16 {
+    // The compiler is smart enough to optimize this into an unaligned load.
+    u16::from_le_bytes((&slice[pos..pos + 2]).try_into().unwrap())
+}
+
 impl<H: HashImplementation> HashChainHolderImpl<H> {
     pub fn new(params: &TokenPredictorParameters, hash: H) -> Self {
         Self {
@@ -323,13 +330,14 @@ impl<H: HashImplementation> HashChainHolderImpl<H> {
         }
 
         let nice_length = std::cmp::min(self.params.nice_length, max_len);
-        let max_dist_3_matches = u32::from(self.params.max_dist_3_matches);
         let mut max_chain = max_depth;
 
         let input_chars = input.cur_chars(OFFSET as i32);
-        let mut best_len = prev_len;
+        let mut best_len = prev_len.max(1);
         let mut best_match: Option<DeflateTokenReference> = None;
         let mut first = true;
+
+        let mut c0 = read_u16_le(input_chars, (best_len - 1) as usize);
 
         for dist in self.hash.iterate::<OFFSET>(input) {
             // first entry gets a special treatment to make sure it doesn't exceed
@@ -345,20 +353,24 @@ impl<H: HashImplementation> HashChainHolderImpl<H> {
 
             let match_start = input.cur_chars(OFFSET as i32 - dist as i32);
 
-            let match_length = prefix_compare(match_start, input_chars, best_len, max_len);
-            if match_length > best_len {
-                let r = DeflateTokenReference::new(match_length, dist, false);
+            if read_u16_le(match_start, (best_len as u32 - 1) as usize) == c0 {
+                let match_length = prefix_compare(match_start, input_chars, best_len, max_len);
+                if match_length > best_len {
+                    let r = DeflateTokenReference::new(match_length, dist, false);
 
-                if match_length >= nice_length && (match_length > 3 || dist <= max_dist_3_matches) {
-                    return MatchResult::Success(r);
-                }
+                    if match_length >= nice_length {
+                        return MatchResult::Success(r);
+                    }
 
-                best_len = match_length;
-                best_match = Some(r);
+                    best_len = match_length;
+                    best_match = Some(r);
 
-                // if we found the maximum length, we can stop since we won't find anything better
-                if best_len == max_len {
-                    break;
+                    // if we found the maximum length, we can stop since we won't find anything better
+                    if best_len == max_len {
+                        break;
+                    }
+
+                    c0 = read_u16_le(input_chars, (best_len - 1) as usize);
                 }
             }
 
