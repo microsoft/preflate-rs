@@ -195,10 +195,9 @@ impl<H: HashImplementation> HashChainHolder for HashChainHolderImpl<H> {
             }
 
             let match_pos = input.cur_chars(-(dist as i32));
-            let match_length =
-                prefix_compare(match_pos, input.cur_chars(0), best_len - 1, best_len);
+            let match_length = prefix_compare(match_pos, input.cur_chars(0), best_len);
 
-            if match_length >= best_len {
+            if match_length >= 3 && match_length >= best_len {
                 hops += 1;
             }
 
@@ -236,14 +235,10 @@ impl<H: HashImplementation> HashChainHolder for HashChainHolderImpl<H> {
                 break;
             }
 
-            let match_length = prefix_compare(
-                input.cur_chars(-(dist as i32)),
-                input.cur_chars(0),
-                len - 1,
-                len,
-            );
+            let match_length =
+                prefix_compare(input.cur_chars(-(dist as i32)), input.cur_chars(0), len);
 
-            if match_length >= len {
+            if match_length >= 3 && match_length >= len {
                 current_hop += 1;
                 if current_hop == hops {
                     return Ok(dist);
@@ -354,8 +349,9 @@ impl<H: HashImplementation> HashChainHolderImpl<H> {
             let match_start = input.cur_chars(OFFSET as i32 - dist as i32);
 
             if read_u16_le(match_start, (best_len as u32 - 1) as usize) == c0 {
-                let match_length = prefix_compare(match_start, input_chars, best_len, max_len);
-                if match_length > best_len {
+                let match_length = prefix_compare(match_start, input_chars, max_len);
+
+                if match_length >= 3 && match_length > best_len {
                     let r = DeflateTokenReference::new(match_length, dist, false);
 
                     if match_length >= nice_length {
@@ -394,8 +390,8 @@ impl<H: HashImplementation> HashChainHolderImpl<H> {
 }
 
 #[inline(always)]
-fn prefix_compare(s1: &[u8], s2: &[u8], best_len: u32, max_len: u32) -> u32 {
-    prefix_cmp_odd_size(max_len, s1, s2, best_len)
+fn prefix_compare(s1: &[u8], s2: &[u8], max_len: u32) -> u32 {
+    prefix_cmp_odd_size(max_len, s1, s2)
     /*
     not working yet
 
@@ -433,25 +429,22 @@ fn prefix_compare(s1: &[u8], s2: &[u8], best_len: u32, max_len: u32) -> u32 {
     }*/
 }
 
-#[cold]
-fn prefix_cmp_odd_size(max_len: u32, s1: &[u8], s2: &[u8], best_len: u32) -> u32 {
+fn prefix_cmp_odd_size(max_len: u32, s1: &[u8], s2: &[u8]) -> u32 {
     assert!(
-        max_len >= 3
-            && s1.len() >= max_len as usize
-            && s2.len() >= max_len as usize
-            && best_len < max_len
+        max_len >= 3 && s1.len() >= max_len as usize && s2.len() >= max_len as usize,
+        "maxlen:{}, s1:{}, s2:{}",
+        max_len,
+        s1.len(),
+        s2.len()
     );
 
-    if s1[best_len as usize] != s2[best_len as usize] {
-        return 0;
-    }
-    if s1[0] != s2[0] || s1[1] != s2[1] || s1[2] != s2[2] {
+    if read_u16_le(s1, 0) != read_u16_le(s2, 0) {
         return 0;
     }
 
-    let mut match_len = 3;
+    let mut match_len = 2;
     // Initialize with the length of the fixed prefix
-    for i in 3..max_len {
+    for i in 2..max_len {
         if s1[i as usize] != s2[i as usize] {
             break;
         }
