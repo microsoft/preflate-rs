@@ -47,7 +47,7 @@ pub fn estimate_preflate_comp_level(
     if min_len == 3 {
         candidates.push(new_depth_estimator(HashAlgorithm::MiniZFast));
 
-        for (hash_shift, hash_mask) in [(5, 32767), (4, 2047)] {
+        for (hash_shift, hash_mask) in [(5, 32767), (4, 2047), (mem_hash_shift, mem_hash_mask)] {
             candidates.push(new_depth_estimator(HashAlgorithm::Zlib {
                 hash_mask,
                 hash_shift,

@@ -53,7 +53,7 @@ fn main() {
 
         let mut ctx = PreflateCompressionContext::new(true, loglevel, 9);
 
-        let mut preflatecompressed = Vec::new();
+        let mut preflatecompressed = Vec::with_capacity(file.len());
         if let Err(e) = ctx.copy_to_end(&mut Cursor::new(&file), &mut preflatecompressed) {
             println!("Skipping due to error: {:?}", e);
             continue;

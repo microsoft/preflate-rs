@@ -12,9 +12,7 @@ use crate::hash_algorithm::{
     Crc32cHash, HashAlgorithm, LibdeflateHash4Fast, MiniZHash, RandomVectorHash, ZlibNGHash,
     ZlibRotatingHash, ZlibRotatingHashFixed,
 };
-use crate::hash_chain::{
-    HashChain, HashChainNormalize, HashChainNormalizeLibflate4, MAX_UPDATE_HASH_BATCH,
-};
+use crate::hash_chain::{HashChain, HashChainDefault, HashChainLibflate4, MAX_UPDATE_HASH_BATCH};
 use crate::preflate_error::{err_exit_code, ExitCode, Result};
 use crate::preflate_input::PreflateInput;
 use crate::token_predictor::TokenPredictorParameters;
@@ -31,7 +29,8 @@ pub enum MatchResult {
 }
 
 /// Factory function to create a new HashChainHolder based on the parameters and returns
-/// a boxed trait object. The reason for this is that this lets the compiler optimize the
+/// a boxed trait object. The reason for this is that this lets the compiler inline hash
+/// implementation.
 pub fn new_hash_chain_holder(params: &TokenPredictorParameters) -> Box<dyn HashChainHolder> {
     match params.hash_algorithm {
         HashAlgorithm::None => Box::<()>::default(),
@@ -42,7 +41,7 @@ pub fn new_hash_chain_holder(params: &TokenPredictorParameters) -> Box<dyn HashC
             hash_shift: 5,
         } => Box::new(HashChainHolderImpl::new(
             params,
-            HashChainNormalize::new(ZlibRotatingHashFixed::<5, 0x7fff> {}),
+            HashChainDefault::new(ZlibRotatingHashFixed::<5, 0x7fff> {}),
         )),
 
         HashAlgorithm::Zlib {
@@ -50,7 +49,7 @@ pub fn new_hash_chain_holder(params: &TokenPredictorParameters) -> Box<dyn HashC
             hash_shift,
         } => Box::new(HashChainHolderImpl::new(
             params,
-            HashChainNormalize::new(ZlibRotatingHash {
+            HashChainDefault::new(ZlibRotatingHash {
                 hash_mask,
                 hash_shift,
             }),
@@ -58,32 +57,31 @@ pub fn new_hash_chain_holder(params: &TokenPredictorParameters) -> Box<dyn HashC
 
         HashAlgorithm::MiniZFast => Box::new(HashChainHolderImpl::new(
             params,
-            HashChainNormalize::new(MiniZHash {}),
+            HashChainDefault::new(MiniZHash {}),
         )),
 
-        HashAlgorithm::Libdeflate4 => Box::new(HashChainHolderImpl::new(
-            params,
-            HashChainNormalizeLibflate4::new(),
-        )),
+        HashAlgorithm::Libdeflate4 => {
+            Box::new(HashChainHolderImpl::new(params, HashChainLibflate4::new()))
+        }
 
         HashAlgorithm::Libdeflate4Fast => Box::new(HashChainHolderImpl::new(
             params,
-            HashChainNormalize::new(LibdeflateHash4Fast {}),
+            HashChainDefault::new(LibdeflateHash4Fast {}),
         )),
 
         HashAlgorithm::ZlibNG => Box::new(HashChainHolderImpl::new(
             params,
-            HashChainNormalize::new(ZlibNGHash {}),
+            HashChainDefault::new(ZlibNGHash {}),
         )),
 
         HashAlgorithm::RandomVector => Box::new(HashChainHolderImpl::new(
             params,
-            HashChainNormalize::new(RandomVectorHash {}),
+            HashChainDefault::new(RandomVectorHash {}),
         )),
 
         HashAlgorithm::Crc32cHash => Box::new(HashChainHolderImpl::new(
             params,
-            HashChainNormalize::new(Crc32cHash {}),
+            HashChainDefault::new(Crc32cHash {}),
         )),
     }
 }
@@ -358,8 +356,8 @@ impl<H: HashChain> HashChainHolderImpl<H> {
 
         let input_chars = input.cur_chars(OFFSET as i32);
         let mut best_len = prev_len.max(1);
-        let mut best_match: Option<DeflateTokenReference> = None;
         let mut first = true;
+        let mut best_dist = 0;
 
         let mut c0 = read_u16_le(input_chars, (best_len - 1) as usize);
 
@@ -381,14 +379,16 @@ impl<H: HashChain> HashChainHolderImpl<H> {
                 let match_length = prefix_compare(match_start, input_chars, max_len);
 
                 if match_length >= 3 && match_length > best_len {
-                    let r = DeflateTokenReference::new(match_length, dist, false);
-
                     if match_length >= nice_length {
-                        return MatchResult::Success(r);
+                        return MatchResult::Success(DeflateTokenReference::new(
+                            match_length,
+                            dist,
+                            false,
+                        ));
                     }
 
                     best_len = match_length;
-                    best_match = Some(r);
+                    best_dist = dist;
 
                     // if we found the maximum length, we can stop since we won't find anything better
                     if best_len == max_len {
@@ -402,18 +402,20 @@ impl<H: HashChain> HashChainHolderImpl<H> {
             max_chain -= 1;
 
             if max_chain == 0 {
-                if let Some(r) = best_match {
-                    return MatchResult::Success(r);
+                if best_dist > 0 {
+                    return MatchResult::Success(DeflateTokenReference::new(
+                        best_len, best_dist, false,
+                    ));
                 } else {
                     return MatchResult::MaxChainExceeded(max_depth);
                 }
             }
         }
 
-        if let Some(r) = best_match {
-            MatchResult::Success(r)
+        if best_dist > 0 {
+            return MatchResult::Success(DeflateTokenReference::new(best_len, best_dist, false));
         } else {
-            MatchResult::NoMoreMatchesFound
+            return MatchResult::NoMoreMatchesFound;
         }
     }
 }

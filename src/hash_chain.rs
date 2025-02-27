@@ -124,6 +124,7 @@ impl HashTable {
     }
 }
 
+/// Implements a chained hash table that is used to find matches in the input stream
 pub trait HashChain {
     fn get_num_hash_bytes() -> usize;
 
@@ -137,19 +138,19 @@ pub trait HashChain {
     fn checksum(&self, checksum: &mut DebugHash);
 }
 
-/// This hash chain algorithm periodically normalizes the hash table
-pub struct HashChainNormalize<H: HashImplementation> {
+/// Default hash chain for a given hash function periodically normalizes the hash table
+pub struct HashChainDefault<H: HashImplementation> {
     hash_table: Box<HashTable>,
     total_shift: i32,
     hash: H,
 }
 
-impl<H: HashImplementation> HashChainNormalize<H> {
+impl<H: HashImplementation> HashChainDefault<H> {
     pub fn new(hash: H) -> Self {
         // Important: total_shift starts at -8 since 0 indicates the end of the hash chain
         // so this means that all valid values will be >= 8, otherwise the very first hash
         // offset would be zero and so it would get missed
-        HashChainNormalize {
+        HashChainDefault {
             total_shift: -8,
             hash_table: HashTable::default_boxed(),
             hash: hash,
@@ -165,7 +166,7 @@ impl<H: HashImplementation> HashChainNormalize<H> {
     }
 }
 
-impl<H: HashImplementation> HashChain for HashChainNormalize<H> {
+impl<H: HashImplementation> HashChain for HashChainDefault<H> {
     #[inline]
     fn iterate<'a, const OFFSET: u32>(
         &'a self,
@@ -248,18 +249,18 @@ impl<H: HashImplementation> HashChain for HashChainNormalize<H> {
 
 /// implementation of the hash chain that uses the libdeflate rotating hash.
 /// This consists of two hash tables, one for length 3 and one for length 4.
-pub struct HashChainNormalizeLibflate4 {
+pub struct HashChainLibflate4 {
     hash_table: Box<HashTable>,
     hash_table_3: Box<HashTable>,
     total_shift: i32,
 }
 
-impl HashChainNormalizeLibflate4 {
+impl HashChainLibflate4 {
     pub fn new() -> Self {
         // Important: total_shift starts at -8 since 0 indicates the end of the hash chain
         // so this means that all valid values will be >= 8, otherwise the very first hash
         // offset would be zero and so it would get missed
-        HashChainNormalizeLibflate4 {
+        HashChainLibflate4 {
             total_shift: -8,
             hash_table: HashTable::default_boxed(),
             hash_table_3: HashTable::default_boxed(),
@@ -270,7 +271,7 @@ impl HashChainNormalizeLibflate4 {
 const LIBFLATE_HASH_3: LibdeflateHash3Secondary = LibdeflateHash3Secondary {};
 const LIBFLATE_HASH_4: LibdeflateHash4 = LibdeflateHash4 {};
 
-impl HashChain for HashChainNormalizeLibflate4 {
+impl HashChain for HashChainLibflate4 {
     fn iterate<'a, const OFFSET: u32>(
         &'a self,
         input: &PreflateInput,
