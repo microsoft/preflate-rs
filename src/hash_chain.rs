@@ -125,6 +125,8 @@ impl HashTable {
 }
 
 pub trait HashChain {
+    fn get_num_hash_bytes() -> usize;
+
     fn iterate<'a, const OFFSET: u32>(
         &'a self,
         input: &PreflateInput,
@@ -238,6 +240,10 @@ impl<H: HashImplementation> HashChain for HashChainNormalize<H> {
 
         self.hash_table.update_chain(self.hash, input, pos, length);
     }
+
+    fn get_num_hash_bytes() -> usize {
+        H::NUM_HASH_BYTES
+    }
 }
 
 /// implementation of the hash chain that uses the libdeflate rotating hash.
@@ -348,5 +354,9 @@ impl HashChain for HashChainNormalizeLibflate4 {
 
         self.hash_table_3
             .update_chain(LIBFLATE_HASH_3, input, pos, length);
+    }
+
+    fn get_num_hash_bytes() -> usize {
+        4
     }
 }

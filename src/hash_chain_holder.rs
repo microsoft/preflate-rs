@@ -9,10 +9,12 @@ use crate::deflate::deflate_constants::{MAX_MATCH, MIN_LOOKAHEAD, MIN_MATCH};
 use crate::deflate::deflate_token::DeflateTokenReference;
 use crate::estimator::preflate_parameter_estimator::PreflateStrategy;
 use crate::hash_algorithm::{
-    Crc32cHash, HashAlgorithm, HashImplementation, LibdeflateHash4, LibdeflateHash4Fast, MiniZHash,
-    RandomVectorHash, ZlibNGHash, ZlibRotatingHash,
+    Crc32cHash, HashAlgorithm, LibdeflateHash4Fast, MiniZHash, RandomVectorHash, ZlibNGHash,
+    ZlibRotatingHash, ZlibRotatingHashFixed,
 };
-use crate::hash_chain::{HashChain, MAX_UPDATE_HASH_BATCH};
+use crate::hash_chain::{
+    HashChain, HashChainNormalize, HashChainNormalizeLibflate4, MAX_UPDATE_HASH_BATCH,
+};
 use crate::preflate_error::{err_exit_code, ExitCode, Result};
 use crate::preflate_input::PreflateInput;
 use crate::token_predictor::TokenPredictorParameters;
@@ -33,29 +35,56 @@ pub enum MatchResult {
 pub fn new_hash_chain_holder(params: &TokenPredictorParameters) -> Box<dyn HashChainHolder> {
     match params.hash_algorithm {
         HashAlgorithm::None => Box::<()>::default(),
+
+        // most common Zlib combo, optimize with fixed parameters
+        HashAlgorithm::Zlib {
+            hash_mask: 0x7fff,
+            hash_shift: 5,
+        } => Box::new(HashChainHolderImpl::new(
+            params,
+            HashChainNormalize::new(ZlibRotatingHashFixed::<5, 0x7fff> {}),
+        )),
+
         HashAlgorithm::Zlib {
             hash_mask,
             hash_shift,
         } => Box::new(HashChainHolderImpl::new(
             params,
-            ZlibRotatingHash {
+            HashChainNormalize::new(ZlibRotatingHash {
                 hash_mask,
                 hash_shift,
-            },
+            }),
         )),
-        HashAlgorithm::MiniZFast => Box::new(HashChainHolderImpl::new(params, MiniZHash {})),
-        HashAlgorithm::Libdeflate4 => {
-            Box::new(HashChainHolderImpl::new(params, LibdeflateHash4 {}))
-        }
-        HashAlgorithm::Libdeflate4Fast => {
-            Box::new(HashChainHolderImpl::new(params, LibdeflateHash4Fast {}))
-        }
 
-        HashAlgorithm::ZlibNG => Box::new(HashChainHolderImpl::new(params, ZlibNGHash {})),
-        HashAlgorithm::RandomVector => {
-            Box::new(HashChainHolderImpl::new(params, RandomVectorHash {}))
-        }
-        HashAlgorithm::Crc32cHash => Box::new(HashChainHolderImpl::new(params, Crc32cHash {})),
+        HashAlgorithm::MiniZFast => Box::new(HashChainHolderImpl::new(
+            params,
+            HashChainNormalize::new(MiniZHash {}),
+        )),
+
+        HashAlgorithm::Libdeflate4 => Box::new(HashChainHolderImpl::new(
+            params,
+            HashChainNormalizeLibflate4::new(),
+        )),
+
+        HashAlgorithm::Libdeflate4Fast => Box::new(HashChainHolderImpl::new(
+            params,
+            HashChainNormalize::new(LibdeflateHash4Fast {}),
+        )),
+
+        HashAlgorithm::ZlibNG => Box::new(HashChainHolderImpl::new(
+            params,
+            HashChainNormalize::new(ZlibNGHash {}),
+        )),
+
+        HashAlgorithm::RandomVector => Box::new(HashChainHolderImpl::new(
+            params,
+            HashChainNormalize::new(RandomVectorHash {}),
+        )),
+
+        HashAlgorithm::Crc32cHash => Box::new(HashChainHolderImpl::new(
+            params,
+            HashChainNormalize::new(Crc32cHash {}),
+        )),
     }
 }
 
@@ -141,13 +170,13 @@ impl HashChainHolder for () {
 }
 
 /// implemenation of HashChainHolder depends type of hash implemenatation
-struct HashChainHolderImpl<H: HashImplementation> {
-    hash: H::HashChainType,
+struct HashChainHolderImpl<H: HashChain> {
+    hash: H,
     params: TokenPredictorParameters,
     window_bytes: u32,
 }
 
-impl<H: HashImplementation> HashChainHolder for HashChainHolderImpl<H> {
+impl<H: HashChain> HashChainHolder for HashChainHolderImpl<H> {
     fn update_hash(&mut self, length: u32, input: &PreflateInput) {
         debug_assert!(length <= MAX_UPDATE_HASH_BATCH);
 
@@ -268,10 +297,10 @@ fn read_u16_le(slice: &[u8], pos: usize) -> u16 {
     u16::from_le_bytes((&slice[pos..pos + 2]).try_into().unwrap())
 }
 
-impl<H: HashImplementation> HashChainHolderImpl<H> {
+impl<H: HashChain> HashChainHolderImpl<H> {
     pub fn new(params: &TokenPredictorParameters, hash: H) -> Self {
         Self {
-            hash: hash.new_hash_chain(),
+            hash,
             window_bytes: 1 << params.window_bits,
             params: *params,
         }
@@ -289,7 +318,7 @@ impl<H: HashImplementation> HashChainHolderImpl<H> {
         if max_len
             < std::cmp::max(
                 prev_len + 1,
-                std::cmp::max(H::NUM_HASH_BYTES as u32, MIN_MATCH),
+                std::cmp::max(H::get_num_hash_bytes() as u32, MIN_MATCH),
             )
         {
             return MatchResult::NoInput;
