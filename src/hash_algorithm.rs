@@ -107,6 +107,36 @@ pub trait HashImplementation: Default + Copy + Clone {
 }
 
 #[derive(Default, Debug, Copy, Clone, Eq, PartialEq)]
+pub struct ZlibRotatingHashFixed<const HASH_SHIFT: u32, const HASH_MASK: u32> {}
+
+impl<const HASH_SHIFT: u32, const HASH_MASK: u32> HashImplementation
+    for ZlibRotatingHashFixed<HASH_SHIFT, HASH_MASK>
+{
+    type HashChainType = HashChainNormalize<ZlibRotatingHashFixed<HASH_SHIFT, HASH_MASK>>;
+    const NUM_HASH_BYTES: usize = 3;
+
+    fn get_hash(&self, b: &[u8]) -> u16 {
+        assert!(b.len() >= 3);
+
+        let c = u32::from(b[0]);
+        let c = (c << HASH_SHIFT) ^ u32::from(b[1]);
+        let c = (c << HASH_SHIFT) ^ u32::from(b[2]);
+        (c & HASH_MASK) as u16
+    }
+
+    fn new_hash_chain(self) -> Self::HashChainType {
+        HashChainNormalize::<ZlibRotatingHashFixed<HASH_SHIFT, HASH_MASK>>::new(self)
+    }
+
+    fn algorithm(&self) -> HashAlgorithm {
+        HashAlgorithm::Zlib {
+            hash_mask: HASH_MASK as u16,
+            hash_shift: HASH_SHIFT,
+        }
+    }
+}
+
+#[derive(Default, Debug, Copy, Clone, Eq, PartialEq)]
 pub struct ZlibRotatingHash {
     pub hash_mask: u16,
     pub hash_shift: u32,

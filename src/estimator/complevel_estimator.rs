@@ -45,15 +45,6 @@ pub fn estimate_preflate_comp_level(
     let mut candidates: Vec<Box<dyn HashTableDepthEstimator>> = Vec::new();
 
     if min_len == 3 {
-        let mut hashparameters = vec![(5, 0x7fff), (4, 2047), (4, 4095)];
-
-        if !hashparameters
-            .iter()
-            .any(|&(a, b)| a == mem_hash_shift && b == mem_hash_mask)
-        {
-            hashparameters.push((mem_hash_shift, mem_hash_mask));
-        }
-
         candidates.push(new_depth_estimator(HashAlgorithm::MiniZFast));
 
         for (hash_shift, hash_mask) in [(5, 32767), (4, 2047)] {

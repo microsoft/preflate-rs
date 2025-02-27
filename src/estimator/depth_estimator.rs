@@ -315,6 +315,14 @@ pub fn new_depth_estimator(hash_algorithm: HashAlgorithm) -> Box<dyn HashTableDe
     match hash_algorithm {
         HashAlgorithm::None => panic!("No hash algorithm specified"),
         HashAlgorithm::Zlib {
+            hash_mask: 0x7fff,
+            hash_shift: 5,
+        } => HashTableDepthEstimatorImpl::box_new(ZlibRotatingHashFixed::<5, 0x7fff> {}),
+        HashAlgorithm::Zlib {
+            hash_mask: 2047,
+            hash_shift: 4,
+        } => HashTableDepthEstimatorImpl::box_new(ZlibRotatingHashFixed::<4, 2047> {}),
+        HashAlgorithm::Zlib {
             hash_mask,
             hash_shift,
         } => HashTableDepthEstimatorImpl::box_new(ZlibRotatingHash {

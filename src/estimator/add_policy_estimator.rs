@@ -39,6 +39,7 @@ pub enum DictionaryAddPolicy {
 
 impl DictionaryAddPolicy {
     /// Updates the hash based on the dictionary add policy
+    #[inline(always)]
     pub fn update_hash<U: FnMut(&[u8], u32, u32)>(
         self,
         input: &[u8],
