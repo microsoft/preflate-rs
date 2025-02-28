@@ -35,8 +35,8 @@ impl<R: Read> DeflateReader<R> {
 
     /// reads the padding at the end of the file
     pub fn read_eof_padding(&mut self) -> u8 {
-        let padding_bit_count = 8 - self.input.bit_position_in_current_byte() as u8;
-        self.input.get(padding_bit_count.into()).unwrap() as u8
+        let padding_bit_count = self.input.bits_left() & 7;
+        self.input.get(padding_bit_count).unwrap() as u8
     }
 
     /// moves ownership out of block reader
@@ -85,16 +85,16 @@ impl<R: Read> DeflateReader<R> {
 
         match mode {
             0 => {
-                let padding_bit_count = 8 - self.input.bit_position_in_current_byte() as u8;
-                let padding_bits = self.read_bits(padding_bit_count.into())? as u8;
+                let padding_bit_count = self.input.bits_left() & 7;
+                let padding_bits = self.read_bits(padding_bit_count)? as u8;
+
+                debug_assert!(self.input.bits_left() & 7 == 0);
 
                 let len = self.read_bits(16)?;
                 let ilen = self.read_bits(16)?;
                 if (len ^ ilen) != 0xffff {
                     return err_exit_code(ExitCode::InvalidDeflate, "Block length mismatch");
                 }
-
-                self.input.flush_buffer_to_byte_boundary();
 
                 let mut uncompressed = Vec::with_capacity(len as usize);
 
