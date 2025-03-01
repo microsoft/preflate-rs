@@ -77,7 +77,7 @@ impl<R: Read + Seek> DeflateReader<R> {
                         1 => {
                             self.read_state = ReadState::Huffman(
                                 HuffmanReader::create_fixed()?,
-                                DeflateHuffmanType::Static { incomplete: false },
+                                DeflateHuffmanType::Static,
                                 Vec::new(),
                             )
                         }
@@ -120,7 +120,7 @@ impl<R: Read + Seek> DeflateReader<R> {
                             padding_bits,
                         },
                         last: self.last_block,
-                        last_padding_bits: 0, // never bit unaligned for uncompressed blocks
+                        tail_padding_bits: 0, // never bit unaligned for uncompressed blocks
                     });
                 }
                 ReadState::Huffman(reader, hufftype, tokens) => {
@@ -140,7 +140,7 @@ impl<R: Read + Seek> DeflateReader<R> {
                     return Ok(DeflateTokenBlock {
                         block_type: b,
                         last: self.last_block,
-                        last_padding_bits,
+                        tail_padding_bits: last_padding_bits,
                     });
                 }
                 ReadState::StartHuffmanDynamic => {

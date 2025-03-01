@@ -348,7 +348,7 @@ impl<'a> TokenPredictor<'a> {
                     },
                     last: self.input_eof()
                         && !codec.decode_misprediction(CodecCorrection::EOFMisprediction),
-                    last_padding_bits: 0,
+                    tail_padding_bits: 0,
                 });
             }
             BT_STATICHUFF | BT_DYNAMICHUFF => {
@@ -464,11 +464,11 @@ impl<'a> TokenPredictor<'a> {
 
         let b = DeflateTokenBlock {
             last,
-            last_padding_bits,
+            tail_padding_bits: last_padding_bits,
             block_type: DeflateTokenBlockType::Huffman {
                 tokens,
                 huffman_type: if bt == BT_STATICHUFF {
-                    DeflateHuffmanType::Static { incomplete: false }
+                    DeflateHuffmanType::Static
                 } else {
                     DeflateHuffmanType::Dynamic {
                         huffman_encoding: recreate_tree_for_block(

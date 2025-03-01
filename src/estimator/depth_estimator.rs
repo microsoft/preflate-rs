@@ -4,12 +4,9 @@ use crate::{
     deflate::{
         deflate_constants,
         deflate_reader::DeflateContents,
-        deflate_token::{
-            DeflateToken, DeflateTokenBlock, DeflateTokenBlockType, DeflateTokenReference,
-        },
+        deflate_token::{DeflateToken, DeflateTokenBlockType, DeflateTokenReference},
     },
     hash_algorithm::*,
-    preflate_error::AddContext,
     preflate_input::PreflateInput,
 };
 

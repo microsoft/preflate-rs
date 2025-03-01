@@ -85,7 +85,7 @@ impl DeflateWriter {
                 }
                 if block.last {
                     self.bitwriter
-                        .pad(block.last_padding_bits, &mut self.output);
+                        .pad(block.tail_padding_bits, &mut self.output);
                 }
             }
         }
@@ -167,11 +167,15 @@ fn roundtrip_deflate_writer() {
     let blocks = [
         DeflateTokenBlock {
             block_type: DeflateTokenBlockType::Huffman {
-                tokens: vec![DeflateToken::Literal(0), DeflateToken::Literal(1)],
-                huffman_type: DeflateHuffmanType::Static { incomplete: false },
+                tokens: vec![
+                    DeflateToken::Literal(0),
+                    DeflateToken::Literal(2),
+                    DeflateToken::Literal(3),
+                ],
+                huffman_type: DeflateHuffmanType::Static,
             },
             last: false,
-            last_padding_bits: 0,
+            tail_padding_bits: 0,
         },
         DeflateTokenBlock {
             block_type: DeflateTokenBlockType::Stored {
@@ -179,7 +183,7 @@ fn roundtrip_deflate_writer() {
                 padding_bits: 0b101, // there are 3 bits of padding
             },
             last: false,
-            last_padding_bits: 0,
+            tail_padding_bits: 0,
         },
         DeflateTokenBlock {
             block_type: DeflateTokenBlockType::Huffman {
@@ -190,10 +194,10 @@ fn roundtrip_deflate_writer() {
                     DeflateToken::new_ref(258, 1, true),
                     DeflateToken::Literal(3),
                 ],
-                huffman_type: DeflateHuffmanType::Static { incomplete: false },
+                huffman_type: DeflateHuffmanType::Static,
             },
             last: true,
-            last_padding_bits: 0b1010,
+            tail_padding_bits: 0b1010,
         },
     ];
 

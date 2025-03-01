@@ -75,17 +75,15 @@ pub const BT_STATICHUFF: u32 = 2;
 
 #[derive(Debug, PartialEq)]
 pub enum DeflateHuffmanType {
+    Static,
     Dynamic {
         huffman_encoding: HuffmanOriginalEncoding,
-    },
-    Static {
-        incomplete: bool,
     },
 }
 
 impl Default for DeflateHuffmanType {
     fn default() -> Self {
-        DeflateHuffmanType::Static { incomplete: false }
+        DeflateHuffmanType::Static
     }
 }
 
@@ -105,7 +103,7 @@ pub enum DeflateTokenBlockType {
 pub struct DeflateTokenBlock {
     pub block_type: DeflateTokenBlockType,
     pub last: bool,
-    pub last_padding_bits: u8,
+    pub tail_padding_bits: u8,
 }
 
 impl DeflateTokenBlockType {
