@@ -8,12 +8,14 @@ use bitcode::{Decode, Encode};
 
 use crate::{
     bit_helper::DebugHash,
-    deflate::deflate_constants::MIN_MATCH,
-    deflate::deflate_token::{
-        DeflateHuffmanType, DeflateToken, DeflateTokenBlock, DeflateTokenReference, TokenFrequency,
-        BT_DYNAMICHUFF, BT_STATICHUFF, BT_STORED,
+    deflate::{
+        deflate_constants::MIN_MATCH,
+        deflate_token::{
+            DeflateHuffmanType, DeflateToken, DeflateTokenBlock, DeflateTokenBlockType,
+            DeflateTokenReference, TokenFrequency, BT_DYNAMICHUFF, BT_STATICHUFF, BT_STORED,
+        },
+        huffman_calc::HufftreeBitCalc,
     },
-    deflate::huffman_calc::HufftreeBitCalc,
     estimator::{
         add_policy_estimator::DictionaryAddPolicy, preflate_parameter_estimator::PreflateStrategy,
         preflate_parse_config::MatchingType,
@@ -95,7 +97,6 @@ impl<'a> TokenPredictor<'a> {
         &mut self,
         block: &DeflateTokenBlock,
         codec: &mut D,
-        last_block: bool,
     ) -> Result<()> {
         self.current_token_count = 0;
         self.pending_reference = None;
@@ -105,8 +106,8 @@ impl<'a> TokenPredictor<'a> {
         let tokens;
         let huffman_encoding;
 
-        match block {
-            DeflateTokenBlock::Stored {
+        match &block.block_type {
+            DeflateTokenBlockType::Stored {
                 uncompressed,
                 padding_bits,
             } => {
@@ -130,7 +131,7 @@ impl<'a> TokenPredictor<'a> {
                 }
                 return Ok(());
             }
-            DeflateTokenBlock::Huffman {
+            DeflateTokenBlockType::Huffman {
                 tokens: t,
                 huffman_type,
             } => {
@@ -162,7 +163,7 @@ impl<'a> TokenPredictor<'a> {
 
         // if the block ends at an unexpected point, or it contains more tokens
         // than expected, we will need to encode the block size
-        if (!last_block && tokens.len() != self.max_token_count as usize)
+        if (!block.last && tokens.len() != self.max_token_count as usize)
             || tokens.len() > self.max_token_count as usize
         {
             codec.encode_correction(
@@ -306,6 +307,11 @@ impl<'a> TokenPredictor<'a> {
             predict_tree_for_block(huffman_encoding, &freq, codec, HufftreeBitCalc::Zlib)?;
         }
 
+        // we thought it was the end of the block, but it wasn't
+        if self.input_eof() && !block.last {
+            codec.encode_misprediction(CodecCorrection::EOFMisprediction, false);
+        }
+
         codec.encode_verify_state("done", if VERIFY { self.checksum().hash() } else { 0 });
 
         Ok(())
@@ -335,9 +341,14 @@ impl<'a> TokenPredictor<'a> {
                     self.input.advance(1);
                 }
 
-                return Ok(DeflateTokenBlock::Stored {
-                    uncompressed,
-                    padding_bits,
+                return Ok(DeflateTokenBlock {
+                    block_type: DeflateTokenBlockType::Stored {
+                        uncompressed,
+                        padding_bits,
+                    },
+                    last: self.input_eof()
+                        && !codec.decode_misprediction(CodecCorrection::EOFMisprediction),
+                    tail_padding_bits: 0,
                 });
             }
             BT_STATICHUFF | BT_DYNAMICHUFF => {
@@ -443,14 +454,30 @@ impl<'a> TokenPredictor<'a> {
             tokens.push(DeflateToken::Reference(predicted_ref));
         }
 
-        let b = DeflateTokenBlock::Huffman {
-            tokens,
-            huffman_type: if bt == BT_STATICHUFF {
-                DeflateHuffmanType::Static { incomplete: false }
-            } else {
-                DeflateHuffmanType::Dynamic {
-                    huffman_encoding: recreate_tree_for_block(&freq, codec, HufftreeBitCalc::Zlib)?,
-                }
+        let last =
+            self.input_eof() && !codec.decode_misprediction(CodecCorrection::EOFMisprediction);
+        let last_padding_bits = if last {
+            codec.decode_correction(CodecCorrection::NonZeroPadding) as u8
+        } else {
+            0
+        };
+
+        let b = DeflateTokenBlock {
+            last,
+            tail_padding_bits: last_padding_bits,
+            block_type: DeflateTokenBlockType::Huffman {
+                tokens,
+                huffman_type: if bt == BT_STATICHUFF {
+                    DeflateHuffmanType::Static
+                } else {
+                    DeflateHuffmanType::Dynamic {
+                        huffman_encoding: recreate_tree_for_block(
+                            &freq,
+                            codec,
+                            HufftreeBitCalc::Zlib,
+                        )?,
+                    }
+                },
             },
         };
 

@@ -6,8 +6,12 @@
 
 use crate::deflate::huffman_encoding::HuffmanOriginalEncoding;
 
-use super::deflate_constants::{
-    quantize_distance, quantize_length, DIST_CODE_COUNT, LITLENDIST_CODE_COUNT, NONLEN_CODE_COUNT,
+use super::{
+    deflate_constants::{
+        quantize_distance, quantize_length, DIST_CODE_COUNT, LITLENDIST_CODE_COUNT,
+        NONLEN_CODE_COUNT,
+    },
+    deflate_reader::append_reference_to_plaintext,
 };
 
 /// In a DEFLATE stream, tokens are either literals (bytes) or references to previous bytes
@@ -71,16 +75,20 @@ pub const BT_STATICHUFF: u32 = 2;
 
 #[derive(Debug, PartialEq)]
 pub enum DeflateHuffmanType {
+    Static,
     Dynamic {
         huffman_encoding: HuffmanOriginalEncoding,
     },
-    Static {
-        incomplete: bool,
-    },
+}
+
+impl Default for DeflateHuffmanType {
+    fn default() -> Self {
+        DeflateHuffmanType::Static
+    }
 }
 
 #[derive(Debug, PartialEq)]
-pub enum DeflateTokenBlock {
+pub enum DeflateTokenBlockType {
     Huffman {
         tokens: Vec<DeflateToken>,
         huffman_type: DeflateHuffmanType,
@@ -91,29 +99,29 @@ pub enum DeflateTokenBlock {
     },
 }
 
-impl DeflateTokenBlock {
+#[derive(Debug, PartialEq)]
+pub struct DeflateTokenBlock {
+    pub block_type: DeflateTokenBlockType,
+    pub last: bool,
+    pub tail_padding_bits: u8,
+}
+
+impl DeflateTokenBlockType {
     pub fn append_to_plaintext(&self, dest: &mut Vec<u8>) {
         match self {
-            DeflateTokenBlock::Huffman { tokens, .. } => {
+            DeflateTokenBlockType::Huffman { tokens, .. } => {
                 for &token in tokens.iter() {
                     match token {
                         DeflateToken::Literal(l) => {
                             dest.push(l);
                         }
                         DeflateToken::Reference(r) => {
-                            assert!(dest.len() >= r.dist() as usize);
-
-                            let mut index = dest.len() - r.dist() as usize;
-                            for _i in 0..r.len() {
-                                let l = dest[index];
-                                dest.push(l);
-                                index += 1;
-                            }
+                            append_reference_to_plaintext(dest, r.dist(), r.len());
                         }
                     }
                 }
             }
-            DeflateTokenBlock::Stored { uncompressed, .. } => {
+            DeflateTokenBlockType::Stored { uncompressed, .. } => {
                 dest.extend_from_slice(&uncompressed);
             }
         }

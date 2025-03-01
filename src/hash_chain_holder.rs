@@ -9,10 +9,10 @@ use crate::deflate::deflate_constants::{MAX_MATCH, MIN_LOOKAHEAD, MIN_MATCH};
 use crate::deflate::deflate_token::DeflateTokenReference;
 use crate::estimator::preflate_parameter_estimator::PreflateStrategy;
 use crate::hash_algorithm::{
-    Crc32cHash, HashAlgorithm, HashImplementation, LibdeflateHash4, LibdeflateHash4Fast, MiniZHash,
-    RandomVectorHash, ZlibNGHash, ZlibRotatingHash,
+    Crc32cHash, HashAlgorithm, LibdeflateHash4Fast, MiniZHash, RandomVectorHash, ZlibNGHash,
+    ZlibRotatingHash, ZlibRotatingHashFixed,
 };
-use crate::hash_chain::{HashChain, MAX_UPDATE_HASH_BATCH};
+use crate::hash_chain::{HashChain, HashChainDefault, HashChainLibflate4, MAX_UPDATE_HASH_BATCH};
 use crate::preflate_error::{err_exit_code, ExitCode, Result};
 use crate::preflate_input::PreflateInput;
 use crate::token_predictor::TokenPredictorParameters;
@@ -29,33 +29,60 @@ pub enum MatchResult {
 }
 
 /// Factory function to create a new HashChainHolder based on the parameters and returns
-/// a boxed trait object. The reason for this is that this lets the compiler optimize the
+/// a boxed trait object. The reason for this is that this lets the compiler inline hash
+/// implementation.
 pub fn new_hash_chain_holder(params: &TokenPredictorParameters) -> Box<dyn HashChainHolder> {
     match params.hash_algorithm {
         HashAlgorithm::None => Box::<()>::default(),
+
+        // most common Zlib combo, optimize with fixed parameters
+        HashAlgorithm::Zlib {
+            hash_mask: 0x7fff,
+            hash_shift: 5,
+        } => Box::new(HashChainHolderImpl::new(
+            params,
+            HashChainDefault::new(ZlibRotatingHashFixed::<5, 0x7fff> {}),
+        )),
+
         HashAlgorithm::Zlib {
             hash_mask,
             hash_shift,
         } => Box::new(HashChainHolderImpl::new(
             params,
-            ZlibRotatingHash {
+            HashChainDefault::new(ZlibRotatingHash {
                 hash_mask,
                 hash_shift,
-            },
+            }),
         )),
-        HashAlgorithm::MiniZFast => Box::new(HashChainHolderImpl::new(params, MiniZHash {})),
+
+        HashAlgorithm::MiniZFast => Box::new(HashChainHolderImpl::new(
+            params,
+            HashChainDefault::new(MiniZHash {}),
+        )),
+
         HashAlgorithm::Libdeflate4 => {
-            Box::new(HashChainHolderImpl::new(params, LibdeflateHash4 {}))
-        }
-        HashAlgorithm::Libdeflate4Fast => {
-            Box::new(HashChainHolderImpl::new(params, LibdeflateHash4Fast {}))
+            Box::new(HashChainHolderImpl::new(params, HashChainLibflate4::new()))
         }
 
-        HashAlgorithm::ZlibNG => Box::new(HashChainHolderImpl::new(params, ZlibNGHash {})),
-        HashAlgorithm::RandomVector => {
-            Box::new(HashChainHolderImpl::new(params, RandomVectorHash {}))
-        }
-        HashAlgorithm::Crc32cHash => Box::new(HashChainHolderImpl::new(params, Crc32cHash {})),
+        HashAlgorithm::Libdeflate4Fast => Box::new(HashChainHolderImpl::new(
+            params,
+            HashChainDefault::new(LibdeflateHash4Fast {}),
+        )),
+
+        HashAlgorithm::ZlibNG => Box::new(HashChainHolderImpl::new(
+            params,
+            HashChainDefault::new(ZlibNGHash {}),
+        )),
+
+        HashAlgorithm::RandomVector => Box::new(HashChainHolderImpl::new(
+            params,
+            HashChainDefault::new(RandomVectorHash {}),
+        )),
+
+        HashAlgorithm::Crc32cHash => Box::new(HashChainHolderImpl::new(
+            params,
+            HashChainDefault::new(Crc32cHash {}),
+        )),
     }
 }
 
@@ -141,13 +168,13 @@ impl HashChainHolder for () {
 }
 
 /// implemenation of HashChainHolder depends type of hash implemenatation
-struct HashChainHolderImpl<H: HashImplementation> {
-    hash: H::HashChainType,
+struct HashChainHolderImpl<H: HashChain> {
+    hash: H,
     params: TokenPredictorParameters,
     window_bytes: u32,
 }
 
-impl<H: HashImplementation> HashChainHolder for HashChainHolderImpl<H> {
+impl<H: HashChain> HashChainHolder for HashChainHolderImpl<H> {
     fn update_hash(&mut self, length: u32, input: &PreflateInput) {
         debug_assert!(length <= MAX_UPDATE_HASH_BATCH);
 
@@ -160,6 +187,7 @@ impl<H: HashImplementation> HashChainHolder for HashChainHolderImpl<H> {
             },
         );
     }
+
     fn match_token_0(&self, prev_len: u32, max_depth: u32, input: &PreflateInput) -> MatchResult {
         self.match_token_offset::<0>(prev_len, max_depth, input)
     }
@@ -188,16 +216,15 @@ impl<H: HashImplementation> HashChainHolder for HashChainHolderImpl<H> {
 
         let cur_max_dist = std::cmp::min(input.pos(), self.window_bytes);
 
-        for dist in self.hash.iterate(input, 0) {
+        for dist in self.hash.iterate::<0>(input) {
             if dist > cur_max_dist {
                 break;
             }
 
             let match_pos = input.cur_chars(-(dist as i32));
-            let match_length =
-                prefix_compare(match_pos, input.cur_chars(0), best_len - 1, best_len);
+            let match_length = prefix_compare(match_pos, input.cur_chars(0), best_len);
 
-            if match_length >= best_len {
+            if match_length >= 3 && match_length >= best_len {
                 hops += 1;
             }
 
@@ -230,19 +257,15 @@ impl<H: HashImplementation> HashChainHolder for HashChainHolderImpl<H> {
         let cur_max_dist = std::cmp::min(input.pos(), self.window_bytes);
         let mut current_hop = 0;
 
-        for dist in self.hash.iterate(input, 0) {
+        for dist in self.hash.iterate::<0>(input) {
             if dist > cur_max_dist {
                 break;
             }
 
-            let match_length = prefix_compare(
-                input.cur_chars(-(dist as i32)),
-                input.cur_chars(0),
-                len - 1,
-                len,
-            );
+            let match_length =
+                prefix_compare(input.cur_chars(-(dist as i32)), input.cur_chars(0), len);
 
-            if match_length >= len {
+            if match_length >= 3 && match_length >= len {
                 current_hop += 1;
                 if current_hop == hops {
                     return Ok(dist);
@@ -265,10 +288,17 @@ impl<H: HashImplementation> HashChainHolder for HashChainHolderImpl<H> {
     }
 }
 
-impl<H: HashImplementation> HashChainHolderImpl<H> {
+// Read the two bytes starting at pos and interpret them as an u16.
+#[inline(always)]
+fn read_u16_le(slice: &[u8], pos: usize) -> u16 {
+    // The compiler is smart enough to optimize this into an unaligned load.
+    u16::from_le_bytes((&slice[pos..pos + 2]).try_into().unwrap())
+}
+
+impl<H: HashChain> HashChainHolderImpl<H> {
     pub fn new(params: &TokenPredictorParameters, hash: H) -> Self {
         Self {
-            hash: hash.new_hash_chain(),
+            hash,
             window_bytes: 1 << params.window_bits,
             params: *params,
         }
@@ -286,7 +316,7 @@ impl<H: HashImplementation> HashChainHolderImpl<H> {
         if max_len
             < std::cmp::max(
                 prev_len + 1,
-                std::cmp::max(H::NUM_HASH_BYTES as u32, MIN_MATCH),
+                std::cmp::max(H::get_num_hash_bytes() as u32, MIN_MATCH),
             )
         {
             return MatchResult::NoInput;
@@ -322,15 +352,16 @@ impl<H: HashImplementation> HashChainHolderImpl<H> {
         }
 
         let nice_length = std::cmp::min(self.params.nice_length, max_len);
-        let max_dist_3_matches = u32::from(self.params.max_dist_3_matches);
         let mut max_chain = max_depth;
 
         let input_chars = input.cur_chars(OFFSET as i32);
-        let mut best_len = prev_len;
-        let mut best_match: Option<DeflateTokenReference> = None;
+        let mut best_len = prev_len.max(1);
         let mut first = true;
+        let mut best_dist = 0;
 
-        for dist in self.hash.iterate(input, OFFSET) {
+        let mut c0 = read_u16_le(input_chars, (best_len - 1) as usize);
+
+        for dist in self.hash.iterate::<OFFSET>(input) {
             // first entry gets a special treatment to make sure it doesn't exceed
             // the limits we calculated for the first hop
             if first {
@@ -344,45 +375,54 @@ impl<H: HashImplementation> HashChainHolderImpl<H> {
 
             let match_start = input.cur_chars(OFFSET as i32 - dist as i32);
 
-            let match_length = prefix_compare(match_start, input_chars, best_len, max_len);
-            if match_length > best_len {
-                let r = DeflateTokenReference::new(match_length, dist, false);
+            if read_u16_le(match_start, (best_len as u32 - 1) as usize) == c0 {
+                let match_length = prefix_compare(match_start, input_chars, max_len);
 
-                if match_length >= nice_length && (match_length > 3 || dist <= max_dist_3_matches) {
-                    return MatchResult::Success(r);
-                }
+                if match_length >= 3 && match_length > best_len {
+                    if match_length >= nice_length {
+                        return MatchResult::Success(DeflateTokenReference::new(
+                            match_length,
+                            dist,
+                            false,
+                        ));
+                    }
 
-                best_len = match_length;
-                best_match = Some(r);
+                    best_len = match_length;
+                    best_dist = dist;
 
-                // if we found the maximum length, we can stop since we won't find anything better
-                if best_len == max_len {
-                    break;
+                    // if we found the maximum length, we can stop since we won't find anything better
+                    if best_len == max_len {
+                        break;
+                    }
+
+                    c0 = read_u16_le(input_chars, (best_len - 1) as usize);
                 }
             }
 
             max_chain -= 1;
 
             if max_chain == 0 {
-                if let Some(r) = best_match {
-                    return MatchResult::Success(r);
+                if best_dist > 0 {
+                    return MatchResult::Success(DeflateTokenReference::new(
+                        best_len, best_dist, false,
+                    ));
                 } else {
                     return MatchResult::MaxChainExceeded(max_depth);
                 }
             }
         }
 
-        if let Some(r) = best_match {
-            MatchResult::Success(r)
+        if best_dist > 0 {
+            return MatchResult::Success(DeflateTokenReference::new(best_len, best_dist, false));
         } else {
-            MatchResult::NoMoreMatchesFound
+            return MatchResult::NoMoreMatchesFound;
         }
     }
 }
 
 #[inline(always)]
-fn prefix_compare(s1: &[u8], s2: &[u8], best_len: u32, max_len: u32) -> u32 {
-    prefix_cmp_odd_size(max_len, s1, s2, best_len)
+fn prefix_compare(s1: &[u8], s2: &[u8], max_len: u32) -> u32 {
+    prefix_cmp_odd_size(max_len, s1, s2)
     /*
     not working yet
 
@@ -420,25 +460,22 @@ fn prefix_compare(s1: &[u8], s2: &[u8], best_len: u32, max_len: u32) -> u32 {
     }*/
 }
 
-#[cold]
-fn prefix_cmp_odd_size(max_len: u32, s1: &[u8], s2: &[u8], best_len: u32) -> u32 {
+fn prefix_cmp_odd_size(max_len: u32, s1: &[u8], s2: &[u8]) -> u32 {
     assert!(
-        max_len >= 3
-            && s1.len() >= max_len as usize
-            && s2.len() >= max_len as usize
-            && best_len < max_len
+        max_len >= 3 && s1.len() >= max_len as usize && s2.len() >= max_len as usize,
+        "maxlen:{}, s1:{}, s2:{}",
+        max_len,
+        s1.len(),
+        s2.len()
     );
 
-    if s1[best_len as usize] != s2[best_len as usize] {
-        return 0;
-    }
-    if s1[0] != s2[0] || s1[1] != s2[1] || s1[2] != s2[2] {
+    if read_u16_le(s1, 0) != read_u16_le(s2, 0) {
         return 0;
     }
 
-    let mut match_len = 3;
+    let mut match_len = 2;
     // Initialize with the length of the fixed prefix
-    for i in 3..max_len {
+    for i in 2..max_len {
         if s1[i as usize] != s2[i as usize] {
             break;
         }

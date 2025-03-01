@@ -1,7 +1,11 @@
 use default_boxed::DefaultBoxed;
 
 use crate::{
-    deflate::{deflate_constants, deflate_token::DeflateTokenReference},
+    deflate::{
+        deflate_constants,
+        deflate_reader::DeflateContents,
+        deflate_token::{DeflateToken, DeflateTokenBlockType, DeflateTokenReference},
+    },
     hash_algorithm::*,
     preflate_input::PreflateInput,
 };
@@ -45,7 +49,7 @@ impl HashTableDepthEstimator for MinizDepthEstimator {
 
                 for i in 0..length {
                     let length3hash = MiniZHash::default().get_hash(&chars[i as usize..]);
-                    self.positions[usize::from(length3hash)] = pos + i;
+                    self.positions[length3hash as usize] = pos + i;
                 }
             },
         );
@@ -53,7 +57,7 @@ impl HashTableDepthEstimator for MinizDepthEstimator {
 
     fn match_depth(&mut self, token: DeflateTokenReference, input: &PreflateInput) -> bool {
         let length3hash = MiniZHash::default().get_hash(input.cur_chars(0));
-        let dictpos = self.positions[usize::from(length3hash)];
+        let dictpos = self.positions[length3hash as usize];
         let distance3 = input.pos() - dictpos;
 
         if distance3 == token.dist() {
@@ -154,10 +158,10 @@ impl<H: HashImplementation> HashTableDepthEstimatorImpl<H> {
             let h = self.hash.get_hash(&chars[i as usize..]);
 
             self.chain_depth[usize::from(pos)] =
-                self.chain_depth[self.head[usize::from(h)] as usize] + 1;
-            self.chain_depth_hash_verify[usize::from(pos)] = h;
+                self.chain_depth[self.head[h as usize] as usize] + 1;
+            self.chain_depth_hash_verify[usize::from(pos)] = h as u16;
 
-            self.head[usize::from(h)] = pos;
+            self.head[h as usize] = pos;
 
             pos = pos.wrapping_add(1);
         }
@@ -167,12 +171,12 @@ impl<H: HashImplementation> HashTableDepthEstimatorImpl<H> {
         let match_pos = (input.pos() - token.dist()) as u16;
 
         let h = self.hash.get_hash(input.cur_chars(0));
-        let head = self.head[usize::from(h)];
+        let head = self.head[h as usize];
 
         // since we already calculated the dictionary add policy, we should
         // always be on the same chain as the the head
-        let cur_depth = self.get_node_depth(head, h);
-        let match_depth = self.get_node_depth(match_pos, h);
+        let cur_depth = self.get_node_depth(head, h as u16);
+        let match_depth = self.get_node_depth(match_pos, h as u16);
 
         debug_assert!(
             cur_depth >= match_depth,
@@ -251,7 +255,7 @@ impl HashTableDepthEstimatorLibdeflate {
         for i in 0..length {
             let h = LIB_DEFLATE3_HASH.get_hash(&chars[i as usize..]);
 
-            self.head3[usize::from(h)] = pos + i;
+            self.head3[h as usize] = pos + i;
         }
     }
 }
@@ -274,7 +278,7 @@ impl HashTableDepthEstimator for HashTableDepthEstimatorLibdeflate {
     /// match node.
     fn match_depth(&mut self, token: DeflateTokenReference, input: &PreflateInput) -> bool {
         let length3hash = LIB_DEFLATE3_HASH.get_hash(input.cur_chars(0));
-        let distance3 = input.pos() - self.head3[usize::from(length3hash)];
+        let distance3 = input.pos() - self.head3[length3hash as usize];
 
         let mdepth = if distance3 == token.dist() {
             1
@@ -311,6 +315,14 @@ pub fn new_depth_estimator(hash_algorithm: HashAlgorithm) -> Box<dyn HashTableDe
     match hash_algorithm {
         HashAlgorithm::None => panic!("No hash algorithm specified"),
         HashAlgorithm::Zlib {
+            hash_mask: 0x7fff,
+            hash_shift: 5,
+        } => HashTableDepthEstimatorImpl::box_new(ZlibRotatingHashFixed::<5, 0x7fff> {}),
+        HashAlgorithm::Zlib {
+            hash_mask: 2047,
+            hash_shift: 4,
+        } => HashTableDepthEstimatorImpl::box_new(ZlibRotatingHashFixed::<4, 2047> {}),
+        HashAlgorithm::Zlib {
             hash_mask,
             hash_shift,
         } => HashTableDepthEstimatorImpl::box_new(ZlibRotatingHash {
@@ -329,12 +341,62 @@ pub fn new_depth_estimator(hash_algorithm: HashAlgorithm) -> Box<dyn HashTableDe
     }
 }
 
+fn update_candidate_hashes(
+    length: u32,
+    candidates: &mut Vec<Box<dyn HashTableDepthEstimator>>,
+    add_policy: DictionaryAddPolicy,
+    input: &mut PreflateInput,
+) {
+    for i in candidates {
+        i.update_hash(add_policy, &input, length);
+    }
+
+    input.advance(length);
+}
+
+/// Runs all the candidates against the compression stream to see which one
+/// does best. The candidates are updated in place and removed if the hash
+/// chain goes above the limit.
+pub fn run_depth_candidates(
+    add_policy: DictionaryAddPolicy,
+    deflate: &DeflateContents,
+    candidates: &mut Vec<Box<dyn HashTableDepthEstimator>>,
+) {
+    let mut input = PreflateInput::new(&deflate.plain_text);
+
+    for (_i, b) in deflate.blocks.iter().enumerate() {
+        match &b.block_type {
+            DeflateTokenBlockType::Stored { uncompressed, .. } => {
+                for _i in 0..uncompressed.len() {
+                    update_candidate_hashes(1, candidates, add_policy, &mut input);
+                }
+            }
+            DeflateTokenBlockType::Huffman { tokens, .. } => {
+                for (_j, t) in tokens.iter().enumerate() {
+                    match t {
+                        DeflateToken::Literal(_) => {
+                            update_candidate_hashes(1, candidates, add_policy, &mut input);
+                        }
+                        &DeflateToken::Reference(token) => {
+                            candidates.retain_mut(|c| c.match_depth(token, &input));
+
+                            update_candidate_hashes(
+                                token.len(),
+                                candidates,
+                                add_policy,
+                                &mut input,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 #[test]
 fn verify_max_chain_length() {
-    use crate::{
-        deflate::deflate_token::{DeflateToken, DeflateTokenBlock},
-        process::parse_deflate,
-    };
+    use crate::deflate::deflate_reader::parse_deflate;
 
     let zlib = HashAlgorithm::Zlib {
         hash_mask: 0x7FFF,
@@ -370,6 +432,7 @@ fn verify_max_chain_length() {
     ];
 
     for (filename, hash_algorithm, add_policy, max_chain_length) in levels {
+        println!("testing {}", filename);
         let compressed_data = crate::process::read_file(filename);
 
         let parsed = parse_deflate(&compressed_data, 0).unwrap();
@@ -382,47 +445,15 @@ fn verify_max_chain_length() {
             filename, add_policy
         );
 
-        let mut estimator = new_depth_estimator(hash_algorithm);
+        let estimator = new_depth_estimator(hash_algorithm);
 
-        let mut plaintext = Vec::new();
-        for block in parsed.blocks.iter() {
-            block.append_to_plaintext(&mut plaintext);
-        }
+        let mut candidates = vec![estimator];
+        run_depth_candidates(add_policy, &parsed, &mut candidates);
 
-        assert_eq!(
-            plaintext.len(),
-            parsed.plain_text.len(),
-            "decompression for file {} is incorrect",
-            filename,
-        );
+        assert!(candidates.len() == 1);
 
-        let mut input = PreflateInput::new(&plaintext);
+        let estimator = candidates.pop().unwrap();
 
-        for block in &parsed.blocks {
-            match block {
-                DeflateTokenBlock::Stored { uncompressed, .. } => {
-                    estimator.update_hash(
-                        DictionaryAddPolicy::AddAll,
-                        &input,
-                        uncompressed.len() as u32,
-                    );
-                }
-                DeflateTokenBlock::Huffman { tokens, .. } => {
-                    for token in tokens {
-                        let len = match token {
-                            DeflateToken::Literal(_) => 1,
-                            DeflateToken::Reference(r) => {
-                                assert!(estimator.match_depth(*r, &input));
-                                r.len()
-                            }
-                        };
-
-                        estimator.update_hash(add_policy, &input, len);
-                        input.advance(len);
-                    }
-                }
-            }
-        }
         assert_eq!(
             estimator.max_chain_found(),
             max_chain_length,

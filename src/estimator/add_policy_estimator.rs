@@ -10,7 +10,7 @@
 /// use skip_hash or update_hash.
 use bitcode::{Decode, Encode};
 
-use crate::deflate::deflate_token::{DeflateToken, DeflateTokenBlock};
+use crate::deflate::deflate_token::{DeflateToken, DeflateTokenBlock, DeflateTokenBlockType};
 
 #[derive(Encode, Decode, Default, Eq, PartialEq, Debug, Clone, Copy)]
 pub enum DictionaryAddPolicy {
@@ -39,6 +39,7 @@ pub enum DictionaryAddPolicy {
 
 impl DictionaryAddPolicy {
     /// Updates the hash based on the dictionary add policy
+    #[inline(always)]
     pub fn update_hash<U: FnMut(&[u8], u32, u32)>(
         self,
         input: &[u8],
@@ -133,15 +134,15 @@ pub(super) fn estimate_add_policy(token_blocks: &[DeflateTokenBlock]) -> Diction
     for i in 0..token_blocks.len() {
         let token_block = &token_blocks[i];
 
-        match token_block {
-            DeflateTokenBlock::Stored { uncompressed, .. } => {
+        match &token_block.block_type {
+            DeflateTokenBlockType::Stored { uncompressed, .. } => {
                 // we assume for stored blocks everything was added to the dictionary
                 for _i in 0..uncompressed.len() {
                     current_window[current_offset as usize & WINDOW_MASK] = 0;
                     current_offset += 1;
                 }
             }
-            DeflateTokenBlock::Huffman { tokens, .. } => {
+            DeflateTokenBlockType::Huffman { tokens, .. } => {
                 for token in tokens.iter() {
                     match token {
                         DeflateToken::Literal(_) => {
@@ -208,9 +209,11 @@ pub(super) fn estimate_add_policy(token_blocks: &[DeflateTokenBlock]) -> Diction
 
 #[test]
 fn verify_miniz1_recognition() {
+    use crate::deflate::deflate_reader::parse_deflate;
+
     let v = crate::process::read_file("compressed_minizoxide_level1.deflate");
 
-    let contents = crate::process::parse_deflate(&v, 1).unwrap();
+    let contents = parse_deflate(&v, 1).unwrap();
 
     let add_policy = estimate_add_policy(&contents.blocks);
 
@@ -219,6 +222,8 @@ fn verify_miniz1_recognition() {
 
 #[test]
 fn verify_zlib_level_recognition() {
+    use crate::deflate::deflate_reader::parse_deflate;
+
     let levels = [
         DictionaryAddPolicy::AddFirst(4),
         DictionaryAddPolicy::AddFirst(5),
@@ -229,7 +234,7 @@ fn verify_zlib_level_recognition() {
     for i in 1..=4 {
         let v = crate::process::read_file(&format!("compressed_zlib_level{}.deflate", i));
 
-        let contents = crate::process::parse_deflate(&v, 1).unwrap();
+        let contents = parse_deflate(&v, 1).unwrap();
         let add_policy = estimate_add_policy(&contents.blocks);
 
         assert_eq!(add_policy, levels[i - 1]);
@@ -238,6 +243,7 @@ fn verify_zlib_level_recognition() {
 
 #[test]
 fn verify_zlibng_level_recognition() {
+    use crate::deflate::deflate_reader::parse_deflate;
     let levels = [
         DictionaryAddPolicy::AddFirstWith32KBoundary, // 1 quick
         DictionaryAddPolicy::AddFirstAndLast(4),      // 2 fast
@@ -248,7 +254,7 @@ fn verify_zlibng_level_recognition() {
     for i in 1..=4 {
         let v = crate::process::read_file(&format!("compressed_zlibng_level{}.deflate", i));
 
-        let contents = crate::process::parse_deflate(&v, 1).unwrap();
+        let contents = parse_deflate(&v, 1).unwrap();
         let add_policy = estimate_add_policy(&contents.blocks);
 
         assert_eq!(add_policy, levels[i - 1]);
@@ -258,10 +264,12 @@ fn verify_zlibng_level_recognition() {
 /// libflate always adds all matches to the dictionary
 #[test]
 fn verify_libdeflate_level_recognition() {
+    use crate::deflate::deflate_reader::parse_deflate;
+
     for i in 1..=9 {
         let v = crate::process::read_file(&format!("compressed_libdeflate_level{}.deflate", i));
 
-        let contents = crate::process::parse_deflate(&v, 1).unwrap();
+        let contents = parse_deflate(&v, 1).unwrap();
         let add_policy = estimate_add_policy(&contents.blocks);
 
         assert_eq!(add_policy, DictionaryAddPolicy::AddAll);

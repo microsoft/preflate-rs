@@ -4,7 +4,9 @@
  *  This software incorporates material from third parties. See NOTICE.txt for details.
  *--------------------------------------------------------------------------------------------*/
 
-use crate::deflate::deflate_token::{DeflateHuffmanType, DeflateToken, DeflateTokenBlock};
+use crate::deflate::deflate_token::{
+    DeflateHuffmanType, DeflateToken, DeflateTokenBlock, DeflateTokenBlockType,
+};
 
 pub struct PreflateStreamInfo {
     pub token_count: u32,
@@ -19,9 +21,10 @@ pub struct PreflateStreamInfo {
     pub count_rle_blocks: u32,
     pub count_static_huff_tree_blocks: u32,
     pub max_dist_3_matches: u32,
+    pub matches_to_start_detected: bool,
 }
 
-fn process_tokens(tokens: &[DeflateToken], result: &mut PreflateStreamInfo) {
+fn process_tokens(tokens: &[DeflateToken], result: &mut PreflateStreamInfo, position: &mut u32) {
     result.token_count += tokens.len() as u32;
     result.max_tokens_per_block = std::cmp::max(result.max_tokens_per_block, tokens.len() as u32);
     let mut block_max_dist = 0;
@@ -31,11 +34,17 @@ fn process_tokens(tokens: &[DeflateToken], result: &mut PreflateStreamInfo) {
         match &tokens[j] {
             DeflateToken::Literal(_) => {
                 result.literal_count += 1;
+                *position += 1;
             }
             DeflateToken::Reference(t) => {
+                if t.dist() == *position {
+                    result.matches_to_start_detected = true;
+                }
+
                 result.reference_count += 1;
                 block_max_dist = std::cmp::max(block_max_dist, t.dist());
                 block_min_len = std::cmp::min(block_min_len, t.len());
+                *position += t.len();
 
                 if t.len() == 3 {
                     result.max_dist_3_matches = std::cmp::max(result.max_dist_3_matches, t.dist());
@@ -67,21 +76,24 @@ pub(crate) fn extract_preflate_info(blocks: &[DeflateTokenBlock]) -> PreflateStr
         count_huff_blocks: 0,
         count_rle_blocks: 0,
         max_dist_3_matches: 0,
+        matches_to_start_detected: false,
     };
 
+    let mut position = 0;
     for i in 0..blocks.len() {
-        match &blocks[i] {
-            DeflateTokenBlock::Stored { .. } => {
+        match &blocks[i].block_type {
+            DeflateTokenBlockType::Stored { uncompressed, .. } => {
                 result.count_stored_blocks += 1;
+                position += uncompressed.len() as u32;
             }
-            DeflateTokenBlock::Huffman {
+            DeflateTokenBlockType::Huffman {
                 tokens,
                 huffman_type,
             } => {
                 if let DeflateHuffmanType::Static { .. } = huffman_type {
                     result.count_static_huff_tree_blocks += 1;
                 }
-                process_tokens(&tokens, &mut result);
+                process_tokens(&tokens, &mut result, &mut position);
             }
         }
     }

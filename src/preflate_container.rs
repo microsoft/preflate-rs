@@ -7,12 +7,13 @@ use std::{
 
 use crate::{
     cabac_codec::{PredictionDecoderCabac, PredictionEncoderCabac},
+    deflate::deflate_reader::parse_deflate,
     estimator::preflate_parameter_estimator::PreflateParameters,
     hash_algorithm::HashAlgorithm,
     idat_parse::{recreate_idat, IdatContents},
     preflate_error::{err_exit_code, AddContext, ExitCode, PreflateError, Result},
     preflate_input::PreflateInput,
-    process::{decode_mispredictions, encode_mispredictions, parse_deflate, ReconstructionData},
+    process::{decode_mispredictions, encode_mispredictions, ReconstructionData},
     scan_deflate::{split_into_deflate_streams, BlockChunk},
     statistical_codec::PredictionEncoder,
 };
@@ -258,7 +259,7 @@ pub fn expand_zlib_chunks(
         println!("locations found: {:?}", locations_found);
     }
 
-    write.write(&[COMPRESSED_WRAPPER_VERSION_1]); // version 1 of format. Definitely will improved.
+    write.write_all(&[COMPRESSED_WRAPPER_VERSION_1])?; // version 1 of format. Definitely will improved.
 
     let mut index = 0;
     for loc in locations_found {
@@ -371,9 +372,7 @@ pub fn decompress_deflate_stream(
     //process::write_file("c:\\temp\\lastop.deflate", compressed_data);
     //process::write_file("c:\\temp\\lastop.bin", contents.plain_text.as_slice());
 
-    let params =
-        PreflateParameters::estimate_preflate_parameters(&contents.plain_text, &contents.blocks)
-            .context()?;
+    let params = PreflateParameters::estimate_preflate_parameters(&contents).context()?;
 
     if loglevel > 0 {
         println!("params: {:?}", params);
@@ -465,9 +464,7 @@ pub fn decompress_deflate_stream_assert(
 
     let contents = parse_deflate(compressed_data, 0)?;
 
-    let params =
-        PreflateParameters::estimate_preflate_parameters(&contents.plain_text, &contents.blocks)
-            .context()?;
+    let params = PreflateParameters::estimate_preflate_parameters(&contents).context()?;
 
     encode_mispredictions(&contents, &params, &mut cabac_encoder)?;
     assert_eq!(contents.compressed_size, compressed_data.len());
@@ -655,6 +652,33 @@ pub trait ProcessBuffer {
         }
         Ok(writer)
     }
+
+    /// reads everything from input and writes it to the output
+    fn copy_to_end(&mut self, input: &mut impl Read, output: &mut impl Write) -> Result<()> {
+        let mut buffer = [0; 65536];
+        let mut input_complete = false;
+        loop {
+            let amount_read;
+
+            if input_complete {
+                amount_read = 0;
+            } else {
+                amount_read = input.read(&mut buffer).context()?;
+                if amount_read == 0 {
+                    input_complete = true
+                }
+            };
+
+            let done = self
+                .process_buffer(&buffer[0..amount_read], input_complete, output, usize::MAX)
+                .context()?;
+            if done {
+                break;
+            }
+        }
+
+        Ok(())
+    }
 }
 
 pub struct PreflateCompressionContext {
@@ -781,6 +805,8 @@ impl ProcessBuffer for PreflateCompressionContext {
             }
 
             pending_output.drain(..amount_written);
+
+            self.compression_stats.zstd_compressed_size += amount_written as u64;
         }
         Ok(self.input_complete && pending_output.len() == 0)
     }
@@ -856,6 +882,26 @@ impl ProcessBuffer for PreflateDecompressionContext {
             Ok(false)
         }
     }
+}
+
+#[test]
+fn test_baseline_calc() {
+    use crate::process::read_file;
+
+    let v = read_file("samplezip.zip");
+
+    let mut context = PreflateCompressionContext::new(true, 0, 9);
+
+    let _r = context.process_vec(&v).unwrap();
+
+    let stats = context.stats();
+
+    println!("stats: {:?}", stats);
+
+    // these change if the compression algorithm is altered, update them
+    assert_eq!(stats.zstd_baseline_size, 13661);
+    assert_eq!(stats.overhead_bytes, 466);
+    assert_eq!(stats.zstd_compressed_size, 12452);
 }
 
 #[test]

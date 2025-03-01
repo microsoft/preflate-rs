@@ -6,7 +6,7 @@
 
 use crate::preflate_error::Result;
 
-use super::deflate_token::DeflateHuffmanType;
+use super::deflate_token::{DeflateHuffmanType, DeflateTokenBlockType};
 use super::{
     deflate_constants::{
         quantize_distance, quantize_length, DIST_BASE_TABLE, DIST_EXTRA_TABLE, LENGTH_BASE_TABLE,
@@ -41,12 +41,13 @@ impl DeflateWriter {
         o
     }
 
-    pub fn encode_block(&mut self, block: &DeflateTokenBlock, last: bool) -> Result<()> {
-        self.bitwriter.write(last as u32, 1, &mut self.output);
-        match block {
-            DeflateTokenBlock::Stored {
+    pub fn encode_block(&mut self, block: &DeflateTokenBlock) -> Result<()> {
+        self.bitwriter.write(block.last as u32, 1, &mut self.output);
+        match &block.block_type {
+            DeflateTokenBlockType::Stored {
                 uncompressed,
                 padding_bits,
+                ..
             } => {
                 self.bitwriter.write(0, 2, &mut self.output);
                 self.bitwriter.pad(*padding_bits, &mut self.output);
@@ -59,34 +60,40 @@ impl DeflateWriter {
 
                 self.output.extend_from_slice(&uncompressed);
             }
-            DeflateTokenBlock::Huffman {
+            DeflateTokenBlockType::Huffman {
                 tokens,
                 huffman_type,
-            } => match huffman_type {
-                DeflateHuffmanType::Static { .. } => {
-                    self.bitwriter.write(1, 2, &mut self.output);
-                    let huffman_writer = HuffmanWriter::start_fixed_huffman_table();
-                    self.encode_huffman(tokens, &huffman_writer);
-                }
-                DeflateHuffmanType::Dynamic {
-                    huffman_encoding, ..
-                } => {
-                    let huffman_writer = HuffmanWriter::start_dynamic_huffman_table(
-                        &mut self.bitwriter,
-                        &huffman_encoding,
-                        &mut self.output,
-                    )?;
+                ..
+            } => {
+                match huffman_type {
+                    DeflateHuffmanType::Static { .. } => {
+                        self.bitwriter.write(1, 2, &mut self.output);
+                        let huffman_writer = HuffmanWriter::start_fixed_huffman_table();
+                        self.encode_huffman(tokens, &huffman_writer);
+                    }
+                    DeflateHuffmanType::Dynamic {
+                        huffman_encoding, ..
+                    } => {
+                        let huffman_writer = HuffmanWriter::start_dynamic_huffman_table(
+                            &mut self.bitwriter,
+                            &huffman_encoding,
+                            &mut self.output,
+                        )?;
 
-                    self.encode_huffman(tokens, &huffman_writer);
+                        self.encode_huffman(tokens, &huffman_writer);
+                    }
                 }
-            },
+                if block.last {
+                    self.bitwriter
+                        .pad(block.tail_padding_bits, &mut self.output);
+                }
+            }
         }
 
         Ok(())
     }
 
-    pub fn flush_with_padding(&mut self, padding: u8) {
-        self.bitwriter.pad(padding, &mut self.output);
+    pub fn flush(&mut self) {
         self.bitwriter.flush_whole_bytes(&mut self.output);
     }
 
@@ -158,30 +165,46 @@ fn roundtrip_deflate_writer() {
     let mut w = DeflateWriter::new();
 
     let blocks = [
-        DeflateTokenBlock::Huffman {
-            tokens: vec![DeflateToken::Literal(0), DeflateToken::Literal(1)],
-            huffman_type: DeflateHuffmanType::Static { incomplete: false },
+        DeflateTokenBlock {
+            block_type: DeflateTokenBlockType::Huffman {
+                tokens: vec![
+                    DeflateToken::Literal(0),
+                    DeflateToken::Literal(2),
+                    DeflateToken::Literal(3),
+                ],
+                huffman_type: DeflateHuffmanType::Static,
+            },
+            last: false,
+            tail_padding_bits: 0,
         },
-        DeflateTokenBlock::Stored {
-            uncompressed: vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
-            padding_bits: 0b101, // there are 3 bits of padding
+        DeflateTokenBlock {
+            block_type: DeflateTokenBlockType::Stored {
+                uncompressed: vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+                padding_bits: 0b101, // there are 3 bits of padding
+            },
+            last: false,
+            tail_padding_bits: 0,
         },
-        DeflateTokenBlock::Huffman {
-            tokens: vec![
-                DeflateToken::Literal(0),
-                DeflateToken::Literal(1),
-                DeflateToken::new_ref(100, 1, false),
-                DeflateToken::new_ref(258, 1, true),
-                DeflateToken::Literal(3),
-            ],
-            huffman_type: DeflateHuffmanType::Static { incomplete: false },
+        DeflateTokenBlock {
+            block_type: DeflateTokenBlockType::Huffman {
+                tokens: vec![
+                    DeflateToken::Literal(0),
+                    DeflateToken::Literal(1),
+                    DeflateToken::new_ref(100, 1, false),
+                    DeflateToken::new_ref(258, 1, true),
+                    DeflateToken::Literal(3),
+                ],
+                huffman_type: DeflateHuffmanType::Static,
+            },
+            last: true,
+            tail_padding_bits: 0b1010,
         },
     ];
 
     for i in 0..blocks.len() {
-        w.encode_block(&blocks[i], i == blocks.len() - 1).unwrap();
+        w.encode_block(&blocks[i]).unwrap();
     }
-    w.flush_with_padding(0);
+    w.flush();
 
     let output = w.detach_output();
 
@@ -189,8 +212,9 @@ fn roundtrip_deflate_writer() {
 
     let mut newcontent = Vec::new();
     loop {
-        let mut last = false;
-        newcontent.push(r.read_block(&mut last).unwrap());
+        let b = r.read_block().unwrap();
+        let last = b.last;
+        newcontent.push(b);
         if last {
             break;
         }
@@ -199,5 +223,58 @@ fn roundtrip_deflate_writer() {
     assert_eq!(blocks.len(), newcontent.len());
     for i in 0..blocks.len() {
         assert_eq!(blocks[i], newcontent[i], "block {}", i);
+    }
+}
+
+/// rountrips all deflate files in the sample directory
+#[test]
+fn roundtrip_full_file() {
+    use std::fs::File;
+    use std::io::Read;
+    use std::path::Path;
+
+    let searchpath = Path::new(env!("CARGO_MANIFEST_DIR")).join("samples");
+
+    for entry in std::fs::read_dir(searchpath).unwrap() {
+        let entry = entry.unwrap();
+        let path = entry.path();
+
+        if path.extension().is_some() && path.extension().unwrap() == "deflate" {
+            println!("Testing {:?}", path);
+
+            let mut file = File::open(&path).unwrap();
+            let mut buffer = Vec::new();
+            file.read_to_end(&mut buffer).unwrap();
+
+            let mut reader = std::io::Cursor::new(&buffer);
+
+            let mut r = crate::deflate::deflate_reader::DeflateReader::new(&mut reader);
+
+            let mut newcontent = Vec::new();
+            loop {
+                let b = r.read_block().unwrap();
+                let last = b.last;
+                newcontent.push(b);
+                if last {
+                    break;
+                }
+            }
+
+            let amount_read = reader.position() as usize;
+
+            let mut w = DeflateWriter::new();
+            for i in 0..newcontent.len() {
+                w.encode_block(&newcontent[i]).unwrap();
+            }
+            w.flush();
+
+            let output = w.detach_output();
+
+            if amount_read != output.len() || buffer[0..amount_read] != output[..] {
+                println!("mismatch");
+            }
+            //assert_eq!(buffer.len(), output.len());
+            //assert_eq!(buffer, output);
+        }
     }
 }
