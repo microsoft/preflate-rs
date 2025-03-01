@@ -49,8 +49,6 @@ pub fn encode_mispredictions(
         encoder,
     )?;
 
-    encoder.encode_misprediction(CodecCorrection::EOFMisprediction, false);
-
     encoder.encode_correction(CodecCorrection::NonZeroPadding, deflate.eof_padding.into());
 
     Ok(())
@@ -62,11 +60,7 @@ fn predict_blocks(
     encoder: &mut impl PredictionEncoder,
 ) -> Result<(), PreflateError> {
     for i in 0..blocks.len() {
-        if token_predictor_in.input_eof() {
-            encoder.encode_misprediction(CodecCorrection::EOFMisprediction, true);
-        }
-
-        token_predictor_in.predict_block(&blocks[i], encoder, i == blocks.len() - 1)?;
+        token_predictor_in.predict_block(&blocks[i], encoder)?;
     }
     assert!(token_predictor_in.input_eof());
     Ok(())
@@ -85,10 +79,7 @@ pub fn decode_mispredictions(
         &mut deflate_writer,
     )?;
 
-    // flush the last byte, which may be incomplete and normally
-    // padded with zeros, but maybe not
-    let padding = decoder.decode_correction(CodecCorrection::NonZeroPadding) as u8;
-    deflate_writer.flush_with_padding(padding);
+    deflate_writer.flush();
 
     Ok((deflate_writer.detach_output(), output_blocks))
 }
@@ -100,17 +91,16 @@ fn recreate_blocks<D: PredictionDecoder>(
     deflate_writer: &mut DeflateWriter,
 ) -> Result<Vec<DeflateTokenBlock>, PreflateError> {
     let mut output_blocks = Vec::new();
-    let mut is_eof = token_predictor.input_eof()
-        && !decoder.decode_misprediction(CodecCorrection::EOFMisprediction);
-    while !is_eof {
+    loop {
         let block = token_predictor.recreate_block(decoder)?;
 
-        is_eof = token_predictor.input_eof()
-            && !decoder.decode_misprediction(CodecCorrection::EOFMisprediction);
+        deflate_writer.encode_block(&block)?;
 
-        deflate_writer.encode_block(&block, is_eof)?;
-
+        let last = block.last;
         output_blocks.push(block);
+        if last {
+            break;
+        }
     }
     Ok(output_blocks)
 }
@@ -202,7 +192,7 @@ fn analyze_compressed_data_verify(
 ) {
     use crate::{
         cabac_codec::{PredictionDecoderCabac, PredictionEncoderCabac},
-        deflate::deflate_reader::parse_deflate,
+        deflate::{deflate_reader::parse_deflate, deflate_token::DeflateTokenBlockType},
         statistical_codec::{VerifyPredictionDecoder, VerifyPredictionEncoder},
     };
     use cabac::debug::{DebugReader, DebugWriter};
@@ -264,13 +254,13 @@ fn analyze_compressed_data_verify(
         .iter()
         .zip(recreated_blocks)
         .enumerate()
-        .for_each(|(index, (a, b))| match (a, &b) {
+        .for_each(|(index, (a, b))| match (&a.block_type, &b.block_type) {
             (
-                DeflateTokenBlock::Stored {
+                DeflateTokenBlockType::Stored {
                     uncompressed: a,
                     padding_bits: b,
                 },
-                DeflateTokenBlock::Stored {
+                DeflateTokenBlockType::Stored {
                     uncompressed: c,
                     padding_bits: d,
                 },
@@ -279,11 +269,11 @@ fn analyze_compressed_data_verify(
                 assert_eq!(b, d, "padding bits differ {index}");
             }
             (
-                DeflateTokenBlock::Huffman {
+                DeflateTokenBlockType::Huffman {
                     tokens: t1,
                     huffman_type: h1,
                 },
-                DeflateTokenBlock::Huffman {
+                DeflateTokenBlockType::Huffman {
                     tokens: t2,
                     huffman_type: h2,
                 },

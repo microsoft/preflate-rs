@@ -4,9 +4,12 @@ use crate::{
     deflate::{
         deflate_constants,
         deflate_reader::DeflateContents,
-        deflate_token::{DeflateToken, DeflateTokenBlock, DeflateTokenReference},
+        deflate_token::{
+            DeflateToken, DeflateTokenBlock, DeflateTokenBlockType, DeflateTokenReference,
+        },
     },
     hash_algorithm::*,
+    preflate_error::AddContext,
     preflate_input::PreflateInput,
 };
 
@@ -365,13 +368,13 @@ pub fn run_depth_candidates(
     let mut input = PreflateInput::new(&deflate.plain_text);
 
     for (_i, b) in deflate.blocks.iter().enumerate() {
-        match b {
-            DeflateTokenBlock::Stored { uncompressed, .. } => {
+        match &b.block_type {
+            DeflateTokenBlockType::Stored { uncompressed, .. } => {
                 for _i in 0..uncompressed.len() {
                     update_candidate_hashes(1, candidates, add_policy, &mut input);
                 }
             }
-            DeflateTokenBlock::Huffman { tokens, .. } => {
+            DeflateTokenBlockType::Huffman { tokens, .. } => {
                 for (_j, t) in tokens.iter().enumerate() {
                     match t {
                         DeflateToken::Literal(_) => {
@@ -432,6 +435,7 @@ fn verify_max_chain_length() {
     ];
 
     for (filename, hash_algorithm, add_policy, max_chain_length) in levels {
+        println!("testing {}", filename);
         let compressed_data = crate::process::read_file(filename);
 
         let parsed = parse_deflate(&compressed_data, 0).unwrap();

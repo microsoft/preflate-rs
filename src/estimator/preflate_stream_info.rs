@@ -4,7 +4,9 @@
  *  This software incorporates material from third parties. See NOTICE.txt for details.
  *--------------------------------------------------------------------------------------------*/
 
-use crate::deflate::deflate_token::{DeflateHuffmanType, DeflateToken, DeflateTokenBlock};
+use crate::deflate::deflate_token::{
+    DeflateHuffmanType, DeflateToken, DeflateTokenBlock, DeflateTokenBlockType,
+};
 
 pub struct PreflateStreamInfo {
     pub token_count: u32,
@@ -79,12 +81,12 @@ pub(crate) fn extract_preflate_info(blocks: &[DeflateTokenBlock]) -> PreflateStr
 
     let mut position = 0;
     for i in 0..blocks.len() {
-        match &blocks[i] {
-            DeflateTokenBlock::Stored { uncompressed, .. } => {
+        match &blocks[i].block_type {
+            DeflateTokenBlockType::Stored { uncompressed, .. } => {
                 result.count_stored_blocks += 1;
                 position += uncompressed.len() as u32;
             }
-            DeflateTokenBlock::Huffman {
+            DeflateTokenBlockType::Huffman {
                 tokens,
                 huffman_type,
             } => {

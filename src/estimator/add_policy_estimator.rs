@@ -10,7 +10,7 @@
 /// use skip_hash or update_hash.
 use bitcode::{Decode, Encode};
 
-use crate::deflate::deflate_token::{DeflateToken, DeflateTokenBlock};
+use crate::deflate::deflate_token::{DeflateToken, DeflateTokenBlock, DeflateTokenBlockType};
 
 #[derive(Encode, Decode, Default, Eq, PartialEq, Debug, Clone, Copy)]
 pub enum DictionaryAddPolicy {
@@ -134,15 +134,15 @@ pub(super) fn estimate_add_policy(token_blocks: &[DeflateTokenBlock]) -> Diction
     for i in 0..token_blocks.len() {
         let token_block = &token_blocks[i];
 
-        match token_block {
-            DeflateTokenBlock::Stored { uncompressed, .. } => {
+        match &token_block.block_type {
+            DeflateTokenBlockType::Stored { uncompressed, .. } => {
                 // we assume for stored blocks everything was added to the dictionary
                 for _i in 0..uncompressed.len() {
                     current_window[current_offset as usize & WINDOW_MASK] = 0;
                     current_offset += 1;
                 }
             }
-            DeflateTokenBlock::Huffman { tokens, .. } => {
+            DeflateTokenBlockType::Huffman { tokens, .. } => {
                 for token in tokens.iter() {
                     match token {
                         DeflateToken::Literal(_) => {
