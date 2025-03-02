@@ -10,25 +10,55 @@ use byteorder::ReadBytesExt;
 
 pub trait ReadBits {
     fn get(&mut self, cbit: u32) -> Result<u32>;
+    fn read_padding_bits(&mut self) -> u8;
+    fn read_byte(&mut self) -> Result<u8>;
+    fn bits_left(&self) -> u32;
 }
 
 /// BitReader reads a variable number of bits from a byte stream.
-pub struct BitReader<R: Read + Seek> {
-    binary_reader: R,
+pub struct BitReader {
     bits_read: u32,
     bit_count: u32,
 }
 
-impl<R: Read + Seek> ReadBits for BitReader<R> {
-    fn get(&mut self, cbit: u32) -> Result<u32> {
-        BitReader::get(self, cbit)
+pub struct BitReaderWrapper<'a, R: Read> {
+    bit_reader: &'a mut BitReader,
+    byte_reader: &'a mut R,
+}
+
+impl<R: Read> BitReaderWrapper<'_, R> {
+    pub fn new<'a>(
+        bit_reader: &'a mut BitReader,
+        byte_reader: &'a mut R,
+    ) -> BitReaderWrapper<'a, R> {
+        BitReaderWrapper {
+            bit_reader,
+            byte_reader,
+        }
     }
 }
 
-impl<R: Read + Seek> BitReader<R> {
-    pub fn new(binary_reader: R) -> Self {
+impl<R: Read> ReadBits for BitReaderWrapper<'_, R> {
+    fn get(&mut self, cbit: u32) -> Result<u32> {
+        BitReader::get(self.bit_reader, cbit, self.byte_reader)
+    }
+
+    fn read_padding_bits(&mut self) -> u8 {
+        self.bit_reader.read_padding_bits()
+    }
+
+    fn read_byte(&mut self) -> Result<u8> {
+        self.bit_reader.read_byte(self.byte_reader)
+    }
+
+    fn bits_left(&self) -> u32 {
+        self.bit_reader.bits_left()
+    }
+}
+
+impl BitReader {
+    pub fn new() -> Self {
         BitReader {
-            binary_reader,
             bits_read: 0,
             bit_count: 0,
         }
@@ -40,25 +70,24 @@ impl<R: Read + Seek> BitReader<R> {
     pub fn run_with_rollback<
         ROK,
         RERR,
-        F: FnOnce(&mut BitReader<R>) -> core::result::Result<ROK, RERR>,
+        R: Read + Seek,
+        F: FnOnce(&mut BitReaderWrapper<R>) -> core::result::Result<ROK, RERR>,
     >(
         &mut self,
+        byte_reader: &mut R,
         f: F,
     ) -> core::result::Result<ROK, RERR> {
-        let prev_pos = self
-            .binary_reader
-            .seek(std::io::SeekFrom::Current(0))
-            .unwrap();
+        let prev_pos = byte_reader.seek(std::io::SeekFrom::Current(0)).unwrap();
         let prev_bits_read = self.bits_read;
         let prev_bit_count = self.bit_count;
 
-        let r = f(self);
+        let r = f(&mut BitReaderWrapper::new(self, byte_reader));
         match r {
             Ok(result) => {
                 return Ok(result);
             }
             Err(e) => {
-                self.binary_reader
+                byte_reader
                     .seek(std::io::SeekFrom::Start(prev_pos))
                     .unwrap();
                 self.bits_read = prev_bits_read;
@@ -84,17 +113,17 @@ impl<R: Read + Seek> BitReader<R> {
         wret as u8
     }
 
-    pub fn read_byte(&mut self) -> Result<u8> {
-        assert!(self.bit_count == 0, "BitReader Error: Attempt to read bytes without first calling FlushBufferToByteBoundary");
+    pub fn read_byte(&mut self, byte_reader: &mut impl Read) -> Result<u8> {
+        debug_assert!(self.bit_count == 0, "BitReader Error: Attempt to read bytes without first calling FlushBufferToByteBoundary");
 
-        let result = self.binary_reader.read_u8()?;
+        let result = byte_reader.read_u8()?;
 
         Ok(result)
     }
 
     /// Read cbit bits from the input stream return
     /// Only supports read of 1 to 32 bits.
-    pub fn get(&mut self, cbit: u32) -> Result<u32> {
+    pub fn get(&mut self, cbit: u32, byte_reader: &mut impl Read) -> Result<u32> {
         let mut wret: u32 = 0;
 
         if cbit == 0 {
@@ -109,7 +138,7 @@ impl<R: Read + Seek> BitReader<R> {
         }
 
         while self.bit_count < cbit {
-            let b = self.binary_reader.read_u8()? as u32;
+            let b = byte_reader.read_u8()? as u32;
 
             self.bits_read |= b << self.bit_count;
             self.bit_count += 8;

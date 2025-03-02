@@ -49,8 +49,6 @@ pub fn encode_mispredictions(
         encoder,
     )?;
 
-    encoder.encode_correction(CodecCorrection::NonZeroPadding, deflate.eof_padding.into());
-
     Ok(())
 }
 

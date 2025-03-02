@@ -49,7 +49,7 @@ impl HuffmanOriginalEncoding {
     /// Reads a dynamic huffman table from the bit reader. The structure
     /// holds all the information necessary to recode the huffman table
     /// exactly as it was written.
-    pub fn read<R: ReadBits>(bit_reader: &mut R) -> Result<HuffmanOriginalEncoding> {
+    pub fn read(bit_reader: &mut impl ReadBits) -> Result<HuffmanOriginalEncoding> {
         // 5 Bits: HLIT, # of Literal/Length codes - 257 (257 - 286)
         let hlit = bit_reader.get(5)? as usize + 257;
         // 5 Bits: HDIST, # of Distance codes - 1        (1 - 32)
@@ -356,7 +356,8 @@ impl HuffmanWriter {
 
 #[test]
 fn roundtrip_huffman_bitreadwrite() {
-    use crate::deflate::bit_reader::BitReader;
+    use crate::deflate::bit_reader::{BitReader, BitReaderWrapper};
+
     use std::io::Cursor;
 
     let code_lengths = [1, 0, 3, 3, 4, 4, 3, 0];
@@ -375,7 +376,8 @@ fn roundtrip_huffman_bitreadwrite() {
     bit_writer.pad(0, &mut data_buffer);
 
     let mut reader = Cursor::new(&data_buffer);
-    let mut bit_reader = BitReader::new(&mut reader);
+    let mut br = BitReader::new();
+    let mut bit_reader = BitReaderWrapper::new(&mut br, &mut reader);
 
     let huffman_tree = calculate_huffman_code_tree(&code_lengths).unwrap();
 
@@ -457,6 +459,8 @@ fn roundtrip_huffman_table() {
 
 #[cfg(test)]
 fn rountrip_test(encoding: HuffmanOriginalEncoding) {
+    use crate::deflate::bit_reader;
+
     use super::bit_reader::BitReader;
     use std::io::Cursor;
 
@@ -473,13 +477,15 @@ fn rountrip_test(encoding: HuffmanOriginalEncoding) {
 
     // now re-read the encoding
     let mut reader = Cursor::new(&output_buffer);
-    let mut bit_reader = BitReader::new(&mut reader);
-    let encoding2 = HuffmanOriginalEncoding::read(&mut bit_reader).unwrap();
+    let mut bit_reader = BitReader::new();
+    let mut bit_reader_wrapper = bit_reader::BitReaderWrapper::new(&mut bit_reader, &mut reader);
+
+    let encoding2 = HuffmanOriginalEncoding::read(&mut bit_reader_wrapper).unwrap();
     assert_eq!(encoding, encoding2);
 
     // verify sentinal to make sure we didn't write anything extra or too little
     assert_eq!(
-        bit_reader.get(16).unwrap(),
+        bit_reader_wrapper.get(16).unwrap(),
         0x1234,
         "sentinal value didn't match"
     );

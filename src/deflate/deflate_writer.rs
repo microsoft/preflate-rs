@@ -208,11 +208,13 @@ fn roundtrip_deflate_writer() {
 
     let output = w.detach_output();
 
-    let mut r = DeflateReader::new(Cursor::new(output));
+    let mut r = DeflateReader::new();
+    let mut plain_text = Vec::new();
+    let mut byte_reader = Cursor::new(&output);
 
     let mut newcontent = Vec::new();
     loop {
-        let b = r.read_block().unwrap();
+        let b = r.read_block(&mut byte_reader, &mut plain_text).unwrap();
         let last = b.last;
         newcontent.push(b);
         if last {
@@ -248,11 +250,12 @@ fn roundtrip_full_file() {
 
             let mut reader = std::io::Cursor::new(&buffer);
 
-            let mut r = crate::deflate::deflate_reader::DeflateReader::new(&mut reader);
+            let mut r = crate::deflate::deflate_reader::DeflateReader::new();
+            let mut plain_text = Vec::new();
 
             let mut newcontent = Vec::new();
             loop {
-                let b = r.read_block().unwrap();
+                let b = r.read_block(&mut reader, &mut plain_text).unwrap();
                 let last = b.last;
                 newcontent.push(b);
                 if last {

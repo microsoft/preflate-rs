@@ -99,9 +99,9 @@ fn write_roundtrip() {
     b.flush_whole_bytes(&mut data_buffer);
 
     let mut cursor = std::io::Cursor::new(data_buffer);
-    let mut reader = BitReader::new(&mut cursor);
+    let mut reader = BitReader::new();
 
     for &(bits, len) in pattern.iter() {
-        assert_eq!(reader.get(len).unwrap(), bits);
+        assert_eq!(reader.get(len, &mut cursor).unwrap(), bits);
     }
 }
