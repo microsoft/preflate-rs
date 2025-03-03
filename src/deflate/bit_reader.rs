@@ -4,7 +4,10 @@
  *  This software incorporates material from third parties. See NOTICE.txt for details.
  *--------------------------------------------------------------------------------------------*/
 
-use std::io::{Error, ErrorKind, Read, Result, Seek};
+use std::{
+    collections::VecDeque,
+    io::{Cursor, Error, ErrorKind, Read, Result, Seek, SeekFrom},
+};
 
 use byteorder::ReadBytesExt;
 
@@ -15,94 +18,75 @@ pub trait ReadBits {
     fn bits_left(&self) -> u32;
 }
 
+pub trait ScopedRead: Read {
+    fn read_at_position(&self, position: usize) -> Result<u8>;
+    fn truncate(&mut self, position: usize);
+}
+
+impl ScopedRead for VecDeque<u8> {
+    fn read_at_position(&self, position: usize) -> Result<u8> {
+        if position >= self.len() {
+            return Err(Error::new(ErrorKind::UnexpectedEof, "Unexpected EOF"));
+        }
+        Ok(self[position])
+    }
+
+    fn truncate(&mut self, position: usize) {
+        self.drain(0..position);
+    }
+}
+
+impl<T: AsRef<[u8]>> ScopedRead for Cursor<T> {
+    fn read_at_position(&self, position: usize) -> Result<u8> {
+        let read_pos = self.position() as usize + position;
+        if read_pos >= self.get_ref().as_ref().len() {
+            return Err(Error::new(ErrorKind::UnexpectedEof, "Unexpected EOF"));
+        }
+
+        Ok(self.get_ref().as_ref()[read_pos])
+    }
+
+    fn truncate(&mut self, position: usize) {
+        self.seek(SeekFrom::Current(position as i64)).unwrap();
+    }
+}
+
 /// BitReader reads a variable number of bits from a byte stream.
-pub struct BitReader {
+pub struct BitReader<R: Read> {
     bits_read: u32,
     bit_count: u32,
+    bytes_read: u64,
+    inner: R,
 }
 
-pub struct BitReaderWrapper<'a, R: Read> {
-    bit_reader: &'a mut BitReader,
-    byte_reader: &'a mut R,
-}
-
-impl<R: Read> BitReaderWrapper<'_, R> {
-    pub fn new<'a>(
-        bit_reader: &'a mut BitReader,
-        byte_reader: &'a mut R,
-    ) -> BitReaderWrapper<'a, R> {
-        BitReaderWrapper {
-            bit_reader,
-            byte_reader,
-        }
-    }
-}
-
-impl<R: Read> ReadBits for BitReaderWrapper<'_, R> {
-    fn get(&mut self, cbit: u32) -> Result<u32> {
-        BitReader::get(self.bit_reader, cbit, self.byte_reader)
-    }
-
-    fn read_padding_bits(&mut self) -> u8 {
-        self.bit_reader.read_padding_bits()
-    }
-
-    fn read_byte(&mut self) -> Result<u8> {
-        self.bit_reader.read_byte(self.byte_reader)
-    }
-
-    fn bits_left(&self) -> u32 {
-        self.bit_reader.bits_left()
-    }
-}
-
-impl BitReader {
-    pub fn new() -> Self {
+impl<R: Read> BitReader<R> {
+    pub fn new(inner: R) -> Self {
         BitReader {
             bits_read: 0,
             bit_count: 0,
+            bytes_read: 0,
+            inner: inner,
         }
     }
 
-    /// runs a function that reads from the bit stream and rolls back if an error ocurrs. This
-    /// is useful if we have complicated parsing code that needs to abort if the buffer is not yet full.
-    #[inline(always)]
-    pub fn run_with_rollback<
-        ROK,
-        RERR,
-        R: Read + Seek,
-        F: FnOnce(&mut BitReaderWrapper<R>) -> core::result::Result<ROK, RERR>,
-    >(
-        &mut self,
-        byte_reader: &mut R,
-        f: F,
-    ) -> core::result::Result<ROK, RERR> {
-        let prev_pos = byte_reader.seek(std::io::SeekFrom::Current(0)).unwrap();
-        let prev_bits_read = self.bits_read;
-        let prev_bit_count = self.bit_count;
-
-        let r = f(&mut BitReaderWrapper::new(self, byte_reader));
-        match r {
-            Ok(result) => {
-                return Ok(result);
-            }
-            Err(e) => {
-                byte_reader
-                    .seek(std::io::SeekFrom::Start(prev_pos))
-                    .unwrap();
-                self.bits_read = prev_bits_read;
-                self.bit_count = prev_bit_count;
-                return Err(e);
-            }
-        }
+    pub fn get_inner_mut(&mut self) -> &mut R {
+        &mut self.inner
     }
+}
 
-    pub fn bits_left(&self) -> u32 {
+impl<R: Read> BitReader<R> {
+    pub fn position(&self) -> u64 {
+        self.bytes_read
+    }
+}
+
+impl<R: Read> ReadBits for BitReader<R> {
+    fn bits_left(&self) -> u32 {
         self.bit_count
     }
 
     /// reads the bits until the next byte boundary
-    pub fn read_padding_bits(&mut self) -> u8 {
+    fn read_padding_bits(&mut self) -> u8 {
         let cbit = self.bit_count & 7;
 
         let wret = self.bits_read & ((1 << cbit) - 1);
@@ -113,21 +97,21 @@ impl BitReader {
         wret as u8
     }
 
-    pub fn read_byte(&mut self, byte_reader: &mut impl Read) -> Result<u8> {
+    fn read_byte(&mut self) -> Result<u8> {
         debug_assert!(self.bit_count == 0, "BitReader Error: Attempt to read bytes without first calling FlushBufferToByteBoundary");
 
-        let result = byte_reader.read_u8()?;
+        let result = self.inner.read_u8()?;
+
+        self.bytes_read += 1;
 
         Ok(result)
     }
 
     /// Read cbit bits from the input stream return
     /// Only supports read of 1 to 32 bits.
-    pub fn get(&mut self, cbit: u32, byte_reader: &mut impl Read) -> Result<u32> {
-        let mut wret: u32 = 0;
-
+    fn get(&mut self, cbit: u32) -> Result<u32> {
         if cbit == 0 {
-            return Ok(wret);
+            return Ok(0);
         }
 
         if cbit > 32 {
@@ -138,17 +122,99 @@ impl BitReader {
         }
 
         while self.bit_count < cbit {
-            let b = byte_reader.read_u8()? as u32;
+            let b = self.inner.read_u8()? as u32;
 
             self.bits_read |= b << self.bit_count;
             self.bit_count += 8;
+            self.bytes_read += 1;
         }
 
-        wret = self.bits_read & ((1 << cbit) - 1);
+        let wret = self.bits_read & ((1 << cbit) - 1);
 
         self.bits_read >>= cbit;
         self.bit_count -= cbit;
 
         Ok(wret)
+    }
+}
+
+pub struct BitReaderWrapper<'a, R: Read> {
+    bit_reader: &'a mut BitReader<R>,
+    position: usize,
+}
+
+impl<R: ScopedRead> ReadBits for BitReaderWrapper<'_, R> {
+    fn get(&mut self, cbit: u32) -> Result<u32> {
+        if cbit == 0 {
+            return Ok(0);
+        }
+
+        if cbit > 32 {
+            return Err(Error::new(
+                ErrorKind::InvalidInput,
+                "BitReader Error: Attempt to read more than 32 bits",
+            ));
+        }
+
+        while self.bit_reader.bit_count < cbit {
+            let b = self.bit_reader.inner.read_at_position(self.position)? as u32;
+            self.position += 1;
+
+            self.bit_reader.bits_read |= b << self.bit_reader.bit_count;
+            self.bit_reader.bit_count += 8;
+        }
+
+        let wret = self.bit_reader.bits_read & ((1 << cbit) - 1);
+
+        self.bit_reader.bits_read >>= cbit;
+        self.bit_reader.bit_count -= cbit;
+
+        Ok(wret)
+    }
+
+    fn read_padding_bits(&mut self) -> u8 {
+        self.bit_reader.read_padding_bits()
+    }
+
+    fn read_byte(&mut self) -> Result<u8> {
+        let b = self.bit_reader.inner.read_at_position(self.position)?;
+        self.position += 1;
+        Ok(b)
+    }
+
+    fn bits_left(&self) -> u32 {
+        self.bit_reader.bits_left()
+    }
+}
+
+impl<R: ScopedRead> BitReader<R> {
+    pub fn scoped_read<
+        'a,
+        T,
+        E,
+        F: FnOnce(&mut BitReaderWrapper<R>) -> core::result::Result<T, E>,
+    >(
+        &'a mut self,
+        f: F,
+    ) -> core::result::Result<T, E> {
+        let saved_bit_count = self.bit_count;
+        let saved_bits_read = self.bits_read;
+
+        let mut w = BitReaderWrapper {
+            bit_reader: self,
+            position: 0,
+        };
+        let r = f(&mut w);
+        let inner_pos = w.position;
+        if r.is_ok() {
+            self.inner.truncate(inner_pos);
+            self.bytes_read += inner_pos as u64;
+        } else {
+            // revert back to original without changes
+            self.bit_count = saved_bit_count;
+            self.bits_read = saved_bits_read;
+        }
+
+        r
     }
 }

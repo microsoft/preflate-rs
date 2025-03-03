@@ -159,7 +159,9 @@ impl DeflateWriter {
 /// Create a set of blocks and read them back to see if they are identical
 #[test]
 fn roundtrip_deflate_writer() {
+    use super::bit_reader::BitReader;
     use super::deflate_reader::DeflateReader;
+
     use std::io::Cursor;
 
     let mut w = DeflateWriter::new();
@@ -210,11 +212,11 @@ fn roundtrip_deflate_writer() {
 
     let mut r = DeflateReader::new();
     let mut plain_text = Vec::new();
-    let mut byte_reader = Cursor::new(&output);
+    let mut bit_reader = BitReader::new(Cursor::new(&output));
 
     let mut newcontent = Vec::new();
     loop {
-        let b = r.read_block(&mut byte_reader, &mut plain_text).unwrap();
+        let b = r.read_block(&mut bit_reader, &mut plain_text).unwrap();
         let last = b.last;
         newcontent.push(b);
         if last {
@@ -235,6 +237,9 @@ fn roundtrip_full_file() {
     use std::io::Read;
     use std::path::Path;
 
+    use super::bit_reader::BitReader;
+    use super::deflate_reader::DeflateReader;
+
     let searchpath = Path::new(env!("CARGO_MANIFEST_DIR")).join("samples");
 
     for entry in std::fs::read_dir(searchpath).unwrap() {
@@ -248,9 +253,9 @@ fn roundtrip_full_file() {
             let mut buffer = Vec::new();
             file.read_to_end(&mut buffer).unwrap();
 
-            let mut reader = std::io::Cursor::new(&buffer);
+            let mut reader = BitReader::new(std::io::Cursor::new(&buffer));
 
-            let mut r = crate::deflate::deflate_reader::DeflateReader::new();
+            let mut r = DeflateReader::new();
             let mut plain_text = Vec::new();
 
             let mut newcontent = Vec::new();

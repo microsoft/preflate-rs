@@ -375,9 +375,8 @@ fn roundtrip_huffman_bitreadwrite() {
     bit_writer.write(0x1234, 16, &mut data_buffer);
     bit_writer.pad(0, &mut data_buffer);
 
-    let mut reader = Cursor::new(&data_buffer);
-    let mut br = BitReader::new();
-    let mut bit_reader = BitReaderWrapper::new(&mut br, &mut reader);
+    let reader = Cursor::new(&data_buffer);
+    let mut bit_reader = BitReader::new(reader);
 
     let huffman_tree = calculate_huffman_code_tree(&code_lengths).unwrap();
 
@@ -476,16 +475,15 @@ fn rountrip_test(encoding: HuffmanOriginalEncoding) {
     bit_writer.flush_whole_bytes(&mut output_buffer);
 
     // now re-read the encoding
-    let mut reader = Cursor::new(&output_buffer);
-    let mut bit_reader = BitReader::new();
-    let mut bit_reader_wrapper = bit_reader::BitReaderWrapper::new(&mut bit_reader, &mut reader);
+    let reader = Cursor::new(&output_buffer);
+    let mut bit_reader = BitReader::new(reader);
 
-    let encoding2 = HuffmanOriginalEncoding::read(&mut bit_reader_wrapper).unwrap();
+    let encoding2 = HuffmanOriginalEncoding::read(&mut bit_reader).unwrap();
     assert_eq!(encoding, encoding2);
 
     // verify sentinal to make sure we didn't write anything extra or too little
     assert_eq!(
-        bit_reader_wrapper.get(16).unwrap(),
+        bit_reader.get(16).unwrap(),
         0x1234,
         "sentinal value didn't match"
     );
