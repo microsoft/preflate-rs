@@ -356,7 +356,7 @@ impl HuffmanWriter {
 
 #[test]
 fn roundtrip_huffman_bitreadwrite() {
-    use crate::deflate::bit_reader::{BitReader, BitReaderWrapper};
+    use crate::deflate::bit_reader::BitReader;
 
     use std::io::Cursor;
 
@@ -458,8 +458,6 @@ fn roundtrip_huffman_table() {
 
 #[cfg(test)]
 fn rountrip_test(encoding: HuffmanOriginalEncoding) {
-    use crate::deflate::bit_reader;
-
     use super::bit_reader::BitReader;
     use std::io::Cursor;
 

@@ -4,51 +4,17 @@
  *  This software incorporates material from third parties. See NOTICE.txt for details.
  *--------------------------------------------------------------------------------------------*/
 
-use std::{
-    collections::VecDeque,
-    io::{Cursor, Error, ErrorKind, Read, Result, Seek, SeekFrom},
-};
+use std::io::{Error, ErrorKind, Read, Result};
 
 use byteorder::ReadBytesExt;
+
+use crate::scoped_read::ScopedRead;
 
 pub trait ReadBits {
     fn get(&mut self, cbit: u32) -> Result<u32>;
     fn read_padding_bits(&mut self) -> u8;
     fn read_byte(&mut self) -> Result<u8>;
     fn bits_left(&self) -> u32;
-}
-
-pub trait ScopedRead: Read {
-    fn read_at_position(&self, position: usize) -> Result<u8>;
-    fn truncate(&mut self, position: usize);
-}
-
-impl ScopedRead for VecDeque<u8> {
-    fn read_at_position(&self, position: usize) -> Result<u8> {
-        if position >= self.len() {
-            return Err(Error::new(ErrorKind::UnexpectedEof, "Unexpected EOF"));
-        }
-        Ok(self[position])
-    }
-
-    fn truncate(&mut self, position: usize) {
-        self.drain(0..position);
-    }
-}
-
-impl<T: AsRef<[u8]>> ScopedRead for Cursor<T> {
-    fn read_at_position(&self, position: usize) -> Result<u8> {
-        let read_pos = self.position() as usize + position;
-        if read_pos >= self.get_ref().as_ref().len() {
-            return Err(Error::new(ErrorKind::UnexpectedEof, "Unexpected EOF"));
-        }
-
-        Ok(self.get_ref().as_ref()[read_pos])
-    }
-
-    fn truncate(&mut self, position: usize) {
-        self.seek(SeekFrom::Current(position as i64)).unwrap();
-    }
 }
 
 /// BitReader reads a variable number of bits from a byte stream.
@@ -69,6 +35,7 @@ impl<R: Read> BitReader<R> {
         }
     }
 
+    #[allow(dead_code)]
     pub fn get_inner_mut(&mut self) -> &mut R {
         &mut self.inner
     }
@@ -114,10 +81,10 @@ impl<R: Read> ReadBits for BitReader<R> {
             return Ok(0);
         }
 
-        if cbit > 32 {
+        if cbit > 24 {
             return Err(Error::new(
                 ErrorKind::InvalidInput,
-                "BitReader Error: Attempt to read more than 32 bits",
+                "BitReader Error: Attempt to read more than 24 bits",
             ));
         }
 
@@ -157,7 +124,7 @@ impl<R: ScopedRead> ReadBits for BitReaderWrapper<'_, R> {
         }
 
         while self.bit_reader.bit_count < cbit {
-            let b = self.bit_reader.inner.read_at_position(self.position)? as u32;
+            let b = self.bit_reader.inner.peek(self.position)? as u32;
             self.position += 1;
 
             self.bit_reader.bits_read |= b << self.bit_reader.bit_count;
@@ -177,7 +144,7 @@ impl<R: ScopedRead> ReadBits for BitReaderWrapper<'_, R> {
     }
 
     fn read_byte(&mut self) -> Result<u8> {
-        let b = self.bit_reader.inner.read_at_position(self.position)?;
+        let b = self.bit_reader.inner.peek(self.position)?;
         self.position += 1;
         Ok(b)
     }
@@ -207,7 +174,7 @@ impl<R: ScopedRead> BitReader<R> {
         let r = f(&mut w);
         let inner_pos = w.position;
         if r.is_ok() {
-            self.inner.truncate(inner_pos);
+            self.inner.advance(inner_pos);
             self.bytes_read += inner_pos as u64;
         } else {
             // revert back to original without changes

@@ -17,6 +17,7 @@ mod preflate_error;
 mod preflate_input;
 mod process;
 mod scan_deflate;
+mod scoped_read;
 mod statistical_codec;
 mod token_predictor;
 mod tree_predictor;

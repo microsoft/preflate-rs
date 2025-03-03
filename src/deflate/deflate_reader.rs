@@ -10,12 +10,12 @@ use crate::{
         deflate_token::{DeflateHuffmanType, DeflateToken, DeflateTokenReference},
     },
     preflate_error::{err_exit_code, ExitCode, Result},
+    scoped_read::ScopedRead,
 };
 
 use std::io::Cursor;
 
 use super::{
-    bit_reader::ScopedRead,
     deflate_constants,
     deflate_token::{DeflateTokenBlock, DeflateTokenBlockType},
 };
