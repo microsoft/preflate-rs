@@ -1,6 +1,6 @@
 [package]
 name = "preflate-rs"
-version = "0.6.4"
+version = "0.6.3"
 edition = "2021"
 authors = ["Kristof Roomp <kristofr@microsoft.com>"]
 license = "Apache-2.0"

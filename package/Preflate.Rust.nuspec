@@ -2,7 +2,7 @@
 <package xmlns="http://schemas.microsoft.com/packaging/2011/08/nuspec.xsd">
   <metadata>
     <id>Preflate.Rust</id>
-    <version>0.6.4.0</version>
+    <version>0.6.3.1</version>
     <title>PreflateRs Compression Rust binaries and libraries</title>
     <authors>kristofr</authors>
     <owners>kristofr</owners>
