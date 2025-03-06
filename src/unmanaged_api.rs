@@ -5,8 +5,9 @@ use std::{
 };
 
 use crate::{
-    preflate_container::ProcessBuffer, preflate_error::ExitCode, PreflateCompressionContext,
-    PreflateDecompressionContext, PreflateError,
+    preflate_container::{ProcessBuffer, ZstdDecompressContext},
+    preflate_error::ExitCode,
+    PreflateCompressionContext, PreflateError, RecreateFromChunksContext,
 };
 
 /// Helper function to catch panics and convert them into the appropriate LeptonError
@@ -173,6 +174,8 @@ pub unsafe extern "C" fn get_compression_stats(
     *hash_algorithm = stats.hash_algorithm.to_u16() as u32;
 }
 
+type DecompressionContext = ZstdDecompressContext<RecreateFromChunksContext>;
+
 #[no_mangle]
 pub unsafe extern "C" fn create_decompression_context(
     _flags: u32,
@@ -181,7 +184,7 @@ pub unsafe extern "C" fn create_decompression_context(
     match catch_unwind_result(|| {
         let context = Box::new((
             87654321u32,
-            PreflateDecompressionContext::new(capacity as usize),
+            DecompressionContext::new(RecreateFromChunksContext::new(capacity as usize)),
         ));
         Ok(Box::into_raw(context) as *mut std::ffi::c_void)
     }) {
@@ -195,7 +198,7 @@ pub unsafe extern "C" fn create_decompression_context(
 
 #[no_mangle]
 pub unsafe extern "C" fn free_decompression_context(context: *mut std::ffi::c_void) {
-    let x = Box::from_raw(context as *mut (u32, PreflateDecompressionContext));
+    let x = Box::from_raw(context as *mut (u32, DecompressionContext));
     assert_eq!(x.0, 87654321, "invalid context passed in");
     // let Box destroy the object
 }
@@ -217,7 +220,7 @@ pub unsafe extern "C" fn decompress_buffer(
     error_string_buffer_len: u64,
 ) -> i32 {
     match catch_unwind_result(|| {
-        let context = context as *mut (u32, PreflateDecompressionContext);
+        let context = context as *mut (u32, DecompressionContext);
         let (magic, context) = &mut *context;
         assert_eq!(*magic, 87654321, "invalid context passed in");
 
