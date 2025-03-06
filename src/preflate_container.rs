@@ -5,7 +5,6 @@ use std::{
     io::{Cursor, Read, Write},
     usize,
 };
-use zstd::stream::write;
 
 use crate::{
     cabac_codec::{PredictionDecoderCabac, PredictionEncoderCabac},
@@ -17,6 +16,7 @@ use crate::{
     preflate_input::PreflateInput,
     process::{decode_mispredictions, encode_mispredictions, ReconstructionData},
     scan_deflate::{split_into_deflate_streams, BlockChunk},
+    scoped_read::ScopedRead,
     statistical_codec::PredictionEncoder,
 };
 
@@ -134,7 +134,7 @@ fn read_chunk_block(
     destination: &mut impl Write,
 ) -> std::result::Result<(), PreflateError> {
     let mut p = RecreateFromChunksContext::new_single_chunk(usize::MAX);
-    p.copy_to_end(source, destination).context()
+    p.copy_to_end_slow(source, destination).context()
 }
 
 #[test]
@@ -627,6 +627,34 @@ pub trait ProcessBuffer {
 
         Ok(())
     }
+
+    /// reads everything from input and writes it to the output, but one byte a time to test worst case parsing
+    #[cfg(test)]
+    fn copy_to_end_slow(&mut self, input: &mut impl Read, output: &mut impl Write) -> Result<()> {
+        let mut buffer = [0; 1];
+        let mut input_complete = false;
+        loop {
+            let amount_read;
+
+            if input_complete {
+                amount_read = 0;
+            } else {
+                amount_read = input.read(&mut buffer).context()?;
+                if amount_read == 0 {
+                    input_complete = true
+                }
+            };
+
+            let done = self
+                .process_buffer(&buffer[0..amount_read], input_complete, output, 1)
+                .context()?;
+            if done {
+                break;
+            }
+        }
+
+        Ok(())
+    }
 }
 
 pub struct PreflateCompressionContext {
@@ -955,48 +983,55 @@ impl ProcessBuffer for RecreateFromChunksContext {
                     self.state = DecompressionState::StartSegment;
                 }
                 DecompressionState::StartSegment => {
+                    // here's a good place to stop if we run out of input
                     if self.input.len() == 0 {
-                        // done reading
                         break;
                     }
 
-                    // minimum buffer size to simplify parsing code and not have to worry about partial reads
-                    if !self.input_complete && self.input.len() < 4096 {
-                        break;
-                    }
-
-                    match self.input.read_u8()? {
+                    // use scoped read so that if we run out of bytes we can undo the read and wait for more input
+                    self.state = match self.input.scoped_read(|r| match r.read_u8()? {
                         LITERAL_CHUNK => {
-                            let length = read_varint(&mut self.input)? as usize;
-                            self.state = DecompressionState::LiteralBlock(length);
+                            let length = read_varint(r)? as usize;
+
+                            Ok(DecompressionState::LiteralBlock(length))
                         }
                         DEFLATE_STREAM => {
-                            let correction_length = read_varint(&mut self.input)? as usize;
-                            let uncompressed_length = read_varint(&mut self.input)? as usize;
-                            self.state = DecompressionState::DeflateBlock(
+                            let correction_length = read_varint(r)? as usize;
+                            let uncompressed_length = read_varint(r)? as usize;
+
+                            Ok(DecompressionState::DeflateBlock(
                                 correction_length,
                                 uncompressed_length,
-                            );
+                            ))
                         }
                         PNG_COMPRESSED => {
-                            let correction_length = read_varint(&mut self.input)? as usize;
-                            let uncompressed_length = read_varint(&mut self.input)? as usize;
-                            let idat = IdatContents::read_from_bytestream(&mut self.input)?;
+                            let correction_length = read_varint(r)? as usize;
+                            let uncompressed_length = read_varint(r)? as usize;
+                            let idat = IdatContents::read_from_bytestream(r)?;
 
-                            self.state = DecompressionState::PNGBlock(
+                            Ok(DecompressionState::PNGBlock(
                                 correction_length,
                                 uncompressed_length,
                                 idat,
-                            );
-                        }
-                        _ => {
-                            return Err(PreflateError::new(
-                                ExitCode::InvalidCompressedWrapper,
-                                "Invalid chunk",
                             ))
+                        }
+                        _ => Err(PreflateError::new(
+                            ExitCode::InvalidCompressedWrapper,
+                            "Invalid chunk",
+                        )),
+                    }) {
+                        Ok(s) => s,
+                        Err(e) => {
+                            if !self.input_complete && e.exit_code() == ExitCode::ShortRead {
+                                // wait for more input if we ran out of bytes here
+                                break;
+                            } else {
+                                return Err(e);
+                            }
                         }
                     }
                 }
+
                 DecompressionState::LiteralBlock(length) => {
                     let source_size = self.input.len();
                     if source_size < *length {
