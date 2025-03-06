@@ -1,10 +1,9 @@
 use std::{
     collections::VecDeque,
     io::{Cursor, Error, ErrorKind, Read, Result, SeekFrom},
-    ops::ControlFlow,
 };
 
-use crate::{ExitCode, PreflateError};
+use crate::PreflateError;
 
 pub trait ScopedRead: Read
 where

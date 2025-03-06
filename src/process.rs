@@ -14,7 +14,7 @@ use crate::{
     estimator::preflate_parameter_estimator::PreflateParameters,
     preflate_error::{ExitCode, PreflateError},
     preflate_input::PreflateInput,
-    statistical_codec::{CodecCorrection, PredictionDecoder, PredictionEncoder},
+    statistical_codec::{PredictionDecoder, PredictionEncoder},
     token_predictor::TokenPredictor,
 };
 
