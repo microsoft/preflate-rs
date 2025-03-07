@@ -182,18 +182,6 @@ impl ReadBits for SingleCode {
 
         Ok(result)
     }
-
-    fn read_padding_bits(&mut self) -> u8 {
-        unimplemented!()
-    }
-
-    fn read_byte(&mut self) -> std::io::Result<u8> {
-        unimplemented!()
-    }
-
-    fn bits_left(&self) -> u32 {
-        unimplemented!()
-    }
 }
 
 #[cfg(test)]
