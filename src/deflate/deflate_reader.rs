@@ -24,12 +24,13 @@ use super::{
 
 /// Used to read binary data in DEFLATE format and convert it to plaintext and a list of tokenized blocks
 /// containing the literals and distance codes that were used to compress the file
-pub struct DeflateReader<R: Read> {
+struct DeflateReader<R: Read> {
     input: BitReader<R>,
     plain_text: Vec<u8>,
     blocks: Vec<DeflateTokenBlock>,
     last_good_block: usize,
     last_good_bytes_read: usize,
+    last_good_plain_text: usize,
 }
 
 impl<R: Read> DeflateReader<R> {
@@ -38,25 +39,27 @@ impl<R: Read> DeflateReader<R> {
         if self.blocks.len() > 0 {
             self.last_good_block = self.blocks.len() - 1;
             self.last_good_bytes_read = self.bytes_read() as usize;
+            self.last_good_plain_text = self.plain_text.len();
         }
     }
 
-    pub fn new(compressed_text: R) -> Self {
+    fn new(compressed_text: R) -> Self {
         DeflateReader {
             input: BitReader::new(compressed_text),
             plain_text: Vec::new(),
             last_good_block: 0,
             last_good_bytes_read: 0,
+            last_good_plain_text: 0,
             blocks: Vec::new(),
         }
     }
 
     /// moves ownership out of block reader
-    pub fn move_plain_text(&mut self) -> Vec<u8> {
+    fn move_plain_text(&mut self) -> Vec<u8> {
         std::mem::take(&mut self.plain_text)
     }
 
-    pub fn move_blocks(&mut self) -> Vec<DeflateTokenBlock> {
+    fn move_blocks(&mut self) -> Vec<DeflateTokenBlock> {
         std::mem::take(&mut self.blocks)
     }
 
@@ -80,11 +83,11 @@ impl<R: Read> DeflateReader<R> {
         }
     }
 
-    pub fn bytes_read(&self) -> u32 {
+    fn bytes_read(&self) -> u32 {
         self.input.bytes_read()
     }
 
-    pub fn read_blocks(&mut self) -> Result<()> {
+    fn read_blocks(&mut self) -> Result<()> {
         loop {
             let last = self.read_bit()?;
             let mode = self.read_bits(2)?;
@@ -265,24 +268,23 @@ pub struct DeflateContents {
     pub blocks: Vec<DeflateTokenBlock>,
 }
 
-pub fn parse_deflate(
-    compressed_data: &[u8],
-    _deflate_info_dump_level: u32,
-) -> Result<DeflateContents> {
-    let mut block_decoder = DeflateReader::new(Cursor::new(compressed_data));
+pub fn parse_deflate(compressed_data: &[u8]) -> Result<DeflateContents> {
+    let mut b = DeflateReader::new(Cursor::new(compressed_data));
 
-    block_decoder.read_blocks()?;
+    if let Err(e) = b.read_blocks() {
+        // if we hit the end of the stream, we can still return the good data we have so far
+        if e.exit_code() != ExitCode::ShortRead {
+            return Err(e);
+        }
 
-    let compressed_size = block_decoder.bytes_read() as usize;
-
-    /*// write to file
-     let mut f = std::fs::File::create("c:\\temp\\treegdi.deflate")
-    .unwrap();
-    std::io::Write::write_all(&mut f, &compressed_data[0..compressed_size]).unwrap();*/
-
+        if b.blocks.len() > 0 {
+            b.blocks.truncate(b.last_good_block);
+            b.plain_text.truncate(b.last_good_plain_text);
+        }
+    }
     Ok(DeflateContents {
-        compressed_size,
-        plain_text: block_decoder.move_plain_text(),
-        blocks: block_decoder.move_blocks(),
+        compressed_size: b.last_good_bytes_read,
+        plain_text: b.move_plain_text(),
+        blocks: b.move_blocks(),
     })
 }

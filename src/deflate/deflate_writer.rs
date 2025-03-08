@@ -159,9 +159,7 @@ impl DeflateWriter {
 /// Create a set of blocks and read them back to see if they are identical
 #[test]
 fn roundtrip_deflate_writer() {
-    use super::deflate_reader::DeflateReader;
-
-    use std::io::Cursor;
+    use super::deflate_reader::parse_deflate;
 
     let mut w = DeflateWriter::new();
 
@@ -209,14 +207,11 @@ fn roundtrip_deflate_writer() {
 
     let output = w.detach_output();
 
-    let mut r = DeflateReader::new(Cursor::new(&output));
-    r.read_blocks().unwrap();
+    let r = parse_deflate(&output).unwrap();
 
-    let newcontent = r.move_blocks();
-
-    assert_eq!(blocks.len(), newcontent.len());
+    assert_eq!(blocks.len(), r.blocks.len());
     for i in 0..blocks.len() {
-        assert_eq!(blocks[i], newcontent[i], "block {}", i);
+        assert_eq!(blocks[i], r.blocks[i], "block {}", i);
     }
 }
 
@@ -227,7 +222,7 @@ fn roundtrip_full_file() {
     use std::io::Read;
     use std::path::Path;
 
-    use super::deflate_reader::DeflateReader;
+    use super::deflate_reader::parse_deflate;
 
     let searchpath = Path::new(env!("CARGO_MANIFEST_DIR")).join("samples");
 
@@ -242,22 +237,17 @@ fn roundtrip_full_file() {
             let mut buffer = Vec::new();
             file.read_to_end(&mut buffer).unwrap();
 
-            let mut r = DeflateReader::new(std::io::Cursor::new(&buffer));
-            r.read_blocks().unwrap();
-
-            let newcontent = r.move_blocks();
-
-            let amount_read = r.bytes_read() as usize;
+            let r = parse_deflate(&buffer).unwrap();
 
             let mut w = DeflateWriter::new();
-            for i in 0..newcontent.len() {
-                w.encode_block(&newcontent[i]).unwrap();
+            for i in 0..r.blocks.len() {
+                w.encode_block(&r.blocks[i]).unwrap();
             }
             w.flush();
 
             let output = w.detach_output();
 
-            if amount_read != output.len() || buffer[0..amount_read] != output[..] {
+            if r.compressed_size != output.len() || buffer[0..r.compressed_size] != output[..] {
                 println!("mismatch");
             }
             //assert_eq!(buffer.len(), output.len());

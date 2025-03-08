@@ -172,7 +172,7 @@ fn verify_zlib_recognition() {
 
     for i in 0..=9 {
         let v = read_file(&format!("compressed_zlib_level{}.deflate", i));
-        let contents = parse_deflate(&v, 1).unwrap();
+        let contents = parse_deflate(&v).unwrap();
 
         let params = PreflateParameters::estimate_preflate_parameters(&contents).unwrap();
 
@@ -214,7 +214,7 @@ fn verify_miniz_recognition() {
 
     for i in 0..=9 {
         let v = read_file(&format!("compressed_flate2_level{}.deflate", i));
-        let contents = parse_deflate(&v, 1).unwrap();
+        let contents = parse_deflate(&v).unwrap();
 
         let params = PreflateParameters::estimate_preflate_parameters(&contents).unwrap();
 
@@ -235,7 +235,7 @@ fn verify_zlibng_recognition() {
 
     for i in 1..=2 {
         let v = read_file(&format!("compressed_zlibng_level{}.deflate", i));
-        let contents = parse_deflate(&v, 1).unwrap();
+        let contents = parse_deflate(&v).unwrap();
 
         let params = PreflateParameters::estimate_preflate_parameters(&contents).unwrap();
 

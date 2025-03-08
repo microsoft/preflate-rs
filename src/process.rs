@@ -145,7 +145,7 @@ fn analyze_compressed_data_fast(
 
     let mut cabac_encoder = PredictionEncoderCabac::new(VP8Writer::new(&mut buffer).unwrap());
 
-    let contents = parse_deflate(compressed_data, 1).unwrap();
+    let contents = parse_deflate(compressed_data).unwrap();
 
     let params = PreflateParameters::estimate_preflate_parameters(&contents).unwrap();
 
@@ -215,7 +215,7 @@ fn analyze_compressed_data_verify(
 
     let mut combined_encoder = (debug_encoder, cabac_encoder);
 
-    let contents = parse_deflate(compressed_data, 1).unwrap();
+    let contents = parse_deflate(compressed_data).unwrap();
 
     let params = PreflateParameters::estimate_preflate_parameters(&contents).unwrap();
 
@@ -326,7 +326,7 @@ fn verify_zlib_perfect_compression() {
 
         let compressed_data = compressed_data;
 
-        let contents = parse_deflate(compressed_data, 1).unwrap();
+        let contents = parse_deflate(compressed_data).unwrap();
 
         let params = PreflateParameters::estimate_preflate_parameters(&contents).unwrap();
 

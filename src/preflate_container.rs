@@ -313,7 +313,7 @@ pub fn decompress_deflate_stream(
 ) -> Result<DecompressResult> {
     let mut cabac_encoded = Vec::new();
 
-    let contents = parse_deflate(compressed_data, 0)?;
+    let contents = parse_deflate(compressed_data)?;
 
     //process::write_file("c:\\temp\\lastop.deflate", compressed_data);
     //process::write_file("c:\\temp\\lastop.bin", contents.plain_text.as_slice());
@@ -408,7 +408,7 @@ pub fn decompress_deflate_stream_assert(
     let mut cabac_encoder =
         PredictionEncoderCabac::new(DebugWriter::new(&mut cabac_encoded).unwrap());
 
-    let contents = parse_deflate(compressed_data, 0)?;
+    let contents = parse_deflate(compressed_data)?;
 
     let params = PreflateParameters::estimate_preflate_parameters(&contents).context()?;
 

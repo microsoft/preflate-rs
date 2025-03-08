@@ -435,7 +435,7 @@ fn verify_max_chain_length() {
         println!("testing {}", filename);
         let compressed_data = crate::process::read_file(filename);
 
-        let parsed = parse_deflate(&compressed_data, 0).unwrap();
+        let parsed = parse_deflate(&compressed_data).unwrap();
 
         let add_policy_estimator = super::add_policy_estimator::estimate_add_policy(&parsed.blocks);
 
