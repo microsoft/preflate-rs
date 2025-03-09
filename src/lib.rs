@@ -33,5 +33,6 @@ pub use preflate_error::{PreflateError, Result};
 
 pub use preflate_container::CompressionStats;
 pub use preflate_container::{
-    PreflateCompressionContext, ProcessBuffer, RecreateFromChunksContext, ZstdDecompressContext,
+    PreflateCompressionContext, ProcessBuffer, RecreateFromChunksContext, ZstdCompressContext,
+    ZstdDecompressContext,
 };

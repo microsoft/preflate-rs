@@ -203,23 +203,10 @@ pub fn expand_zlib_chunks(
     compression_stats: &mut CompressionStats,
     write: &mut impl Write,
 ) -> Result<()> {
-    write.write_all(&[COMPRESSED_WRAPPER_VERSION_1])?;
-
-    let mut offset = 0;
-
-    while let Some((next, chunk)) = find_deflate_stream(&compressed_data[offset..], loglevel) {
-        if next.start != 0 {
-            write_literal_block(&compressed_data[offset..offset + next.start], write)?;
-        }
-
-        write_chunk_block(chunk, compression_stats, write)?;
-
-        offset += next.end;
-    }
-
-    if offset < compressed_data.len() {
-        write_literal_block(&compressed_data[offset..], write)?;
-    }
+    let mut context = PreflateCompressionContext::new(loglevel);
+    context
+        .copy_to_end(&mut Cursor::new(compressed_data), write)
+        .unwrap();
 
     Ok(())
 }
@@ -513,7 +500,8 @@ pub fn compress_zstd(
     loglevel: u32,
     compression_stats: &mut CompressionStats,
 ) -> Result<Vec<u8>> {
-    let mut ctx = PreflateCompressionContext::new(false, loglevel, 9);
+    let mut ctx = ZstdCompressContext::new(PreflateCompressionContext::new(loglevel), 9, false);
+
     let r = ctx.process_vec(zlib_compressed_data)?;
 
     *compression_stats = ctx.stats();
@@ -643,24 +631,18 @@ pub trait ProcessBuffer {
 
         Ok(())
     }
+
+    fn stats(&self) -> CompressionStats {
+        CompressionStats::default()
+    }
 }
 
 pub struct PreflateCompressionContext {
     content: Vec<u8>,
-    result: zstd::stream::write::Encoder<'static, VecDeque<u8>>,
+    result: VecDeque<u8>,
     compression_stats: CompressionStats,
 
-    /// if set, the encoder will write all the input to a null zstd encoder to see how much
-    /// compression we would get if we just used Zstandard without any Preflate processing.
-    ///
-    /// This gives a fairer comparison of the compression ratio of Preflate + Zstandard vs. Zstandard
-    /// since Zstd does compress the data a bit, especially if there is a lot of non-Deflate streams
-    /// in the file.
-    test_baseline: Option<zstd::stream::write::Encoder<'static, MeasureWriteSink>>,
-
     log_level: u32,
-
-    compression_level: i32,
 
     input_complete: bool,
 }
@@ -682,30 +664,14 @@ impl Write for MeasureWriteSink {
 }
 
 impl PreflateCompressionContext {
-    pub fn new(test_baseline: bool, log_level: u32, compression_level: i32) -> Self {
+    pub fn new(log_level: u32) -> Self {
         PreflateCompressionContext {
             content: Vec::new(),
             compression_stats: CompressionStats::default(),
-            result: zstd::stream::write::Encoder::new(VecDeque::new(), compression_level).unwrap(),
+            result: VecDeque::new(),
             log_level,
-            compression_level,
             input_complete: false,
-            test_baseline: if test_baseline {
-                Some(
-                    zstd::stream::write::Encoder::new(
-                        MeasureWriteSink { length: 0 },
-                        compression_level,
-                    )
-                    .unwrap(),
-                )
-            } else {
-                None
-            },
         }
-    }
-
-    pub fn stats(&self) -> CompressionStats {
-        self.compression_stats
     }
 }
 
@@ -725,54 +691,44 @@ impl ProcessBuffer for PreflateCompressionContext {
         }
 
         if input.len() > 0 {
-            if let Some(encoder) = &mut self.test_baseline {
-                encoder.write_all(input).context()?;
-            }
-
             self.content.extend_from_slice(input);
         }
 
         if input_complete && !self.input_complete {
             self.input_complete = true;
 
-            if let Some(encoder) = &mut self.test_baseline {
-                encoder.do_finish().context()?;
-                self.compression_stats.zstd_baseline_size = encoder.get_ref().length as u64;
-                self.test_baseline = None;
+            self.result.write_all(&[COMPRESSED_WRAPPER_VERSION_1])?;
+
+            let mut offset = 0;
+
+            while let Some((next, chunk)) =
+                find_deflate_stream(&self.content[offset..], self.log_level)
+            {
+                if next.start != 0 {
+                    write_literal_block(
+                        &self.content[offset..offset + next.start],
+                        &mut self.result,
+                    )?;
+                }
+
+                write_chunk_block(chunk, &mut self.compression_stats, &mut self.result)?;
+
+                offset += next.end;
             }
 
-            expand_zlib_chunks(
-                &self.content,
-                self.log_level,
-                &mut self.compression_stats,
-                &mut self.result,
-            )
-            .context()?;
-
-            self.result.do_finish().context()?;
+            if offset < self.content.len() {
+                write_literal_block(&self.content[offset..], &mut self.result)?;
+            }
         }
 
         // write any output we have pending in the queue into the output buffer
-        let pending_output = self.result.get_mut();
-        if pending_output.len() > 0 {
-            let slices = pending_output.as_mut_slices();
+        write_dequeue(&mut self.result, writer, max_output_write).context()?;
 
-            let mut amount_written = 0;
-            let len = slices.0.len().min(max_output_write);
-            writer.write_all(&slices.0[..len])?;
-            amount_written += len;
+        Ok(self.input_complete && self.result.len() == 0)
+    }
 
-            if amount_written < max_output_write {
-                let len = slices.1.len().min(max_output_write - amount_written);
-                writer.write_all(&slices.1[..len])?;
-                amount_written += len;
-            }
-
-            pending_output.drain(..amount_written);
-
-            self.compression_stats.zstd_compressed_size += amount_written as u64;
-        }
-        Ok(self.input_complete && pending_output.len() == 0)
+    fn stats(&self) -> CompressionStats {
+        self.compression_stats
     }
 }
 
@@ -781,7 +737,7 @@ fn write_dequeue(
     pending_output: &mut VecDeque<u8>,
     writer: &mut impl Write,
     max_output_write: usize,
-) -> Result<()> {
+) -> Result<usize> {
     if pending_output.len() > 0 {
         let slices = pending_output.as_mut_slices();
 
@@ -797,9 +753,9 @@ fn write_dequeue(
         }
 
         pending_output.drain(..amount_written);
-        Ok(())
+        Ok(amount_written)
     } else {
-        Ok(())
+        Ok(0)
     }
 }
 
@@ -819,9 +775,116 @@ impl ProcessBuffer for NopProcessBuffer {
     ) -> Result<bool> {
         self.result.extend(input);
 
-        write_dequeue(&mut self.result, writer, max_output_write)?;
+        write_dequeue(&mut self.result, writer, max_output_write).context()?;
 
         Ok(input_complete && self.result.len() == 0)
+    }
+}
+
+pub struct ZstdCompressContext<D: ProcessBuffer> {
+    zstd_compress: zstd::stream::write::Encoder<'static, VecDeque<u8>>,
+    input_complete: bool,
+    internal: D,
+
+    /// if set, the encoder will write all the input to a null zstd encoder to see how much
+    /// compression we would get if we just used Zstandard without any Preflate processing.
+    ///
+    /// This gives a fairer comparison of the compression ratio of Preflate + Zstandard vs. Zstandard
+    /// since Zstd does compress the data a bit, especially if there is a lot of non-Deflate streams
+    /// in the file.
+    test_baseline: Option<zstd::stream::write::Encoder<'static, MeasureWriteSink>>,
+
+    zstd_baseline_size: u64,
+    uncompressed_size: u64,
+    zstd_compressed_size: u64,
+
+    done_write: bool,
+}
+
+impl<D: ProcessBuffer> ZstdCompressContext<D> {
+    pub fn new(internal: D, compression_level: i32, test_baseline: bool) -> Self {
+        ZstdCompressContext {
+            zstd_compress: zstd::stream::write::Encoder::new(VecDeque::new(), compression_level)
+                .unwrap(),
+            input_complete: false,
+            done_write: false,
+            internal,
+            zstd_baseline_size: 0,
+            uncompressed_size: 0,
+            zstd_compressed_size: 0,
+            test_baseline: if test_baseline {
+                Some(
+                    zstd::stream::write::Encoder::new(
+                        MeasureWriteSink { length: 0 },
+                        compression_level,
+                    )
+                    .unwrap(),
+                )
+            } else {
+                None
+            },
+        }
+    }
+}
+
+impl<D: ProcessBuffer> ProcessBuffer for ZstdCompressContext<D> {
+    fn process_buffer(
+        &mut self,
+        input: &[u8],
+        input_complete: bool,
+        writer: &mut impl Write,
+        max_output_write: usize,
+    ) -> Result<bool> {
+        if self.input_complete && (input.len() > 0 || !input_complete) {
+            return Err(PreflateError::new(
+                ExitCode::InvalidParameter,
+                "more data provided after input_complete signaled",
+            ));
+        }
+
+        if input.len() > 0 {
+            self.uncompressed_size += input.len() as u64;
+
+            if let Some(encoder) = &mut self.test_baseline {
+                encoder.write_all(input).context()?;
+            }
+        }
+
+        let done_write = self
+            .internal
+            .process_buffer(
+                input,
+                input_complete,
+                &mut self.zstd_compress,
+                max_output_write,
+            )
+            .context()?;
+
+        if done_write && !self.done_write {
+            self.done_write = true;
+            self.zstd_compress.flush().context()?;
+
+            if let Some(encoder) = &mut self.test_baseline {
+                encoder.do_finish()?;
+                self.zstd_baseline_size = encoder.get_mut().length as u64;
+            }
+        }
+
+        let output = self.zstd_compress.get_mut();
+        let amount_written = write_dequeue(output, writer, max_output_write).context()?;
+        self.zstd_compressed_size += amount_written as u64;
+
+        Ok(done_write && output.len() == 0)
+    }
+
+    fn stats(&self) -> CompressionStats {
+        let s = self.internal.stats();
+        CompressionStats {
+            zstd_compressed_size: self.zstd_compressed_size,
+            zstd_baseline_size: self.zstd_baseline_size,
+            uncompressed_size: self.uncompressed_size,
+            ..self.internal.stats()
+        }
     }
 }
 
@@ -860,7 +923,7 @@ impl<D: ProcessBuffer> ProcessBuffer for ZstdDecompressContext<D> {
             self.zstd_decompress.write_all(input).context()?;
         }
 
-        if input_complete {
+        if input_complete && !self.input_complete {
             self.input_complete = true;
             self.zstd_decompress.flush().context()?;
         }
@@ -1185,7 +1248,7 @@ impl ProcessBuffer for RecreateFromChunksContext {
             }
         }
 
-        write_dequeue(&mut self.result, writer, max_output_write)?;
+        write_dequeue(&mut self.result, writer, max_output_write).context()?;
 
         Ok(self.input_complete && self.result.len() == 0)
     }
@@ -1197,7 +1260,7 @@ fn test_baseline_calc() {
 
     let v = read_file("samplezip.zip");
 
-    let mut context = PreflateCompressionContext::new(true, 0, 9);
+    let mut context = ZstdCompressContext::new(PreflateCompressionContext::new(0), 9, true);
 
     let _r = context.process_vec(&v).unwrap();
 
@@ -1206,9 +1269,9 @@ fn test_baseline_calc() {
     println!("stats: {:?}", stats);
 
     // these change if the compression algorithm is altered, update them
-    assert_eq!(stats.zstd_baseline_size, 13661);
     assert_eq!(stats.overhead_bytes, 466);
     assert_eq!(stats.zstd_compressed_size, 12445);
+    assert_eq!(stats.zstd_baseline_size, 13661);
 }
 
 #[test]
@@ -1217,7 +1280,7 @@ fn roundtrip_contexts() {
 
     let v = read_file("samplezip.zip");
 
-    let mut context = PreflateCompressionContext::new(true, 1, 9);
+    let mut context = ZstdCompressContext::new(PreflateCompressionContext::new(0), 9, false);
 
     let mut buffer = Vec::new();
     let mut pos = 0;
@@ -1235,7 +1298,7 @@ fn roundtrip_contexts() {
     }
 
     let stats = context.stats();
-    println!("stats: {:?}", stats);
+    println!("stats: {:?} buffer:{}", stats, buffer.len());
     println!(
         "zstd baseline size: {} -> comp {}",
         stats.zstd_baseline_size,

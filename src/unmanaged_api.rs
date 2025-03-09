@@ -5,7 +5,7 @@ use std::{
 };
 
 use crate::{
-    preflate_container::{ProcessBuffer, ZstdDecompressContext},
+    preflate_container::{ProcessBuffer, ZstdCompressContext, ZstdDecompressContext},
     preflate_error::ExitCode,
     PreflateCompressionContext, PreflateError, RecreateFromChunksContext,
 };
@@ -75,7 +75,7 @@ pub unsafe extern "C" fn create_compression_context(flags: u32) -> *mut std::ffi
         let test_baseline = (flags & 1) != 0;
         let context = Box::new((
             12345678u32,
-            PreflateCompressionContext::new(test_baseline, 0, 9),
+            CompressionContext::new(PreflateCompressionContext::new(0), 9, test_baseline),
         ));
         Ok(Box::into_raw(context) as *mut std::ffi::c_void)
     }) {
@@ -89,7 +89,7 @@ pub unsafe extern "C" fn create_compression_context(flags: u32) -> *mut std::ffi
 
 #[no_mangle]
 pub unsafe extern "C" fn free_compression_context(context: *mut std::ffi::c_void) {
-    let x = Box::from_raw(context as *mut (u32, PreflateCompressionContext));
+    let x = Box::from_raw(context as *mut (u32, CompressionContext));
     assert_eq!(x.0, 12345678, "invalid context passed in");
     // let Box destroy the object. If this asserts, we have some kind of memory corruption so better to just kill the process.
 }
@@ -111,7 +111,7 @@ pub unsafe extern "C" fn compress_buffer(
     error_string_buffer_len: u64,
 ) -> i32 {
     match catch_unwind_result(|| {
-        let context = context as *mut (u32, PreflateCompressionContext);
+        let context = context as *mut (u32, CompressionContext);
         let (magic, context) = &mut *context;
         assert_eq!(*magic, 12345678, "invalid context passed in");
 
@@ -160,7 +160,7 @@ pub unsafe extern "C" fn get_compression_stats(
     overhead_bytes: *mut u64,
     hash_algorithm: *mut u32,
 ) {
-    let context = context as *mut (u32, PreflateCompressionContext);
+    let context = context as *mut (u32, CompressionContext);
     let (magic, context) = &*context;
     assert_eq!(*magic, 12345678, "invalid context passed in");
 
@@ -175,6 +175,7 @@ pub unsafe extern "C" fn get_compression_stats(
 }
 
 type DecompressionContext = ZstdDecompressContext<RecreateFromChunksContext>;
+type CompressionContext = ZstdCompressContext<PreflateCompressionContext>;
 
 #[no_mangle]
 pub unsafe extern "C" fn create_decompression_context(
@@ -433,9 +434,9 @@ fn test_error_translation() {
 
         let error_string = std::ffi::CStr::from_bytes_with_nul(&error_string[0..len + 1]).unwrap();
 
-        assert_eq!(
-            error_string.to_str().unwrap(),
-            "more data provided after input_complete signaled"
-        );
+        assert!(error_string
+            .to_str()
+            .unwrap()
+            .starts_with("more data provided after input_complete signaled"),);
     }
 }
