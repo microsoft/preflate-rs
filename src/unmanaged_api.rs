@@ -260,7 +260,7 @@ pub unsafe extern "C" fn decompress_buffer(
 
 #[test]
 fn extern_interface() {
-    use crate::process::read_file;
+    use crate::utils::read_file;
     let input = read_file("samplezip.zip");
 
     let mut compressed = Vec::new();

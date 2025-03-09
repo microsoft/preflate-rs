@@ -4,18 +4,24 @@
  *  This software incorporates material from third parties. See NOTICE.txt for details.
  *--------------------------------------------------------------------------------------------*/
 
+use std::io::Cursor;
+
 use bitcode::{Decode, Encode};
+use cabac::vp8::{VP8Reader, VP8Writer};
 
 use crate::{
+    cabac_codec::{PredictionDecoderCabac, PredictionEncoderCabac},
     deflate::{
-        deflate_reader::DeflateContents, deflate_token::DeflateTokenBlock,
+        deflate_reader::{parse_deflate, DeflateContents},
+        deflate_token::DeflateTokenBlock,
         deflate_writer::DeflateWriter,
     },
     estimator::preflate_parameter_estimator::PreflateParameters,
-    preflate_error::{ExitCode, PreflateError},
+    preflate_error::{AddContext, ExitCode, PreflateError},
     preflate_input::PreflateInput,
     statistical_codec::{PredictionDecoder, PredictionEncoder},
     token_predictor::TokenPredictor,
+    Result,
 };
 
 /// the data required to reconstruct the deflate stream exactly the way that it was
@@ -26,7 +32,7 @@ pub struct ReconstructionData {
 }
 
 impl ReconstructionData {
-    pub fn read(data: &[u8]) -> Result<Self, PreflateError> {
+    pub fn read(data: &[u8]) -> Result<Self> {
         bitcode::decode(data).map_err(|e| {
             PreflateError::new(
                 ExitCode::InvalidCompressedWrapper,
@@ -36,14 +42,119 @@ impl ReconstructionData {
     }
 }
 
+/// result of decompress_deflate_stream
+pub struct DecompressResult {
+    /// the plaintext that was decompressed from the stream
+    pub plain_text: Vec<u8>,
+
+    /// the extra data that is needed to reconstruct the deflate stream exactly as it was written
+    pub prediction_corrections: Vec<u8>,
+
+    /// the number of bytes that were processed from the compressed stream (this will be exactly the
+    /// data that will be recreated using the cabac_encoded data)
+    pub compressed_size: usize,
+
+    /// the parameters that were used to compress the stream (informational)
+    pub parameters: PreflateParameters,
+}
+
+impl core::fmt::Debug for DecompressResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "DecompressResult {{ plain_text: {}, prediction_corrections: {}, compressed_size: {} }}", self.plain_text.len(), self.prediction_corrections.len(), self.compressed_size)
+    }
+}
+
+/// decompresses a deflate stream and returns the plaintext and cabac_encoded data that can be used to reconstruct it
+pub fn decompress_deflate_stream(
+    compressed_data: &[u8],
+    verify: bool,
+    loglevel: u32,
+) -> Result<DecompressResult> {
+    let mut cabac_encoded = Vec::new();
+
+    let contents = parse_deflate(compressed_data)?;
+
+    //process::write_file("c:\\temp\\lastop.deflate", compressed_data);
+    //process::write_file("c:\\temp\\lastop.bin", contents.plain_text.as_slice());
+
+    let params = PreflateParameters::estimate_preflate_parameters(&contents).context()?;
+
+    if loglevel > 0 {
+        println!("params: {:?}", params);
+    }
+
+    let mut cabac_encoder =
+        PredictionEncoderCabac::new(VP8Writer::new(&mut cabac_encoded).unwrap());
+
+    encode_mispredictions(&contents, &params, &mut cabac_encoder, false)?;
+
+    cabac_encoder.finish();
+
+    if loglevel > 0 {
+        cabac_encoder.print();
+    }
+
+    let reconstruction_data = bitcode::encode(&ReconstructionData {
+        parameters: params,
+        corrections: cabac_encoded,
+    });
+
+    if verify {
+        let r: ReconstructionData = bitcode::decode(&reconstruction_data).map_err(|e| {
+            PreflateError::new(ExitCode::InvalidCompressedWrapper, format!("{:?}", e))
+        })?;
+
+        let mut cabac_decoder =
+            PredictionDecoderCabac::new(VP8Reader::new(Cursor::new(&r.corrections[..])).unwrap());
+
+        let reread_params = r.parameters;
+
+        assert_eq!(params, reread_params);
+
+        let mut input = PreflateInput::new(&contents.plain_text);
+        let (recompressed, _recreated_blocks) =
+            decode_mispredictions(&reread_params, &mut input, &mut cabac_decoder, false)?;
+
+        if recompressed[..] != compressed_data[..contents.compressed_size] {
+            return Err(PreflateError::new(
+                ExitCode::RoundtripMismatch,
+                "recompressed data does not match original",
+            ));
+        }
+    }
+
+    Ok(DecompressResult {
+        plain_text: contents.plain_text,
+        prediction_corrections: reconstruction_data,
+        compressed_size: contents.compressed_size,
+        parameters: params,
+    })
+}
+
+/// recompresses a deflate stream using the cabac_encoded data that was returned from decompress_deflate_stream
+pub fn recompress_deflate_stream(
+    plain_text: &[u8],
+    prediction_corrections: &[u8],
+) -> Result<Vec<u8>> {
+    let r = ReconstructionData::read(prediction_corrections)?;
+
+    let mut cabac_decoder =
+        PredictionDecoderCabac::new(VP8Reader::new(Cursor::new(r.corrections)).unwrap());
+
+    let mut input = PreflateInput::new(plain_text);
+    let (recompressed, _recreated_blocks) =
+        decode_mispredictions(&r.parameters, &mut input, &mut cabac_decoder, false)?;
+    Ok(recompressed)
+}
+
 /// takes a deflate compressed stream, analyzes it, decoompresses it, and records
 /// any differences in the encoder codec
-pub fn encode_mispredictions(
+fn encode_mispredictions(
     deflate: &DeflateContents,
     params: &PreflateParameters,
     encoder: &mut impl PredictionEncoder,
     partial: bool,
-) -> Result<(), PreflateError> {
+) -> Result<()> {
     let mut input = PreflateInput::new(&deflate.plain_text);
 
     predict_blocks(
@@ -63,7 +174,7 @@ fn predict_blocks(
     encoder: &mut impl PredictionEncoder,
     input: &mut PreflateInput,
     partial: bool,
-) -> Result<(), PreflateError> {
+) -> Result<()> {
     for i in 0..blocks.len() {
         token_predictor_in.predict_block(&blocks[i], encoder, input, partial)?;
     }
@@ -71,12 +182,12 @@ fn predict_blocks(
     Ok(())
 }
 
-pub fn decode_mispredictions(
+fn decode_mispredictions(
     params: &PreflateParameters,
     input: &mut PreflateInput,
     decoder: &mut impl PredictionDecoder,
     partial: bool,
-) -> Result<(Vec<u8>, Vec<DeflateTokenBlock>), PreflateError> {
+) -> Result<(Vec<u8>, Vec<DeflateTokenBlock>)> {
     let mut deflate_writer: DeflateWriter = DeflateWriter::new();
     let mut predictor = TokenPredictor::new(&params.predictor);
 
@@ -89,13 +200,13 @@ pub fn decode_mispredictions(
 }
 
 #[inline(never)]
-pub fn recreate_blocks<D: PredictionDecoder>(
+fn recreate_blocks<D: PredictionDecoder>(
     token_predictor: &mut TokenPredictor,
     decoder: &mut D,
     deflate_writer: &mut DeflateWriter,
     input: &mut PreflateInput,
     partial: bool,
-) -> Result<Vec<DeflateTokenBlock>, PreflateError> {
+) -> Result<Vec<DeflateTokenBlock>> {
     let mut output_blocks = Vec::new();
     loop {
         let (stop, block) = token_predictor.recreate_block(decoder, input, partial)?;
@@ -110,28 +221,123 @@ pub fn recreate_blocks<D: PredictionDecoder>(
     Ok(output_blocks)
 }
 
-#[allow(dead_code)]
-pub fn write_file(filename: &str, data: &[u8]) {
-    let mut writecomp = std::fs::File::create(filename).unwrap();
-    std::io::Write::write_all(&mut writecomp, data).unwrap();
+/// decompresses a deflate stream and returns the plaintext and cabac_encoded data that can be used to reconstruct it
+/// This version uses DebugWriter and DebugReader, which are slower but can be used to debug the cabac encoding errors.
+#[cfg(test)]
+fn decompress_deflate_stream_assert(
+    compressed_data: &[u8],
+    verify: bool,
+) -> Result<DecompressResult> {
+    use cabac::debug::{DebugReader, DebugWriter};
+
+    use crate::preflate_error::AddContext;
+
+    let mut cabac_encoded = Vec::new();
+
+    let mut cabac_encoder =
+        PredictionEncoderCabac::new(DebugWriter::new(&mut cabac_encoded).unwrap());
+
+    let contents = parse_deflate(compressed_data)?;
+
+    let params = PreflateParameters::estimate_preflate_parameters(&contents).context()?;
+
+    encode_mispredictions(&contents, &params, &mut cabac_encoder, false)?;
+    assert_eq!(contents.compressed_size, compressed_data.len());
+    cabac_encoder.finish();
+
+    let reconstruction_data = bitcode::encode(&ReconstructionData {
+        parameters: params,
+        corrections: cabac_encoded,
+    });
+
+    if verify {
+        let r = ReconstructionData::read(&reconstruction_data)?;
+
+        let mut cabac_decoder =
+            PredictionDecoderCabac::new(DebugReader::new(Cursor::new(&r.corrections)).unwrap());
+
+        let params = r.parameters;
+        let mut input = PreflateInput::new(&contents.plain_text);
+        let (recompressed, _recreated_blocks) =
+            decode_mispredictions(&params, &mut input, &mut cabac_decoder, false)?;
+
+        if recompressed[..] != compressed_data[..] {
+            return Err(PreflateError::new(
+                ExitCode::RoundtripMismatch,
+                "recompressed data does not match original",
+            ));
+        }
+    }
+
+    Ok(DecompressResult {
+        plain_text: contents.plain_text,
+        prediction_corrections: reconstruction_data,
+        compressed_size: contents.compressed_size,
+        parameters: params,
+    })
+}
+
+#[test]
+fn verify_roundtrip_assert() {
+    use crate::utils::read_file;
+
+    let v = read_file("compressed_zlib_level1.deflate");
+
+    let r = decompress_deflate_stream_assert(&v, true).unwrap();
+    let recompressed =
+        recompress_deflate_stream_assert(&r.plain_text, &r.prediction_corrections).unwrap();
+    assert!(v == recompressed);
+}
+
+#[test]
+fn verify_roundtrip_zlib() {
+    for i in 0..9 {
+        verify_file(&format!("compressed_zlib_level{}.deflate", i));
+    }
+}
+
+#[test]
+fn verify_roundtrip_flate2() {
+    for i in 0..9 {
+        verify_file(&format!("compressed_flate2_level{}.deflate", i));
+    }
+}
+
+#[test]
+fn verify_roundtrip_libdeflate() {
+    for i in 0..9 {
+        verify_file(&format!("compressed_libdeflate_level{}.deflate", i));
+    }
 }
 
 #[cfg(test)]
-pub fn read_file(filename: &str) -> Vec<u8> {
-    use std::fs::File;
-    use std::io::Read;
-    use std::path::Path;
+fn verify_file(filename: &str) {
+    use crate::utils::read_file;
+    let v = read_file(filename);
 
-    let filename = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("samples")
-        .join(filename);
-    println!("reading {0}", filename.to_str().unwrap());
-    let mut f = File::open(filename).unwrap();
+    let r = decompress_deflate_stream(&v, true, 1).unwrap();
+    let recompressed = recompress_deflate_stream(&r.plain_text, &r.prediction_corrections).unwrap();
+    assert!(v == recompressed);
+}
 
-    let mut content = Vec::new();
-    f.read_to_end(&mut content).unwrap();
+/// recompresses a deflate stream using the cabac_encoded data that was returned from decompress_deflate_stream
+/// This version uses DebugWriter and DebugReader, which are slower and don't compress but can be used to debug the cabac encoding errors.
+#[cfg(test)]
+fn recompress_deflate_stream_assert(
+    plain_text: &[u8],
+    prediction_corrections: &[u8],
+) -> Result<Vec<u8>> {
+    use cabac::debug::DebugReader;
 
-    content
+    let r = ReconstructionData::read(prediction_corrections)?;
+
+    let mut cabac_decoder =
+        PredictionDecoderCabac::new(DebugReader::new(Cursor::new(&r.corrections)).unwrap());
+
+    let mut input = PreflateInput::new(plain_text);
+    let (recompressed, _recreated_blocks) =
+        decode_mispredictions(&r.parameters, &mut input, &mut cabac_decoder, false)?;
+    Ok(recompressed)
 }
 
 #[cfg(test)]
@@ -320,6 +526,7 @@ fn do_analyze(crc: Option<u32>, compressed_data: &[u8], verify: bool) {
 #[test]
 fn verify_zlib_perfect_compression() {
     use crate::deflate::deflate_reader::parse_deflate;
+    use crate::utils::read_file;
 
     for i in 1..6 {
         println!("iteration {}", i);
@@ -344,6 +551,7 @@ fn verify_zlib_perfect_compression() {
 
 #[test]
 fn verify_longmatch() {
+    use crate::utils::read_file;
     do_analyze(
         None,
         &read_file("compressed_flate2_level1_longmatch.deflate"),
@@ -353,11 +561,15 @@ fn verify_longmatch() {
 
 #[test]
 fn verify_zlibng() {
+    use crate::utils::read_file;
+
     do_analyze(None, &read_file("compressed_zlibng_level1.deflate"), false);
 }
 
 #[test]
 fn verify_miniz() {
+    use crate::utils::read_file;
+
     do_analyze(
         None,
         &read_file("compressed_minizoxide_level1.deflate"),
@@ -368,5 +580,6 @@ fn verify_miniz() {
 // this is the deflate stream extracted out of the
 #[test]
 fn verify_png_deflate() {
+    use crate::utils::read_file;
     do_analyze(None, &read_file("treegdi.extract.deflate"), false);
 }

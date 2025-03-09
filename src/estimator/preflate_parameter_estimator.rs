@@ -167,7 +167,7 @@ fn verify_zlib_recognition() {
         estimator::preflate_parse_config::{
             SLOW_PREFLATE_PARSER_SETTINGS, ZLIB_PREFLATE_PARSER_SETTINGS,
         },
-        process::read_file,
+        utils::read_file,
     };
 
     for i in 0..=9 {
@@ -210,7 +210,7 @@ fn verify_zlib_recognition() {
 #[test]
 fn verify_miniz_recognition() {
     use crate::deflate::deflate_reader::parse_deflate;
-    use crate::process::read_file;
+    use crate::utils::read_file;
 
     for i in 0..=9 {
         let v = read_file(&format!("compressed_flate2_level{}.deflate", i));
@@ -231,7 +231,7 @@ fn verify_miniz_recognition() {
 #[test]
 fn verify_zlibng_recognition() {
     use crate::deflate::deflate_reader::parse_deflate;
-    use crate::process::read_file;
+    use crate::utils::read_file;
 
     for i in 1..=2 {
         let v = read_file(&format!("compressed_zlibng_level{}.deflate", i));

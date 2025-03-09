@@ -217,7 +217,7 @@ pub fn decompress_zstd(compressed_data: &[u8], capacity: usize) -> Result<Vec<u8
 
 #[test]
 fn verify_zip_compress_zstd() {
-    use crate::process::read_file;
+    use crate::utils::read_file;
     let v = read_file("samplezip.zip");
 
     let mut stats = CompressionStats::default();

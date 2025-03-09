@@ -7,17 +7,15 @@ use std::{
 };
 
 use crate::{
-    cabac_codec::{PredictionDecoderCabac, PredictionEncoderCabac},
-    deflate::{deflate_reader::parse_deflate, deflate_writer::DeflateWriter},
-    estimator::preflate_parameter_estimator::PreflateParameters,
+    cabac_codec::PredictionDecoderCabac,
+    deflate::deflate_writer::DeflateWriter,
+    deflate_stream::{recompress_deflate_stream, ReconstructionData},
     hash_algorithm::HashAlgorithm,
     idat_parse::{recreate_idat, IdatContents},
     preflate_error::{err_exit_code, AddContext, ExitCode, PreflateError, Result},
     preflate_input::PreflateInput,
-    process::{decode_mispredictions, encode_mispredictions, ReconstructionData},
     scan_deflate::{find_deflate_stream, BlockChunk},
     scoped_read::ScopedRead,
-    statistical_codec::PredictionEncoder,
     token_predictor::TokenPredictor,
 };
 
@@ -152,7 +150,9 @@ fn roundtrip_chunk_block_literal() {
 
 #[test]
 fn roundtrip_chunk_block_deflate() {
-    let contents = crate::process::read_file("compressed_zlib_level1.deflate");
+    use crate::deflate_stream::decompress_deflate_stream;
+
+    let contents = crate::utils::read_file("compressed_zlib_level1.deflate");
     let results = decompress_deflate_stream(&contents, true, 1).unwrap();
 
     let mut buffer = Vec::new();
@@ -169,7 +169,9 @@ fn roundtrip_chunk_block_deflate() {
 
 #[test]
 fn roundtrip_chunk_block_png() {
-    let f = crate::process::read_file("treegdi.png");
+    use crate::deflate_stream::decompress_deflate_stream;
+
+    let f = crate::utils::read_file("treegdi.png");
 
     // we know the first IDAT chunk starts at 83 (avoid testing the scan_deflate code in a unit teast)
     let (idat_contents, deflate_stream) = crate::idat_parse::parse_idat(&f[83..], 1).unwrap();
@@ -225,7 +227,7 @@ pub fn recreated_zlib_chunks(
 
 #[cfg(test)]
 fn roundtrip_deflate_chunks(filename: &str) {
-    let f = crate::process::read_file(filename);
+    let f = crate::utils::read_file(filename);
 
     let mut stats = CompressionStats::default();
     let mut expanded = Vec::new();
@@ -268,190 +270,9 @@ fn roundtrip_pdf_chunks() {
     roundtrip_deflate_chunks("starcontrol.samplesave");
 }
 
-/// result of decompress_deflate_stream
-pub struct DecompressResult {
-    /// the plaintext that was decompressed from the stream
-    pub plain_text: Vec<u8>,
-
-    /// the extra data that is needed to reconstruct the deflate stream exactly as it was written
-    pub prediction_corrections: Vec<u8>,
-
-    /// the number of bytes that were processed from the compressed stream (this will be exactly the
-    /// data that will be recreated using the cabac_encoded data)
-    pub compressed_size: usize,
-
-    /// the parameters that were used to compress the stream (informational)
-    pub parameters: PreflateParameters,
-}
-
-impl core::fmt::Debug for DecompressResult {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "DecompressResult {{ plain_text: {}, prediction_corrections: {}, compressed_size: {} }}", self.plain_text.len(), self.prediction_corrections.len(), self.compressed_size)
-    }
-}
-
-/// decompresses a deflate stream and returns the plaintext and cabac_encoded data that can be used to reconstruct it
-pub fn decompress_deflate_stream(
-    compressed_data: &[u8],
-    verify: bool,
-    loglevel: u32,
-) -> Result<DecompressResult> {
-    let mut cabac_encoded = Vec::new();
-
-    let contents = parse_deflate(compressed_data)?;
-
-    //process::write_file("c:\\temp\\lastop.deflate", compressed_data);
-    //process::write_file("c:\\temp\\lastop.bin", contents.plain_text.as_slice());
-
-    let params = PreflateParameters::estimate_preflate_parameters(&contents).context()?;
-
-    if loglevel > 0 {
-        println!("params: {:?}", params);
-    }
-
-    let mut cabac_encoder =
-        PredictionEncoderCabac::new(VP8Writer::new(&mut cabac_encoded).unwrap());
-
-    encode_mispredictions(&contents, &params, &mut cabac_encoder, false)?;
-
-    cabac_encoder.finish();
-
-    if loglevel > 0 {
-        cabac_encoder.print();
-    }
-
-    let reconstruction_data = bitcode::encode(&ReconstructionData {
-        parameters: params,
-        corrections: cabac_encoded,
-    });
-
-    if verify {
-        let r: ReconstructionData = bitcode::decode(&reconstruction_data).map_err(|e| {
-            PreflateError::new(ExitCode::InvalidCompressedWrapper, format!("{:?}", e))
-        })?;
-
-        let mut cabac_decoder =
-            PredictionDecoderCabac::new(VP8Reader::new(Cursor::new(&r.corrections[..])).unwrap());
-
-        let reread_params = r.parameters;
-
-        assert_eq!(params, reread_params);
-
-        let mut input = PreflateInput::new(&contents.plain_text);
-        let (recompressed, _recreated_blocks) =
-            decode_mispredictions(&reread_params, &mut input, &mut cabac_decoder, false)?;
-
-        if recompressed[..] != compressed_data[..contents.compressed_size] {
-            return Err(PreflateError::new(
-                ExitCode::RoundtripMismatch,
-                "recompressed data does not match original",
-            ));
-        }
-    }
-
-    Ok(DecompressResult {
-        plain_text: contents.plain_text,
-        prediction_corrections: reconstruction_data,
-        compressed_size: contents.compressed_size,
-        parameters: params,
-    })
-}
-
-/// recompresses a deflate stream using the cabac_encoded data that was returned from decompress_deflate_stream
-pub fn recompress_deflate_stream(
-    plain_text: &[u8],
-    prediction_corrections: &[u8],
-) -> Result<Vec<u8>> {
-    let r = ReconstructionData::read(prediction_corrections)?;
-
-    let mut cabac_decoder =
-        PredictionDecoderCabac::new(VP8Reader::new(Cursor::new(r.corrections)).unwrap());
-
-    let mut input = PreflateInput::new(plain_text);
-    let (recompressed, _recreated_blocks) =
-        decode_mispredictions(&r.parameters, &mut input, &mut cabac_decoder, false)?;
-    Ok(recompressed)
-}
-
-/// decompresses a deflate stream and returns the plaintext and cabac_encoded data that can be used to reconstruct it
-/// This version uses DebugWriter and DebugReader, which are slower but can be used to debug the cabac encoding errors.
-#[cfg(test)]
-pub fn decompress_deflate_stream_assert(
-    compressed_data: &[u8],
-    verify: bool,
-) -> Result<DecompressResult> {
-    use cabac::debug::{DebugReader, DebugWriter};
-
-    use crate::preflate_error::AddContext;
-
-    let mut cabac_encoded = Vec::new();
-
-    let mut cabac_encoder =
-        PredictionEncoderCabac::new(DebugWriter::new(&mut cabac_encoded).unwrap());
-
-    let contents = parse_deflate(compressed_data)?;
-
-    let params = PreflateParameters::estimate_preflate_parameters(&contents).context()?;
-
-    encode_mispredictions(&contents, &params, &mut cabac_encoder, false)?;
-    assert_eq!(contents.compressed_size, compressed_data.len());
-    cabac_encoder.finish();
-
-    let reconstruction_data = bitcode::encode(&ReconstructionData {
-        parameters: params,
-        corrections: cabac_encoded,
-    });
-
-    if verify {
-        let r = ReconstructionData::read(&reconstruction_data)?;
-
-        let mut cabac_decoder =
-            PredictionDecoderCabac::new(DebugReader::new(Cursor::new(&r.corrections)).unwrap());
-
-        let params = r.parameters;
-        let mut input = PreflateInput::new(&contents.plain_text);
-        let (recompressed, _recreated_blocks) =
-            decode_mispredictions(&params, &mut input, &mut cabac_decoder, false)?;
-
-        if recompressed[..] != compressed_data[..] {
-            return Err(PreflateError::new(
-                ExitCode::RoundtripMismatch,
-                "recompressed data does not match original",
-            ));
-        }
-    }
-
-    Ok(DecompressResult {
-        plain_text: contents.plain_text,
-        prediction_corrections: reconstruction_data,
-        compressed_size: contents.compressed_size,
-        parameters: params,
-    })
-}
-
-/// recompresses a deflate stream using the cabac_encoded data that was returned from decompress_deflate_stream
-/// This version uses DebugWriter and DebugReader, which are slower and don't compress but can be used to debug the cabac encoding errors.
-#[cfg(test)]
-pub fn recompress_deflate_stream_assert(
-    plain_text: &[u8],
-    prediction_corrections: &[u8],
-) -> Result<Vec<u8>> {
-    use cabac::debug::DebugReader;
-
-    let r = ReconstructionData::read(prediction_corrections)?;
-
-    let mut cabac_decoder =
-        PredictionDecoderCabac::new(DebugReader::new(Cursor::new(&r.corrections)).unwrap());
-
-    let mut input = PreflateInput::new(plain_text);
-    let (recompressed, _recreated_blocks) =
-        decode_mispredictions(&r.parameters, &mut input, &mut cabac_decoder, false)?;
-    Ok(recompressed)
-}
-
 #[test]
 fn verify_zip_compress() {
-    use crate::process::read_file;
+    use crate::utils::read_file;
     let v = read_file("samplezip.zip");
 
     let mut stats = CompressionStats::default();
@@ -461,49 +282,6 @@ fn verify_zip_compress() {
     let mut recompressed = Vec::new();
     recreated_zlib_chunks(&mut Cursor::new(expanded), &mut recompressed).unwrap();
 
-    assert!(v == recompressed);
-}
-
-#[test]
-fn verify_roundtrip_zlib() {
-    for i in 0..9 {
-        verify_file(&format!("compressed_zlib_level{}.deflate", i));
-    }
-}
-
-#[test]
-fn verify_roundtrip_flate2() {
-    for i in 0..9 {
-        verify_file(&format!("compressed_flate2_level{}.deflate", i));
-    }
-}
-
-#[test]
-fn verify_roundtrip_libdeflate() {
-    for i in 0..9 {
-        verify_file(&format!("compressed_libdeflate_level{}.deflate", i));
-    }
-}
-
-#[cfg(test)]
-fn verify_file(filename: &str) {
-    use crate::process::read_file;
-    let v = read_file(filename);
-
-    let r = decompress_deflate_stream(&v, true, 1).unwrap();
-    let recompressed = recompress_deflate_stream(&r.plain_text, &r.prediction_corrections).unwrap();
-    assert!(v == recompressed);
-}
-
-#[test]
-fn verify_roundtrip_assert() {
-    use crate::process::read_file;
-
-    let v = read_file("compressed_zlib_level1.deflate");
-
-    let r = decompress_deflate_stream_assert(&v, true).unwrap();
-    let recompressed =
-        recompress_deflate_stream_assert(&r.plain_text, &r.prediction_corrections).unwrap();
     assert!(v == recompressed);
 }
 
@@ -1033,7 +811,7 @@ impl ProcessBuffer for RecreateFromChunksContext {
 
 #[test]
 fn test_baseline_calc() {
-    use crate::process::read_file;
+    use crate::utils::read_file;
     use crate::zstd_compression::ZstdCompressContext;
 
     let v = read_file("samplezip.zip");
@@ -1054,7 +832,7 @@ fn test_baseline_calc() {
 
 #[test]
 fn roundtrip_contexts() {
-    use crate::process::read_file;
+    use crate::utils::read_file;
     use crate::zstd_compression::{ZstdCompressContext, ZstdDecompressContext};
 
     let v = read_file("samplezip.zip");

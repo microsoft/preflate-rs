@@ -1,8 +1,8 @@
 use std::{io::Cursor, ops::Range};
 
 use crate::{
+    deflate_stream::{decompress_deflate_stream, DecompressResult},
     idat_parse::{parse_idat, IdatContents},
-    preflate_container::{decompress_deflate_stream, DecompressResult},
     preflate_error::{err_exit_code, ExitCode},
 };
 
@@ -167,7 +167,7 @@ fn skip_gzip_header<R: Read>(reader: &mut R) -> Result<()> {
 
 #[test]
 fn parse_png() {
-    let f = crate::process::read_file("treegdi.png");
+    let f = crate::utils::read_file("treegdi.png");
 
     let loc = find_deflate_stream(&f, 1);
 
@@ -181,7 +181,7 @@ fn parse_png() {
 
 #[test]
 fn parse_gz() {
-    let f = crate::process::read_file("sample1.bin.gz");
+    let f = crate::utils::read_file("sample1.bin.gz");
 
     let loc = find_deflate_stream(&f, 1).unwrap();
 
@@ -195,7 +195,7 @@ fn parse_gz() {
 
 #[test]
 fn parse_docx() {
-    let f = crate::process::read_file("file-sample_1MB.docx");
+    let f = crate::utils::read_file("file-sample_1MB.docx");
 
     let mut offset = 0;
     while let Some((loc, res)) = find_deflate_stream(&f[offset..], 0) {

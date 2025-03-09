@@ -433,7 +433,7 @@ fn verify_max_chain_length() {
 
     for (filename, hash_algorithm, add_policy, max_chain_length) in levels {
         println!("testing {}", filename);
-        let compressed_data = crate::process::read_file(filename);
+        let compressed_data = crate::utils::read_file(filename);
 
         let parsed = parse_deflate(&compressed_data).unwrap();
 
