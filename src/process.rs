@@ -43,10 +43,13 @@ pub fn encode_mispredictions(
     params: &PreflateParameters,
     encoder: &mut impl PredictionEncoder,
 ) -> Result<(), PreflateError> {
+    let mut input = PreflateInput::new(&deflate.plain_text);
+
     predict_blocks(
         &deflate.blocks,
-        TokenPredictor::new(PreflateInput::new(&deflate.plain_text), &params.predictor),
+        TokenPredictor::new(&params.predictor),
         encoder,
+        &mut input,
     )?;
 
     Ok(())
@@ -56,26 +59,24 @@ fn predict_blocks(
     blocks: &[DeflateTokenBlock],
     mut token_predictor_in: TokenPredictor,
     encoder: &mut impl PredictionEncoder,
+    input: &mut PreflateInput,
 ) -> Result<(), PreflateError> {
     for i in 0..blocks.len() {
-        token_predictor_in.predict_block(&blocks[i], encoder)?;
+        token_predictor_in.predict_block(&blocks[i], encoder, input)?;
     }
-    assert!(token_predictor_in.input_eof());
+    assert!(input.remaining() == 0);
     Ok(())
 }
 
 pub fn decode_mispredictions(
     params: &PreflateParameters,
-    plain_text: PreflateInput,
+    input: &mut PreflateInput,
     decoder: &mut impl PredictionDecoder,
 ) -> Result<(Vec<u8>, Vec<DeflateTokenBlock>), PreflateError> {
     let mut deflate_writer: DeflateWriter = DeflateWriter::new();
+    let mut predictor = TokenPredictor::new(&params.predictor);
 
-    let output_blocks = recreate_blocks(
-        TokenPredictor::new(plain_text, &params.predictor),
-        decoder,
-        &mut deflate_writer,
-    )?;
+    let output_blocks = recreate_blocks(&mut predictor, decoder, &mut deflate_writer, input)?;
 
     deflate_writer.flush();
 
@@ -84,13 +85,14 @@ pub fn decode_mispredictions(
 
 #[inline(never)]
 fn recreate_blocks<D: PredictionDecoder>(
-    mut token_predictor: TokenPredictor,
+    token_predictor: &mut TokenPredictor,
     decoder: &mut D,
     deflate_writer: &mut DeflateWriter,
+    input: &mut PreflateInput,
 ) -> Result<Vec<DeflateTokenBlock>, PreflateError> {
     let mut output_blocks = Vec::new();
     loop {
-        let block = token_predictor.recreate_block(decoder)?;
+        let block = token_predictor.recreate_block(decoder, input)?;
 
         deflate_writer.encode_block(&block)?;
 
@@ -169,12 +171,10 @@ fn analyze_compressed_data_fast(
     let mut cabac_decoder =
         PredictionDecoderCabac::new(VP8Reader::new(Cursor::new(&buffer)).unwrap());
 
-    let (recompressed, _recreated_blocks) = decode_mispredictions(
-        &params,
-        PreflateInput::new(&contents.plain_text),
-        &mut cabac_decoder,
-    )
-    .unwrap();
+    let mut input = PreflateInput::new(&contents.plain_text);
+
+    let (recompressed, _recreated_blocks) =
+        decode_mispredictions(&params, &mut input, &mut cabac_decoder).unwrap();
 
     assert!(recompressed[..] == compressed_data[..]);
 
@@ -238,13 +238,10 @@ fn analyze_compressed_data_verify(
         PredictionDecoderCabac::new(DebugReader::new(Cursor::new(&buffer)).unwrap());
 
     let mut combined_decoder = (debug_decoder, cabac_decoder);
+    let mut input = PreflateInput::new(&contents.plain_text);
 
-    let (recompressed, recreated_blocks) = decode_mispredictions(
-        &params,
-        PreflateInput::new(&contents.plain_text),
-        &mut combined_decoder,
-    )
-    .unwrap();
+    let (recompressed, recreated_blocks) =
+        decode_mispredictions(&params, &mut input, &mut combined_decoder).unwrap();
 
     assert_eq!(contents.blocks.len(), recreated_blocks.len());
     contents

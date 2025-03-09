@@ -30,13 +30,12 @@ use crate::{
 
 const VERIFY: bool = false;
 
-pub struct TokenPredictor<'a> {
+pub struct TokenPredictor {
     state: Box<dyn HashChainHolder>,
     params: TokenPredictorParameters,
     pending_reference: Option<DeflateTokenReference>,
     current_token_count: u32,
     max_token_count: u32,
-    input: PreflateInput<'a>,
 }
 
 #[derive(Encode, Decode, Debug, Copy, Clone, Eq, PartialEq)]
@@ -67,13 +66,8 @@ pub struct TokenPredictorParameters {
     pub hash_algorithm: HashAlgorithm,
 }
 
-impl<'a> TokenPredictor<'a> {
-    pub fn new(uncompressed: PreflateInput<'a>, params: &TokenPredictorParameters) -> Self {
-        // Implement constructor logic for PreflateTokenPredictor
-        // Initialize fields as necessary
-        // Create and initialize PreflatePredictorState, PreflateHashChainExt, and PreflateSeqChain instances
-        // Construct the analysisResults vector
-
+impl TokenPredictor {
+    pub fn new(params: &TokenPredictorParameters) -> Self {
         let predictor_state = new_hash_chain_holder(params);
 
         Self {
@@ -82,7 +76,6 @@ impl<'a> TokenPredictor<'a> {
             pending_reference: None,
             current_token_count: 0,
             max_token_count: params.max_token_count.into(),
-            input: uncompressed,
         }
     }
 
@@ -97,6 +90,7 @@ impl<'a> TokenPredictor<'a> {
         &mut self,
         block: &DeflateTokenBlock,
         codec: &mut D,
+        input: &mut PreflateInput,
     ) -> Result<()> {
         self.current_token_count = 0;
         self.pending_reference = None;
@@ -126,8 +120,8 @@ impl<'a> TokenPredictor<'a> {
                 codec.encode_correction(CodecCorrection::NonZeroPadding, (*padding_bits).into());
 
                 for _i in 0..uncompressed.len() {
-                    self.state.update_hash(1, &self.input);
-                    self.input.advance(1);
+                    self.state.update_hash(1, &input);
+                    input.advance(1);
                 }
                 return Ok(());
             }
@@ -198,7 +192,7 @@ impl<'a> TokenPredictor<'a> {
                 println!("target = {:?}", target_token)
             }*/
 
-            let predicted_token = self.predict_token();
+            let predicted_token = self.predict_token(input);
 
             /*
             let hash = self.state.calculate_hash();
@@ -243,7 +237,7 @@ impl<'a> TokenPredictor<'a> {
                                 CodecCorrection::LiteralPredictionWrong,
                                 true,
                             );
-                            self.repredict_reference(Some(*target_ref))
+                            self.repredict_reference(Some(*target_ref), input)
                                 .with_context(|| {
                                     format!(
                                         "repredict_reference target={:?} index={}",
@@ -268,23 +262,29 @@ impl<'a> TokenPredictor<'a> {
                     );
 
                     if predicted_ref.len() != target_ref.len() {
-                        let rematch = self
-                            .state
-                            .calculate_hops(target_ref, &self.input)
-                            .with_context(|| {
-                                format!("calculate_hops p={:?}, t={:?}", predicted_ref, target_ref)
-                            })?;
+                        let rematch =
+                            self.state
+                                .calculate_hops(target_ref, input)
+                                .with_context(|| {
+                                    format!(
+                                        "calculate_hops p={:?}, t={:?}",
+                                        predicted_ref, target_ref
+                                    )
+                                })?;
                         codec.encode_correction(
                             CodecCorrection::DistAfterLenCorrection,
                             rematch - 1,
                         );
                     } else if target_ref.dist() != predicted_ref.dist() {
-                        let rematch = self
-                            .state
-                            .calculate_hops(target_ref, &self.input)
-                            .with_context(|| {
-                                format!("calculate_hops p={:?}, t={:?}", predicted_ref, target_ref)
-                            })?;
+                        let rematch =
+                            self.state
+                                .calculate_hops(target_ref, input)
+                                .with_context(|| {
+                                    format!(
+                                        "calculate_hops p={:?}, t={:?}",
+                                        predicted_ref, target_ref
+                                    )
+                                })?;
                         codec.encode_correction(CodecCorrection::DistOnlyCorrection, rematch);
                     } else {
                         codec.encode_correction(CodecCorrection::DistOnlyCorrection, 0);
@@ -299,7 +299,7 @@ impl<'a> TokenPredictor<'a> {
                 }
             }
 
-            self.commit_token(target_token);
+            self.commit_token(target_token, input);
             freq.commit_token(target_token);
         }
 
@@ -308,7 +308,7 @@ impl<'a> TokenPredictor<'a> {
         }
 
         // we thought it was the end of the block, but it wasn't
-        if self.input_eof() && !block.last {
+        if input.remaining() == 0 && !block.last {
             codec.encode_misprediction(CodecCorrection::EOFMisprediction, false);
         }
 
@@ -320,6 +320,7 @@ impl<'a> TokenPredictor<'a> {
     pub fn recreate_block<D: PredictionDecoder>(
         &mut self,
         codec: &mut D,
+        input: &mut PreflateInput,
     ) -> Result<DeflateTokenBlock> {
         self.current_token_count = 0;
         self.pending_reference = None;
@@ -336,9 +337,9 @@ impl<'a> TokenPredictor<'a> {
                 let mut uncompressed = Vec::with_capacity(uncompressed_len as usize);
 
                 for _i in 0..uncompressed_len {
-                    uncompressed.push(self.input.cur_char(0));
-                    self.state.update_hash(1, &self.input);
-                    self.input.advance(1);
+                    uncompressed.push(input.cur_char(0));
+                    self.state.update_hash(1, &input);
+                    input.advance(1);
                 }
 
                 return Ok(DeflateTokenBlock {
@@ -346,7 +347,7 @@ impl<'a> TokenPredictor<'a> {
                         uncompressed,
                         padding_bits,
                     },
-                    last: self.input_eof()
+                    last: input.remaining() == 0
                         && !codec.decode_misprediction(CodecCorrection::EOFMisprediction),
                     tail_padding_bits: 0,
                 });
@@ -371,7 +372,7 @@ impl<'a> TokenPredictor<'a> {
 
         codec.decode_verify_state("start", if VERIFY { self.checksum().hash() } else { 0 });
 
-        while !self.input_eof() && self.current_token_count < blocksize {
+        while input.remaining() != 0 && self.current_token_count < blocksize {
             codec.decode_verify_state(
                 "token",
                 if VERIFY {
@@ -382,19 +383,19 @@ impl<'a> TokenPredictor<'a> {
             );
 
             let mut predicted_ref: DeflateTokenReference;
-            match self.predict_token() {
+            match self.predict_token(input) {
                 DeflateToken::Literal(l) => {
                     let not_ok =
                         codec.decode_misprediction(CodecCorrection::LiteralPredictionWrong);
                     if !not_ok {
-                        self.commit_token(&DeflateToken::Literal(l));
+                        self.commit_token(&DeflateToken::Literal(l), input);
                         freq.commit_token(&DeflateToken::Literal(l));
 
                         tokens.push(DeflateToken::Literal(l));
                         continue;
                     }
 
-                    predicted_ref = self.repredict_reference(None).with_context(|| {
+                    predicted_ref = self.repredict_reference(None, input).with_context(|| {
                         format!(
                             "repredict_reference token_count={:?}",
                             self.current_token_count
@@ -405,8 +406,8 @@ impl<'a> TokenPredictor<'a> {
                     let not_ok =
                         codec.decode_misprediction(CodecCorrection::ReferencePredictionWrong);
                     if not_ok {
-                        let c = self.input.cur_char(0);
-                        self.commit_token(&DeflateToken::Literal(c));
+                        let c = input.cur_char(0);
+                        self.commit_token(&DeflateToken::Literal(c), input);
                         freq.commit_token(&DeflateToken::Literal(c));
 
                         tokens.push(DeflateToken::Literal(c));
@@ -426,7 +427,7 @@ impl<'a> TokenPredictor<'a> {
                 predicted_ref = DeflateTokenReference::new(
                     new_len,
                     self.state
-                        .hop_match(new_len, hops, &self.input)
+                        .hop_match(new_len, hops, input)
                         .with_context(|| format!("hop_match l={} {:?}", new_len, predicted_ref))?,
                     false,
                 );
@@ -435,7 +436,7 @@ impl<'a> TokenPredictor<'a> {
                 if hops != 0 {
                     let new_dist = self
                         .state
-                        .hop_match(predicted_ref.len(), hops, &self.input)
+                        .hop_match(predicted_ref.len(), hops, input)
                         .with_context(|| {
                             format!("recalculate_distance token {}", self.current_token_count)
                         })?;
@@ -449,13 +450,13 @@ impl<'a> TokenPredictor<'a> {
                 predicted_ref.set_irregular258(true);
             }
 
-            self.commit_token(&DeflateToken::Reference(predicted_ref));
+            self.commit_token(&DeflateToken::Reference(predicted_ref), input);
             freq.commit_token(&DeflateToken::Reference(predicted_ref));
             tokens.push(DeflateToken::Reference(predicted_ref));
         }
 
-        let last =
-            self.input_eof() && !codec.decode_misprediction(CodecCorrection::EOFMisprediction);
+        let last = input.remaining() == 0
+            && !codec.decode_misprediction(CodecCorrection::EOFMisprediction);
         let last_padding_bits = if last {
             codec.decode_correction(CodecCorrection::NonZeroPadding) as u8
         } else {
@@ -486,34 +487,28 @@ impl<'a> TokenPredictor<'a> {
         Ok(b)
     }
 
-    pub fn input_eof(&self) -> bool {
-        // Return a boolean indicating whether input has reached EOF
-        self.input.remaining() == 0
-    }
-
-    fn predict_token(&mut self) -> DeflateToken {
-        if self.input.pos() == 0 || self.input.remaining() < MIN_MATCH {
-            return DeflateToken::Literal(self.input.cur_char(0));
+    fn predict_token(&mut self, input: &mut PreflateInput) -> DeflateToken {
+        if input.pos() == 0 || input.remaining() < MIN_MATCH {
+            return DeflateToken::Literal(input.cur_char(0));
         }
 
         let m = if let Some(pending) = self.pending_reference {
             MatchResult::Success(pending)
         } else {
-            self.state
-                .match_token_0(0, self.params.max_chain, &self.input)
+            self.state.match_token_0(0, self.params.max_chain, input)
         };
 
         self.pending_reference = None;
 
         if let MatchResult::Success(match_token) = m {
             if match_token.len() < MIN_MATCH {
-                return DeflateToken::Literal(self.input.cur_char(0));
+                return DeflateToken::Literal(input.cur_char(0));
             }
 
             // match is too small and far way to be worth encoding as a distance/length pair.
             if match_token.len() == 3 && match_token.dist() > self.params.max_dist_3_matches.into()
             {
-                return DeflateToken::Literal(self.input.cur_char(0));
+                return DeflateToken::Literal(input.cur_char(0));
             }
 
             // Check for a longer match that starts at the next byte, in which case we should
@@ -524,7 +519,7 @@ impl<'a> TokenPredictor<'a> {
             } = self.params.matching_type
             {
                 if match_token.len() < u32::from(max_lazy)
-                    && self.input.remaining() >= match_token.len() + 2
+                    && input.remaining() >= match_token.len() + 2
                 {
                     let mut max_depth = self.params.max_chain;
 
@@ -533,9 +528,9 @@ impl<'a> TokenPredictor<'a> {
                         max_depth >>= 2;
                     }
 
-                    let match_next =
-                        self.state
-                            .match_token_1(match_token.len(), max_depth, &self.input);
+                    let match_next = self
+                        .state
+                        .match_token_1(match_token.len(), max_depth, input);
 
                     if let MatchResult::Success(m) = match_next {
                         if m.len() > match_token.len() {
@@ -544,7 +539,7 @@ impl<'a> TokenPredictor<'a> {
                             if !self.params.zlib_compatible {
                                 self.pending_reference = None;
                             }
-                            return DeflateToken::Literal(self.input.cur_char(0));
+                            return DeflateToken::Literal(input.cur_char(0));
                         }
                     }
                 }
@@ -552,7 +547,7 @@ impl<'a> TokenPredictor<'a> {
 
             DeflateToken::Reference(match_token)
         } else {
-            DeflateToken::Literal(self.input.cur_char(0))
+            DeflateToken::Literal(input.cur_char(0))
         }
     }
 
@@ -561,8 +556,9 @@ impl<'a> TokenPredictor<'a> {
     fn repredict_reference(
         &mut self,
         _dist_match: Option<DeflateTokenReference>,
+        input: &mut PreflateInput,
     ) -> Result<DeflateTokenReference> {
-        if self.input.pos() == 0 || self.input.remaining() < MIN_MATCH {
+        if input.pos() == 0 || input.remaining() < MIN_MATCH {
             return err_exit_code(
                 ExitCode::RecompressFailed,
                 "Not enough space left to find a reference",
@@ -577,9 +573,7 @@ impl<'a> TokenPredictor<'a> {
         }
         */
 
-        let match_token = self
-            .state
-            .match_token_0(0, self.params.max_chain, &self.input);
+        let match_token = self.state.match_token_0(0, self.params.max_chain, input);
 
         self.pending_reference = None;
 
@@ -590,7 +584,7 @@ impl<'a> TokenPredictor<'a> {
         }
 
         // If we didn't find a match, try again with a larger chain
-        let match_token = self.state.match_token_0(0, 4096, &self.input);
+        let match_token = self.state.match_token_0(0, 4096, input);
 
         if let MatchResult::Success(m) = match_token {
             if m.len() >= MIN_MATCH {
@@ -604,15 +598,15 @@ impl<'a> TokenPredictor<'a> {
         )
     }
 
-    fn commit_token(&mut self, token: &DeflateToken) {
+    fn commit_token(&mut self, token: &DeflateToken, input: &mut PreflateInput) {
         match token {
             DeflateToken::Literal(_) => {
-                self.state.update_hash(1, &self.input);
-                self.input.advance(1);
+                self.state.update_hash(1, input);
+                input.advance(1);
             }
             DeflateToken::Reference(t) => {
-                self.state.update_hash(t.len(), &self.input);
-                self.input.advance(t.len());
+                self.state.update_hash(t.len(), input);
+                input.advance(t.len());
             }
         }
 

@@ -352,11 +352,9 @@ pub fn decompress_deflate_stream(
 
         assert_eq!(params, reread_params);
 
-        let (recompressed, _recreated_blocks) = decode_mispredictions(
-            &reread_params,
-            PreflateInput::new(&contents.plain_text),
-            &mut cabac_decoder,
-        )?;
+        let mut input = PreflateInput::new(&contents.plain_text);
+        let (recompressed, _recreated_blocks) =
+            decode_mispredictions(&reread_params, &mut input, &mut cabac_decoder)?;
 
         if recompressed[..] != compressed_data[..contents.compressed_size] {
             return Err(PreflateError::new(
@@ -384,11 +382,9 @@ pub fn recompress_deflate_stream(
     let mut cabac_decoder =
         PredictionDecoderCabac::new(VP8Reader::new(Cursor::new(r.corrections)).unwrap());
 
-    let (recompressed, _recreated_blocks) = decode_mispredictions(
-        &r.parameters,
-        PreflateInput::new(plain_text),
-        &mut cabac_decoder,
-    )?;
+    let mut input = PreflateInput::new(plain_text);
+    let (recompressed, _recreated_blocks) =
+        decode_mispredictions(&r.parameters, &mut input, &mut cabac_decoder)?;
     Ok(recompressed)
 }
 
@@ -428,11 +424,9 @@ pub fn decompress_deflate_stream_assert(
             PredictionDecoderCabac::new(DebugReader::new(Cursor::new(&r.corrections)).unwrap());
 
         let params = r.parameters;
-        let (recompressed, _recreated_blocks) = decode_mispredictions(
-            &params,
-            PreflateInput::new(&contents.plain_text),
-            &mut cabac_decoder,
-        )?;
+        let mut input = PreflateInput::new(&contents.plain_text);
+        let (recompressed, _recreated_blocks) =
+            decode_mispredictions(&params, &mut input, &mut cabac_decoder)?;
 
         if recompressed[..] != compressed_data[..] {
             return Err(PreflateError::new(
@@ -464,11 +458,9 @@ pub fn recompress_deflate_stream_assert(
     let mut cabac_decoder =
         PredictionDecoderCabac::new(DebugReader::new(Cursor::new(&r.corrections)).unwrap());
 
-    let (recompressed, _recreated_blocks) = decode_mispredictions(
-        &r.parameters,
-        PreflateInput::new(plain_text),
-        &mut cabac_decoder,
-    )?;
+    let mut input = PreflateInput::new(plain_text);
+    let (recompressed, _recreated_blocks) =
+        decode_mispredictions(&r.parameters, &mut input, &mut cabac_decoder)?;
     Ok(recompressed)
 }
 
