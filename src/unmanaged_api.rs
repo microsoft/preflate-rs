@@ -5,9 +5,9 @@ use std::{
 };
 
 use crate::{
-    preflate_container::{ProcessBuffer, ZstdCompressContext, ZstdDecompressContext},
     preflate_error::ExitCode,
-    PreflateCompressionContext, PreflateError, RecreateFromChunksContext,
+    zstd_compression::{ZstdCompressContext, ZstdDecompressContext},
+    PreflateCompressionContext, PreflateError, ProcessBuffer, RecreateFromChunksContext,
 };
 
 /// Helper function to catch panics and convert them into the appropriate LeptonError
@@ -428,7 +428,7 @@ fn test_error_translation() {
             error_string.len() as u64,
         );
 
-        assert!(retval == -(ExitCode::InvalidParameter as i32));
+        assert_eq!(retval, -(ExitCode::InvalidParameter as i32));
 
         let len = error_string.iter().position(|&x| x == 0).unwrap();
 

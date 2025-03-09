@@ -21,18 +21,21 @@ mod scoped_read;
 mod statistical_codec;
 mod token_predictor;
 mod tree_predictor;
+mod zstd_compression;
 
 pub mod unmanaged_api;
 
 pub use preflate_container::{
-    compress_zstd, decompress_deflate_stream, decompress_zstd, expand_zlib_chunks,
-    recompress_deflate_stream, recreated_zlib_chunks,
+    decompress_deflate_stream, expand_zlib_chunks, recompress_deflate_stream, recreated_zlib_chunks,
 };
+pub use zstd_compression::{compress_zstd, decompress_zstd};
+
 pub use preflate_error::ExitCode;
 pub use preflate_error::{PreflateError, Result};
 
 pub use preflate_container::CompressionStats;
 pub use preflate_container::{
-    PreflateCompressionContext, ProcessBuffer, RecreateFromChunksContext, ZstdCompressContext,
-    ZstdDecompressContext,
+    PreflateCompressionContext, ProcessBuffer, RecreateFromChunksContext,
 };
+
+pub use zstd_compression::{ZstdCompressContext, ZstdDecompressContext};
