@@ -1,3 +1,8 @@
+//! Implements processors for Zstandard compression and decompression using
+//! the ProcessBuffer model. These are designed to be chained together with
+//! the other ProcessBuffer implementations to create a full compression or
+//! decompression pipeline.
+
 use std::{collections::VecDeque, io::Write};
 
 use crate::{
