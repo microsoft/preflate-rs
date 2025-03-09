@@ -8,16 +8,17 @@ use std::{
 
 use crate::{
     cabac_codec::{PredictionDecoderCabac, PredictionEncoderCabac},
-    deflate::deflate_reader::parse_deflate,
+    deflate::{deflate_reader::parse_deflate, deflate_writer::DeflateWriter},
     estimator::preflate_parameter_estimator::PreflateParameters,
     hash_algorithm::HashAlgorithm,
     idat_parse::{recreate_idat, IdatContents},
     preflate_error::{err_exit_code, AddContext, ExitCode, PreflateError, Result},
     preflate_input::PreflateInput,
-    process::{decode_mispredictions, encode_mispredictions, ReconstructionData},
-    scan_deflate::{split_into_deflate_streams, BlockChunk},
+    process::{decode_mispredictions, encode_mispredictions, recreate_blocks, ReconstructionData},
+    scan_deflate::{find_deflate_stream, BlockChunk},
     scoped_read::ScopedRead,
     statistical_codec::PredictionEncoder,
+    token_predictor::TokenPredictor,
 };
 
 const COMPRESSED_WRAPPER_VERSION_1: u8 = 1;
@@ -82,23 +83,22 @@ fn test_variant_roundtrip() {
     }
 }
 
+fn write_literal_block(content: &[u8], destination: &mut impl Write) -> Result<()> {
+    destination.write_all(&[LITERAL_CHUNK])?;
+    write_varint(destination, content.len() as u32)?;
+    destination.write_all(content)?;
+    Ok(())
+}
+
 fn write_chunk_block(
     block: BlockChunk,
-    literal_data: &[u8],
     compression_stats: &mut CompressionStats,
     destination: &mut impl Write,
 ) -> std::io::Result<usize> {
     match block {
-        BlockChunk::Literal(content_size) => {
-            destination.write_all(&[LITERAL_CHUNK])?;
-            write_varint(destination, content_size as u32)?;
-            destination.write_all(&literal_data[0..content_size])?;
-
-            Ok(content_size)
-        }
-
         BlockChunk::DeflateStream(res) => {
-            destination.write_all(&[DEFLATE_STREAM])?;
+            destination.write_all(&[DEFLATE_STREAM, 0])?;
+
             write_varint(destination, res.prediction_corrections.len() as u32)?;
             write_varint(destination, res.plain_text.len() as u32)?;
 
@@ -141,8 +141,7 @@ fn read_chunk_block(
 fn roundtrip_chunk_block_literal() {
     let mut buffer = Vec::new();
 
-    let mut stats = CompressionStats::default();
-    write_chunk_block(BlockChunk::Literal(5), b"hello", &mut stats, &mut buffer).unwrap();
+    write_literal_block(b"hello", &mut buffer).unwrap();
 
     let mut read_cursor = std::io::Cursor::new(buffer);
     let mut destination = Vec::new();
@@ -159,13 +158,7 @@ fn roundtrip_chunk_block_deflate() {
     let mut buffer = Vec::new();
 
     let mut stats = CompressionStats::default();
-    write_chunk_block(
-        BlockChunk::DeflateStream(results),
-        &[],
-        &mut stats,
-        &mut buffer,
-    )
-    .unwrap();
+    write_chunk_block(BlockChunk::DeflateStream(results), &mut stats, &mut buffer).unwrap();
 
     let mut read_cursor = std::io::Cursor::new(buffer);
     let mut destination = Vec::new();
@@ -189,7 +182,6 @@ fn roundtrip_chunk_block_png() {
     let mut stats = CompressionStats::default();
     write_chunk_block(
         BlockChunk::IDATDeflate(idat_contents, results),
-        &[],
         &mut stats,
         &mut buffer,
     )
@@ -211,18 +203,22 @@ pub fn expand_zlib_chunks(
     compression_stats: &mut CompressionStats,
     write: &mut impl Write,
 ) -> Result<()> {
-    let mut locations_found = Vec::new();
+    write.write_all(&[COMPRESSED_WRAPPER_VERSION_1])?;
 
-    split_into_deflate_streams(compressed_data, &mut locations_found, loglevel);
-    if loglevel > 0 {
-        println!("locations found: {:?}", locations_found);
+    let mut offset = 0;
+
+    while let Some((next, chunk)) = find_deflate_stream(&compressed_data[offset..], loglevel) {
+        if next.start != 0 {
+            write_literal_block(&compressed_data[offset..offset + next.start], write)?;
+        }
+
+        write_chunk_block(chunk, compression_stats, write)?;
+
+        offset += next.end;
     }
 
-    write.write_all(&[COMPRESSED_WRAPPER_VERSION_1])?; // version 1 of format. Definitely will improved.
-
-    let mut index = 0;
-    for loc in locations_found {
-        index += write_chunk_block(loc, &compressed_data[index..], compression_stats, write)?;
+    if offset < compressed_data.len() {
+        write_literal_block(&compressed_data[offset..], write)?;
     }
 
     Ok(())
@@ -890,7 +886,8 @@ enum DecompressionState {
     Start,
     StartSegment,
     LiteralBlock(usize),
-    DeflateBlock(usize, usize),
+    DeflateBlock(usize, usize, bool),
+    DeflateBlockContinue(Vec<u8>, TokenPredictor),
     PNGBlock(usize, usize, IdatContents),
 }
 
@@ -923,6 +920,30 @@ impl RecreateFromChunksContext {
             input_complete: false,
             state: DecompressionState::StartSegment,
         }
+    }
+
+    fn reconstruct_deflate(
+        plain_text: &[u8],
+        corrections: &[u8],
+        predictor: &mut TokenPredictor,
+        partial: bool,
+    ) -> Result<Vec<u8>> {
+        let mut cabac_decoder =
+            PredictionDecoderCabac::new(VP8Reader::new(Cursor::new(corrections)).unwrap());
+        let mut input = PreflateInput::new(plain_text);
+        let mut deflate_writer = DeflateWriter::new();
+        loop {
+            let block = predictor.recreate_block(&mut cabac_decoder, &mut input)?;
+
+            deflate_writer.encode_block(&block)?;
+
+            let last = block.last;
+            if last {
+                break;
+            }
+        }
+        deflate_writer.flush();
+        Ok(deflate_writer.detach_output())
     }
 }
 
@@ -988,12 +1009,14 @@ impl ProcessBuffer for RecreateFromChunksContext {
                             Ok(DecompressionState::LiteralBlock(length))
                         }
                         DEFLATE_STREAM => {
+                            let partial = r.read_u8()? != 0;
                             let correction_length = read_varint(r)? as usize;
                             let uncompressed_length = read_varint(r)? as usize;
 
                             Ok(DecompressionState::DeflateBlock(
                                 correction_length,
                                 uncompressed_length,
+                                partial,
                             ))
                         }
                         PNG_COMPRESSED => {
@@ -1042,7 +1065,11 @@ impl ProcessBuffer for RecreateFromChunksContext {
                     self.state = DecompressionState::StartSegment;
                 }
 
-                DecompressionState::DeflateBlock(correction_length, uncompressed_length) => {
+                DecompressionState::DeflateBlock(
+                    correction_length,
+                    uncompressed_length,
+                    partial,
+                ) => {
                     let source_size = self.input.len();
                     let total_length = *correction_length + *uncompressed_length;
 
@@ -1059,17 +1086,71 @@ impl ProcessBuffer for RecreateFromChunksContext {
                     self.input.make_contiguous();
                     let source_slice = self.input.as_slices().0;
 
-                    self.result.extend(
-                        recompress_deflate_stream(
-                            &source_slice[*correction_length..total_length],
-                            &source_slice[0..*correction_length],
-                        )
-                        .context()?,
-                    );
+                    let plain_text: &[u8] = &source_slice[*correction_length..total_length];
+                    let prediction_corrections: &[u8] = &source_slice[0..*correction_length];
+                    let r = ReconstructionData::read(prediction_corrections)?;
+                    let mut predictor = TokenPredictor::new(&r.parameters.predictor);
+
+                    self.result.extend(Self::reconstruct_deflate(
+                        plain_text,
+                        &r.corrections,
+                        &mut predictor,
+                        *partial,
+                    )?);
+
+                    let tail_plain_text = plain_text.to_vec();
 
                     self.input.drain(0..total_length);
 
-                    self.state = DecompressionState::StartSegment;
+                    if *partial {
+                        self.state =
+                            DecompressionState::DeflateBlockContinue(tail_plain_text, predictor);
+                    } else {
+                        self.state = DecompressionState::StartSegment;
+                    }
+                }
+
+                DecompressionState::DeflateBlockContinue(plain_text, predictor) => {
+                    let (partial, correction_length, uncompressed_length) =
+                        self.input.scoped_read(|r| {
+                            Ok((
+                                r.read_u8()? != 0,
+                                read_varint(r)? as usize,
+                                read_varint(r)? as usize,
+                            ))
+                        })?;
+
+                    let source_size = self.input.len();
+                    let total_length = correction_length + uncompressed_length;
+
+                    if source_size < total_length {
+                        if self.input_complete {
+                            return Err(PreflateError::new(
+                                ExitCode::InvalidCompressedWrapper,
+                                "unexpected end of input",
+                            ));
+                        }
+                        break;
+                    }
+
+                    self.input.make_contiguous();
+                    let source_slice = self.input.as_slices().0;
+
+                    plain_text.extend_from_slice(&source_slice[correction_length..total_length]);
+                    let prediction_corrections: &[u8] = &source_slice[0..correction_length];
+
+                    self.result.extend(Self::reconstruct_deflate(
+                        plain_text,
+                        prediction_corrections,
+                        predictor,
+                        partial,
+                    )?);
+
+                    self.input.drain(0..total_length);
+
+                    if !partial {
+                        self.state = DecompressionState::StartSegment;
+                    }
                 }
 
                 DecompressionState::PNGBlock(correction_length, uncompressed_length, idat) => {
@@ -1127,7 +1208,7 @@ fn test_baseline_calc() {
     // these change if the compression algorithm is altered, update them
     assert_eq!(stats.zstd_baseline_size, 13661);
     assert_eq!(stats.overhead_bytes, 466);
-    assert_eq!(stats.zstd_compressed_size, 12449);
+    assert_eq!(stats.zstd_compressed_size, 12445);
 }
 
 #[test]

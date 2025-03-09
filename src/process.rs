@@ -84,7 +84,7 @@ pub fn decode_mispredictions(
 }
 
 #[inline(never)]
-fn recreate_blocks<D: PredictionDecoder>(
+pub fn recreate_blocks<D: PredictionDecoder>(
     token_predictor: &mut TokenPredictor,
     decoder: &mut D,
     deflate_writer: &mut DeflateWriter,

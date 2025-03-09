@@ -1,4 +1,4 @@
-use std::io::Cursor;
+use std::{io::Cursor, ops::Range};
 
 use crate::{
     idat_parse::{parse_idat, IdatContents},
@@ -16,9 +16,6 @@ const MIN_BLOCKSIZE: usize = 1024;
 
 #[derive(Debug)]
 pub enum BlockChunk {
-    /// just a bunch of normal bytes that are copied to the output
-    Literal(usize),
-
     /// Deflate stream
     DeflateStream(DecompressResult),
 
@@ -63,28 +60,18 @@ fn next_signature(src: &[u8], index: &mut usize) -> Option<Signature> {
 
 /// Scans for deflate streams in a zlib compressed file, decompresses the streams and
 /// PNG IDAT chunks, and returns the locations of the streams.
-pub fn split_into_deflate_streams(
-    src: &[u8],
-    locations_found: &mut Vec<BlockChunk>,
-    loglevel: u32,
-) {
+pub fn find_deflate_stream(src: &[u8], loglevel: u32) -> Option<(Range<usize>, BlockChunk)> {
     let mut index: usize = 0;
-    let mut prev_index = 0;
     while let Some(signature) = next_signature(src, &mut index) {
         match signature {
             Signature::Zlib(_) => {
                 if let Ok(res) = decompress_deflate_stream(&src[index + 2..], true, loglevel) {
                     if res.plain_text.len() > MIN_BLOCKSIZE {
                         index += 2;
-
-                        locations_found.push(BlockChunk::Literal(index - prev_index));
-
-                        index += res.compressed_size;
-
-                        locations_found.push(BlockChunk::DeflateStream(res));
-
-                        prev_index = index;
-                        continue;
+                        return Some((
+                            index..index + res.compressed_size,
+                            BlockChunk::DeflateStream(res),
+                        ));
                     }
                 }
             }
@@ -95,14 +82,10 @@ pub fn split_into_deflate_streams(
                     let start = index + cursor.position() as usize;
                     if let Ok(res) = decompress_deflate_stream(&src[start..], true, loglevel) {
                         if res.plain_text.len() > MIN_BLOCKSIZE {
-                            locations_found.push(BlockChunk::Literal(start - prev_index));
-
-                            index = start + res.compressed_size;
-                            prev_index = index;
-
-                            locations_found.push(BlockChunk::DeflateStream(res));
-
-                            continue;
+                            return Some((
+                                start..start + res.compressed_size,
+                                BlockChunk::DeflateStream(res),
+                            ));
                         }
                     }
                 }
@@ -111,14 +94,10 @@ pub fn split_into_deflate_streams(
             Signature::ZipLocalFileHeader => {
                 if let Ok((header_size, res)) = parse_zip_stream(&src[index..], loglevel) {
                     if res.plain_text.len() > MIN_BLOCKSIZE {
-                        locations_found.push(BlockChunk::Literal(index - prev_index + header_size));
-
-                        index += header_size + res.compressed_size;
-                        prev_index = index;
-
-                        locations_found.push(BlockChunk::DeflateStream(res));
-
-                        continue;
+                        return Some((
+                            index + header_size..index + header_size + res.compressed_size,
+                            BlockChunk::DeflateStream(res),
+                        ));
                     }
                 }
             }
@@ -132,13 +111,10 @@ pub fn split_into_deflate_streams(
                         if let Ok(res) = decompress_deflate_stream(&payload, true, loglevel) {
                             let length = r.total_chunk_length;
                             if length > MIN_BLOCKSIZE {
-                                locations_found.push(BlockChunk::Literal(real_start - prev_index));
-
-                                locations_found.push(BlockChunk::IDATDeflate(r, res));
-
-                                index = real_start + length;
-                                prev_index = index;
-                                continue;
+                                return Some((
+                                    real_start..real_start + r.total_chunk_length,
+                                    BlockChunk::IDATDeflate(r, res),
+                                ));
                             }
                         }
                     }
@@ -150,10 +126,7 @@ pub fn split_into_deflate_streams(
         index += 1;
     }
 
-    // add the last literal block at the end
-    if prev_index < src.len() {
-        locations_found.push(BlockChunk::Literal(src.len() - prev_index));
-    }
+    None
 }
 
 fn skip_gzip_header<R: Read>(reader: &mut R) -> Result<()> {
@@ -196,61 +169,46 @@ fn skip_gzip_header<R: Read>(reader: &mut R) -> Result<()> {
 fn parse_png() {
     let f = crate::process::read_file("treegdi.png");
 
-    let mut locations_found = Vec::new();
-    split_into_deflate_streams(&f, &mut locations_found, 1);
+    let loc = find_deflate_stream(&f, 1);
 
-    println!("locations found: {:?}", locations_found);
+    match loc {
+        Some((offset, BlockChunk::IDATDeflate(idat, _))) => {
+            println!("IDAT chunks: {:?} at {:?}", idat.chunk_sizes, offset);
+        }
+        _ => panic!("Expected IDAT"),
+    }
 }
 
 #[test]
 fn parse_gz() {
     let f = crate::process::read_file("sample1.bin.gz");
 
-    let mut locations_found = Vec::new();
-    split_into_deflate_streams(&f, &mut locations_found, 1);
+    let loc = find_deflate_stream(&f, 1).unwrap();
 
-    println!("locations found: {:?}", locations_found);
+    // 10 byte header + 8 byte footer
+    assert_eq!(loc.0, 10..f.len() - 8);
 
-    assert_eq!(locations_found.len(), 3);
-
-    // 10 byte header
-    assert!(match locations_found[0] {
-        BlockChunk::Literal(10) => true,
-        _ => false,
-    });
-
-    // Deflate stream
-    assert!(match locations_found[1] {
-        BlockChunk::DeflateStream(_) => true,
-        _ => false,
-    });
-
-    // 8 byte footer
-    assert!(match locations_found[2] {
-        BlockChunk::Literal(8) => true,
-        _ => false,
-    });
+    if !matches!(loc.1, BlockChunk::DeflateStream(_)) {
+        panic!("Expected DeflateStream");
+    }
 }
 
 #[test]
 fn parse_docx() {
     let f = crate::process::read_file("file-sample_1MB.docx");
 
-    let mut locations_found = Vec::new();
-    split_into_deflate_streams(&f, &mut locations_found, 1);
-
-    for x in locations_found {
-        match x {
-            BlockChunk::Literal(l) => {
-                println!("Literal: {}", l);
+    let mut offset = 0;
+    while let Some((loc, res)) = find_deflate_stream(&f[offset..], 0) {
+        match res {
+            BlockChunk::DeflateStream(_) => {
+                println!(
+                    "Deflate stream at {:?}",
+                    offset + loc.start..offset + loc.end
+                );
             }
-            BlockChunk::DeflateStream(d) => {
-                println!("Deflate: {:?}", d.compressed_size);
-            }
-            BlockChunk::IDATDeflate(i, d) => {
-                println!("IDAT: {:?} {:?}", i, d.compressed_size);
-            }
+            _ => panic!("Expected DeflateStream"),
         }
+        offset += loc.end;
     }
 
     //assert_eq!(locations_found.len(), 1);
