@@ -91,6 +91,7 @@ impl TokenPredictor {
         block: &DeflateTokenBlock,
         codec: &mut D,
         input: &mut PreflateInput,
+        partial: bool,
     ) -> Result<()> {
         self.current_token_count = 0;
         self.pending_reference = None;
@@ -308,7 +309,7 @@ impl TokenPredictor {
         }
 
         // we thought it was the end of the block, but it wasn't
-        if input.remaining() == 0 && !block.last {
+        if !partial && input.remaining() == 0 && !block.last {
             codec.encode_misprediction(CodecCorrection::EOFMisprediction, false);
         }
 
@@ -321,7 +322,8 @@ impl TokenPredictor {
         &mut self,
         codec: &mut D,
         input: &mut PreflateInput,
-    ) -> Result<DeflateTokenBlock> {
+        partial: bool,
+    ) -> Result<(bool, DeflateTokenBlock)> {
         self.current_token_count = 0;
         self.pending_reference = None;
 
@@ -342,15 +344,20 @@ impl TokenPredictor {
                     input.advance(1);
                 }
 
-                return Ok(DeflateTokenBlock {
-                    block_type: DeflateTokenBlockType::Stored {
-                        uncompressed,
-                        padding_bits,
+                let end = input.remaining() == 0
+                    && !codec.decode_misprediction(CodecCorrection::EOFMisprediction);
+
+                return Ok((
+                    end,
+                    DeflateTokenBlock {
+                        block_type: DeflateTokenBlockType::Stored {
+                            uncompressed,
+                            padding_bits,
+                        },
+                        last: !partial && end,
+                        tail_padding_bits: 0,
                     },
-                    last: input.remaining() == 0
-                        && !codec.decode_misprediction(CodecCorrection::EOFMisprediction),
-                    tail_padding_bits: 0,
-                });
+                ));
             }
             BT_STATICHUFF | BT_DYNAMICHUFF => {
                 // continue
@@ -455,8 +462,10 @@ impl TokenPredictor {
             tokens.push(DeflateToken::Reference(predicted_ref));
         }
 
-        let last = input.remaining() == 0
+        let end = input.remaining() == 0
             && !codec.decode_misprediction(CodecCorrection::EOFMisprediction);
+
+        let last = !partial && end;
         let last_padding_bits = if last {
             codec.decode_correction(CodecCorrection::NonZeroPadding) as u8
         } else {
@@ -484,7 +493,7 @@ impl TokenPredictor {
 
         codec.decode_verify_state("done", if VERIFY { self.checksum().hash() } else { 0 });
 
-        Ok(b)
+        Ok((end, b))
     }
 
     fn predict_token(&mut self, input: &mut PreflateInput) -> DeflateToken {

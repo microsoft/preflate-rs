@@ -14,12 +14,11 @@ use crate::{
     idat_parse::{recreate_idat, IdatContents},
     preflate_error::{err_exit_code, AddContext, ExitCode, PreflateError, Result},
     preflate_input::PreflateInput,
-    process::{decode_mispredictions, encode_mispredictions, recreate_blocks, ReconstructionData},
+    process::{decode_mispredictions, encode_mispredictions, ReconstructionData},
     scan_deflate::{find_deflate_stream, BlockChunk},
     scoped_read::ScopedRead,
     statistical_codec::PredictionEncoder,
     token_predictor::TokenPredictor,
-    zstd_compression::{ZstdCompressContext, ZstdDecompressContext},
 };
 
 const COMPRESSED_WRAPPER_VERSION_1: u8 = 1;
@@ -209,6 +208,8 @@ pub fn expand_zlib_chunks(
         .copy_to_end(&mut Cursor::new(compressed_data), write)
         .unwrap();
 
+    *compression_stats = context.stats();
+
     Ok(())
 }
 
@@ -311,7 +312,7 @@ pub fn decompress_deflate_stream(
     let mut cabac_encoder =
         PredictionEncoderCabac::new(VP8Writer::new(&mut cabac_encoded).unwrap());
 
-    encode_mispredictions(&contents, &params, &mut cabac_encoder)?;
+    encode_mispredictions(&contents, &params, &mut cabac_encoder, false)?;
 
     cabac_encoder.finish();
 
@@ -338,7 +339,7 @@ pub fn decompress_deflate_stream(
 
         let mut input = PreflateInput::new(&contents.plain_text);
         let (recompressed, _recreated_blocks) =
-            decode_mispredictions(&reread_params, &mut input, &mut cabac_decoder)?;
+            decode_mispredictions(&reread_params, &mut input, &mut cabac_decoder, false)?;
 
         if recompressed[..] != compressed_data[..contents.compressed_size] {
             return Err(PreflateError::new(
@@ -368,7 +369,7 @@ pub fn recompress_deflate_stream(
 
     let mut input = PreflateInput::new(plain_text);
     let (recompressed, _recreated_blocks) =
-        decode_mispredictions(&r.parameters, &mut input, &mut cabac_decoder)?;
+        decode_mispredictions(&r.parameters, &mut input, &mut cabac_decoder, false)?;
     Ok(recompressed)
 }
 
@@ -392,7 +393,7 @@ pub fn decompress_deflate_stream_assert(
 
     let params = PreflateParameters::estimate_preflate_parameters(&contents).context()?;
 
-    encode_mispredictions(&contents, &params, &mut cabac_encoder)?;
+    encode_mispredictions(&contents, &params, &mut cabac_encoder, false)?;
     assert_eq!(contents.compressed_size, compressed_data.len());
     cabac_encoder.finish();
 
@@ -410,7 +411,7 @@ pub fn decompress_deflate_stream_assert(
         let params = r.parameters;
         let mut input = PreflateInput::new(&contents.plain_text);
         let (recompressed, _recreated_blocks) =
-            decode_mispredictions(&params, &mut input, &mut cabac_decoder)?;
+            decode_mispredictions(&params, &mut input, &mut cabac_decoder, false)?;
 
         if recompressed[..] != compressed_data[..] {
             return Err(PreflateError::new(
@@ -444,7 +445,7 @@ pub fn recompress_deflate_stream_assert(
 
     let mut input = PreflateInput::new(plain_text);
     let (recompressed, _recreated_blocks) =
-        decode_mispredictions(&r.parameters, &mut input, &mut cabac_decoder)?;
+        decode_mispredictions(&r.parameters, &mut input, &mut cabac_decoder, false)?;
     Ok(recompressed)
 }
 
@@ -773,12 +774,11 @@ impl RecreateFromChunksContext {
         let mut input = PreflateInput::new(plain_text);
         let mut deflate_writer = DeflateWriter::new();
         loop {
-            let block = predictor.recreate_block(&mut cabac_decoder, &mut input)?;
+            let (end, block) = predictor.recreate_block(&mut cabac_decoder, &mut input, partial)?;
 
             deflate_writer.encode_block(&block)?;
 
-            let last = block.last;
-            if last {
+            if end {
                 break;
             }
         }
@@ -1034,6 +1034,7 @@ impl ProcessBuffer for RecreateFromChunksContext {
 #[test]
 fn test_baseline_calc() {
     use crate::process::read_file;
+    use crate::zstd_compression::ZstdCompressContext;
 
     let v = read_file("samplezip.zip");
 
@@ -1054,6 +1055,7 @@ fn test_baseline_calc() {
 #[test]
 fn roundtrip_contexts() {
     use crate::process::read_file;
+    use crate::zstd_compression::{ZstdCompressContext, ZstdDecompressContext};
 
     let v = read_file("samplezip.zip");
 

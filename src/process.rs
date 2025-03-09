@@ -42,6 +42,7 @@ pub fn encode_mispredictions(
     deflate: &DeflateContents,
     params: &PreflateParameters,
     encoder: &mut impl PredictionEncoder,
+    partial: bool,
 ) -> Result<(), PreflateError> {
     let mut input = PreflateInput::new(&deflate.plain_text);
 
@@ -50,6 +51,7 @@ pub fn encode_mispredictions(
         TokenPredictor::new(&params.predictor),
         encoder,
         &mut input,
+        partial,
     )?;
 
     Ok(())
@@ -60,9 +62,10 @@ fn predict_blocks(
     mut token_predictor_in: TokenPredictor,
     encoder: &mut impl PredictionEncoder,
     input: &mut PreflateInput,
+    partial: bool,
 ) -> Result<(), PreflateError> {
     for i in 0..blocks.len() {
-        token_predictor_in.predict_block(&blocks[i], encoder, input)?;
+        token_predictor_in.predict_block(&blocks[i], encoder, input, partial)?;
     }
     assert!(input.remaining() == 0);
     Ok(())
@@ -72,11 +75,13 @@ pub fn decode_mispredictions(
     params: &PreflateParameters,
     input: &mut PreflateInput,
     decoder: &mut impl PredictionDecoder,
+    partial: bool,
 ) -> Result<(Vec<u8>, Vec<DeflateTokenBlock>), PreflateError> {
     let mut deflate_writer: DeflateWriter = DeflateWriter::new();
     let mut predictor = TokenPredictor::new(&params.predictor);
 
-    let output_blocks = recreate_blocks(&mut predictor, decoder, &mut deflate_writer, input)?;
+    let output_blocks =
+        recreate_blocks(&mut predictor, decoder, &mut deflate_writer, input, partial)?;
 
     deflate_writer.flush();
 
@@ -89,16 +94,16 @@ pub fn recreate_blocks<D: PredictionDecoder>(
     decoder: &mut D,
     deflate_writer: &mut DeflateWriter,
     input: &mut PreflateInput,
+    partial: bool,
 ) -> Result<Vec<DeflateTokenBlock>, PreflateError> {
     let mut output_blocks = Vec::new();
     loop {
-        let block = token_predictor.recreate_block(decoder, input)?;
+        let (stop, block) = token_predictor.recreate_block(decoder, input, partial)?;
 
         deflate_writer.encode_block(&block)?;
 
-        let last = block.last;
         output_blocks.push(block);
-        if last {
+        if stop {
             break;
         }
     }
@@ -153,7 +158,7 @@ fn analyze_compressed_data_fast(
 
     println!("params: {:?}", params);
 
-    encode_mispredictions(&contents, &params, &mut cabac_encoder).unwrap();
+    encode_mispredictions(&contents, &params, &mut cabac_encoder, false).unwrap();
 
     if let Some(crc) = header_crc32 {
         let result_crc = crc32fast::hash(&contents.plain_text);
@@ -174,7 +179,7 @@ fn analyze_compressed_data_fast(
     let mut input = PreflateInput::new(&contents.plain_text);
 
     let (recompressed, _recreated_blocks) =
-        decode_mispredictions(&params, &mut input, &mut cabac_decoder).unwrap();
+        decode_mispredictions(&params, &mut input, &mut cabac_decoder, false).unwrap();
 
     assert!(recompressed[..] == compressed_data[..]);
 
@@ -221,7 +226,7 @@ fn analyze_compressed_data_verify(
 
     println!("params: {:?}", params);
 
-    encode_mispredictions(&contents, &params, &mut combined_encoder).unwrap();
+    encode_mispredictions(&contents, &params, &mut combined_encoder, false).unwrap();
 
     assert_eq!(contents.compressed_size, compressed_data.len());
 
@@ -241,7 +246,7 @@ fn analyze_compressed_data_verify(
     let mut input = PreflateInput::new(&contents.plain_text);
 
     let (recompressed, recreated_blocks) =
-        decode_mispredictions(&params, &mut input, &mut combined_decoder).unwrap();
+        decode_mispredictions(&params, &mut input, &mut combined_decoder, false).unwrap();
 
     assert_eq!(contents.blocks.len(), recreated_blocks.len());
     contents
@@ -331,7 +336,7 @@ fn verify_zlib_perfect_compression() {
 
         // this "encoder" just asserts if anything gets passed to it
         let mut verify_encoder = crate::statistical_codec::AssertDefaultOnlyEncoder {};
-        encode_mispredictions(&contents, &params, &mut verify_encoder).unwrap();
+        encode_mispredictions(&contents, &params, &mut verify_encoder, false).unwrap();
 
         println!("params buffer length {}", bitcode::encode(&params).len());
     }
