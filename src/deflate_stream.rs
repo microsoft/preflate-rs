@@ -12,7 +12,7 @@ use cabac::vp8::{VP8Reader, VP8Writer};
 use crate::{
     cabac_codec::{PredictionDecoderCabac, PredictionEncoderCabac},
     deflate::{
-        deflate_reader::{parse_deflate, DeflateContents},
+        deflate_reader::{parse_deflate_whole, DeflateContents},
         deflate_token::DeflateTokenBlock,
         deflate_writer::DeflateWriter,
     },
@@ -72,7 +72,7 @@ pub fn decompress_deflate_stream(
 ) -> Result<DecompressResult> {
     let mut cabac_encoded = Vec::new();
 
-    let contents = parse_deflate(compressed_data)?;
+    let contents = parse_deflate_whole(compressed_data)?;
 
     let params = PreflateParameters::estimate_preflate_parameters(&contents).context()?;
 
@@ -254,7 +254,7 @@ fn decompress_deflate_stream_assert(
     let mut cabac_encoder =
         PredictionEncoderCabac::new(DebugWriter::new(&mut cabac_encoded).unwrap());
 
-    let contents = parse_deflate(compressed_data)?;
+    let contents = parse_deflate_whole(compressed_data)?;
 
     let params = PreflateParameters::estimate_preflate_parameters(&contents).context()?;
 
@@ -365,7 +365,7 @@ fn analyze_compressed_data_fast(
 ) {
     use crate::{
         cabac_codec::{PredictionDecoderCabac, PredictionEncoderCabac},
-        deflate::deflate_reader::parse_deflate,
+        deflate::deflate_reader::parse_deflate_whole,
     };
     use std::io::Cursor;
 
@@ -375,7 +375,7 @@ fn analyze_compressed_data_fast(
 
     let mut cabac_encoder = PredictionEncoderCabac::new(VP8Writer::new(&mut buffer).unwrap());
 
-    let contents = parse_deflate(compressed_data).unwrap();
+    let contents = parse_deflate_whole(compressed_data).unwrap();
 
     let params = PreflateParameters::estimate_preflate_parameters(&contents).unwrap();
 
@@ -418,7 +418,7 @@ fn analyze_compressed_data_verify(
 ) {
     use crate::{
         cabac_codec::{PredictionDecoderCabac, PredictionEncoderCabac},
-        deflate::{deflate_reader::parse_deflate, deflate_token::DeflateTokenBlockType},
+        deflate::{deflate_reader::parse_deflate_whole, deflate_token::DeflateTokenBlockType},
         statistical_codec::{VerifyPredictionDecoder, VerifyPredictionEncoder},
     };
     use cabac::debug::{DebugReader, DebugWriter};
@@ -443,7 +443,7 @@ fn analyze_compressed_data_verify(
 
     let mut combined_encoder = (debug_encoder, cabac_encoder);
 
-    let contents = parse_deflate(compressed_data).unwrap();
+    let contents = parse_deflate_whole(compressed_data).unwrap();
 
     let params = PreflateParameters::estimate_preflate_parameters(&contents).unwrap();
 
@@ -542,7 +542,7 @@ fn do_analyze(crc: Option<u32>, compressed_data: &[u8], verify: bool) {
 /// Future work: figure out why level 7 and above are not perfect
 #[test]
 fn verify_zlib_perfect_compression() {
-    use crate::deflate::deflate_reader::parse_deflate;
+    use crate::deflate::deflate_reader::parse_deflate_whole;
     use crate::utils::read_file;
 
     for i in 1..6 {
@@ -552,7 +552,7 @@ fn verify_zlib_perfect_compression() {
 
         let compressed_data = compressed_data;
 
-        let contents = parse_deflate(compressed_data).unwrap();
+        let contents = parse_deflate_whole(compressed_data).unwrap();
 
         let params = PreflateParameters::estimate_preflate_parameters(&contents).unwrap();
 

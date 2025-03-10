@@ -163,7 +163,7 @@ fn estimate_preflate_huff_strategy(info: &PreflateStreamInfo) -> PreflateHuffStr
 #[test]
 fn verify_zlib_recognition() {
     use crate::{
-        deflate::deflate_reader::parse_deflate,
+        deflate::deflate_reader::parse_deflate_whole,
         estimator::preflate_parse_config::{
             SLOW_PREFLATE_PARSER_SETTINGS, ZLIB_PREFLATE_PARSER_SETTINGS,
         },
@@ -172,7 +172,7 @@ fn verify_zlib_recognition() {
 
     for i in 0..=9 {
         let v = read_file(&format!("compressed_zlib_level{}.deflate", i));
-        let contents = parse_deflate(&v).unwrap();
+        let contents = parse_deflate_whole(&v).unwrap();
 
         let params = PreflateParameters::estimate_preflate_parameters(&contents).unwrap();
 
@@ -209,12 +209,12 @@ fn verify_zlib_recognition() {
 
 #[test]
 fn verify_miniz_recognition() {
-    use crate::deflate::deflate_reader::parse_deflate;
+    use crate::deflate::deflate_reader::parse_deflate_whole;
     use crate::utils::read_file;
 
     for i in 0..=9 {
         let v = read_file(&format!("compressed_flate2_level{}.deflate", i));
-        let contents = parse_deflate(&v).unwrap();
+        let contents = parse_deflate_whole(&v).unwrap();
 
         let params = PreflateParameters::estimate_preflate_parameters(&contents).unwrap();
 
@@ -230,12 +230,12 @@ fn verify_miniz_recognition() {
 
 #[test]
 fn verify_zlibng_recognition() {
-    use crate::deflate::deflate_reader::parse_deflate;
+    use crate::deflate::deflate_reader::parse_deflate_whole;
     use crate::utils::read_file;
 
     for i in 1..=2 {
         let v = read_file(&format!("compressed_zlibng_level{}.deflate", i));
-        let contents = parse_deflate(&v).unwrap();
+        let contents = parse_deflate_whole(&v).unwrap();
 
         let params = PreflateParameters::estimate_preflate_parameters(&contents).unwrap();
 

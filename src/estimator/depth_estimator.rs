@@ -396,7 +396,7 @@ pub fn run_depth_candidates(
 
 #[test]
 fn verify_max_chain_length() {
-    use crate::deflate::deflate_reader::parse_deflate;
+    use crate::deflate::deflate_reader::parse_deflate_whole;
 
     let zlib = HashAlgorithm::Zlib {
         hash_mask: 0x7FFF,
@@ -435,7 +435,7 @@ fn verify_max_chain_length() {
         println!("testing {}", filename);
         let compressed_data = crate::utils::read_file(filename);
 
-        let parsed = parse_deflate(&compressed_data).unwrap();
+        let parsed = parse_deflate_whole(&compressed_data).unwrap();
 
         let add_policy_estimator = super::add_policy_estimator::estimate_add_policy(&parsed.blocks);
 

@@ -159,7 +159,7 @@ impl DeflateWriter {
 /// Create a set of blocks and read them back to see if they are identical
 #[test]
 fn roundtrip_deflate_writer() {
-    use super::deflate_reader::parse_deflate;
+    use super::deflate_reader::parse_deflate_whole;
 
     let mut w = DeflateWriter::new();
 
@@ -207,7 +207,7 @@ fn roundtrip_deflate_writer() {
 
     let output = w.detach_output();
 
-    let r = parse_deflate(&output).unwrap();
+    let r = parse_deflate_whole(&output).unwrap();
 
     assert_eq!(blocks.len(), r.blocks.len());
     for i in 0..blocks.len() {
@@ -222,7 +222,7 @@ fn roundtrip_full_file() {
     use std::io::Read;
     use std::path::Path;
 
-    use super::deflate_reader::parse_deflate;
+    use super::deflate_reader::parse_deflate_whole;
 
     let searchpath = Path::new(env!("CARGO_MANIFEST_DIR")).join("samples");
 
@@ -237,7 +237,7 @@ fn roundtrip_full_file() {
             let mut buffer = Vec::new();
             file.read_to_end(&mut buffer).unwrap();
 
-            let r = parse_deflate(&buffer).unwrap();
+            let r = parse_deflate_whole(&buffer).unwrap();
 
             let mut w = DeflateWriter::new();
             for i in 0..r.blocks.len() {
