@@ -110,14 +110,13 @@ fn libzng() {
 }
 
 fn verifyresult(compressed_data: &[u8]) {
-    let result = decompress_deflate_stream(compressed_data, true, 1).unwrap();
-    let recomp =
-        recompress_deflate_stream(&result.plain_text, &result.prediction_corrections).unwrap();
+    let result = decompress_deflate_stream(None, compressed_data, true, 1).unwrap();
+    let recomp = recompress_deflate_stream(&result.plain_text, &result.corrections).unwrap();
 
     println!(
         "compressed size: {}, cabac: {}",
         compressed_data.len(),
-        result.prediction_corrections.len()
+        result.corrections.len()
     );
     println!("parameters: {:?}", result.parameters);
 
@@ -462,11 +461,11 @@ fn compression_benchmark_overhead_size() {
         for level in 0..=9 {
             let compressed = (i.compress_fn)(&original, level);
 
-            let r = decompress_deflate_stream(&compressed, true, 0);
+            let r = decompress_deflate_stream(None, &compressed, true, 0);
 
             match r {
                 Ok(r) => {
-                    result.push(Ok(r.prediction_corrections.len()));
+                    result.push(Ok(r.corrections.len()));
                 }
                 Err(e) => {
                     result.push(Err(e.exit_code()));

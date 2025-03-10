@@ -163,7 +163,6 @@ impl<D: ProcessBuffer> ProcessBuffer for ZstdCompressContext<D> {
     }
 
     fn stats(&self) -> CompressionStats {
-        let s = self.internal.stats();
         CompressionStats {
             zstd_compressed_size: self.zstd_compressed_size,
             zstd_baseline_size: self.zstd_baseline_size,

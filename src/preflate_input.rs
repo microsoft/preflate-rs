@@ -4,45 +4,160 @@
  *  This software incorporates material from third parties. See NOTICE.txt for details.
  *--------------------------------------------------------------------------------------------*/
 
+use crate::{
+    preflate_error::{err_exit_code, Result},
+    ExitCode,
+};
+
+/// represents the uncompressed data, including a prefix that is may be referenced by
+/// the compressed data. The prefix data is only visible via the PreflateInput struct.
+pub struct PlainText {
+    /// the entire data, including the prefix
+    data: Vec<u8>,
+
+    /// how long the prefix is, after this the data starts
+    prefix_length: i32,
+}
+
+impl std::fmt::Debug for PlainText {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "PlainText {{ prefix_length: {}, data: len={} }}",
+            self.prefix_length,
+            self.data.len()
+        )
+    }
+}
+
+impl Clone for PlainText {
+    fn clone(&self) -> Self {
+        Self {
+            data: self.data.clone(),
+            prefix_length: self.prefix_length,
+        }
+    }
+}
+
+impl PlainText {
+    pub fn new() -> Self {
+        Self {
+            data: Vec::new(),
+            prefix_length: 0,
+        }
+    }
+
+    /// returns the dictionary to be used as a prefix for the next compression, which
+    /// is a maximum of 32KB in size.
+    pub fn shrink_to_dictionary(&mut self) {
+        let amount_to_keep = self.data.len().min(32768);
+
+        self.data.drain(self.data.len() - amount_to_keep..);
+        self.prefix_length = self.data.len() as i32;
+    }
+
+    pub fn new_with_data(data: Vec<u8>) -> Self {
+        Self {
+            data,
+            prefix_length: 0,
+        }
+    }
+
+    /// the data excluding the prefix
+    pub fn text(&self) -> &[u8] {
+        &self.data[self.prefix_length as usize..]
+    }
+
+    pub fn truncate(&mut self, len: usize) {
+        self.data.truncate(self.prefix_length as usize + len);
+    }
+
+    pub fn push(&mut self, c: u8) {
+        self.data.push(c);
+    }
+
+    pub fn append(&mut self, data: &[u8]) {
+        self.data.extend_from_slice(data);
+    }
+
+    pub fn append_iter(&mut self, data: impl Iterator<Item = u8>) {
+        self.data.extend(data);
+    }
+
+    /// writes a reference to the buffer, which copies the text from a previous location
+    /// to the current location. In most cases this is non-overlapping, but there are some
+    /// cases where there is overlap between the source and destination.
+    pub fn append_reference(&mut self, dist: u32, len: u32) -> Result<()> {
+        if dist as usize > self.data.len() {
+            return err_exit_code(ExitCode::InvalidDeflate, "Invalid distance in reference");
+        }
+
+        if dist == 1 {
+            // special case for distance 1, just repeat the last byte n times
+            let byte = self.data[self.data.len() - 1];
+            self.data.resize(self.data.len() + len as usize, byte);
+        } else if dist >= len {
+            // no overlap
+            self.data.extend_from_within(
+                self.data.len() - dist as usize..self.data.len() - dist as usize + len as usize,
+            );
+        } else {
+            // general case, rarely called, copy one character at a time
+            let start = self.data.len() - dist as usize;
+
+            self.data.reserve(len as usize);
+
+            for i in 0..len {
+                let byte = self.data[start + i as usize];
+                self.data.push(byte);
+            }
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone)]
 pub struct PreflateInput<'a> {
-    data: &'a [u8],
+    data: &'a PlainText,
     pos: i32,
 }
 
 impl<'a> PreflateInput<'a> {
-    pub fn new(v: &'a [u8]) -> Self {
-        PreflateInput { data: v, pos: 0 }
+    pub fn new(v: &'a PlainText) -> Self {
+        PreflateInput {
+            data: v,
+            pos: v.prefix_length,
+        }
     }
 
     #[inline(always)]
     pub fn pos(&self) -> u32 {
-        self.pos as u32
+        (self.pos - self.data.prefix_length) as u32
     }
 
     #[inline(always)]
     pub fn size(&self) -> u32 {
-        self.data.len() as u32
+        self.data.text().len() as u32
     }
 
     #[inline(always)]
     pub fn cur_chars(&self, offset: i32) -> &[u8] {
-        &self.data[(self.pos + offset) as usize..]
+        &self.data.data[(self.pos + offset) as usize..]
     }
 
     #[inline(always)]
     pub fn cur_char(&self, offset: i32) -> u8 {
-        self.data[(self.pos + offset) as usize]
+        self.data.data[(self.pos + offset) as usize]
     }
 
     #[inline(always)]
     pub fn advance(&mut self, l: u32) {
         self.pos += l as i32;
-        debug_assert!(self.pos <= self.data.len() as i32);
+        debug_assert!(self.pos <= self.data.data.len() as i32);
     }
 
     #[inline(always)]
     pub fn remaining(&self) -> u32 {
-        self.data.len() as u32 - self.pos as u32
+        self.data.data.len() as u32 - self.pos as u32
     }
 }

@@ -38,6 +38,17 @@ pub struct TokenPredictor {
     max_token_count: u32,
 }
 
+impl std::fmt::Debug for TokenPredictor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TokenPredictor")
+            .field("params", &self.params)
+            .field("pending_reference", &self.pending_reference)
+            .field("current_token_count", &self.current_token_count)
+            .field("max_token_count", &self.max_token_count)
+            .finish()
+    }
+}
+
 #[derive(Encode, Decode, Debug, Copy, Clone, Eq, PartialEq)]
 pub struct TokenPredictorParameters {
     /// Zlib does not match to first byte of a file in order to reserve 0 for the end of chain

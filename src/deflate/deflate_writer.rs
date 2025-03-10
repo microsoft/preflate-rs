@@ -239,13 +239,7 @@ fn roundtrip_full_file() {
 
             let r = parse_deflate_whole(&buffer).unwrap();
 
-            let mut w = DeflateWriter::new();
-            for i in 0..r.blocks.len() {
-                w.encode_block(&r.blocks[i]).unwrap();
-            }
-            w.flush();
-
-            let output = w.detach_output();
+            let output = write_deflate_blocks(&r.blocks);
 
             if r.compressed_size != output.len() || buffer[0..r.compressed_size] != output[..] {
                 println!("mismatch");
@@ -254,4 +248,16 @@ fn roundtrip_full_file() {
             //assert_eq!(buffer, output);
         }
     }
+}
+
+#[cfg(test)]
+pub fn write_deflate_blocks(blocks: &[DeflateTokenBlock]) -> Vec<u8> {
+    let mut w = DeflateWriter::new();
+    for i in 0..blocks.len() {
+        w.encode_block(&blocks[i]).unwrap();
+    }
+    w.flush();
+
+    let output = w.detach_output();
+    output
 }

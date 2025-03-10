@@ -4,14 +4,10 @@
  *  This software incorporates material from third parties. See NOTICE.txt for details.
  *--------------------------------------------------------------------------------------------*/
 
-use crate::deflate::huffman_encoding::HuffmanOriginalEncoding;
+use crate::{deflate::huffman_encoding::HuffmanOriginalEncoding, preflate_input::PlainText};
 
-use super::{
-    deflate_constants::{
-        quantize_distance, quantize_length, DIST_CODE_COUNT, LITLENDIST_CODE_COUNT,
-        NONLEN_CODE_COUNT,
-    },
-    deflate_reader::append_reference_to_plaintext,
+use super::deflate_constants::{
+    quantize_distance, quantize_length, DIST_CODE_COUNT, LITLENDIST_CODE_COUNT, NONLEN_CODE_COUNT,
 };
 
 /// In a DEFLATE stream, tokens are either literals (bytes) or references to previous bytes
@@ -107,7 +103,7 @@ pub struct DeflateTokenBlock {
 }
 
 impl DeflateTokenBlockType {
-    pub fn append_to_plaintext(&self, dest: &mut Vec<u8>) {
+    pub fn append_to_plaintext(&self, dest: &mut PlainText) {
         match self {
             DeflateTokenBlockType::Huffman { tokens, .. } => {
                 for &token in tokens.iter() {
@@ -116,13 +112,13 @@ impl DeflateTokenBlockType {
                             dest.push(l);
                         }
                         DeflateToken::Reference(r) => {
-                            append_reference_to_plaintext(dest, r.dist(), r.len());
+                            dest.append_reference(r.dist(), r.len());
                         }
                     }
                 }
             }
             DeflateTokenBlockType::Stored { uncompressed, .. } => {
-                dest.extend_from_slice(&uncompressed);
+                dest.append(&uncompressed);
             }
         }
     }

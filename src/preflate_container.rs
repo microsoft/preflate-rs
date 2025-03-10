@@ -6,13 +6,16 @@ use std::{
 };
 
 use crate::{
+    decompress_deflate_stream,
     deflate_stream::{
-        recompress_deflate_stream, recompress_deflate_stream_pred, ReconstructionData,
+        recompress_deflate_stream, recompress_deflate_stream_pred, DeflateContinueState,
+        ReconstructionData,
     },
     hash_algorithm::HashAlgorithm,
     idat_parse::{recreate_idat, IdatContents},
     preflate_error::{err_exit_code, AddContext, ExitCode, PreflateError, Result},
-    scan_deflate::{find_deflate_stream, BlockChunk},
+    preflate_input::PlainText,
+    scan_deflate::{find_deflate_stream, FoundStream, FoundStreamType},
     scoped_read::ScopedRead,
     token_predictor::TokenPredictor,
     utils::write_dequeue,
@@ -88,37 +91,38 @@ fn write_literal_block(content: &[u8], destination: &mut impl Write) -> Result<(
 }
 
 fn write_chunk_block(
-    block: BlockChunk,
+    block: &FoundStream,
     compression_stats: &mut CompressionStats,
     destination: &mut impl Write,
+    partial: bool,
 ) -> std::io::Result<usize> {
-    match block {
-        BlockChunk::DeflateStream(res) => {
-            destination.write_all(&[DEFLATE_STREAM, 0])?;
+    match &block.chunk_type {
+        FoundStreamType::DeflateStream(parameters) => {
+            destination.write_all(&[DEFLATE_STREAM, partial as u8])?;
 
-            write_varint(destination, res.prediction_corrections.len() as u32)?;
-            write_varint(destination, res.plain_text.len() as u32)?;
+            write_varint(destination, block.corrections.len() as u32)?;
+            write_varint(destination, block.plain_text.text().len() as u32)?;
 
-            destination.write_all(&res.prediction_corrections)?;
-            destination.write_all(&res.plain_text)?;
+            destination.write_all(&block.corrections)?;
+            destination.write_all(&block.plain_text.text())?;
 
-            compression_stats.overhead_bytes += res.prediction_corrections.len() as u64;
-            compression_stats.hash_algorithm = res.parameters.predictor.hash_algorithm;
-            Ok(res.compressed_size)
+            compression_stats.overhead_bytes += block.corrections.len() as u64;
+            compression_stats.hash_algorithm = parameters.predictor.hash_algorithm;
+            Ok(block.compressed_size)
         }
 
-        BlockChunk::IDATDeflate(idat, res) => {
+        FoundStreamType::IDATDeflate(parameters, idat) => {
             destination.write_all(&[PNG_COMPRESSED])?;
-            write_varint(destination, res.prediction_corrections.len() as u32)?;
-            write_varint(destination, res.plain_text.len() as u32)?;
+            write_varint(destination, block.corrections.len() as u32)?;
+            write_varint(destination, block.plain_text.text().len() as u32)?;
 
             idat.write_to_bytestream(destination)?;
 
-            destination.write_all(&res.prediction_corrections)?;
-            destination.write_all(&res.plain_text)?;
+            destination.write_all(&block.corrections)?;
+            destination.write_all(&block.plain_text.text())?;
 
-            compression_stats.overhead_bytes += res.prediction_corrections.len() as u64;
-            compression_stats.hash_algorithm = res.parameters.predictor.hash_algorithm;
+            compression_stats.overhead_bytes += block.corrections.len() as u64;
+            compression_stats.hash_algorithm = parameters.predictor.hash_algorithm;
 
             Ok(idat.total_chunk_length)
         }
@@ -152,12 +156,23 @@ fn roundtrip_chunk_block_deflate() {
     use crate::deflate_stream::decompress_deflate_stream;
 
     let contents = crate::utils::read_file("compressed_zlib_level1.deflate");
-    let results = decompress_deflate_stream(&contents, true, 1).unwrap();
+    let results = decompress_deflate_stream(None, &contents, true, 1).unwrap();
 
     let mut buffer = Vec::new();
 
     let mut stats = CompressionStats::default();
-    write_chunk_block(BlockChunk::DeflateStream(results), &mut stats, &mut buffer).unwrap();
+    write_chunk_block(
+        &FoundStream {
+            chunk_type: FoundStreamType::DeflateStream(results.parameters.unwrap()),
+            compressed_size: contents.len() as usize,
+            corrections: results.corrections,
+            plain_text: results.plain_text,
+        },
+        &mut stats,
+        &mut buffer,
+        false,
+    )
+    .unwrap();
 
     let mut read_cursor = std::io::Cursor::new(buffer);
     let mut destination = Vec::new();
@@ -174,7 +189,7 @@ fn roundtrip_chunk_block_png() {
 
     // we know the first IDAT chunk starts at 83 (avoid testing the scan_deflate code in a unit teast)
     let (idat_contents, deflate_stream) = crate::idat_parse::parse_idat(&f[83..], 1).unwrap();
-    let results = decompress_deflate_stream(&deflate_stream, true, 1).unwrap();
+    let results = decompress_deflate_stream(None, &deflate_stream, true, 1).unwrap();
 
     let total_chunk_length = idat_contents.total_chunk_length;
 
@@ -182,9 +197,15 @@ fn roundtrip_chunk_block_png() {
 
     let mut stats = CompressionStats::default();
     write_chunk_block(
-        BlockChunk::IDATDeflate(idat_contents, results),
+        &FoundStream {
+            chunk_type: FoundStreamType::IDATDeflate(results.parameters.unwrap(), idat_contents),
+            compressed_size: deflate_stream.len(),
+            corrections: results.corrections,
+            plain_text: results.plain_text,
+        },
         &mut stats,
         &mut buffer,
+        false,
     )
     .unwrap();
 
@@ -265,7 +286,7 @@ fn roundtrip_gz_chunks() {
 }
 
 #[test]
-fn roundtrip_pdf_chunks() {
+fn roundtrip_png_chunks2() {
     roundtrip_deflate_chunks("starcontrol.samplesave");
 }
 
@@ -372,6 +393,13 @@ pub trait ProcessBuffer {
     }
 }
 
+#[derive(Debug)]
+enum ChunkParseState {
+    Start,
+    Searching,
+    DeflateContinue(Option<DeflateContinueState>),
+}
+
 pub struct PreflateCompressionContext {
     content: Vec<u8>,
     result: VecDeque<u8>,
@@ -379,6 +407,8 @@ pub struct PreflateCompressionContext {
 
     log_level: u32,
 
+    state: ChunkParseState,
+    min_chunk_size: usize,
     input_complete: bool,
 }
 
@@ -390,6 +420,8 @@ impl PreflateCompressionContext {
             result: VecDeque::new(),
             log_level,
             input_complete: false,
+            min_chunk_size: 1024 * 1024,
+            state: ChunkParseState::Start,
         }
     }
 }
@@ -413,31 +445,91 @@ impl ProcessBuffer for PreflateCompressionContext {
             self.content.extend_from_slice(input);
         }
 
-        if input_complete && !self.input_complete {
+        loop {
+            // wait until we have at least min_chunk_size before we start processing
+            if self.content.is_empty()
+                || (!input_complete && self.content.len() < self.min_chunk_size)
+            {
+                break;
+            }
+
+            match &mut self.state {
+                ChunkParseState::Start => {
+                    self.result.write_all(&[COMPRESSED_WRAPPER_VERSION_1])?;
+                    self.state = ChunkParseState::Searching;
+                }
+                ChunkParseState::Searching => {
+                    // here we are looking for a deflate stream or PNG chunk
+                    if let Some((next, chunk, continue_state)) =
+                        find_deflate_stream(&self.content, self.log_level)
+                    {
+                        // the gap between the start and the beginning of the deflate stream
+                        // is written out as a literal block
+                        if next.start != 0 {
+                            write_literal_block(&self.content[..next.start], &mut self.result)?;
+                        }
+
+                        write_chunk_block(
+                            &chunk,
+                            &mut self.compression_stats,
+                            &mut self.result,
+                            continue_state.is_some(),
+                        )?;
+
+                        self.content.drain(0..next.end);
+
+                        if let Some(continue_state) = continue_state {
+                            self.state = ChunkParseState::DeflateContinue(Some(continue_state));
+                        }
+                    } else {
+                        // couldn't find anything, just write the rest as a literal block
+                        write_literal_block(&self.content, &mut self.result)?;
+
+                        self.content.clear();
+                    }
+                }
+                ChunkParseState::DeflateContinue(continue_state) => {
+                    // here we have a deflate stream that we need to continue
+                    let res = decompress_deflate_stream(
+                        continue_state.take(),
+                        &self.content,
+                        true,
+                        self.log_level,
+                    );
+                    if let Ok(res) = res {
+                        self.result
+                            .write_all(&[res.continue_state.is_some() as u8])?;
+
+                        write_varint(&mut self.result, res.corrections.len() as u32)?;
+                        write_varint(&mut self.result, res.plain_text.text().len() as u32)?;
+
+                        self.result.write_all(&res.corrections)?;
+                        self.result.write_all(&res.plain_text.text())?;
+
+                        self.compression_stats.overhead_bytes += res.corrections.len() as u64;
+
+                        if let Some(c) = res.continue_state {
+                            self.state = ChunkParseState::DeflateContinue(Some(c));
+                        } else {
+                            self.state = ChunkParseState::Searching;
+                        }
+
+                        self.content.drain(0..res.compressed_size);
+                    } else {
+                        // error decompressing, just switch to a literal
+                        self.state = ChunkParseState::Searching;
+                    }
+                }
+            }
+        }
+
+        if input_complete {
             self.input_complete = true;
 
-            self.result.write_all(&[COMPRESSED_WRAPPER_VERSION_1])?;
-
-            let mut offset = 0;
-
-            while let Some((next, chunk)) =
-                find_deflate_stream(&self.content[offset..], self.log_level)
-            {
-                if next.start != 0 {
-                    write_literal_block(
-                        &self.content[offset..offset + next.start],
-                        &mut self.result,
-                    )?;
-                }
-
-                write_chunk_block(chunk, &mut self.compression_stats, &mut self.result)?;
-
-                offset += next.end;
+            if self.content.len() > 0 {
+                write_literal_block(&self.content, &mut self.result)?;
             }
-
-            if offset < self.content.len() {
-                write_literal_block(&self.content[offset..], &mut self.result)?;
-            }
+            self.content.clear();
         }
 
         // write any output we have pending in the queue into the output buffer
@@ -478,7 +570,7 @@ enum DecompressionState {
     StartSegment,
     LiteralBlock(usize),
     DeflateBlock(usize, usize, bool),
-    DeflateBlockContinue(Vec<u8>, TokenPredictor),
+    DeflateBlockContinue(PlainText, TokenPredictor),
     PNGBlock(usize, usize, IdatContents),
 }
 
@@ -650,34 +742,32 @@ impl ProcessBuffer for RecreateFromChunksContext {
                         break;
                     }
 
-                    self.input.make_contiguous();
-                    let source_slice = self.input.as_slices().0;
+                    let corrections: Vec<u8> = self.input.drain(0..*correction_length).collect();
+                    let mut plain_text = PlainText::new_with_data(
+                        self.input.drain(0..*uncompressed_length).collect(),
+                    );
 
-                    let plain_text: &[u8] = &source_slice[*correction_length..total_length];
-                    let prediction_corrections: &[u8] = &source_slice[0..*correction_length];
-                    let r = ReconstructionData::read(prediction_corrections)?;
+                    let r = ReconstructionData::read(&corrections)?;
                     let mut predictor = TokenPredictor::new(&r.parameters.predictor);
 
                     self.result.extend(recompress_deflate_stream_pred(
-                        plain_text,
+                        &plain_text,
                         &r.corrections,
                         &mut predictor,
                         *partial,
                     )?);
 
-                    let tail_plain_text = plain_text.to_vec();
-
-                    self.input.drain(0..total_length);
+                    plain_text.shrink_to_dictionary();
 
                     if *partial {
                         self.state =
-                            DecompressionState::DeflateBlockContinue(tail_plain_text, predictor);
+                            DecompressionState::DeflateBlockContinue(plain_text, predictor);
                     } else {
                         self.state = DecompressionState::StartSegment;
                     }
                 }
 
-                DecompressionState::DeflateBlockContinue(plain_text, predictor) => {
+                DecompressionState::DeflateBlockContinue(dictionary, predictor) => {
                     let (partial, correction_length, uncompressed_length) =
                         self.input.scoped_read(|r| {
                             Ok((
@@ -700,22 +790,19 @@ impl ProcessBuffer for RecreateFromChunksContext {
                         break;
                     }
 
-                    self.input.make_contiguous();
-                    let source_slice = self.input.as_slices().0;
-
-                    plain_text.extend_from_slice(&source_slice[correction_length..total_length]);
-                    let prediction_corrections: &[u8] = &source_slice[0..correction_length];
+                    let corrections: Vec<u8> = self.input.drain(0..correction_length).collect();
+                    dictionary.append_iter(self.input.drain(0..uncompressed_length));
 
                     self.result.extend(recompress_deflate_stream_pred(
-                        plain_text,
-                        prediction_corrections,
+                        dictionary,
+                        &corrections,
                         predictor,
                         partial,
                     )?);
 
-                    self.input.drain(0..total_length);
-
-                    if !partial {
+                    if partial {
+                        dictionary.shrink_to_dictionary();
+                    } else {
                         self.state = DecompressionState::StartSegment;
                     }
                 }
@@ -734,16 +821,14 @@ impl ProcessBuffer for RecreateFromChunksContext {
                         break;
                     }
 
-                    self.input.make_contiguous();
-                    let source_slice = self.input.as_slices().0;
+                    let corrections: Vec<u8> = self.input.drain(0..*correction_length).collect();
+                    let plain_text: Vec<u8> = self.input.drain(0..*uncompressed_length).collect();
 
                     let recompressed = recompress_deflate_stream(
-                        &source_slice[*correction_length..total_length],
-                        &source_slice[0..*correction_length],
+                        &PlainText::new_with_data(plain_text),
+                        &corrections,
                     )
                     .context()?;
-
-                    self.input.drain(0..total_length);
 
                     recreate_idat(&idat, &recompressed[..], &mut self.result).context()?;
 
