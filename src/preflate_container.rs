@@ -1,5 +1,4 @@
 use byteorder::ReadBytesExt;
-use cabac::vp8::{VP8Reader, VP8Writer};
 use std::{
     collections::VecDeque,
     io::{Cursor, Read, Write},
@@ -7,16 +6,16 @@ use std::{
 };
 
 use crate::{
-    cabac_codec::PredictionDecoderCabac,
-    deflate::deflate_writer::DeflateWriter,
-    deflate_stream::{recompress_deflate_stream, ReconstructionData},
+    deflate_stream::{
+        recompress_deflate_stream, recompress_deflate_stream_pred, ReconstructionData,
+    },
     hash_algorithm::HashAlgorithm,
     idat_parse::{recreate_idat, IdatContents},
     preflate_error::{err_exit_code, AddContext, ExitCode, PreflateError, Result},
-    preflate_input::PreflateInput,
     scan_deflate::{find_deflate_stream, BlockChunk},
     scoped_read::ScopedRead,
     token_predictor::TokenPredictor,
+    utils::write_dequeue,
 };
 
 const COMPRESSED_WRAPPER_VERSION_1: u8 = 1;
@@ -452,33 +451,6 @@ impl ProcessBuffer for PreflateCompressionContext {
     }
 }
 
-/// writes the pending output to the writer
-pub fn write_dequeue(
-    pending_output: &mut VecDeque<u8>,
-    writer: &mut impl Write,
-    max_output_write: usize,
-) -> Result<usize> {
-    if pending_output.len() > 0 {
-        let slices = pending_output.as_mut_slices();
-
-        let mut amount_written = 0;
-        let len = slices.0.len().min(max_output_write);
-        writer.write_all(&slices.0[..len])?;
-        amount_written += len;
-
-        if amount_written < max_output_write {
-            let len = slices.1.len().min(max_output_write - amount_written);
-            writer.write_all(&slices.1[..len])?;
-            amount_written += len;
-        }
-
-        pending_output.drain(..amount_written);
-        Ok(amount_written)
-    } else {
-        Ok(0)
-    }
-}
-
 #[cfg(test)]
 pub struct NopProcessBuffer {
     result: VecDeque<u8>,
@@ -539,29 +511,6 @@ impl RecreateFromChunksContext {
             input_complete: false,
             state: DecompressionState::StartSegment,
         }
-    }
-
-    fn reconstruct_deflate(
-        plain_text: &[u8],
-        corrections: &[u8],
-        predictor: &mut TokenPredictor,
-        partial: bool,
-    ) -> Result<Vec<u8>> {
-        let mut cabac_decoder =
-            PredictionDecoderCabac::new(VP8Reader::new(Cursor::new(corrections)).unwrap());
-        let mut input = PreflateInput::new(plain_text);
-        let mut deflate_writer = DeflateWriter::new();
-        loop {
-            let (end, block) = predictor.recreate_block(&mut cabac_decoder, &mut input, partial)?;
-
-            deflate_writer.encode_block(&block)?;
-
-            if end {
-                break;
-            }
-        }
-        deflate_writer.flush();
-        Ok(deflate_writer.detach_output())
     }
 }
 
@@ -709,7 +658,7 @@ impl ProcessBuffer for RecreateFromChunksContext {
                     let r = ReconstructionData::read(prediction_corrections)?;
                     let mut predictor = TokenPredictor::new(&r.parameters.predictor);
 
-                    self.result.extend(Self::reconstruct_deflate(
+                    self.result.extend(recompress_deflate_stream_pred(
                         plain_text,
                         &r.corrections,
                         &mut predictor,
@@ -757,7 +706,7 @@ impl ProcessBuffer for RecreateFromChunksContext {
                     plain_text.extend_from_slice(&source_slice[correction_length..total_length]);
                     let prediction_corrections: &[u8] = &source_slice[0..correction_length];
 
-                    self.result.extend(Self::reconstruct_deflate(
+                    self.result.extend(recompress_deflate_stream_pred(
                         plain_text,
                         prediction_corrections,
                         predictor,

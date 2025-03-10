@@ -1,3 +1,34 @@
+use std::{collections::VecDeque, io::Write};
+
+use crate::Result;
+
+/// writes the pending output to the writer
+pub fn write_dequeue(
+    pending_output: &mut VecDeque<u8>,
+    writer: &mut impl Write,
+    max_output_write: usize,
+) -> Result<usize> {
+    if pending_output.len() > 0 {
+        let slices = pending_output.as_mut_slices();
+
+        let mut amount_written = 0;
+        let len = slices.0.len().min(max_output_write);
+        writer.write_all(&slices.0[..len])?;
+        amount_written += len;
+
+        if amount_written < max_output_write {
+            let len = slices.1.len().min(max_output_write - amount_written);
+            writer.write_all(&slices.1[..len])?;
+            amount_written += len;
+        }
+
+        pending_output.drain(..amount_written);
+        Ok(amount_written)
+    } else {
+        Ok(0)
+    }
+}
+
 #[allow(dead_code)]
 #[cfg(test)]
 pub fn write_file(filename: &str, data: &[u8]) {

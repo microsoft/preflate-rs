@@ -6,7 +6,7 @@
 use std::{collections::VecDeque, io::Write};
 
 use crate::{
-    preflate_container::write_dequeue, preflate_error::AddContext, CompressionStats, ExitCode,
+    preflate_error::AddContext, utils::write_dequeue, CompressionStats, ExitCode,
     PreflateCompressionContext, PreflateError, ProcessBuffer, RecreateFromChunksContext, Result,
 };
 

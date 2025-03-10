@@ -19,7 +19,7 @@ use crate::{
     estimator::preflate_parameter_estimator::PreflateParameters,
     preflate_error::{AddContext, ExitCode, PreflateError},
     preflate_input::PreflateInput,
-    statistical_codec::{PredictionDecoder, PredictionEncoder},
+    statistical_codec::PredictionEncoder,
     token_predictor::TokenPredictor,
     Result,
 };
@@ -74,9 +74,6 @@ pub fn decompress_deflate_stream(
 
     let contents = parse_deflate(compressed_data)?;
 
-    //process::write_file("c:\\temp\\lastop.deflate", compressed_data);
-    //process::write_file("c:\\temp\\lastop.bin", contents.plain_text.as_slice());
-
     let params = PreflateParameters::estimate_preflate_parameters(&contents).context()?;
 
     if loglevel > 0 {
@@ -100,20 +97,16 @@ pub fn decompress_deflate_stream(
     });
 
     if verify {
-        let r: ReconstructionData = bitcode::decode(&reconstruction_data).map_err(|e| {
-            PreflateError::new(ExitCode::InvalidCompressedWrapper, format!("{:?}", e))
-        })?;
+        let r = ReconstructionData::read(&reconstruction_data)?;
 
-        let mut cabac_decoder =
-            PredictionDecoderCabac::new(VP8Reader::new(Cursor::new(&r.corrections[..])).unwrap());
+        assert_eq!(r.parameters, params);
 
-        let reread_params = r.parameters;
-
-        assert_eq!(params, reread_params);
-
-        let mut input = PreflateInput::new(&contents.plain_text);
-        let (recompressed, _recreated_blocks) =
-            decode_mispredictions(&reread_params, &mut input, &mut cabac_decoder, false)?;
+        let recompressed = recompress_deflate_stream_pred(
+            &contents.plain_text,
+            &r.corrections,
+            &mut TokenPredictor::new(&r.parameters.predictor),
+            false,
+        )?;
 
         if recompressed[..] != compressed_data[..contents.compressed_size] {
             return Err(PreflateError::new(
@@ -138,13 +131,35 @@ pub fn recompress_deflate_stream(
 ) -> Result<Vec<u8>> {
     let r = ReconstructionData::read(prediction_corrections)?;
 
-    let mut cabac_decoder =
-        PredictionDecoderCabac::new(VP8Reader::new(Cursor::new(r.corrections)).unwrap());
+    recompress_deflate_stream_pred(
+        plain_text,
+        &r.corrections,
+        &mut TokenPredictor::new(&r.parameters.predictor),
+        false,
+    )
+}
 
+pub fn recompress_deflate_stream_pred(
+    plain_text: &[u8],
+    corrections: &[u8],
+    predictor: &mut TokenPredictor,
+    partial: bool,
+) -> Result<Vec<u8>> {
+    let mut cabac_decoder =
+        PredictionDecoderCabac::new(VP8Reader::new(Cursor::new(corrections)).unwrap());
     let mut input = PreflateInput::new(plain_text);
-    let (recompressed, _recreated_blocks) =
-        decode_mispredictions(&r.parameters, &mut input, &mut cabac_decoder, false)?;
-    Ok(recompressed)
+    let mut deflate_writer = DeflateWriter::new();
+    loop {
+        let (end, block) = predictor.recreate_block(&mut cabac_decoder, &mut input, partial)?;
+
+        deflate_writer.encode_block(&block)?;
+
+        if end {
+            break;
+        }
+    }
+    deflate_writer.flush();
+    Ok(deflate_writer.detach_output())
 }
 
 /// takes a deflate compressed stream, analyzes it, decoompresses it, and records
@@ -182,10 +197,11 @@ fn predict_blocks(
     Ok(())
 }
 
+#[cfg(test)]
 fn decode_mispredictions(
     params: &PreflateParameters,
     input: &mut PreflateInput,
-    decoder: &mut impl PredictionDecoder,
+    decoder: &mut impl crate::statistical_codec::PredictionDecoder,
     partial: bool,
 ) -> Result<(Vec<u8>, Vec<DeflateTokenBlock>)> {
     let mut deflate_writer: DeflateWriter = DeflateWriter::new();
@@ -199,8 +215,9 @@ fn decode_mispredictions(
     Ok((deflate_writer.detach_output(), output_blocks))
 }
 
+#[cfg(test)]
 #[inline(never)]
-fn recreate_blocks<D: PredictionDecoder>(
+fn recreate_blocks<D: crate::statistical_codec::PredictionDecoder>(
     token_predictor: &mut TokenPredictor,
     decoder: &mut D,
     deflate_writer: &mut DeflateWriter,
