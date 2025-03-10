@@ -38,11 +38,11 @@ fn read_blocks(
 ) -> Result<(usize, DeflateParserState)> {
     let mut input = BitReader::new(Cursor::new(input));
 
+    let mut checkpoint_bytes_read = 0;
+    let mut checkpoint_plain_text = plain_text.text().len();
+
     if let DeflateParserState::ContinueStaticBlock { last } = state {
         let decoder = HuffmanReader::create_fixed()?;
-
-        let mut checkpoint_bytes_read = input.bytes_read() as usize;
-        let mut checkpoint_plain_text = plain_text.text().len();
 
         let mut tokens = Vec::new();
         let r = decode_tokens(
@@ -73,8 +73,6 @@ fn read_blocks(
         }
     }
 
-    let mut checkpoint_bytes_read = input.bytes_read() as usize;
-    let mut checkpoint_plain_text = plain_text.text().len();
     let mut checkpoint_blocks = blocks.len();
 
     let r = read_blocks_internal(
@@ -87,7 +85,7 @@ fn read_blocks(
     );
     match r {
         Err(e) => {
-            if e.exit_code() == ExitCode::ShortRead {
+            if e.exit_code() == ExitCode::ShortRead && checkpoint_bytes_read != 0 {
                 plain_text.truncate(checkpoint_plain_text);
                 blocks.truncate(checkpoint_blocks);
 
@@ -204,7 +202,7 @@ fn read_blocks_internal<R: Read>(
         }
 
         // if we are at a good boundary, record where we are so we can continue from there
-        if input.bits_left() == 0 {
+        if (input.bits_left() & 7) == 0 {
             *checkpoint_bytes_read = input.bytes_read() as usize;
             *checkpoint_plain_text = plain_text.text().len();
             *checkpoint_blocks = blocks.len();
@@ -278,7 +276,6 @@ fn decode_tokens<R: Read>(
 /// represents the complete deflate stream
 pub struct DeflateContents {
     pub compressed_size: usize,
-    pub plain_text: PlainText,
     pub blocks: Vec<DeflateTokenBlock>,
     pub state: DeflateParserState,
 }
@@ -287,24 +284,25 @@ impl std::fmt::Debug for DeflateContents {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DeflateContents")
             .field("compressed_size", &self.compressed_size)
-            .field("plain_text", &self.plain_text.text().len())
             .field("blocks", &self.blocks.len())
             .field("state", &self.state)
             .finish()
     }
 }
 
+/// parses an entire deflate stream and asserts if it isn't complete
 #[cfg(test)]
-pub fn parse_deflate_whole(compressed_data: &[u8]) -> Result<DeflateContents> {
+pub fn parse_deflate_whole(compressed_data: &[u8]) -> Result<(DeflateContents, PlainText)> {
+    let mut plain_text = PlainText::new();
     match parse_deflate(
         DeflateParserState::StartBlock,
         compressed_data,
-        PlainText::new(),
+        &mut plain_text,
     ) {
         Ok(v) => {
             // no partial reads allowed here
             assert_eq!(v.state, DeflateParserState::Done);
-            Ok(v)
+            Ok((v, plain_text))
         }
         Err(e) => Err(e).context(),
     }
@@ -313,25 +311,23 @@ pub fn parse_deflate_whole(compressed_data: &[u8]) -> Result<DeflateContents> {
 pub fn parse_deflate(
     start_state: DeflateParserState,
     compressed_data: &[u8],
-    mut plain_text: PlainText,
+    plain_text: &mut PlainText,
 ) -> Result<DeflateContents> {
     let mut blocks = Vec::new();
 
     let (compressed_size, state) =
-        read_blocks(start_state, &mut plain_text, compressed_data, &mut blocks)?;
+        read_blocks(start_state, plain_text, compressed_data, &mut blocks)?;
 
     Ok(DeflateContents {
         compressed_size: compressed_size,
-        plain_text,
         blocks,
         state,
     })
 }
 
-/*
 #[test]
 fn test_partial_read() {
-    let d = crate::utils::read_file("compressed_libdeflate_level1.deflate");
+    let d = crate::utils::read_file("compressed_flate2_level1.deflate");
 
     let mut start_offset = 0;
     let mut end_offset = 1;
@@ -342,24 +338,22 @@ fn test_partial_read() {
         let r = parse_deflate(
             DeflateParserState::StartBlock,
             &d[start_offset..end_offset],
-            plain_text,
+            &mut plain_text,
         );
         match r {
-            Ok(mut d) => {
-                if d.state == DeflateParserState::Done {
+            Ok(mut dc) => {
+                allblocks.append(&mut dc.blocks);
+                start_offset += dc.compressed_size;
+
+                end_offset = (start_offset + 1).min(d.len());
+
+                if dc.state == DeflateParserState::Done {
                     break;
                 }
-
-                assert_eq!(d.state, DeflateParserState::StartBlock);
-
-                allblocks.append(&mut d.blocks);
-                plain_text = d.plain_text;
-                start_offset += d.compressed_size;
-                end_offset = start_offset + 1;
             }
             Err(e) => {
                 assert_eq!(e.exit_code(), ExitCode::ShortRead);
-                end_offset += 1;
+                end_offset = (end_offset + 1333).min(d.len());
             }
         }
     }
@@ -367,4 +361,3 @@ fn test_partial_read() {
     let reconstruct = crate::deflate::deflate_writer::write_deflate_blocks(&allblocks);
     assert_eq!(d.len(), reconstruct.len());
 }
-*/

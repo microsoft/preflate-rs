@@ -207,7 +207,7 @@ fn roundtrip_deflate_writer() {
 
     let output = w.detach_output();
 
-    let r = parse_deflate_whole(&output).unwrap();
+    let (r, _) = parse_deflate_whole(&output).unwrap();
 
     assert_eq!(blocks.len(), r.blocks.len());
     for i in 0..blocks.len() {
@@ -237,7 +237,7 @@ fn roundtrip_full_file() {
             let mut buffer = Vec::new();
             file.read_to_end(&mut buffer).unwrap();
 
-            let r = parse_deflate_whole(&buffer).unwrap();
+            let (r, _plain_text) = parse_deflate_whole(&buffer).unwrap();
 
             let output = write_deflate_blocks(&r.blocks);
 

@@ -224,7 +224,7 @@ fn parse_and_recreate_png() {
     assert_eq!(idat_contents.chunk_sizes, [65445, 65524, 40164]);
     assert_eq!(idat_contents.zlib_header, [120, 94]);
 
-    let contents = parse_deflate_whole(&deflate_stream).unwrap();
+    let (contents, _plain_text) = parse_deflate_whole(&deflate_stream).unwrap();
 
     assert_eq!(deflate_stream.len(), contents.compressed_size as usize);
 

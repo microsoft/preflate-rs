@@ -11,6 +11,7 @@ use crate::{
     deflate::deflate_reader::DeflateContents,
     hash_algorithm::HashAlgorithm,
     preflate_error::{err_exit_code, ExitCode, Result},
+    preflate_input::PlainText,
 };
 
 use super::{
@@ -35,6 +36,7 @@ pub fn estimate_preflate_comp_level(
     mem_level: u32,
     min_len: u32,
     deflate_contents: &DeflateContents,
+    plain_text: &PlainText,
     add_policy: DictionaryAddPolicy,
 ) -> Result<CompLevelInfo> {
     let hash_bits = mem_level + 7;
@@ -70,7 +72,7 @@ pub fn estimate_preflate_comp_level(
         candidates.push(new_depth_estimator(HashAlgorithm::Crc32cHash));
     }
 
-    run_depth_candidates(add_policy, deflate_contents, &mut candidates);
+    run_depth_candidates(add_policy, deflate_contents, plain_text, &mut candidates);
 
     if candidates.is_empty() {
         return err_exit_code(ExitCode::NoCompressionCandidates, "no candidates found");

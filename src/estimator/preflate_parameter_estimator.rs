@@ -12,6 +12,7 @@ use crate::{
     estimator::{add_policy_estimator::DictionaryAddPolicy, preflate_parse_config::MatchingType},
     hash_algorithm::HashAlgorithm,
     preflate_error::Result,
+    preflate_input::PlainText,
     token_predictor::TokenPredictorParameters,
 };
 
@@ -47,7 +48,10 @@ pub struct PreflateParameters {
 
 impl PreflateParameters {
     /// From the plain text and the preflate blocks, estimate the preflate parameters
-    pub fn estimate_preflate_parameters(deflate_contents: &DeflateContents) -> Result<Self> {
+    pub fn estimate_preflate_parameters(
+        deflate_contents: &DeflateContents,
+        plain_text: &PlainText,
+    ) -> Result<Self> {
         let info = extract_preflate_info(&deflate_contents.blocks);
 
         let preflate_strategy = estimate_preflate_strategy(&info);
@@ -91,6 +95,7 @@ impl PreflateParameters {
             mem_level,
             info.min_len,
             deflate_contents,
+            plain_text,
             add_policy,
         )?;
 
@@ -172,9 +177,10 @@ fn verify_zlib_recognition() {
 
     for i in 0..=9 {
         let v = read_file(&format!("compressed_zlib_level{}.deflate", i));
-        let contents = parse_deflate_whole(&v).unwrap();
+        let (contents, plain_text) = parse_deflate_whole(&v).unwrap();
 
-        let params = PreflateParameters::estimate_preflate_parameters(&contents).unwrap();
+        let params =
+            PreflateParameters::estimate_preflate_parameters(&contents, &plain_text).unwrap();
 
         assert_eq!(params.predictor.zlib_compatible, true);
         if i == 0 {
@@ -214,9 +220,10 @@ fn verify_miniz_recognition() {
 
     for i in 0..=9 {
         let v = read_file(&format!("compressed_flate2_level{}.deflate", i));
-        let contents = parse_deflate_whole(&v).unwrap();
+        let (contents, plain_text) = parse_deflate_whole(&v).unwrap();
 
-        let params = PreflateParameters::estimate_preflate_parameters(&contents).unwrap();
+        let params =
+            PreflateParameters::estimate_preflate_parameters(&contents, &plain_text).unwrap();
 
         if i == 0 {
             assert_eq!(params.predictor.strategy, PreflateStrategy::Store);
@@ -235,9 +242,10 @@ fn verify_zlibng_recognition() {
 
     for i in 1..=2 {
         let v = read_file(&format!("compressed_zlibng_level{}.deflate", i));
-        let contents = parse_deflate_whole(&v).unwrap();
+        let (contents, plain_text) = parse_deflate_whole(&v).unwrap();
 
-        let params = PreflateParameters::estimate_preflate_parameters(&contents).unwrap();
+        let params =
+            PreflateParameters::estimate_preflate_parameters(&contents, &plain_text).unwrap();
 
         if i == 0 {
             assert_eq!(params.predictor.strategy, PreflateStrategy::Store);

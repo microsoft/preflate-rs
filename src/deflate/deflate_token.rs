@@ -4,7 +4,7 @@
  *  This software incorporates material from third parties. See NOTICE.txt for details.
  *--------------------------------------------------------------------------------------------*/
 
-use crate::{deflate::huffman_encoding::HuffmanOriginalEncoding, preflate_input::PlainText};
+use crate::deflate::huffman_encoding::HuffmanOriginalEncoding;
 
 use super::deflate_constants::{
     quantize_distance, quantize_length, DIST_CODE_COUNT, LITLENDIST_CODE_COUNT, NONLEN_CODE_COUNT,
@@ -100,28 +100,6 @@ pub struct DeflateTokenBlock {
     pub block_type: DeflateTokenBlockType,
     pub last: bool,
     pub tail_padding_bits: u8,
-}
-
-impl DeflateTokenBlockType {
-    pub fn append_to_plaintext(&self, dest: &mut PlainText) {
-        match self {
-            DeflateTokenBlockType::Huffman { tokens, .. } => {
-                for &token in tokens.iter() {
-                    match token {
-                        DeflateToken::Literal(l) => {
-                            dest.push(l);
-                        }
-                        DeflateToken::Reference(r) => {
-                            dest.append_reference(r.dist(), r.len());
-                        }
-                    }
-                }
-            }
-            DeflateTokenBlockType::Stored { uncompressed, .. } => {
-                dest.append(&uncompressed);
-            }
-        }
-    }
 }
 
 /// Used to track the frequence of tokens in the DEFLATE stream
