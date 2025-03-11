@@ -4,6 +4,8 @@
  *  This software incorporates material from third parties. See NOTICE.txt for details.
  *--------------------------------------------------------------------------------------------*/
 
+use std::io::Read;
+
 use crate::preflate_error::{err_exit_code, ExitCode, Result};
 
 use crate::deflate::{
@@ -12,6 +14,8 @@ use crate::deflate::{
     deflate_constants::TREE_CODE_ORDER_TABLE,
     huffman_helper::{calc_huffman_codes, calculate_huffman_code_tree, decode_symbol},
 };
+
+use super::bit_reader::BitReader;
 
 #[derive(PartialEq, Eq, Clone, Copy, Debug)]
 pub enum TreeCodeType {
@@ -49,13 +53,16 @@ impl HuffmanOriginalEncoding {
     /// Reads a dynamic huffman table from the bit reader. The structure
     /// holds all the information necessary to recode the huffman table
     /// exactly as it was written.
-    pub fn read(bit_reader: &mut impl ReadBits) -> Result<HuffmanOriginalEncoding> {
+    pub fn read(
+        bit_reader: &mut BitReader,
+        reader: &mut impl Read,
+    ) -> Result<HuffmanOriginalEncoding> {
         // 5 Bits: HLIT, # of Literal/Length codes - 257 (257 - 286)
-        let hlit = bit_reader.get(5)? as usize + 257;
+        let hlit = bit_reader.get(5, reader)? as usize + 257;
         // 5 Bits: HDIST, # of Distance codes - 1        (1 - 32)
-        let hdist = bit_reader.get(5)? as usize + 1;
+        let hdist = bit_reader.get(5, reader)? as usize + 1;
         // 4 Bits: HCLEN, # of Code Length codes - 4     (4 - 19)
-        let hclen = bit_reader.get(4)? as usize + 4;
+        let hclen = bit_reader.get(4, reader)? as usize + 4;
 
         //  HCLEN + 4) x 3 bits: code lengths for the code length
         //  alphabet given just above, in the order: 16, 17, 18,
@@ -67,7 +74,8 @@ impl HuffmanOriginalEncoding {
 
         let mut code_length_alphabet_code_lengths = [0; 19];
         for i in 0..hclen {
-            code_length_alphabet_code_lengths[TREE_CODE_ORDER_TABLE[i]] = bit_reader.get(3)? as u8;
+            code_length_alphabet_code_lengths[TREE_CODE_ORDER_TABLE[i]] =
+                bit_reader.get(3, reader)? as u8;
         }
 
         let code_length_huff_code_tree =
@@ -81,7 +89,7 @@ impl HuffmanOriginalEncoding {
         let mut codes_read: usize = 0;
 
         while codes_read < c_lengths_combined {
-            let w_next: u16 = decode_symbol(bit_reader, &code_length_huff_code_tree)?;
+            let w_next: u16 = decode_symbol(bit_reader, reader, &code_length_huff_code_tree)?;
 
             if w_next <= 15 {
                 //	0 - 15: Represent code lengths of 0 - 15
@@ -100,7 +108,7 @@ impl HuffmanOriginalEncoding {
 
                 let (sub, bits) = Self::get_tree_code_adjustment(tree_code);
 
-                let v = bit_reader.get(bits)? as u8 + sub;
+                let v = bit_reader.get(bits, reader)? as u8 + sub;
                 combined_lengths.push((tree_code, v));
 
                 codes_read += v as usize;
@@ -286,12 +294,20 @@ impl HuffmanReader {
         })
     }
 
-    pub fn fetch_next_literal_code<R: ReadBits>(&self, bit_reader: &mut R) -> Result<u16> {
-        decode_symbol(bit_reader, &self.lit_huff_code_tree)
+    pub fn fetch_next_literal_code(
+        &self,
+        bit_reader: &mut BitReader,
+        reader: &mut impl Read,
+    ) -> Result<u16> {
+        decode_symbol(bit_reader, reader, &self.lit_huff_code_tree)
     }
 
-    pub fn fetch_next_distance_char<R: ReadBits>(&self, bit_reader: &mut R) -> Result<u16> {
-        decode_symbol(bit_reader, &self.dist_huff_code_tree)
+    pub fn fetch_next_distance_char(
+        &self,
+        bit_reader: &mut BitReader,
+        reader: &mut impl Read,
+    ) -> Result<u16> {
+        decode_symbol(bit_reader, reader, &self.dist_huff_code_tree)
     }
 }
 
@@ -373,8 +389,8 @@ fn roundtrip_huffman_bitreadwrite() {
     bit_writer.write(0x1234, 16, &mut data_buffer);
     bit_writer.pad(0, &mut data_buffer);
 
-    let reader = Cursor::new(&data_buffer);
-    let mut bit_reader = BitReader::new(reader);
+    let mut reader = Cursor::new(&data_buffer);
+    let mut bit_reader = BitReader::new();
 
     let huffman_tree = calculate_huffman_code_tree(&code_lengths).unwrap();
 
@@ -382,14 +398,14 @@ fn roundtrip_huffman_bitreadwrite() {
         if code_lengths[i] != 0 {
             assert_eq!(
                 i as u16,
-                decode_symbol(&mut bit_reader, &huffman_tree).unwrap()
+                decode_symbol(&mut bit_reader, &mut reader, &huffman_tree).unwrap()
             );
         }
     }
 
     // read sentinal to make sure we read everything correctly
     assert_eq!(
-        bit_reader.get(16).unwrap(),
+        bit_reader.get(16, &mut reader).unwrap(),
         0x1234,
         "sentinal value didn't match"
     );
@@ -471,15 +487,15 @@ fn rountrip_test(encoding: HuffmanOriginalEncoding) {
     bit_writer.flush_whole_bytes(&mut output_buffer);
 
     // now re-read the encoding
-    let reader = Cursor::new(&output_buffer);
-    let mut bit_reader = BitReader::new(reader);
+    let mut reader = Cursor::new(&output_buffer);
+    let mut bit_reader = BitReader::new();
 
-    let encoding2 = HuffmanOriginalEncoding::read(&mut bit_reader).unwrap();
+    let encoding2 = HuffmanOriginalEncoding::read(&mut bit_reader, &mut reader).unwrap();
     assert_eq!(encoding, encoding2);
 
     // verify sentinal to make sure we didn't write anything extra or too little
     assert_eq!(
-        bit_reader.get(16).unwrap(),
+        bit_reader.get(16, &mut reader).unwrap(),
         0x1234,
         "sentinal value didn't match"
     );

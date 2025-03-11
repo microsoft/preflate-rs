@@ -63,6 +63,10 @@ impl PlainText {
         }
     }
 
+    pub fn len(&self) -> usize {
+        self.data.len() - (self.prefix_length as usize)
+    }
+
     /// the data excluding the prefix
     pub fn text(&self) -> &[u8] {
         &self.data[self.prefix_length as usize..]

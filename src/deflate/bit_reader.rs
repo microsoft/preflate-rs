@@ -9,34 +9,26 @@ use std::io::{Error, ErrorKind, Read, Result};
 use byteorder::ReadBytesExt;
 
 pub trait ReadBits {
-    fn get(&mut self, cbit: u32) -> Result<u32>;
+    fn get(&mut self, cbit: u32, reader: &mut impl Read) -> Result<u32>;
 }
 
 /// BitReader reads a variable number of bits from a byte stream.
-pub struct BitReader<R: Read> {
+#[derive(Debug, Clone)]
+pub struct BitReader {
     bits_read: u32,
     bit_count: u32,
     bytes_read: u32,
-    inner: R,
 }
 
-impl<R: Read> BitReader<R> {
-    pub fn new(inner: R) -> Self {
+impl BitReader {
+    pub fn new() -> Self {
         BitReader {
             bits_read: 0,
             bit_count: 0,
             bytes_read: 0,
-            inner: inner,
         }
     }
 
-    #[allow(dead_code)]
-    pub fn get_inner_mut(&mut self) -> &mut R {
-        &mut self.inner
-    }
-}
-
-impl<R: Read> BitReader<R> {
     pub fn bytes_read(&self) -> u32 {
         self.bytes_read
     }
@@ -56,21 +48,18 @@ impl<R: Read> BitReader<R> {
         wret as u8
     }
 
-    pub fn read_byte(&mut self) -> Result<u8> {
-        debug_assert!(self.bit_count == 0, "BitReader Error: Attempt to read bytes without first calling FlushBufferToByteBoundary");
-
-        let result = self.inner.read_u8()?;
-
+    pub fn read_byte(&mut self, reader: &mut impl Read) -> Result<u8> {
+        debug_assert!(self.bit_count == 0);
+        let r = reader.read_u8()?;
         self.bytes_read += 1;
-
-        Ok(result)
+        Ok(r)
     }
 }
 
-impl<R: Read> ReadBits for BitReader<R> {
+impl ReadBits for BitReader {
     /// Read cbit bits from the input stream return
     /// Only supports read of 1 to 32 bits.
-    fn get(&mut self, cbit: u32) -> Result<u32> {
+    fn get(&mut self, cbit: u32, reader: &mut impl Read) -> Result<u32> {
         if cbit == 0 {
             return Ok(0);
         }
@@ -83,7 +72,7 @@ impl<R: Read> ReadBits for BitReader<R> {
         }
 
         while self.bit_count < cbit {
-            let b = self.inner.read_u8()? as u32;
+            let b = reader.read_u8()? as u32;
 
             self.bits_read |= b << self.bit_count;
             self.bit_count += 8;

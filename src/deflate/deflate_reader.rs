@@ -23,251 +23,175 @@ use super::{
     huffman_encoding::{HuffmanOriginalEncoding, HuffmanReader},
 };
 
+#[derive(Debug)]
+pub struct DeflateParser {
+    state: DeflateParserState,
+    bit_reader: BitReader,
+    plain_text: PlainText,
+}
+
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
-pub enum DeflateParserState {
+enum DeflateParserState {
     StartBlock,
     ContinueStaticBlock { last: bool },
     Done,
 }
 
-fn read_blocks(
-    state: DeflateParserState,
-    plain_text: &mut PlainText,
-    input: &[u8],
-    blocks: &mut Vec<DeflateTokenBlock>,
-) -> Result<(usize, DeflateParserState)> {
-    let mut input = BitReader::new(Cursor::new(input));
-
-    let mut checkpoint_bytes_read = 0;
-    let mut checkpoint_plain_text = plain_text.text().len();
-
-    if let DeflateParserState::ContinueStaticBlock { last } = state {
-        let decoder = HuffmanReader::create_fixed()?;
-
-        let mut tokens = Vec::new();
-        let mut checkpoint_tokens = 0;
-        let r = decode_tokens(
-            &decoder,
-            &mut tokens,
-            plain_text,
-            &mut input,
-            &mut checkpoint_bytes_read,
-            &mut checkpoint_plain_text,
-            &mut checkpoint_tokens,
-        );
-
-        tokens.truncate(checkpoint_tokens);
-
-        // check for short read
-        if let Err(e) = r {
-            if e.exit_code() == ExitCode::ShortRead && checkpoint_bytes_read != 0 {
-                plain_text.truncate(checkpoint_plain_text);
-
-                blocks.push(DeflateTokenBlock {
-                    block_type: DeflateTokenBlockType::Huffman {
-                        tokens,
-                        huffman_type: DeflateHuffmanType::Static,
-                        partial: PartialBlock::Middle,
-                        tail_padding_bits: None,
-                    },
-                    last,
-                });
-
-                return Ok((
-                    checkpoint_bytes_read,
-                    DeflateParserState::ContinueStaticBlock { last: last },
-                ));
-            }
-            // any other error is a real error
-            return Err(e).context();
-        } else {
-            blocks.push(DeflateTokenBlock {
-                block_type: DeflateTokenBlockType::Huffman {
-                    tokens,
-                    huffman_type: DeflateHuffmanType::Static,
-                    tail_padding_bits: if last {
-                        Some(input.read_padding_bits())
-                    } else {
-                        None
-                    },
-                    partial: PartialBlock::End,
-                },
-                last,
-            });
-        }
-
-        if last {
-            return Ok((input.bytes_read() as usize, DeflateParserState::Done));
+impl DeflateParser {
+    pub fn new() -> Self {
+        Self {
+            state: DeflateParserState::StartBlock,
+            bit_reader: BitReader::new(),
+            plain_text: PlainText::new(),
         }
     }
 
-    let mut checkpoint_blocks = blocks.len();
-
-    let r = read_blocks_internal(
-        &mut input,
-        plain_text,
-        blocks,
-        &mut checkpoint_bytes_read,
-        &mut checkpoint_plain_text,
-        &mut checkpoint_blocks,
-    );
-    match r {
-        Err(e) => {
-            if e.exit_code() == ExitCode::ShortRead && checkpoint_bytes_read != 0 {
-                plain_text.truncate(checkpoint_plain_text);
-                blocks.truncate(checkpoint_blocks);
-
-                // if we errored out trying to read the block, we can still return
-                // the good data we have so far that was lined up to the byte boundary
-                return Ok((checkpoint_bytes_read, DeflateParserState::StartBlock));
-            }
-            return Err(e).context();
-        }
-
-        Ok(s) => {
-            plain_text.truncate(checkpoint_plain_text);
-            Ok((checkpoint_bytes_read, s))
-        }
+    pub fn is_done(&self) -> bool {
+        self.state == DeflateParserState::Done
     }
-}
 
-fn read_blocks_internal<R: Read>(
-    input: &mut BitReader<R>,
-    plain_text: &mut PlainText,
-    blocks: &mut Vec<DeflateTokenBlock>,
-    checkpoint_bytes_read: &mut usize,
-    checkpoint_plain_text: &mut usize,
-    checkpoint_blocks: &mut usize,
-) -> Result<DeflateParserState> {
-    loop {
-        let last = input.get(1)? != 0;
-        let mode = input.get(2)?;
+    pub fn plain_text(&self) -> &PlainText {
+        &self.plain_text
+    }
 
-        match mode {
-            0 => {
-                let padding_bits = input.read_padding_bits() as u8;
+    pub fn detach_plain_text(self) -> PlainText {
+        self.plain_text
+    }
 
-                assert!(input.bits_left() == 0);
+    pub fn parse(&mut self, compressed_data: &[u8]) -> Result<DeflateContents> {
+        let mut blocks = Vec::new();
 
-                let len = input.get(16)?;
-                let ilen = input.get(16)?;
-                if (len ^ ilen) != 0xffff {
-                    return err_exit_code(ExitCode::InvalidDeflate, "Block length mismatch");
+        let mut cursor = &mut Cursor::new(compressed_data);
+
+        self.read_blocks_internal(&mut cursor, &mut blocks)?;
+
+        Ok(DeflateContents {
+            compressed_size: self.bit_reader.bytes_read() as usize,
+            blocks,
+        })
+    }
+
+    fn read_blocks_internal<R: Read>(
+        &mut self,
+        reader: &mut R,
+        blocks: &mut Vec<DeflateTokenBlock>,
+    ) -> Result<DeflateParserState> {
+        loop {
+            let (last, mode) = match self.state {
+                DeflateParserState::StartBlock => (
+                    self.bit_reader.get(1, reader)? != 0,
+                    self.bit_reader.get(2, reader)?,
+                ),
+                DeflateParserState::ContinueStaticBlock { last } => (last, 1),
+                DeflateParserState::Done => {
+                    return Ok(DeflateParserState::Done);
                 }
+            };
 
-                let mut uncompressed = Vec::with_capacity(len as usize);
+            match mode {
+                0 => {
+                    let padding_bits = self.bit_reader.read_padding_bits() as u8;
 
-                for _i in 0..len {
-                    let b = input.read_byte()?;
-                    uncompressed.push(b);
-                    plain_text.push(b);
-                }
+                    assert!(self.bit_reader.bits_left() == 0);
 
-                blocks.push(DeflateTokenBlock {
-                    block_type: DeflateTokenBlockType::Stored {
-                        uncompressed,
-                        head_padding_bits: padding_bits,
-                    },
-                    last,
-                });
-            }
-            1 => {
-                // some compressors don't flush blocks at all if they are using static huffman encoding
-                // since there's no need to keep track of statistics etc.
-
-                let mut checkpoint_tokens = 0;
-                let mut tokens = Vec::new();
-                let decoder = HuffmanReader::create_fixed()?;
-                let r = decode_tokens(
-                    &decoder,
-                    &mut tokens,
-                    plain_text,
-                    input,
-                    checkpoint_bytes_read,
-                    checkpoint_plain_text,
-                    &mut checkpoint_tokens,
-                );
-
-                if let Err(e) = r {
-                    if e.exit_code() == ExitCode::ShortRead && tokens.len() > 0 {
-                        tokens.truncate(checkpoint_tokens);
-                        blocks.push(DeflateTokenBlock {
-                            block_type: DeflateTokenBlockType::Huffman {
-                                tokens,
-                                huffman_type: DeflateHuffmanType::Static,
-                                partial: PartialBlock::Start,
-                                tail_padding_bits: None,
-                            },
-                            last,
-                        });
-                        return Ok(DeflateParserState::ContinueStaticBlock { last });
-                    } else {
-                        return Err(e).context();
+                    let len = self.bit_reader.get(16, reader)?;
+                    let ilen = self.bit_reader.get(16, reader)?;
+                    if (len ^ ilen) != 0xffff {
+                        return err_exit_code(ExitCode::InvalidDeflate, "Block length mismatch");
                     }
+
+                    let mut uncompressed = Vec::with_capacity(len as usize);
+
+                    for _i in 0..len {
+                        let b = self.bit_reader.read_byte(reader)?;
+                        uncompressed.push(b);
+                        self.plain_text.push(b);
+                    }
+
+                    blocks.push(DeflateTokenBlock {
+                        block_type: DeflateTokenBlockType::Stored {
+                            uncompressed,
+                            head_padding_bits: padding_bits,
+                        },
+                        last,
+                    });
+                }
+                1 => {
+                    // some compressors don't flush blocks at all if they are using static huffman encoding
+                    // since there's no need to keep track of statistics etc.
+
+                    let mut tokens = Vec::new();
+                    let decoder = HuffmanReader::create_fixed()?;
+                    decode_tokens(
+                        &decoder,
+                        &mut tokens,
+                        &mut self.plain_text,
+                        &mut self.bit_reader,
+                        reader,
+                        &mut 0,
+                        &mut 0,
+                        &mut 0,
+                    )
+                    .context()?;
+
+                    blocks.push(DeflateTokenBlock {
+                        block_type: DeflateTokenBlockType::Huffman {
+                            tokens,
+                            huffman_type: DeflateHuffmanType::Static,
+                            partial: PartialBlock::Whole,
+                            tail_padding_bits: if last {
+                                Some(self.bit_reader.read_padding_bits())
+                            } else {
+                                None
+                            },
+                        },
+                        last,
+                    });
                 }
 
-                blocks.push(DeflateTokenBlock {
-                    block_type: DeflateTokenBlockType::Huffman {
-                        tokens,
-                        huffman_type: DeflateHuffmanType::Static,
-                        partial: PartialBlock::Whole,
-                        tail_padding_bits: if last {
-                            Some(input.read_padding_bits())
-                        } else {
-                            None
+                2 => {
+                    let huffman_encoding =
+                        HuffmanOriginalEncoding::read(&mut self.bit_reader, reader)?;
+
+                    let decoder = HuffmanReader::create_from_original_encoding(&huffman_encoding)?;
+
+                    let mut tokens = Vec::new();
+
+                    // don't checkpoint dynamic huffman blocks since they don't get very big
+                    // and it adds unnecessary complexity
+                    decode_tokens(
+                        &decoder,
+                        &mut tokens,
+                        &mut self.plain_text,
+                        &mut self.bit_reader,
+                        reader,
+                        &mut 0,
+                        &mut 0,
+                        &mut 0,
+                    )
+                    .context()?;
+
+                    blocks.push(DeflateTokenBlock {
+                        block_type: DeflateTokenBlockType::Huffman {
+                            tokens,
+                            huffman_type: DeflateHuffmanType::Dynamic { huffman_encoding },
+                            tail_padding_bits: if last {
+                                Some(self.bit_reader.read_padding_bits())
+                            } else {
+                                None
+                            },
+                            partial: PartialBlock::Whole,
                         },
-                    },
-                    last,
-                });
+                        last,
+                    });
+                }
+
+                _ => return err_exit_code(ExitCode::InvalidDeflate, "Invalid block type"),
             }
 
-            2 => {
-                let huffman_encoding = HuffmanOriginalEncoding::read(input)?;
-
-                let decoder = HuffmanReader::create_from_original_encoding(&huffman_encoding)?;
-
-                let mut tokens = Vec::new();
-
-                // don't checkpoint dynamic huffman blocks since they don't get very big
-                // and it adds unnecessary complexity
-                decode_tokens(
-                    &decoder,
-                    &mut tokens,
-                    plain_text,
-                    input,
-                    &mut 0,
-                    &mut 0,
-                    &mut 0,
-                )
-                .context()?;
-
-                blocks.push(DeflateTokenBlock {
-                    block_type: DeflateTokenBlockType::Huffman {
-                        tokens,
-                        huffman_type: DeflateHuffmanType::Dynamic { huffman_encoding },
-                        tail_padding_bits: if last {
-                            Some(input.read_padding_bits())
-                        } else {
-                            None
-                        },
-                        partial: PartialBlock::Whole,
-                    },
-                    last,
-                });
+            if last {
+                self.state = DeflateParserState::Done;
             }
-
-            _ => return err_exit_code(ExitCode::InvalidDeflate, "Invalid block type"),
-        }
-
-        // if we are at a good boundary, record where we are so we can continue from there
-        if (input.bits_left() & 7) == 0 {
-            *checkpoint_bytes_read = input.bytes_read() as usize;
-            *checkpoint_plain_text = plain_text.text().len();
-            *checkpoint_blocks = blocks.len();
-        }
-
-        if last {
-            return Ok(DeflateParserState::Done);
         }
     }
 }
@@ -276,7 +200,8 @@ fn decode_tokens<R: Read>(
     decoder: &HuffmanReader,
     tokens: &mut Vec<DeflateToken>,
     plain_text: &mut PlainText,
-    input: &mut BitReader<R>,
+    bit_reader: &mut BitReader,
+    reader: &mut R,
     checkpoint_bytes_read: &mut usize,
     checkpoint_plain_text: &mut usize,
     checkpoint_tokens: &mut usize,
@@ -285,7 +210,7 @@ fn decode_tokens<R: Read>(
     let mut cur_pos = 0;
 
     loop {
-        let lit_len: u32 = decoder.fetch_next_literal_code(input)?.into();
+        let lit_len: u32 = decoder.fetch_next_literal_code(bit_reader, reader)?.into();
         if lit_len < 256 {
             plain_text.push(lit_len as u8);
             tokens.push(DeflateToken::Literal(lit_len as u8));
@@ -299,19 +224,25 @@ fn decode_tokens<R: Read>(
             }
             let len: u32 = deflate_constants::MIN_MATCH
                 + deflate_constants::LENGTH_BASE_TABLE[lcode as usize] as u32
-                + input.get(deflate_constants::LENGTH_EXTRA_TABLE[lcode as usize].into())?;
+                + bit_reader.get(
+                    deflate_constants::LENGTH_EXTRA_TABLE[lcode as usize].into(),
+                    reader,
+                )?;
 
             // length of 258 can be encoded two ways: 284 with 5 one bits (non-standard) or as 285 with 0 extra bits (standard)
             let irregular258 = len == 258 && lcode != deflate_constants::LEN_CODE_COUNT as u32 - 1;
 
-            let dcode = decoder.fetch_next_distance_char(input)? as u32;
+            let dcode = decoder.fetch_next_distance_char(bit_reader, reader)? as u32;
             if dcode >= deflate_constants::DIST_CODE_COUNT as u32 {
                 return err_exit_code(ExitCode::InvalidDeflate, "Invalid distance code");
             }
 
             let dist = 1
                 + deflate_constants::DIST_BASE_TABLE[dcode as usize] as u32
-                + input.get(deflate_constants::DIST_EXTRA_TABLE[dcode as usize].into())?;
+                + bit_reader.get(
+                    deflate_constants::DIST_EXTRA_TABLE[dcode as usize].into(),
+                    reader,
+                )?;
 
             plain_text.append_reference(dist, len)?;
             tokens.push(DeflateToken::Reference(DeflateTokenReference::new(
@@ -325,8 +256,8 @@ fn decode_tokens<R: Read>(
         }
 
         // checkpoint a good byte aligned place to stop if we hit the end of the stream
-        if input.bits_left() == 0 {
-            *checkpoint_bytes_read = input.bytes_read() as usize;
+        if bit_reader.bits_left() == 0 {
+            *checkpoint_bytes_read = bit_reader.bytes_read() as usize;
             *checkpoint_plain_text = plain_text.text().len();
             *checkpoint_tokens = tokens.len();
         }
@@ -337,7 +268,6 @@ fn decode_tokens<R: Read>(
 pub struct DeflateContents {
     pub compressed_size: usize,
     pub blocks: Vec<DeflateTokenBlock>,
-    pub state: DeflateParserState,
 }
 
 impl std::fmt::Debug for DeflateContents {
@@ -345,7 +275,6 @@ impl std::fmt::Debug for DeflateContents {
         f.debug_struct("DeflateContents")
             .field("compressed_size", &self.compressed_size)
             .field("blocks", &self.blocks.len())
-            .field("state", &self.state)
             .finish()
     }
 }
@@ -353,36 +282,15 @@ impl std::fmt::Debug for DeflateContents {
 /// parses an entire deflate stream and asserts if it isn't complete
 #[cfg(test)]
 pub fn parse_deflate_whole(compressed_data: &[u8]) -> Result<(DeflateContents, PlainText)> {
-    let mut plain_text = PlainText::new();
-    match parse_deflate(
-        DeflateParserState::StartBlock,
-        compressed_data,
-        &mut plain_text,
-    ) {
-        Ok(v) => {
-            // no partial reads allowed here
-            assert_eq!(v.state, DeflateParserState::Done);
-            Ok((v, plain_text))
-        }
-        Err(e) => Err(e).context(),
+    let mut parse = DeflateParser::new();
+    let deflate_content = parse.parse(compressed_data)?;
+
+    match parse.state {
+        DeflateParserState::Done => (),
+        _ => panic!("Deflate stream not complete"),
     }
-}
 
-pub fn parse_deflate(
-    start_state: DeflateParserState,
-    compressed_data: &[u8],
-    plain_text: &mut PlainText,
-) -> Result<DeflateContents> {
-    let mut blocks = Vec::new();
-
-    let (compressed_size, state) =
-        read_blocks(start_state, plain_text, compressed_data, &mut blocks)?;
-
-    Ok(DeflateContents {
-        compressed_size: compressed_size,
-        blocks,
-        state,
-    })
+    Ok((deflate_content, parse.plain_text))
 }
 
 #[test]
@@ -395,24 +303,16 @@ fn test_partial_read() {
     let mut start_offset = 0;
     let mut end_offset = 1;
     let mut allblocks = Vec::new();
-    let mut plain_text = PlainText::new();
-    let mut block_state = DeflateParserState::StartBlock;
 
-    loop {
-        let r = parse_deflate(block_state, &d[start_offset..end_offset], &mut plain_text);
-        match r {
+    let mut deflate_parser = DeflateParser::new();
+
+    while !deflate_parser.is_done() {
+        match deflate_parser.parse(&d[start_offset..end_offset]) {
             Ok(mut dc) => {
-                println!("{} {} {:?}", start_offset, dc.blocks.len(), dc.state);
                 allblocks.append(&mut dc.blocks);
                 start_offset += dc.compressed_size;
 
                 end_offset = (start_offset + 1).min(d.len());
-
-                if dc.state == DeflateParserState::Done {
-                    break;
-                }
-
-                block_state = dc.state;
             }
             Err(e) => {
                 assert_eq!(e.exit_code(), ExitCode::ShortRead);
@@ -420,6 +320,8 @@ fn test_partial_read() {
             }
         }
     }
+
+    println!("blocks {:?}", allblocks);
 
     assert_eq_array(&get_tokens(&allblocks), &get_tokens(&complete.blocks));
 

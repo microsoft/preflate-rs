@@ -1,7 +1,7 @@
 use std::{io::Cursor, ops::Range};
 
 use crate::{
-    deflate_stream::{decompress_deflate_stream, DecompressResult, DeflateContinueState},
+    deflate_stream::{DecompressResult, DeflateStreamState},
     estimator::preflate_parameter_estimator::PreflateParameters,
     idat_parse::{parse_idat, IdatContents},
     preflate_error::{err_exit_code, ExitCode},
@@ -18,18 +18,16 @@ const MIN_BLOCKSIZE: usize = 1024;
 
 pub struct FoundStream {
     pub chunk_type: FoundStreamType,
-    pub plain_text: PlainText,
     pub corrections: Vec<u8>,
-    pub compressed_size: usize,
 }
 
 pub enum FoundStreamType {
     /// Deflate stream
-    DeflateStream(PreflateParameters),
+    DeflateStream(PreflateParameters, DeflateStreamState),
 
     /// PNG IDAT, which is a concatenated Zlib stream of IDAT chunks. This
     /// is special since the Deflate stream is split into IDAT chunks.
-    IDATDeflate(PreflateParameters, IdatContents),
+    IDATDeflate(PreflateParameters, IdatContents, PlainText),
 }
 
 #[derive(Hash, Eq, PartialEq, Clone, Debug)]
@@ -68,27 +66,25 @@ fn next_signature(src: &[u8], index: &mut usize) -> Option<Signature> {
 
 /// Scans for deflate streams in a zlib compressed file, decompresses the streams and
 /// PNG IDAT chunks, and returns the locations of the streams.
-pub fn find_deflate_stream(
-    src: &[u8],
-    loglevel: u32,
-) -> Option<(Range<usize>, FoundStream, Option<DeflateContinueState>)> {
+pub fn find_deflate_stream(src: &[u8], loglevel: u32) -> Option<(Range<usize>, FoundStream)> {
     let mut index: usize = 0;
     while let Some(signature) = next_signature(src, &mut index) {
         match signature {
             Signature::Zlib(_) => {
-                if let Ok(res) = decompress_deflate_stream(None, &src[index + 2..], true, loglevel)
-                {
-                    if res.plain_text.text().len() > MIN_BLOCKSIZE {
+                let mut state = DeflateStreamState::new();
+
+                if let Ok(res) = state.decompress(&src[index + 2..], true, loglevel) {
+                    if state.plain_text().len() > MIN_BLOCKSIZE {
                         index += 2;
                         return Some((
                             index..index + res.compressed_size,
                             FoundStream {
-                                chunk_type: FoundStreamType::DeflateStream(res.parameters.unwrap()),
-                                plain_text: res.plain_text,
+                                chunk_type: FoundStreamType::DeflateStream(
+                                    res.parameters.unwrap(),
+                                    state,
+                                ),
                                 corrections: res.corrections,
-                                compressed_size: res.compressed_size,
                             },
-                            res.continue_state,
                         ));
                     }
                 }
@@ -98,20 +94,19 @@ pub fn find_deflate_stream(
                 let mut cursor = Cursor::new(&src[index..]);
                 if skip_gzip_header(&mut cursor).is_ok() {
                     let start = index + cursor.position() as usize;
-                    if let Ok(res) = decompress_deflate_stream(None, &src[start..], true, loglevel)
-                    {
-                        if res.plain_text.text().len() > MIN_BLOCKSIZE {
+
+                    let mut state = DeflateStreamState::new();
+                    if let Ok(res) = state.decompress(&src[start..], true, loglevel) {
+                        if state.plain_text().len() > MIN_BLOCKSIZE {
                             return Some((
                                 start..start + res.compressed_size,
                                 FoundStream {
                                     chunk_type: FoundStreamType::DeflateStream(
                                         res.parameters.unwrap(),
+                                        state,
                                     ),
-                                    plain_text: res.plain_text,
                                     corrections: res.corrections,
-                                    compressed_size: res.compressed_size,
                                 },
-                                res.continue_state,
                             ));
                         }
                     }
@@ -119,17 +114,17 @@ pub fn find_deflate_stream(
             }
 
             Signature::ZipLocalFileHeader => {
-                if let Ok((header_size, res)) = parse_zip_stream(&src[index..], loglevel) {
-                    if res.plain_text.text().len() > MIN_BLOCKSIZE {
+                if let Ok((header_size, res, state)) = parse_zip_stream(&src[index..], loglevel) {
+                    if state.plain_text().len() > MIN_BLOCKSIZE {
                         return Some((
                             index + header_size..index + header_size + res.compressed_size,
                             FoundStream {
-                                chunk_type: FoundStreamType::DeflateStream(res.parameters.unwrap()),
-                                plain_text: res.plain_text,
+                                chunk_type: FoundStreamType::DeflateStream(
+                                    res.parameters.unwrap(),
+                                    state,
+                                ),
                                 corrections: res.corrections,
-                                compressed_size: res.compressed_size,
                             },
-                            res.continue_state,
                         ));
                     }
                 }
@@ -140,22 +135,22 @@ pub fn find_deflate_stream(
                     // idat has the length first, then the "IDAT", so we need to look back 4 bytes
                     // if we find and IDAT
                     let real_start = index - 4;
-                    if let Ok((r, payload)) = parse_idat(&src[real_start..], 0) {
-                        if let Ok(res) = decompress_deflate_stream(None, &payload, true, loglevel) {
-                            let length = r.total_chunk_length;
+                    if let Ok((idat_contents, payload)) = parse_idat(&src[real_start..], 0) {
+                        let mut state = DeflateStreamState::new();
+
+                        if let Ok(res) = state.decompress(&payload, true, loglevel) {
+                            let length = idat_contents.total_chunk_length;
                             if length > MIN_BLOCKSIZE {
                                 return Some((
-                                    real_start..real_start + r.total_chunk_length,
+                                    real_start..real_start + idat_contents.total_chunk_length,
                                     FoundStream {
                                         chunk_type: FoundStreamType::IDATDeflate(
                                             res.parameters.unwrap(),
-                                            r,
+                                            idat_contents,
+                                            state.detach_plain_text(),
                                         ),
-                                        plain_text: res.plain_text,
                                         corrections: res.corrections,
-                                        compressed_size: res.compressed_size,
                                     },
-                                    None,
                                 ));
                             }
                         }
@@ -211,10 +206,10 @@ fn skip_gzip_header<R: Read>(reader: &mut R) -> Result<()> {
 fn parse_png() {
     let f = crate::utils::read_file("treegdi.png");
 
-    let (loc, chunk, _) = find_deflate_stream(&f, 1).unwrap();
+    let (loc, chunk) = find_deflate_stream(&f, 1).unwrap();
 
     match chunk.chunk_type {
-        FoundStreamType::IDATDeflate(_p, idat) => {
+        FoundStreamType::IDATDeflate(_p, idat, _plain_text) => {
             println!("IDAT chunks: {:?} at {:?}", idat.chunk_sizes, loc);
         }
         _ => panic!("Expected IDAT"),
@@ -230,7 +225,7 @@ fn parse_gz() {
     // 10 byte header + 8 byte footer
     assert_eq!(loc.0, 10..f.len() - 8);
 
-    if !matches!(loc.1.chunk_type, FoundStreamType::DeflateStream(_)) {
+    if !matches!(loc.1.chunk_type, FoundStreamType::DeflateStream(_, _)) {
         panic!("Expected DeflateStream");
     }
 }
@@ -240,9 +235,9 @@ fn parse_docx() {
     let f = crate::utils::read_file("file-sample_1MB.docx");
 
     let mut offset = 0;
-    while let Some((loc, res, _)) = find_deflate_stream(&f[offset..], 0) {
+    while let Some((loc, res)) = find_deflate_stream(&f[offset..], 0) {
         match res.chunk_type {
-            FoundStreamType::DeflateStream(_) => {
+            FoundStreamType::DeflateStream(_, _) => {
                 println!(
                     "Deflate stream at {:?}",
                     offset + loc.start..offset + loc.end
@@ -295,7 +290,10 @@ impl ZipLocalFileHeader {
 }
 
 /// parses the zip stream and returns the size of the header, followed by the decompressed contents
-fn parse_zip_stream(contents: &[u8], loglevel: u32) -> Result<(usize, DecompressResult)> {
+fn parse_zip_stream(
+    contents: &[u8],
+    loglevel: u32,
+) -> Result<(usize, DecompressResult, DeflateStreamState)> {
     let mut binary_reader = Cursor::new(&contents);
 
     // read the signature
@@ -319,10 +317,10 @@ fn parse_zip_stream(contents: &[u8], loglevel: u32) -> Result<(usize, Decompress
     if zip_local_file_header.compression_method == 8 {
         let deflate_start_position = binary_reader.stream_position()? as usize;
 
-        if let Ok(res) =
-            decompress_deflate_stream(None, &contents[deflate_start_position..], true, loglevel)
-        {
-            return Ok((deflate_start_position, res));
+        let mut state = DeflateStreamState::new();
+
+        if let Ok(res) = state.decompress(&contents[deflate_start_position..], true, loglevel) {
+            return Ok((deflate_start_position, res, state));
         }
     }
 

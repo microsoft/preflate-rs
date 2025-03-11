@@ -6,9 +6,8 @@ use std::{
 };
 
 use crate::{
-    decompress_deflate_stream,
     deflate_stream::{
-        recompress_deflate_stream, recompress_deflate_stream_pred, DeflateContinueState,
+        recompress_deflate_stream, recompress_deflate_stream_pred, DeflateStreamState,
         ReconstructionData,
     },
     hash_algorithm::HashAlgorithm,
@@ -91,42 +90,42 @@ fn write_literal_block(content: &[u8], destination: &mut impl Write) -> Result<(
 }
 
 fn write_chunk_block(
-    block: &FoundStream,
-    compression_stats: &mut CompressionStats,
-    destination: &mut impl Write,
-    partial: bool,
-) -> std::io::Result<usize> {
-    match &block.chunk_type {
-        FoundStreamType::DeflateStream(parameters) => {
-            destination.write_all(&[DEFLATE_STREAM, partial as u8])?;
+    result: &mut impl Write,
+    chunk: FoundStream,
+    stats: &mut CompressionStats,
+) -> Result<Option<DeflateStreamState>> {
+    match chunk.chunk_type {
+        FoundStreamType::DeflateStream(parameters, state) => {
+            result.write_all(&[DEFLATE_STREAM, !state.is_done() as u8])?;
 
-            write_varint(destination, block.corrections.len() as u32)?;
-            write_varint(destination, block.plain_text.text().len() as u32)?;
+            write_varint(result, chunk.corrections.len() as u32)?;
+            write_varint(result, state.plain_text().text().len() as u32)?;
 
-            destination.write_all(&block.corrections)?;
-            destination.write_all(&block.plain_text.text())?;
+            result.write_all(&chunk.corrections)?;
+            result.write_all(&state.plain_text().text())?;
 
-            compression_stats.overhead_bytes += block.corrections.len() as u64;
-            compression_stats.hash_algorithm = parameters.predictor.hash_algorithm;
-            Ok(block.compressed_size)
+            stats.overhead_bytes += chunk.corrections.len() as u64;
+            stats.hash_algorithm = parameters.predictor.hash_algorithm;
+
+            if !state.is_done() {
+                return Ok(Some(state));
+            }
         }
+        FoundStreamType::IDATDeflate(parameters, idat, plain_text) => {
+            result.write_all(&[PNG_COMPRESSED])?;
+            write_varint(result, chunk.corrections.len() as u32)?;
+            write_varint(result, plain_text.text().len() as u32)?;
 
-        FoundStreamType::IDATDeflate(parameters, idat) => {
-            destination.write_all(&[PNG_COMPRESSED])?;
-            write_varint(destination, block.corrections.len() as u32)?;
-            write_varint(destination, block.plain_text.text().len() as u32)?;
+            idat.write_to_bytestream(result)?;
 
-            idat.write_to_bytestream(destination)?;
+            result.write_all(&chunk.corrections)?;
+            result.write_all(&plain_text.text())?;
 
-            destination.write_all(&block.corrections)?;
-            destination.write_all(&block.plain_text.text())?;
-
-            compression_stats.overhead_bytes += block.corrections.len() as u64;
-            compression_stats.hash_algorithm = parameters.predictor.hash_algorithm;
-
-            Ok(idat.total_chunk_length)
+            stats.overhead_bytes += chunk.corrections.len() as u64;
+            stats.hash_algorithm = parameters.predictor.hash_algorithm;
         }
     }
+    Ok(None)
 }
 
 #[cfg(test)]
@@ -153,24 +152,23 @@ fn roundtrip_chunk_block_literal() {
 
 #[test]
 fn roundtrip_chunk_block_deflate() {
-    use crate::deflate_stream::decompress_deflate_stream;
+    use crate::deflate_stream::DeflateStreamState;
 
     let contents = crate::utils::read_file("compressed_zlib_level1.deflate");
-    let results = decompress_deflate_stream(None, &contents, true, 1).unwrap();
+
+    let mut stream_state = DeflateStreamState::new();
+    let results = stream_state.decompress(&contents, true, 1).unwrap();
 
     let mut buffer = Vec::new();
 
     let mut stats = CompressionStats::default();
     write_chunk_block(
-        &FoundStream {
-            chunk_type: FoundStreamType::DeflateStream(results.parameters.unwrap()),
-            compressed_size: contents.len() as usize,
+        &mut buffer,
+        FoundStream {
+            chunk_type: FoundStreamType::DeflateStream(results.parameters.unwrap(), stream_state),
             corrections: results.corrections,
-            plain_text: results.plain_text,
         },
         &mut stats,
-        &mut buffer,
-        false,
     )
     .unwrap();
 
@@ -183,13 +181,12 @@ fn roundtrip_chunk_block_deflate() {
 
 #[test]
 fn roundtrip_chunk_block_png() {
-    use crate::deflate_stream::decompress_deflate_stream;
-
     let f = crate::utils::read_file("treegdi.png");
 
     // we know the first IDAT chunk starts at 83 (avoid testing the scan_deflate code in a unit teast)
     let (idat_contents, deflate_stream) = crate::idat_parse::parse_idat(&f[83..], 1).unwrap();
-    let results = decompress_deflate_stream(None, &deflate_stream, true, 1).unwrap();
+    let mut stream = crate::deflate_stream::DeflateStreamState::new();
+    let results = stream.decompress(&deflate_stream, true, 1).unwrap();
 
     let total_chunk_length = idat_contents.total_chunk_length;
 
@@ -197,15 +194,16 @@ fn roundtrip_chunk_block_png() {
 
     let mut stats = CompressionStats::default();
     write_chunk_block(
-        &FoundStream {
-            chunk_type: FoundStreamType::IDATDeflate(results.parameters.unwrap(), idat_contents),
-            compressed_size: deflate_stream.len(),
+        &mut buffer,
+        FoundStream {
+            chunk_type: FoundStreamType::IDATDeflate(
+                results.parameters.unwrap(),
+                idat_contents,
+                stream.detach_plain_text(),
+            ),
             corrections: results.corrections,
-            plain_text: results.plain_text,
         },
         &mut stats,
-        &mut buffer,
-        false,
     )
     .unwrap();
 
@@ -395,7 +393,7 @@ pub trait ProcessBuffer {
 enum ChunkParseState {
     Start,
     Searching,
-    DeflateContinue(Option<DeflateContinueState>),
+    DeflateContinue(DeflateStreamState),
 }
 
 pub struct PreflateCompressionContext {
@@ -458,8 +456,7 @@ impl ProcessBuffer for PreflateCompressionContext {
                 }
                 ChunkParseState::Searching => {
                     // here we are looking for a deflate stream or PNG chunk
-                    if let Some((next, chunk, continue_state)) =
-                        find_deflate_stream(&self.content, self.log_level)
+                    if let Some((next, chunk)) = find_deflate_stream(&self.content, self.log_level)
                     {
                         // the gap between the start and the beginning of the deflate stream
                         // is written out as a literal block
@@ -467,18 +464,14 @@ impl ProcessBuffer for PreflateCompressionContext {
                             write_literal_block(&self.content[..next.start], &mut self.result)?;
                         }
 
-                        write_chunk_block(
-                            &chunk,
-                            &mut self.compression_stats,
-                            &mut self.result,
-                            continue_state.is_some(),
-                        )?;
+                        if let Some(state) =
+                            write_chunk_block(&mut self.result, chunk, &mut self.compression_stats)
+                                .context()?
+                        {
+                            self.state = ChunkParseState::DeflateContinue(state);
+                        }
 
                         self.content.drain(0..next.end);
-
-                        if let Some(continue_state) = continue_state {
-                            self.state = ChunkParseState::DeflateContinue(Some(continue_state));
-                        }
                     } else {
                         // couldn't find anything, just write the rest as a literal block
                         write_literal_block(&self.content, &mut self.result)?;
@@ -486,33 +479,24 @@ impl ProcessBuffer for PreflateCompressionContext {
                         self.content.clear();
                     }
                 }
-                ChunkParseState::DeflateContinue(continue_state) => {
+                ChunkParseState::DeflateContinue(state) => {
                     // here we have a deflate stream that we need to continue
-                    let res = decompress_deflate_stream(
-                        continue_state.take(),
-                        &self.content,
-                        true,
-                        self.log_level,
-                    );
-                    if let Ok(res) = res {
-                        self.result
-                            .write_all(&[res.continue_state.is_some() as u8])?;
+                    if let Ok(res) = state.decompress(&self.content, true, 0) {
+                        self.result.write_all(&[!state.is_done() as u8])?;
 
                         write_varint(&mut self.result, res.corrections.len() as u32)?;
-                        write_varint(&mut self.result, res.plain_text.text().len() as u32)?;
+                        write_varint(&mut self.result, state.plain_text().len() as u32)?;
 
                         self.result.write_all(&res.corrections)?;
-                        self.result.write_all(&res.plain_text.text())?;
+                        self.result.write_all(&state.plain_text().text())?;
 
                         self.compression_stats.overhead_bytes += res.corrections.len() as u64;
 
-                        if let Some(c) = res.continue_state {
-                            self.state = ChunkParseState::DeflateContinue(Some(c));
-                        } else {
+                        self.content.drain(0..res.compressed_size);
+
+                        if state.is_done() {
                             self.state = ChunkParseState::Searching;
                         }
-
-                        self.content.drain(0..res.compressed_size);
                     } else {
                         // error decompressing, just switch to a literal
                         self.state = ChunkParseState::Searching;

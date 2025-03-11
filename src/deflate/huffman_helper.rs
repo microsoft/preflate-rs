@@ -5,7 +5,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 use crate::preflate_error::{err_exit_code, ExitCode, Result};
-use std::vec;
+use std::{io::Read, vec};
 
 use super::bit_reader::ReadBits;
 
@@ -154,12 +154,16 @@ pub fn calculate_huffman_code_tree(code_lengths: &[u8]) -> Result<Vec<i32>> {
 /// Huffman Nodes are encoded in the array of ints as follows:
 /// '0' child link of node 'N' is at huffman_tree[N], '1' child link is at huffman_tree[N + 1]
 /// Root of tree is at huffman_tree.len() - 2
-pub fn decode_symbol<R: ReadBits>(bit_reader: &mut R, huffman_tree: &[i32]) -> Result<u16> {
+pub fn decode_symbol(
+    bit_reader: &mut impl ReadBits,
+    reader: &mut impl Read,
+    huffman_tree: &[i32],
+) -> Result<u16> {
     let mut i_node_cur: i32 = huffman_tree.len() as i32 - 2; // Start at the root of the Huffman tree
 
     loop {
         // Use next bit of input to decide next node
-        i_node_cur = huffman_tree[(bit_reader.get(1)? as i32 + i_node_cur) as usize];
+        i_node_cur = huffman_tree[(bit_reader.get(1, reader)? as i32 + i_node_cur) as usize];
 
         // Negative indicates a leaf node, return alphabet char for this leaf
         if i_node_cur < 0 {
@@ -176,7 +180,7 @@ struct SingleCode {
 
 #[cfg(test)]
 impl ReadBits for SingleCode {
-    fn get(&mut self, cbits: u32) -> std::io::Result<u32> {
+    fn get(&mut self, cbits: u32, _: &mut impl Read) -> std::io::Result<u32> {
         let result = self.code & ((1 << cbits) - 1);
         self.code >>= cbits;
 
@@ -202,7 +206,7 @@ fn roundtrip(frequencies: &[u16], huffcalc: super::huffman_calc::HufftreeBitCalc
                 code: codes[i].into(),
             };
 
-            let symbol = decode_symbol(&mut code, &huffman_tree).unwrap();
+            let symbol = decode_symbol(&mut code, &mut std::io::empty(), &huffman_tree).unwrap();
 
             assert_eq!(i, symbol as usize);
         }
