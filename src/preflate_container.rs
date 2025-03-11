@@ -247,6 +247,8 @@ pub fn recreated_zlib_chunks(
 
 #[cfg(test)]
 fn roundtrip_deflate_chunks(filename: &str) {
+    use crate::utils::assert_eq_array;
+
     let f = crate::utils::read_file(filename);
 
     let mut stats = CompressionStats::default();
@@ -258,11 +260,7 @@ fn roundtrip_deflate_chunks(filename: &str) {
     let mut destination = Vec::new();
     recreated_zlib_chunks(&mut read_cursor, &mut destination).unwrap();
 
-    assert_eq!(destination.len(), f.len());
-    for i in 0..destination.len() {
-        assert_eq!(destination[i], f[i], "Mismatch at index {}", i);
-    }
-    assert!(destination == f);
+    assert_eq_array(&destination, &f);
 }
 
 #[test]

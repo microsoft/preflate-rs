@@ -83,23 +83,84 @@ impl Default for DeflateHuffmanType {
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub enum PartialBlock {
+    Whole,
+    Start,
+    Middle,
+    End,
+}
+
+#[derive(PartialEq)]
 pub enum DeflateTokenBlockType {
     Huffman {
         tokens: Vec<DeflateToken>,
         huffman_type: DeflateHuffmanType,
+
+        /// If present, this is the value of bits to pad the end of the block with.
+        tail_padding_bits: Option<u8>,
+
+        /// If we have partial blocks written, this will indicate if this block is the start, middle, or end of the partial block.
+        partial: PartialBlock,
     },
     Stored {
         uncompressed: Vec<u8>,
-        padding_bits: u8,
+        head_padding_bits: u8,
     },
+}
+
+/// Debug implementation for DeflateTokenBlockType doesn't print all the tokens
+impl std::fmt::Debug for DeflateTokenBlockType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DeflateTokenBlockType::Huffman {
+                tokens,
+                tail_padding_bits,
+                partial,
+                huffman_type: DeflateHuffmanType::Static { .. },
+            } => {
+                write!(
+                    f,
+                    "StaticHuffman {{ tokens: len={}, partial={:?} tail={:?} }}",
+                    tokens.len(),
+                    partial,
+                    tail_padding_bits
+                )
+            }
+            DeflateTokenBlockType::Huffman {
+                tokens,
+                tail_padding_bits,
+                partial,
+                huffman_type: DeflateHuffmanType::Dynamic { .. },
+            } => {
+                write!(
+                    f,
+                    "DynamicHuffman {{ tokens: len={}, partial={:?} tail={:?} }}",
+                    tokens.len(),
+                    partial,
+                    tail_padding_bits
+                )
+            }
+            DeflateTokenBlockType::Stored {
+                uncompressed,
+                head_padding_bits: padding_bits,
+            } => {
+                write!(
+                    f,
+                    "Stored {{ uncompressed: len={}, padding_bits={} }}",
+                    uncompressed.len(),
+                    padding_bits
+                )
+            }
+        }
+    }
 }
 
 #[derive(Debug, PartialEq)]
 pub struct DeflateTokenBlock {
     pub block_type: DeflateTokenBlockType,
+
     pub last: bool,
-    pub tail_padding_bits: u8,
 }
 
 /// Used to track the frequence of tokens in the DEFLATE stream

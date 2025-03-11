@@ -53,3 +53,38 @@ pub fn read_file(filename: &str) -> Vec<u8> {
 
     content
 }
+
+/// handy function to compare two arrays, and print the first mismatch. Useful for debugging.
+#[cfg(test)]
+#[track_caller]
+pub fn assert_eq_array<T: PartialEq + std::fmt::Debug>(a: &[T], b: &[T]) {
+    use core::panic;
+
+    if a.len() != b.len() {
+        for i in 0..std::cmp::min(a.len(), b.len()) {
+            assert_eq!(
+                a[i],
+                b[i],
+                "length mismatch {},{} and first mismatch at offset {}",
+                a.len(),
+                b.len(),
+                i
+            );
+        }
+        panic!(
+            "length mismatch {} and {}, but common prefix identical",
+            a.len(),
+            b.len()
+        );
+    } else {
+        for i in 0..a.len() {
+            assert_eq!(
+                a[i],
+                b[i],
+                "length identical {}, but first mismatch at offset {}",
+                a.len(),
+                i
+            );
+        }
+    }
+}

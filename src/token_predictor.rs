@@ -12,7 +12,8 @@ use crate::{
         deflate_constants::MIN_MATCH,
         deflate_token::{
             DeflateHuffmanType, DeflateToken, DeflateTokenBlock, DeflateTokenBlockType,
-            DeflateTokenReference, TokenFrequency, BT_DYNAMICHUFF, BT_STATICHUFF, BT_STORED,
+            DeflateTokenReference, PartialBlock, TokenFrequency, BT_DYNAMICHUFF, BT_STATICHUFF,
+            BT_STORED,
         },
         huffman_calc::HufftreeBitCalc,
     },
@@ -115,7 +116,7 @@ impl TokenPredictor {
         match &block.block_type {
             DeflateTokenBlockType::Stored {
                 uncompressed,
-                padding_bits,
+                head_padding_bits: padding_bits,
             } => {
                 codec.encode_correction_diff(
                     CodecCorrection::BlockTypeCorrection,
@@ -140,6 +141,7 @@ impl TokenPredictor {
             DeflateTokenBlockType::Huffman {
                 tokens: t,
                 huffman_type,
+                ..
             } => {
                 match huffman_type {
                     DeflateHuffmanType::Static { .. } => {
@@ -363,10 +365,9 @@ impl TokenPredictor {
                     DeflateTokenBlock {
                         block_type: DeflateTokenBlockType::Stored {
                             uncompressed,
-                            padding_bits,
+                            head_padding_bits: padding_bits,
                         },
                         last: !partial && end,
-                        tail_padding_bits: 0,
                     },
                 ));
             }
@@ -476,18 +477,18 @@ impl TokenPredictor {
         let end = input.remaining() == 0
             && !codec.decode_misprediction(CodecCorrection::EOFMisprediction);
 
-        let last = !partial && end;
-        let last_padding_bits = if last {
-            codec.decode_correction(CodecCorrection::NonZeroPadding) as u8
+        let tail_padding_bits = if !partial && end {
+            Some(codec.decode_correction(CodecCorrection::NonZeroPadding) as u8)
         } else {
-            0
+            None
         };
 
         let b = DeflateTokenBlock {
-            last,
-            tail_padding_bits: last_padding_bits,
+            last: end,
             block_type: DeflateTokenBlockType::Huffman {
                 tokens,
+                tail_padding_bits,
+                partial: PartialBlock::Whole,
                 huffman_type: if bt == BT_STATICHUFF {
                     DeflateHuffmanType::Static
                 } else {

@@ -89,6 +89,7 @@ pub(crate) fn extract_preflate_info(blocks: &[DeflateTokenBlock]) -> PreflateStr
             DeflateTokenBlockType::Huffman {
                 tokens,
                 huffman_type,
+                ..
             } => {
                 if let DeflateHuffmanType::Static { .. } = huffman_type {
                     result.count_static_huff_tree_blocks += 1;

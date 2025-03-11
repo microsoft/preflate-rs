@@ -78,7 +78,7 @@ pub fn decompress_deflate_stream(
     previous_state: Option<DeflateContinueState>,
     compressed_data: &[u8],
     verify: bool,
-    loglevel: u32,
+    _loglevel: u32,
 ) -> Result<DecompressResult> {
     let mut cabac_encoded = Vec::new();
 
@@ -495,21 +495,10 @@ fn analyze_compressed_data_verify(
         cabac_codec::{PredictionDecoderCabac, PredictionEncoderCabac},
         deflate::{deflate_reader::parse_deflate_whole, deflate_token::DeflateTokenBlockType},
         statistical_codec::{VerifyPredictionDecoder, VerifyPredictionEncoder},
+        utils::assert_eq_array,
     };
     use cabac::debug::{DebugReader, DebugWriter};
     use std::io::Cursor;
-
-    fn compare<T: PartialEq + std::fmt::Debug>(a: &[T], b: &[T], str: &str) {
-        if a.len() != b.len() {
-            panic!("lengths differ {}", str);
-        }
-
-        for i in 0..a.len() {
-            if a[i] != b[i] {
-                panic!("index {} differs ({:?},{:?}) {}", i, a[i], b[i], str);
-            }
-        }
-    }
 
     let mut buffer = Vec::new();
 
@@ -563,11 +552,11 @@ fn analyze_compressed_data_verify(
             (
                 DeflateTokenBlockType::Stored {
                     uncompressed: a,
-                    padding_bits: b,
+                    head_padding_bits: b,
                 },
                 DeflateTokenBlockType::Stored {
                     uncompressed: c,
-                    padding_bits: d,
+                    head_padding_bits: d,
                 },
             ) => {
                 assert_eq!(a, c, "uncompressed data differs {index}");
@@ -577,14 +566,20 @@ fn analyze_compressed_data_verify(
                 DeflateTokenBlockType::Huffman {
                     tokens: t1,
                     huffman_type: h1,
+                    tail_padding_bits: p1,
+                    partial: part1,
                 },
                 DeflateTokenBlockType::Huffman {
                     tokens: t2,
                     huffman_type: h2,
+                    tail_padding_bits: p2,
+                    partial: part2,
                 },
             ) => {
-                compare(t1, t2, &format!("tokens differ {index}"));
+                assert_eq_array(t1, t2);
                 assert_eq!(h1, h2, "huffman type differs {index}");
+                assert_eq!(p1, p2, "padding bits differ {index}");
+                assert_eq!(part1, part2, "partial differ {index}");
             }
             _ => panic!("block type differs {index}"),
         });

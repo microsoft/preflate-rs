@@ -301,8 +301,6 @@ impl HuffmanWriter {
         huffman_encoding: &HuffmanOriginalEncoding,
         output_buffer: &mut Vec<u8>,
     ) -> Result<Self> {
-        bitwriter.write(2, 2, output_buffer);
-
         huffman_encoding.write(bitwriter, output_buffer)?; // write the huffman table
 
         let (lit_lengths, dist_lengths) = huffman_encoding.get_literal_distance_lengths();
