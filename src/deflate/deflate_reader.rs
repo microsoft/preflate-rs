@@ -10,7 +10,7 @@ use crate::{
     preflate_input::PlainText,
 };
 
-use std::io::{Cursor, Read};
+use std::io::Cursor;
 
 use super::{
     bit_reader::ReadBits,
@@ -26,6 +26,7 @@ use super::{
 struct Checkpoint {
     bit_reader: BitReader,
     plain_text: usize,
+    position: u64,
 }
 
 #[derive(Debug)]
@@ -63,39 +64,50 @@ impl DeflateParser {
         self.plain_text
     }
 
+    fn checkpoint(&self, reader: &Cursor<&[u8]>) -> Checkpoint {
+        Checkpoint {
+            plain_text: self.plain_text().len(),
+            bit_reader: self.bit_reader.clone(),
+            position: reader.position(),
+        }
+    }
+
     pub fn parse(&mut self, compressed_data: &[u8]) -> Result<DeflateContents> {
         let mut blocks = Vec::new();
 
         let mut cursor = &mut Cursor::new(compressed_data);
 
-        let mut checkpoint = None;
+        let mut checkpoint = self.checkpoint(&cursor);
         match self.read_blocks_internal(&mut cursor, &mut blocks, &mut checkpoint) {
             Err(e) => {
-                if e.exit_code() == ExitCode::ShortRead {
-                    if let Some(checkpoint) = checkpoint {
-                        self.bit_reader = checkpoint.bit_reader;
-                        self.plain_text.truncate(checkpoint.plain_text);
-                    } else {
-                        return Err(e);
-                    }
-                } else {
+                // reset back to known good checkpoint
+                self.bit_reader = checkpoint.bit_reader;
+                self.plain_text.truncate(checkpoint.plain_text);
+
+                // if nothing was successfully read or we didn't
+                // get the expected error, then just exit
+                if checkpoint.position == 0 || e.exit_code() != ExitCode::ShortRead {
                     return Err(e);
                 }
+                return Ok(DeflateContents {
+                    compressed_size: checkpoint.position as usize,
+                    blocks,
+                });
             }
-            Ok(_) => {}
+            Ok(()) => {}
         }
 
         Ok(DeflateContents {
-            compressed_size: self.bit_reader.bytes_read() as usize,
+            compressed_size: cursor.position() as usize,
             blocks,
         })
     }
 
-    fn read_blocks_internal<R: Read>(
+    fn read_blocks_internal(
         &mut self,
-        reader: &mut R,
+        reader: &mut Cursor<&[u8]>,
         blocks: &mut Vec<DeflateTokenBlock>,
-        checkpoint: &mut Option<Checkpoint>,
+        checkpoint: &mut Checkpoint,
     ) -> Result<()> {
         loop {
             let (last, mode) = match self.state {
@@ -208,20 +220,17 @@ impl DeflateParser {
                 self.state = DeflateParserState::Done;
             }
 
-            *checkpoint = Some(Checkpoint {
-                bit_reader: self.bit_reader.clone(),
-                plain_text: self.plain_text.len(),
-            });
+            *checkpoint = self.checkpoint(reader);
         }
     }
 }
 
-fn decode_tokens<R: Read>(
+fn decode_tokens(
     decoder: &HuffmanReader,
     tokens: &mut Vec<DeflateToken>,
     plain_text: &mut PlainText,
     bit_reader: &mut BitReader,
-    reader: &mut R,
+    reader: &mut Cursor<&[u8]>,
 ) -> Result<()> {
     let mut earliest_reference = i32::MAX;
     let mut cur_pos = 0;
@@ -303,11 +312,12 @@ pub fn parse_deflate_whole(compressed_data: &[u8]) -> Result<(DeflateContents, P
     Ok((deflate_content, parse.plain_text))
 }
 
+/// tests the partial read which allows for blocks to be read incrementally
 #[test]
 fn test_partial_read() {
     use crate::utils::{assert_eq_array, read_file};
 
-    let d = read_file("bigcompressed_zlibng_level1.deflate");
+    let d = read_file("compressed_zlib_level1.deflate");
     let (complete, _plain_text_complete) = parse_deflate_whole(&d).unwrap();
 
     let mut start_offset = 0;
@@ -319,19 +329,30 @@ fn test_partial_read() {
     while !deflate_parser.is_done() {
         match deflate_parser.parse(&d[start_offset..end_offset]) {
             Ok(mut dc) => {
+                println!(
+                    "segment blocks={} plaintext={} comp={}",
+                    dc.blocks.len(),
+                    deflate_parser.plain_text().len(),
+                    dc.compressed_size
+                );
                 allblocks.append(&mut dc.blocks);
                 start_offset += dc.compressed_size;
 
                 end_offset = (start_offset + 1).min(d.len());
             }
             Err(e) => {
+                assert!(
+                    end_offset != d.len(),
+                    "shouldnt have reached the end with an error {:?}",
+                    e
+                );
+
+                // get another 997 bytes if this buffer was not decodable
                 assert_eq!(e.exit_code(), ExitCode::ShortRead);
-                end_offset = (end_offset + 100000).min(d.len());
+                end_offset = (end_offset + 997).min(d.len());
             }
         }
     }
-
-    println!("blocks {:?}", allblocks);
 
     assert_eq_array(&get_tokens(&allblocks), &get_tokens(&complete.blocks));
 
@@ -340,6 +361,9 @@ fn test_partial_read() {
     assert_eq_array(&reconstruct, &d);
 }
 
+/// grabs all the tokens and put them in a single buffer. This
+/// allows us to compare two token block vectors for equlity even if
+/// the buffer has some partial blocks.
 #[cfg(test)]
 fn get_tokens(blocks: &[DeflateTokenBlock]) -> Vec<DeflateToken> {
     let mut tokens = Vec::new();

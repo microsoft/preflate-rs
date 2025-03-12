@@ -17,7 +17,6 @@ pub trait ReadBits {
 pub struct BitReader {
     bits_read: u32,
     bit_count: u32,
-    bytes_read: u32,
 }
 
 impl BitReader {
@@ -25,13 +24,9 @@ impl BitReader {
         BitReader {
             bits_read: 0,
             bit_count: 0,
-            bytes_read: 0,
         }
     }
 
-    pub fn bytes_read(&self) -> u32 {
-        self.bytes_read
-    }
     pub fn bits_left(&self) -> u32 {
         self.bit_count
     }
@@ -51,7 +46,6 @@ impl BitReader {
     pub fn read_byte(&mut self, reader: &mut impl Read) -> Result<u8> {
         debug_assert!(self.bit_count == 0);
         let r = reader.read_u8()?;
-        self.bytes_read += 1;
         Ok(r)
     }
 }
@@ -76,7 +70,6 @@ impl ReadBits for BitReader {
 
             self.bits_read |= b << self.bit_count;
             self.bit_count += 8;
-            self.bytes_read += 1;
         }
 
         let wret = self.bits_read & ((1 << cbit) - 1);
