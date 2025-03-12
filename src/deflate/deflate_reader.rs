@@ -23,6 +23,11 @@ use super::{
     huffman_encoding::{HuffmanOriginalEncoding, HuffmanReader},
 };
 
+struct Checkpoint {
+    bit_reader: BitReader,
+    plain_text: usize,
+}
+
 #[derive(Debug)]
 pub struct DeflateParser {
     state: DeflateParserState,
@@ -63,7 +68,22 @@ impl DeflateParser {
 
         let mut cursor = &mut Cursor::new(compressed_data);
 
-        self.read_blocks_internal(&mut cursor, &mut blocks)?;
+        let mut checkpoint = None;
+        match self.read_blocks_internal(&mut cursor, &mut blocks, &mut checkpoint) {
+            Err(e) => {
+                if e.exit_code() == ExitCode::ShortRead {
+                    if let Some(checkpoint) = checkpoint {
+                        self.bit_reader = checkpoint.bit_reader;
+                        self.plain_text.truncate(checkpoint.plain_text);
+                    } else {
+                        return Err(e);
+                    }
+                } else {
+                    return Err(e);
+                }
+            }
+            Ok(_) => {}
+        }
 
         Ok(DeflateContents {
             compressed_size: self.bit_reader.bytes_read() as usize,
@@ -75,7 +95,8 @@ impl DeflateParser {
         &mut self,
         reader: &mut R,
         blocks: &mut Vec<DeflateTokenBlock>,
-    ) -> Result<DeflateParserState> {
+        checkpoint: &mut Option<Checkpoint>,
+    ) -> Result<()> {
         loop {
             let (last, mode) = match self.state {
                 DeflateParserState::StartBlock => (
@@ -84,7 +105,7 @@ impl DeflateParser {
                 ),
                 DeflateParserState::ContinueStaticBlock { last } => (last, 1),
                 DeflateParserState::Done => {
-                    return Ok(DeflateParserState::Done);
+                    return Ok(());
                 }
             };
 
@@ -128,9 +149,6 @@ impl DeflateParser {
                         &mut self.plain_text,
                         &mut self.bit_reader,
                         reader,
-                        &mut 0,
-                        &mut 0,
-                        &mut 0,
                     )
                     .context()?;
 
@@ -165,9 +183,6 @@ impl DeflateParser {
                         &mut self.plain_text,
                         &mut self.bit_reader,
                         reader,
-                        &mut 0,
-                        &mut 0,
-                        &mut 0,
                     )
                     .context()?;
 
@@ -192,6 +207,11 @@ impl DeflateParser {
             if last {
                 self.state = DeflateParserState::Done;
             }
+
+            *checkpoint = Some(Checkpoint {
+                bit_reader: self.bit_reader.clone(),
+                plain_text: self.plain_text.len(),
+            });
         }
     }
 }
@@ -202,9 +222,6 @@ fn decode_tokens<R: Read>(
     plain_text: &mut PlainText,
     bit_reader: &mut BitReader,
     reader: &mut R,
-    checkpoint_bytes_read: &mut usize,
-    checkpoint_plain_text: &mut usize,
-    checkpoint_tokens: &mut usize,
 ) -> Result<()> {
     let mut earliest_reference = i32::MAX;
     let mut cur_pos = 0;
@@ -253,13 +270,6 @@ fn decode_tokens<R: Read>(
 
             earliest_reference = std::cmp::min(earliest_reference, cur_pos - (dist as i32));
             cur_pos += len as i32;
-        }
-
-        // checkpoint a good byte aligned place to stop if we hit the end of the stream
-        if bit_reader.bits_left() == 0 {
-            *checkpoint_bytes_read = bit_reader.bytes_read() as usize;
-            *checkpoint_plain_text = plain_text.text().len();
-            *checkpoint_tokens = tokens.len();
         }
     }
 }
