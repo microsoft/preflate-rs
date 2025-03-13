@@ -43,14 +43,10 @@ impl DeflateWriter {
 
     pub fn encode_block(&mut self, block: &DeflateTokenBlock) -> Result<()> {
         match &block.block_type {
-            DeflateTokenBlockType::Stored {
-                uncompressed,
-                head_padding_bits: padding_bits,
-                ..
-            } => {
+            DeflateTokenBlockType::Stored { uncompressed, .. } => {
                 self.bitwriter.write(block.last as u32, 1, &mut self.output);
                 self.bitwriter.write(0, 2, &mut self.output);
-                self.bitwriter.pad(*padding_bits, &mut self.output);
+                self.bitwriter.pad(0, &mut self.output);
                 self.bitwriter.flush_whole_bytes(&mut self.output);
 
                 self.output
@@ -64,7 +60,6 @@ impl DeflateWriter {
                 tokens,
                 huffman_type,
                 partial,
-                tail_padding_bits,
             } => {
                 match huffman_type {
                     DeflateHuffmanType::Static => {
@@ -92,8 +87,10 @@ impl DeflateWriter {
                         self.encode_huffman(tokens, &huffman_writer, *partial);
                     }
                 }
-                if let Some(bits) = tail_padding_bits {
-                    self.bitwriter.pad(*bits, &mut self.output);
+
+                if block.last && (*partial == PartialBlock::End || *partial == PartialBlock::Whole)
+                {
+                    self.bitwriter.pad(0, &mut self.output);
                 }
             }
         }
@@ -188,7 +185,6 @@ fn roundtrip_deflate_writer() {
                 ],
                 huffman_type: DeflateHuffmanType::Static,
                 partial: PartialBlock::Whole,
-                tail_padding_bits: None,
             },
             last: false,
         },
@@ -201,14 +197,12 @@ fn roundtrip_deflate_writer() {
                 ],
                 huffman_type: DeflateHuffmanType::Static,
                 partial: PartialBlock::Whole,
-                tail_padding_bits: None,
             },
             last: false,
         },
         DeflateTokenBlock {
             block_type: DeflateTokenBlockType::Stored {
                 uncompressed: vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
-                head_padding_bits: 0,
             },
             last: false,
         },
@@ -222,7 +216,6 @@ fn roundtrip_deflate_writer() {
                     DeflateToken::Literal(3),
                 ],
                 partial: PartialBlock::Whole,
-                tail_padding_bits: Some(0),
                 huffman_type: DeflateHuffmanType::Static,
             },
             last: true,

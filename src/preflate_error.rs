@@ -43,8 +43,11 @@ pub enum ExitCode {
 
     InvalidParameter = 23,
 
-    // panic in rust code
+    /// panic in rust code
     AssertionFailure = 24,
+
+    /// Non-zero padding found in deflate, which we currently don't handle
+    NonZeroPadding = 25,
 }
 
 impl Display for ExitCode {

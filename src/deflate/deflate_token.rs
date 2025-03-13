@@ -97,15 +97,11 @@ pub enum DeflateTokenBlockType {
         tokens: Vec<DeflateToken>,
         huffman_type: DeflateHuffmanType,
 
-        /// If present, this is the value of bits to pad the end of the block with.
-        tail_padding_bits: Option<u8>,
-
         /// If we have partial blocks written, this will indicate if this block is the start, middle, or end of the partial block.
         partial: PartialBlock,
     },
     Stored {
         uncompressed: Vec<u8>,
-        head_padding_bits: u8,
     },
 }
 
@@ -115,42 +111,30 @@ impl std::fmt::Debug for DeflateTokenBlockType {
         match self {
             DeflateTokenBlockType::Huffman {
                 tokens,
-                tail_padding_bits,
                 partial,
                 huffman_type: DeflateHuffmanType::Static { .. },
             } => {
                 write!(
                     f,
-                    "StaticHuffman {{ tokens: len={}, partial={:?} tail={:?} }}",
+                    "StaticHuffman {{ tokens: len={}, partial={:?}  }}",
                     tokens.len(),
                     partial,
-                    tail_padding_bits
                 )
             }
             DeflateTokenBlockType::Huffman {
                 tokens,
-                tail_padding_bits,
                 partial,
                 huffman_type: DeflateHuffmanType::Dynamic { .. },
             } => {
                 write!(
                     f,
-                    "DynamicHuffman {{ tokens: len={}, partial={:?} tail={:?} }}",
+                    "DynamicHuffman {{ tokens: len={}, partial={:?}  }}",
                     tokens.len(),
                     partial,
-                    tail_padding_bits
                 )
             }
-            DeflateTokenBlockType::Stored {
-                uncompressed,
-                head_padding_bits: padding_bits,
-            } => {
-                write!(
-                    f,
-                    "Stored {{ uncompressed: len={}, padding_bits={} }}",
-                    uncompressed.len(),
-                    padding_bits
-                )
+            DeflateTokenBlockType::Stored { uncompressed } => {
+                write!(f, "Stored {{ uncompressed: len={} }}", uncompressed.len(),)
             }
         }
     }

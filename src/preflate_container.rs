@@ -7,7 +7,7 @@ use std::{
 
 use crate::{
     deflate_stream::{
-        recompress_deflate_stream, recompress_deflate_stream_pred, DeflateStreamState,
+        recompress_deflate_stream, recompress_deflate_stream_with_predictor, DeflateStreamState,
         ReconstructionData,
     },
     hash_algorithm::HashAlgorithm,
@@ -759,11 +759,10 @@ impl ProcessBuffer for RecreateFromChunksContext {
                     let r = ReconstructionData::read(&corrections)?;
                     let mut predictor = TokenPredictor::new(&r.parameters.predictor);
 
-                    self.result.extend(recompress_deflate_stream_pred(
+                    self.result.extend(recompress_deflate_stream_with_predictor(
                         &plain_text,
                         &r.corrections,
                         &mut predictor,
-                        *partial,
                     )?);
 
                     plain_text.shrink_to_dictionary();
@@ -802,11 +801,10 @@ impl ProcessBuffer for RecreateFromChunksContext {
                     let corrections: Vec<u8> = self.input.drain(0..correction_length).collect();
                     dictionary.append_iter(self.input.drain(0..uncompressed_length));
 
-                    self.result.extend(recompress_deflate_stream_pred(
+                    self.result.extend(recompress_deflate_stream_with_predictor(
                         dictionary,
                         &corrections,
                         predictor,
-                        partial,
                     )?);
 
                     if partial {
@@ -870,7 +868,7 @@ fn test_baseline_calc() {
 
     // these change if the compression algorithm is altered, update them
     assert_eq!(stats.overhead_bytes, 466);
-    assert_eq!(stats.zstd_compressed_size, 12445);
+    assert_eq!(stats.zstd_compressed_size, 12432);
     assert_eq!(stats.zstd_baseline_size, 13661);
 }
 
@@ -882,7 +880,7 @@ fn roundtrip_contexts() {
     let original = read_file("pptxplaintext.zip");
 
     let mut context =
-        ZstdCompressContext::new(PreflateCompressionContext::new(0, 100000), 9, false);
+        ZstdCompressContext::new(PreflateCompressionContext::new(0, 1000000), 9, false);
 
     let compressed = context.process_vec(&original, 997, 997).unwrap();
 

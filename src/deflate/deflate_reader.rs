@@ -124,6 +124,12 @@ impl DeflateParser {
             match mode {
                 0 => {
                     let padding_bits = self.bit_reader.read_padding_bits() as u8;
+                    if padding_bits != 0 {
+                        return err_exit_code(
+                            ExitCode::NonZeroPadding,
+                            "nonzero padding found before uncompressed block",
+                        );
+                    }
 
                     assert!(self.bit_reader.bits_left() == 0);
 
@@ -142,10 +148,7 @@ impl DeflateParser {
                     }
 
                     blocks.push(DeflateTokenBlock {
-                        block_type: DeflateTokenBlockType::Stored {
-                            uncompressed,
-                            head_padding_bits: padding_bits,
-                        },
+                        block_type: DeflateTokenBlockType::Stored { uncompressed },
                         last,
                     });
                 }
@@ -164,16 +167,18 @@ impl DeflateParser {
                     )
                     .context()?;
 
+                    if last && self.bit_reader.read_padding_bits() != 0 {
+                        return err_exit_code(
+                            ExitCode::NonZeroPadding,
+                            "nonzero padding found at end of stream",
+                        );
+                    }
+
                     blocks.push(DeflateTokenBlock {
                         block_type: DeflateTokenBlockType::Huffman {
                             tokens,
                             huffman_type: DeflateHuffmanType::Static,
                             partial: PartialBlock::Whole,
-                            tail_padding_bits: if last {
-                                Some(self.bit_reader.read_padding_bits())
-                            } else {
-                                None
-                            },
                         },
                         last,
                     });
@@ -202,11 +207,6 @@ impl DeflateParser {
                         block_type: DeflateTokenBlockType::Huffman {
                             tokens,
                             huffman_type: DeflateHuffmanType::Dynamic { huffman_encoding },
-                            tail_padding_bits: if last {
-                                Some(self.bit_reader.read_padding_bits())
-                            } else {
-                                None
-                            },
                             partial: PartialBlock::Whole,
                         },
                         last,
