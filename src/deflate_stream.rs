@@ -76,6 +76,10 @@ impl DeflateStreamState {
         &self.parser.plain_text()
     }
 
+    pub fn shrink_to_dictionary(&mut self) {
+        self.parser.shrink_to_dictionary();
+    }
+
     pub fn detach_plain_text(self) -> PlainText {
         self.parser.detach_plain_text()
     }

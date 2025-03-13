@@ -56,6 +56,10 @@ impl DeflateParser {
         self.state == DeflateParserState::Done
     }
 
+    pub fn shrink_to_dictionary(&mut self) {
+        self.plain_text.shrink_to_dictionary();
+    }
+
     pub fn plain_text(&self) -> &PlainText {
         &self.plain_text
     }
@@ -77,6 +81,12 @@ impl DeflateParser {
 
         let mut cursor = &mut Cursor::new(compressed_data);
 
+        let bits_left = self.bit_reader.bits_left();
+        if bits_left > 0 {
+            self.bit_reader.read_padding_bits();
+            self.bit_reader.get(8 - bits_left, cursor)?;
+        }
+
         let mut checkpoint = self.checkpoint(&cursor);
         match self.read_blocks_internal(&mut cursor, &mut blocks, &mut checkpoint) {
             Err(e) => {
@@ -89,8 +99,17 @@ impl DeflateParser {
                 if checkpoint.position == 0 || e.exit_code() != ExitCode::ShortRead {
                     return Err(e);
                 }
+
+                // if we had bits left to read, then we didn't compress the entire
+                // block, and save the bits for later
+                let compressed_size = if self.bit_reader.bits_left() > 0 {
+                    (checkpoint.position - 1) as usize
+                } else {
+                    checkpoint.position as usize
+                };
+
                 return Ok(DeflateContents {
-                    compressed_size: checkpoint.position as usize,
+                    compressed_size,
                     blocks,
                 });
             }

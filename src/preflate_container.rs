@@ -482,10 +482,12 @@ impl ProcessBuffer for PreflateCompressionContext {
                             write_literal_block(&self.content[..next.start], &mut self.result)?;
                         }
 
-                        if let Some(state) =
+                        if let Some(mut state) =
                             write_chunk_block(&mut self.result, chunk, &mut self.compression_stats)
                                 .context()?
                         {
+                            state.shrink_to_dictionary();
+
                             self.state = ChunkParseState::DeflateContinue(state);
                         }
 
@@ -499,25 +501,24 @@ impl ProcessBuffer for PreflateCompressionContext {
                 }
                 ChunkParseState::DeflateContinue(state) => {
                     // here we have a deflate stream that we need to continue
-                    if let Ok(res) = state.decompress(&self.content, true, 0) {
-                        self.result.write_all(&[!state.is_done() as u8])?;
+                    // right now we error out if the continuation cannot be processed
+                    let res = state.decompress(&self.content, true, 0).context()?;
+                    self.result.write_all(&[!state.is_done() as u8])?;
 
-                        write_varint(&mut self.result, res.corrections.len() as u32)?;
-                        write_varint(&mut self.result, state.plain_text().len() as u32)?;
+                    write_varint(&mut self.result, res.corrections.len() as u32)?;
+                    write_varint(&mut self.result, state.plain_text().len() as u32)?;
 
-                        self.result.write_all(&res.corrections)?;
-                        self.result.write_all(&state.plain_text().text())?;
+                    self.result.write_all(&res.corrections)?;
+                    self.result.write_all(&state.plain_text().text())?;
 
-                        self.compression_stats.overhead_bytes += res.corrections.len() as u64;
+                    self.compression_stats.overhead_bytes += res.corrections.len() as u64;
 
-                        self.content.drain(0..res.compressed_size);
+                    self.content.drain(0..res.compressed_size);
 
-                        if state.is_done() {
-                            self.state = ChunkParseState::Searching;
-                        }
-                    } else {
-                        // error decompressing, just switch to a literal
+                    if state.is_done() {
                         self.state = ChunkParseState::Searching;
+                    } else {
+                        state.shrink_to_dictionary();
                     }
                 }
             }
@@ -765,9 +766,9 @@ impl ProcessBuffer for RecreateFromChunksContext {
                         &mut predictor,
                     )?);
 
-                    plain_text.shrink_to_dictionary();
-
                     if *partial {
+                        plain_text.shrink_to_dictionary();
+
                         self.state =
                             DecompressionState::DeflateBlockContinue(plain_text, predictor);
                     } else {
@@ -880,7 +881,7 @@ fn roundtrip_contexts() {
     let original = read_file("pptxplaintext.zip");
 
     let mut context =
-        ZstdCompressContext::new(PreflateCompressionContext::new(0, 1000000), 9, false);
+        ZstdCompressContext::new(PreflateCompressionContext::new(0, 100000), 9, false);
 
     let compressed = context.process_vec(&original, 997, 997).unwrap();
 
