@@ -53,7 +53,11 @@ fn main() {
 
         let file = std::fs::read(entry).unwrap();
 
-        let mut ctx = ZstdCompressContext::new(PreflateCompressionContext::new(loglevel), 9, true);
+        let mut ctx = ZstdCompressContext::new(
+            PreflateCompressionContext::new(loglevel, 1024 * 1024),
+            9,
+            true,
+        );
 
         let mut preflatecompressed = Vec::with_capacity(file.len());
         if let Err(e) = ctx.copy_to_end(&mut Cursor::new(&file), &mut preflatecompressed) {

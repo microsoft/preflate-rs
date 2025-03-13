@@ -223,7 +223,7 @@ pub fn expand_zlib_chunks(
     compression_stats: &mut CompressionStats,
     write: &mut impl Write,
 ) -> Result<()> {
-    let mut context = PreflateCompressionContext::new(loglevel);
+    let mut context = PreflateCompressionContext::new(loglevel, 1024 * 1024);
     context
         .copy_to_end(&mut Cursor::new(compressed_data), write)
         .unwrap();
@@ -320,11 +320,29 @@ pub trait ProcessBuffer {
         max_output_write: usize,
     ) -> Result<bool>;
 
-    fn process_vec(&mut self, input: &[u8]) -> Result<Vec<u8>> {
+    fn process_vec(
+        &mut self,
+        input: &[u8],
+        read_chunk_size: usize,
+        write_chunk_size: usize,
+    ) -> Result<Vec<u8>> {
         let mut writer = Vec::new();
-        let mut done = self.process_buffer(input, true, &mut writer, usize::MAX)?;
+        let mut done = false;
+
+        let mut input_start_offset: usize = 0;
+
         while !done {
-            done = self.process_buffer(&[], true, &mut writer, usize::MAX)?;
+            let input_end_offset =
+                (input_start_offset.saturating_add(read_chunk_size)).min(input.len());
+
+            done = self.process_buffer(
+                &input[input_start_offset..input_end_offset],
+                input_start_offset == input.len(),
+                &mut writer,
+                write_chunk_size,
+            )?;
+
+            input_start_offset = input_end_offset;
         }
         Ok(writer)
     }
@@ -409,14 +427,14 @@ pub struct PreflateCompressionContext {
 }
 
 impl PreflateCompressionContext {
-    pub fn new(log_level: u32) -> Self {
+    pub fn new(log_level: u32, min_chunk_size: usize) -> Self {
         PreflateCompressionContext {
             content: Vec::new(),
             compression_stats: CompressionStats::default(),
             result: VecDeque::new(),
             log_level,
             input_complete: false,
-            min_chunk_size: 1024 * 1024,
+            min_chunk_size,
             state: ChunkParseState::Start,
         }
     }
@@ -528,6 +546,15 @@ impl ProcessBuffer for PreflateCompressionContext {
 #[cfg(test)]
 pub struct NopProcessBuffer {
     result: VecDeque<u8>,
+}
+
+#[cfg(test)]
+impl NopProcessBuffer {
+    pub fn new() -> Self {
+        NopProcessBuffer {
+            result: VecDeque::new(),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -832,9 +859,10 @@ fn test_baseline_calc() {
 
     let v = read_file("samplezip.zip");
 
-    let mut context = ZstdCompressContext::new(PreflateCompressionContext::new(0), 9, true);
+    let mut context =
+        ZstdCompressContext::new(PreflateCompressionContext::new(0, 1024 * 1024), 9, true);
 
-    let _r = context.process_vec(&v).unwrap();
+    let _r = context.process_vec(&v, usize::MAX, usize::MAX).unwrap();
 
     let stats = context.stats();
 
@@ -848,51 +876,27 @@ fn test_baseline_calc() {
 
 #[test]
 fn roundtrip_contexts() {
-    use crate::utils::read_file;
+    use crate::utils::{assert_eq_array, read_file};
     use crate::zstd_compression::{ZstdCompressContext, ZstdDecompressContext};
 
-    let v = read_file("samplezip.zip");
+    let original = read_file("pptxplaintext.zip");
 
-    let mut context = ZstdCompressContext::new(PreflateCompressionContext::new(0), 9, false);
+    let mut context =
+        ZstdCompressContext::new(PreflateCompressionContext::new(0, 100000), 9, false);
 
-    let mut buffer = Vec::new();
-    let mut pos = 0;
-    loop {
-        let amount_to_write = std::cmp::min(1024, v.len() - pos);
-        let input = &v[pos..pos + amount_to_write];
-        pos += amount_to_write;
-
-        let done = context
-            .process_buffer(input, pos == v.len(), &mut buffer, 333)
-            .unwrap();
-        if done {
-            break;
-        }
-    }
+    let compressed = context.process_vec(&original, 997, 997).unwrap();
 
     let stats = context.stats();
-    println!("stats: {:?} buffer:{}", stats, buffer.len());
+    println!("stats: {:?} buffer:{}", stats, compressed.len());
     println!(
         "zstd baseline size: {} -> comp {}",
         stats.zstd_baseline_size,
-        buffer.len()
+        compressed.len()
     );
 
     let mut context = ZstdDecompressContext::new(RecreateFromChunksContext::new(usize::MAX));
-    let mut buffer2 = Vec::new();
-    let mut pos = 0;
-    loop {
-        let amount_to_write = std::cmp::min(1024, buffer.len() - pos);
-        let input = &buffer[pos..pos + amount_to_write];
-        pos += amount_to_write;
 
-        let done = context
-            .process_buffer(input, pos == buffer.len(), &mut buffer2, 517)
-            .unwrap();
-        if done {
-            break;
-        }
-    }
+    let recreated = context.process_vec(&compressed, 997, 997).unwrap();
 
-    assert!(v == buffer2);
+    assert_eq_array(&original, &recreated);
 }

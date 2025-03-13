@@ -195,9 +195,13 @@ pub fn compress_zstd(
     loglevel: u32,
     compression_stats: &mut CompressionStats,
 ) -> Result<Vec<u8>> {
-    let mut ctx = ZstdCompressContext::new(PreflateCompressionContext::new(loglevel), 9, false);
+    let mut ctx = ZstdCompressContext::new(
+        PreflateCompressionContext::new(loglevel, 1024 * 1024),
+        9,
+        false,
+    );
 
-    let r = ctx.process_vec(zlib_compressed_data)?;
+    let r = ctx.process_vec(zlib_compressed_data, usize::MAX, usize::MAX)?;
 
     *compression_stats = ctx.stats();
 
@@ -211,7 +215,7 @@ pub fn decompress_zstd(compressed_data: &[u8], capacity: usize) -> Result<Vec<u8
         RecreateFromChunksContext::new(capacity),
     );
 
-    Ok(ctx.process_vec(compressed_data)?)
+    Ok(ctx.process_vec(compressed_data, usize::MAX, usize::MAX)?)
 }
 
 #[test]
@@ -230,4 +234,22 @@ fn verify_zip_compress_zstd() {
         v.len(),
         compressed.len()
     );
+}
+
+/// tests zstd compression buffer processing without involving preflate code
+#[test]
+fn roundtrip_zstd_only_contexts() {
+    use crate::preflate_container::NopProcessBuffer;
+    use crate::utils::{assert_eq_array, read_file};
+    use crate::zstd_compression::{ZstdCompressContext, ZstdDecompressContext};
+
+    let original = read_file("samplezip.zip");
+
+    let mut context = ZstdCompressContext::new(NopProcessBuffer::new(), 9, false);
+    let compressed = context.process_vec(&original, 997, 997).unwrap();
+
+    let mut context = ZstdDecompressContext::new(NopProcessBuffer::new());
+    let recreated = context.process_vec(&compressed, 997, 997).unwrap();
+
+    assert_eq_array(&original, &recreated);
 }

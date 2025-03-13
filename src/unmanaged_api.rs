@@ -75,7 +75,11 @@ pub unsafe extern "C" fn create_compression_context(flags: u32) -> *mut std::ffi
         let test_baseline = (flags & 1) != 0;
         let context = Box::new((
             12345678u32,
-            CompressionContext::new(PreflateCompressionContext::new(0), 9, test_baseline),
+            CompressionContext::new(
+                PreflateCompressionContext::new(0, 1024 * 1024),
+                9,
+                test_baseline,
+            ),
         ));
         Ok(Box::into_raw(context) as *mut std::ffi::c_void)
     }) {
