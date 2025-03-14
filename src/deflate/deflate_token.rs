@@ -32,11 +32,32 @@ impl DeflateToken {
 ///
 /// the irregular258 field is used to indicate that the 258 length code was used but in a
 /// suboptimal way (the RFC allows for two different ways to encode 258)
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[derive(Copy, Clone, Eq, PartialEq)]
 pub struct DeflateTokenReference {
     len: u8,
     dist: u16,
     irregular258: bool,
+}
+
+impl std::fmt::Debug for DeflateTokenReference {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.irregular258 {
+            write!(
+                f,
+                "DeflateTokenReference {{ len: {}, dist: {}, irregular258: {} }}",
+                self.len(),
+                self.dist(),
+                self.irregular258
+            )
+        } else {
+            write!(
+                f,
+                "DeflateTokenReference {{ len: {}, dist: {} }}",
+                self.len(),
+                self.dist()
+            )
+        }
+    }
 }
 
 impl DeflateTokenReference {

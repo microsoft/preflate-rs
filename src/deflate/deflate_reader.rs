@@ -96,7 +96,7 @@ impl DeflateParser {
 
                 // if nothing was successfully read or we didn't
                 // get the expected error, then just exit
-                if checkpoint.position == 0 || e.exit_code() != ExitCode::ShortRead {
+                if checkpoint.position <= 1 || e.exit_code() != ExitCode::ShortRead {
                     return Err(e);
                 }
 
@@ -348,6 +348,7 @@ fn test_partial_read() {
     while !deflate_parser.is_done() {
         match deflate_parser.parse(&d[start_offset..end_offset]) {
             Ok(mut dc) => {
+                assert!(dc.compressed_size != 0);
                 println!(
                     "segment blocks={} plaintext={} comp={}",
                     dc.blocks.len(),

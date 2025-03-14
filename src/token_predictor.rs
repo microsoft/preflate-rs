@@ -24,7 +24,7 @@ use crate::{
     hash_algorithm::HashAlgorithm,
     hash_chain_holder::{new_hash_chain_holder, HashChainHolder, MatchResult},
     preflate_error::{err_exit_code, AddContext, ExitCode, Result},
-    preflate_input::PreflateInput,
+    preflate_input::{PlainText, PreflateInput},
     statistical_codec::{CodecCorrection, PredictionDecoder, PredictionEncoder},
     tree_predictor::{predict_tree_for_block, recreate_tree_for_block},
 };
@@ -483,7 +483,7 @@ impl TokenPredictor {
         Ok(b)
     }
 
-    fn predict_token(&mut self, input: &mut PreflateInput) -> DeflateToken {
+    fn predict_token(&mut self, input: &PreflateInput) -> DeflateToken {
         if input.pos() == 0 || input.remaining() < MIN_MATCH {
             return DeflateToken::Literal(input.cur_char(0));
         }
@@ -607,5 +607,130 @@ impl TokenPredictor {
         }
 
         self.current_token_count += 1;
+    }
+}
+
+#[cfg(test)]
+fn zlib_level_1_params() -> TokenPredictorParameters {
+    TokenPredictorParameters {
+        matches_to_start_detected: false,
+        very_far_matches_detected: false,
+        window_bits: 15,
+        strategy: PreflateStrategy::Default,
+        nice_length: 8,
+        add_policy: DictionaryAddPolicy::AddFirst(4),
+        max_token_count: 16383,
+        zlib_compatible: true,
+        max_dist_3_matches: 32488,
+        matching_type: MatchingType::Greedy,
+        max_chain: 4,
+        min_len: 3,
+        hash_algorithm: HashAlgorithm::Zlib {
+            hash_mask: 32767,
+            hash_shift: 5,
+        },
+    }
+}
+
+/// test predictor with a standard zlib match that doesn't need any correction
+#[test]
+pub fn test_predictor_block_perfect() {
+    use crate::deflate::deflate_reader;
+    use crate::preflate_input::PreflateInput;
+    use crate::statistical_codec::AssertDefaultOnlyEncoder;
+
+    let compressed_data = crate::utils::read_file("compressed_zlib_level1.deflate");
+
+    let (contents, plain_text) = deflate_reader::parse_deflate_whole(&compressed_data).unwrap();
+
+    let mut predictor = TokenPredictor::new(&zlib_level_1_params());
+
+    // this codec doesn't do anything other than say default value for everything
+    let mut codec = AssertDefaultOnlyEncoder {};
+
+    let mut input = PreflateInput::new(&plain_text);
+
+    for i in 0..contents.blocks.len() {
+        predictor
+            .predict_block(&contents.blocks[i], &mut codec, &mut input)
+            .unwrap();
+    }
+}
+
+/// test predictor only calleing PredictToken (excludes block prediction)
+#[test]
+pub fn test_predictor_token_only() {
+    use crate::deflate::deflate_reader;
+    use crate::preflate_input::PreflateInput;
+
+    let compressed_data = crate::utils::read_file("compressed_zlib_level1.deflate");
+
+    let (contents, plain_text) = deflate_reader::parse_deflate_whole(&compressed_data).unwrap();
+
+    let mut predictor = TokenPredictor::new(&zlib_level_1_params());
+
+    let mut input = PreflateInput::new(&plain_text);
+
+    for i in 0..contents.blocks.len() {
+        let b = &contents.blocks[i];
+        match &b.block_type {
+            DeflateTokenBlockType::Huffman { tokens, .. } => {
+                for i in 0..tokens.len() {
+                    assert_eq!(predictor.predict_token(&mut input), tokens[i]);
+                    predictor.commit_token(&tokens[i], &mut input);
+                }
+            }
+            _ => {
+                panic!("unexpected block type")
+            }
+        }
+    }
+}
+
+/// test building plain_text incrementally
+#[test]
+pub fn test_predictor_incremental() {
+    use crate::deflate::deflate_reader;
+    use crate::preflate_input::PreflateInput;
+
+    let compressed_data = crate::utils::read_file("compressed_zlib_level1.deflate");
+
+    let (contents, _plain_text_original) =
+        deflate_reader::parse_deflate_whole(&compressed_data).unwrap();
+
+    let mut predictor = TokenPredictor::new(&zlib_level_1_params());
+
+    let mut plain_text = PlainText::new();
+
+    for i in 0..contents.blocks.len() {
+        // build th plain text from the block
+        println!("block {}", i);
+        let b = &contents.blocks[i];
+        match &b.block_type {
+            DeflateTokenBlockType::Huffman { tokens, .. } => {
+                for i in 0..tokens.len() {
+                    match tokens[i] {
+                        DeflateToken::Literal(l) => {
+                            plain_text.append(&[l]);
+                        }
+                        DeflateToken::Reference(r) => {
+                            plain_text.append_reference(r.dist(), r.len()).unwrap();
+                        }
+                    }
+                }
+
+                let mut input = PreflateInput::new(&plain_text);
+
+                for i in 0..tokens.len() {
+                    assert_eq!(predictor.predict_token(&input), tokens[i], "token {}", i);
+                    predictor.commit_token(&tokens[i], &mut input);
+                }
+            }
+            _ => {
+                panic!("unexpected block type")
+            }
+        }
+
+        plain_text.shrink_to_dictionary();
     }
 }

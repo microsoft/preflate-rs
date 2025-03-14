@@ -17,6 +17,9 @@ pub struct PlainText {
 
     /// how long the prefix is, after this the data starts
     prefix_length: i32,
+
+    /// the current position with regard to the shrinking dictionary
+    pos_offset: i32,
 }
 
 impl std::fmt::Debug for PlainText {
@@ -35,6 +38,7 @@ impl Clone for PlainText {
         Self {
             data: self.data.clone(),
             prefix_length: self.prefix_length,
+            pos_offset: self.pos_offset,
         }
     }
 }
@@ -44,15 +48,19 @@ impl PlainText {
         Self {
             data: Vec::new(),
             prefix_length: 0,
+            pos_offset: 0,
         }
     }
 
     /// returns the dictionary to be used as a prefix for the next compression, which
     /// is a maximum of 32KB in size.
     pub fn shrink_to_dictionary(&mut self) {
+        //self.prefix_length = self.data.len() as i32;
+        self.pos_offset += (self.data.len() as i32 - self.prefix_length) as i32;
+
         let amount_to_keep = self.data.len().min(32768);
 
-        self.data.drain(self.data.len() - amount_to_keep..);
+        self.data.drain(..self.data.len() - amount_to_keep);
         self.prefix_length = self.data.len() as i32;
     }
 
@@ -60,6 +68,7 @@ impl PlainText {
         Self {
             data,
             prefix_length: 0,
+            pos_offset: 0,
         }
     }
 
@@ -128,40 +137,76 @@ pub struct PreflateInput<'a> {
 
 impl<'a> PreflateInput<'a> {
     pub fn new(v: &'a PlainText) -> Self {
-        PreflateInput {
-            data: v,
-            pos: v.prefix_length,
-        }
+        PreflateInput { data: v, pos: 0 }
     }
 
     #[inline(always)]
     pub fn pos(&self) -> u32 {
-        (self.pos - self.data.prefix_length) as u32
+        (self.pos + self.data.pos_offset) as u32
     }
 
     #[inline(always)]
     pub fn size(&self) -> u32 {
-        self.data.text().len() as u32
+        (self.data.data.len() as i32 - self.data.prefix_length + self.data.pos_offset) as u32
     }
 
     #[inline(always)]
     pub fn cur_chars(&self, offset: i32) -> &[u8] {
-        &self.data.data[(self.pos + offset) as usize..]
+        &self.data.data[(self.pos + self.data.prefix_length + offset) as usize..]
     }
 
     #[inline(always)]
     pub fn cur_char(&self, offset: i32) -> u8 {
-        self.data.data[(self.pos + offset) as usize]
+        self.data.data[(self.pos + self.data.prefix_length + offset) as usize]
     }
 
     #[inline(always)]
     pub fn advance(&mut self, l: u32) {
         self.pos += l as i32;
-        debug_assert!(self.pos <= self.data.data.len() as i32);
+        debug_assert!((self.pos + self.data.prefix_length) <= self.data.data.len() as i32);
     }
 
     #[inline(always)]
     pub fn remaining(&self) -> u32 {
-        self.data.data.len() as u32 - self.pos as u32
+        (self.data.data.len() as i32 - self.pos - self.data.prefix_length) as u32
     }
+}
+
+#[test]
+fn test_length_behavior() {
+    let mut data = PlainText::new_with_data(vec![0; 10000]);
+
+    let mut input = PreflateInput::new(&data);
+    assert_eq!(input.size(), 10000);
+    assert_eq!(input.pos(), 0);
+    assert_eq!(input.remaining(), 10000);
+
+    input.advance(1000);
+    assert_eq!(input.size(), 10000);
+    assert_eq!(input.pos(), 1000);
+    assert_eq!(input.remaining(), 9000);
+
+    input.advance(9000);
+    assert_eq!(input.size(), 10000);
+    assert_eq!(input.pos(), 10000);
+    assert_eq!(input.remaining(), 0);
+
+    data.shrink_to_dictionary();
+    data.append(&[1; 10000]);
+
+    let mut input = PreflateInput::new(&data);
+    assert_eq!(input.size(), 20000);
+    assert_eq!(input.pos(), 10000);
+    assert_eq!(input.remaining(), 10000);
+    assert_eq!(input.cur_char(0), 1);
+    assert_eq!(input.cur_char(-1), 0);
+    assert_eq!(input.cur_char(-1000), 0);
+
+    input.advance(1000);
+    assert_eq!(input.size(), 20000);
+    assert_eq!(input.pos(), 11000);
+    assert_eq!(input.remaining(), 9000);
+
+    assert_eq!(input.cur_char(-1), 1);
+    assert_eq!(input.cur_char(-1000), 1);
 }
