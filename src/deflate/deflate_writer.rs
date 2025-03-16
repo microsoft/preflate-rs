@@ -240,36 +240,17 @@ fn roundtrip_deflate_writer() {
 /// rountrips all deflate files in the sample directory
 #[test]
 fn roundtrip_full_file() {
-    use std::fs::File;
-    use std::io::Read;
-    use std::path::Path;
+    crate::utils::test_on_all_deflate_files(|buffer| {
+        let (r, _plain_text) = super::deflate_reader::parse_deflate_whole(&buffer).unwrap();
 
-    use super::deflate_reader::parse_deflate_whole;
+        let output = write_deflate_blocks(&r.blocks);
 
-    let searchpath = Path::new(env!("CARGO_MANIFEST_DIR")).join("samples");
-
-    for entry in std::fs::read_dir(searchpath).unwrap() {
-        let entry = entry.unwrap();
-        let path = entry.path();
-
-        if path.extension().is_some() && path.extension().unwrap() == "deflate" {
-            println!("Testing {:?}", path);
-
-            let mut file = File::open(&path).unwrap();
-            let mut buffer = Vec::new();
-            file.read_to_end(&mut buffer).unwrap();
-
-            let (r, _plain_text) = parse_deflate_whole(&buffer).unwrap();
-
-            let output = write_deflate_blocks(&r.blocks);
-
-            if r.compressed_size != output.len() || buffer[0..r.compressed_size] != output[..] {
-                println!("mismatch");
-            }
-            //assert_eq!(buffer.len(), output.len());
-            //assert_eq!(buffer, output);
+        if r.compressed_size != output.len() || buffer[0..r.compressed_size] != output[..] {
+            println!("mismatch");
         }
-    }
+        //assert_eq!(buffer.len(), output.len());
+        //assert_eq!(buffer, output);
+    });
 }
 
 #[cfg(test)]

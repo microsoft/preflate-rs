@@ -26,8 +26,9 @@ impl std::fmt::Debug for PlainText {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "PlainText {{ prefix_length: {}, data: len={} }}",
+            "PlainText {{ prefix_length: {}, pos_offset:{} data: len={} }}",
             self.prefix_length,
+            self.pos_offset,
             self.data.len()
         )
     }
@@ -79,6 +80,10 @@ impl PlainText {
     /// the data excluding the prefix
     pub fn text(&self) -> &[u8] {
         &self.data[self.prefix_length as usize..]
+    }
+
+    pub fn prefix(&self) -> &[u8] {
+        &self.data[0..self.prefix_length as usize]
     }
 
     pub fn truncate(&mut self, len: usize) {

@@ -101,6 +101,10 @@ impl DeflateStreamState {
         if let Some(predictor) = &mut self.predictor {
             let mut input = PreflateInput::new(&self.parser.plain_text());
 
+            // we are missing the last couple hashes in the dictionary since we didn't
+            // have the full plaintext yet.
+            predictor.add_missing_previous_hash(&input);
+
             predict_blocks(&contents.blocks, predictor, &mut cabac_encoder, &mut input)?;
 
             cabac_encoder.finish();
@@ -634,9 +638,45 @@ fn verify_miniz() {
     do_analyze(None, &read_file("compressed_minizoxide_level1.deflate"));
 }
 
-// this is the deflate stream extracted out of the
+/// this is the deflate stream extracted out of the png file (minus the idat wrapper)
 #[test]
 fn verify_png_deflate() {
     use crate::utils::read_file;
     do_analyze(None, &read_file("treegdi.extract.deflate"));
+}
+
+#[cfg(test)]
+fn analyze_compressed_data_verify_incremental(compressed_data: &[u8]) {
+    let mut start_offset = 0;
+    let mut end_offset = 1000;
+
+    let mut stream = DeflateStreamState::new();
+
+    let mut corrections = Vec::new();
+    while !stream.is_done() {
+        let result = stream.decompress(&compressed_data[start_offset..end_offset], false, 0);
+        match result {
+            Ok(r) => {
+                println!("chunk start={} size={}", start_offset, r.compressed_size);
+                start_offset += r.compressed_size;
+                end_offset = (start_offset + 1000).min(compressed_data.len());
+
+                corrections.push(r.corrections);
+
+                stream.shrink_to_dictionary();
+            }
+            Err(e) => {
+                assert_eq!(e.exit_code(), ExitCode::ShortRead);
+                end_offset = (end_offset + 1000).min(compressed_data.len());
+            }
+        }
+    }
+}
+
+/// test partial reading reading
+#[test]
+fn verify_partial_blocks() {
+    crate::utils::test_on_all_deflate_files(|buffer| {
+        analyze_compressed_data_verify_incremental(buffer);
+    });
 }

@@ -98,6 +98,13 @@ impl TokenPredictor {
         c
     }
 
+    /// in the case where we are processing a continuation, we need to
+    /// add the missing hashes of the entries that were at the end of the
+    /// input so it can be found.
+    pub fn add_missing_previous_hash(&mut self, input: &PreflateInput) {
+        self.state.add_missing_previous_hash(input);
+    }
+
     pub fn predict_block<D: PredictionEncoder>(
         &mut self,
         block: &DeflateTokenBlock,
@@ -695,16 +702,18 @@ pub fn test_predictor_incremental() {
 
     let compressed_data = crate::utils::read_file("compressed_zlib_level1.deflate");
 
-    let (contents, _plain_text_original) =
+    let (contents, plain_text_original) =
         deflate_reader::parse_deflate_whole(&compressed_data).unwrap();
 
     let mut predictor = TokenPredictor::new(&zlib_level_1_params());
 
     let mut plain_text = PlainText::new();
 
+    let mut start_pos = 0;
+
     for i in 0..contents.blocks.len() {
         // build th plain text from the block
-        println!("block {}", i);
+        println!("block {}, plaintext {:?}", i, &plain_text);
         let b = &contents.blocks[i];
         match &b.block_type {
             DeflateTokenBlockType::Huffman { tokens, .. } => {
@@ -719,10 +728,29 @@ pub fn test_predictor_incremental() {
                     }
                 }
 
+                crate::utils::assert_eq_array(
+                    plain_text.prefix(),
+                    &plain_text_original.text()[start_pos - plain_text.prefix().len()..start_pos],
+                );
+                crate::utils::assert_eq_array(
+                    plain_text.text(),
+                    &plain_text_original.text()[start_pos..start_pos + plain_text.len()],
+                );
+
                 let mut input = PreflateInput::new(&plain_text);
 
+                if plain_text.prefix().len() > 0 {
+                    predictor.add_missing_previous_hash(&input);
+                }
+
                 for i in 0..tokens.len() {
-                    assert_eq!(predictor.predict_token(&input), tokens[i], "token {}", i);
+                    assert_eq!(
+                        predictor.predict_token(&input),
+                        tokens[i],
+                        "token {} input {}",
+                        i,
+                        input.pos() as usize - start_pos
+                    );
                     predictor.commit_token(&tokens[i], &mut input);
                 }
             }
@@ -730,6 +758,8 @@ pub fn test_predictor_incremental() {
                 panic!("unexpected block type")
             }
         }
+
+        start_pos += plain_text.len() as usize;
 
         plain_text.shrink_to_dictionary();
     }

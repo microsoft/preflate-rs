@@ -120,6 +120,10 @@ pub trait HashChainHolder {
     /// get the new distance based on the number of hops
     fn hop_match(&self, len: u32, hops: u32, input: &PreflateInput) -> Result<u32>;
 
+    /// when we continue compression on a block, we won't have added the last
+    /// n - 1 hashes to the dictionary. Add them here.
+    fn add_missing_previous_hash(&mut self, input: &PreflateInput);
+
     /// debugging function to verify that the hash chain is correct
     #[allow(dead_code)]
     fn verify_hash(&self, _dist: Option<DeflateTokenReference>);
@@ -161,6 +165,8 @@ impl HashChainHolder for () {
     fn hop_match(&self, _len: u32, _hops: u32, _input: &PreflateInput) -> Result<u32> {
         unimplemented!()
     }
+
+    fn add_missing_previous_hash(&mut self, input: &PreflateInput) {}
 
     fn verify_hash(&self, _dist: Option<DeflateTokenReference>) {}
 
@@ -274,6 +280,17 @@ impl<H: HashChain> HashChainHolder for HashChainHolderImpl<H> {
         }
 
         err_exit_code(ExitCode::RecompressFailed, "no match found")
+    }
+
+    /// adds the hashes that couldn't be added because we were at the boundary.
+    fn add_missing_previous_hash(&mut self, input: &PreflateInput) {
+        let length = H::get_num_hash_bytes() as u32 - 1;
+
+        self.hash.update_hash(
+            input.cur_chars(-(length as i32)),
+            input.pos() - length,
+            length,
+        );
     }
 
     /// debugging function to verify that the hash chain is correct

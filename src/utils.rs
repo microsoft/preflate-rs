@@ -88,3 +88,25 @@ pub fn assert_eq_array<T: PartialEq + std::fmt::Debug>(a: &[T], b: &[T]) {
         }
     }
 }
+
+#[cfg(test)]
+pub fn test_on_all_deflate_files(f: impl Fn(&[u8])) {
+    use std::io::Read;
+
+    let searchpath = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("samples");
+
+    for entry in std::fs::read_dir(searchpath).unwrap() {
+        let entry = entry.unwrap();
+        let path = entry.path();
+
+        if path.extension().is_some() && path.extension().unwrap() == "deflate" {
+            println!("Testing {:?}", path);
+
+            let mut file = std::fs::File::open(&path).unwrap();
+            let mut buffer = Vec::new();
+            file.read_to_end(&mut buffer).unwrap();
+
+            f(&buffer);
+        }
+    }
+}

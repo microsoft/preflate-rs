@@ -81,12 +81,13 @@ impl HashTable {
         hash: H,
         chars: &[u8],
         mut pos: InternalPosition,
-        length: u32,
+        mut length: u32,
     ) {
         debug_assert!(length as usize <= chars.len());
+
         if length as usize + H::NUM_HASH_BYTES - 1 >= chars.len() {
-            // reached on of the stream so there will be no more matches
-            return;
+            // if we reached the end of the buffer, hash only while we have characters left
+            length = chars.len().saturating_sub(H::NUM_HASH_BYTES - 1) as u32;
         }
 
         for i in 0..length {

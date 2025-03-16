@@ -81,22 +81,30 @@ impl DeflateParser {
 
         let mut cursor = &mut Cursor::new(compressed_data);
 
+        // our first checkpoint is right at the beginning so that if we get to the
+        // end of the stream before seeing a whole block, we just revert back to
+        // the beginning to try again with more data.
+        let mut checkpoint = self.checkpoint(&cursor);
+
         let bits_left = self.bit_reader.bits_left();
         if bits_left > 0 {
+            // get the bitreader to read the first byte since we are
+            // carrying over state from the previous block but don't have
+            // the new bits to read from this block.
             self.bit_reader.read_padding_bits();
             self.bit_reader.get(8 - bits_left, cursor)?;
         }
 
-        let mut checkpoint = self.checkpoint(&cursor);
         match self.read_blocks_internal(&mut cursor, &mut blocks, &mut checkpoint) {
             Err(e) => {
-                // reset back to known good checkpoint
+                // reset back to known good checkpoint before returning the error.
+                // this allows callers to try again once they have more data
                 self.bit_reader = checkpoint.bit_reader;
                 self.plain_text.truncate(checkpoint.plain_text);
 
                 // if nothing was successfully read or we didn't
-                // get the expected error, then just exit
-                if checkpoint.position <= 1 || e.exit_code() != ExitCode::ShortRead {
+                // get the out-of-data error, then just exit
+                if checkpoint.position == 0 || e.exit_code() != ExitCode::ShortRead {
                     return Err(e);
                 }
 
@@ -334,9 +342,13 @@ pub fn parse_deflate_whole(compressed_data: &[u8]) -> Result<(DeflateContents, P
 /// tests the partial read which allows for blocks to be read incrementally
 #[test]
 fn test_partial_read() {
-    use crate::utils::{assert_eq_array, read_file};
+    test_partial_read_for_buffer(&crate::utils::read_file("compressed_zlib_level1.deflate"));
+}
 
-    let d = read_file("compressed_zlib_level1.deflate");
+#[cfg(test)]
+pub fn test_partial_read_for_buffer(d: &[u8]) {
+    use crate::utils::assert_eq_array;
+
     let (complete, _plain_text_complete) = parse_deflate_whole(&d).unwrap();
 
     let mut start_offset = 0;
@@ -356,9 +368,12 @@ fn test_partial_read() {
                     dc.compressed_size
                 );
                 allblocks.append(&mut dc.blocks);
+
+                // advance by the amount of data we just read
                 start_offset += dc.compressed_size;
 
-                end_offset = (start_offset + 1).min(d.len());
+                // end offset plus a bit
+                end_offset = (start_offset + 10977).min(d.len());
             }
             Err(e) => {
                 assert!(
@@ -367,9 +382,9 @@ fn test_partial_read() {
                     e
                 );
 
-                // get another 997 bytes if this buffer was not decodable
                 assert_eq!(e.exit_code(), ExitCode::ShortRead);
-                end_offset = (end_offset + 997).min(d.len());
+                // get some more this buffer was readable due to lack of data
+                end_offset = (end_offset + 10997).min(d.len());
             }
         }
     }
@@ -378,7 +393,9 @@ fn test_partial_read() {
 
     let reconstruct = crate::deflate::deflate_writer::write_deflate_blocks(&allblocks);
 
-    assert_eq_array(&reconstruct, &d);
+    // data we reconstruct should be the same, minus if there was extra data passed
+    // start_offset that we dedidn't decode
+    assert_eq_array(&reconstruct, &d[..start_offset]);
 }
 
 /// grabs all the tokens and put them in a single buffer. This
