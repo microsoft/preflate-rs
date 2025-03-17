@@ -4,8 +4,6 @@
  *  This software incorporates material from third parties. See NOTICE.txt for details.
  *--------------------------------------------------------------------------------------------*/
 
-use bitcode::{Decode, Encode};
-
 use crate::{
     bit_helper::DebugHash,
     deflate::{
@@ -18,13 +16,11 @@ use crate::{
         huffman_calc::HufftreeBitCalc,
     },
     estimator::{
-        add_policy_estimator::DictionaryAddPolicy, preflate_parameter_estimator::PreflateStrategy,
-        preflate_parse_config::MatchingType,
+        preflate_parameter_estimator::TokenPredictorParameters, preflate_parse_config::MatchingType,
     },
-    hash_algorithm::HashAlgorithm,
     hash_chain_holder::{new_hash_chain_holder, HashChainHolder, MatchResult},
     preflate_error::{err_exit_code, AddContext, ExitCode, Result},
-    preflate_input::{PlainText, PreflateInput},
+    preflate_input::PreflateInput,
     statistical_codec::{CodecCorrection, PredictionDecoder, PredictionEncoder},
     tree_predictor::{predict_tree_for_block, recreate_tree_for_block},
 };
@@ -48,34 +44,6 @@ impl std::fmt::Debug for TokenPredictor {
             .field("max_token_count", &self.max_token_count)
             .finish()
     }
-}
-
-#[derive(Encode, Decode, Debug, Copy, Clone, Eq, PartialEq)]
-pub struct TokenPredictorParameters {
-    /// Zlib does not match to first byte of a file in order to reserve 0 for the end of chain
-    pub matches_to_start_detected: bool,
-
-    /// if there are matches that have a distance larger than window_size - MAX_MATCH.
-    /// Zlib does not allow these.
-    pub very_far_matches_detected: bool,
-    pub window_bits: u32,
-
-    pub strategy: PreflateStrategy,
-    pub nice_length: u32,
-
-    /// if something, then we use the "fast" compressor, which only adds smaller substrings
-    /// to the dictionary
-    pub add_policy: DictionaryAddPolicy,
-
-    pub max_token_count: u16,
-
-    pub zlib_compatible: bool,
-    pub max_dist_3_matches: u32,
-    pub matching_type: MatchingType,
-    pub max_chain: u32,
-    pub min_len: u32,
-
-    pub hash_algorithm: HashAlgorithm,
 }
 
 impl TokenPredictor {
@@ -619,6 +587,10 @@ impl TokenPredictor {
 
 #[cfg(test)]
 fn zlib_level_1_params() -> TokenPredictorParameters {
+    use crate::estimator::add_policy_estimator::DictionaryAddPolicy;
+    use crate::estimator::preflate_parameter_estimator::{BlockTypeStrategy, PreflateStrategy};
+    use crate::hash_algorithm::HashAlgorithm;
+
     TokenPredictorParameters {
         matches_to_start_detected: false,
         very_far_matches_detected: false,
@@ -632,6 +604,7 @@ fn zlib_level_1_params() -> TokenPredictorParameters {
         matching_type: MatchingType::Greedy,
         max_chain: 4,
         min_len: 3,
+        block_type_strategy: BlockTypeStrategy::Dynamic,
         hash_algorithm: HashAlgorithm::Zlib {
             hash_mask: 32767,
             hash_shift: 5,
@@ -698,7 +671,7 @@ pub fn test_predictor_token_only() {
 #[test]
 pub fn test_predictor_incremental() {
     use crate::deflate::deflate_reader;
-    use crate::preflate_input::PreflateInput;
+    use crate::preflate_input::{PlainText, PreflateInput};
 
     let compressed_data = crate::utils::read_file("compressed_zlib_level1.deflate");
 

@@ -105,7 +105,7 @@ fn write_chunk_block(
             result.write_all(&state.plain_text().text())?;
 
             stats.overhead_bytes += chunk.corrections.len() as u64;
-            stats.hash_algorithm = parameters.predictor.hash_algorithm;
+            stats.hash_algorithm = parameters.hash_algorithm;
 
             if !state.is_done() {
                 return Ok(Some(state));
@@ -122,7 +122,7 @@ fn write_chunk_block(
             result.write_all(&plain_text.text())?;
 
             stats.overhead_bytes += chunk.corrections.len() as u64;
-            stats.hash_algorithm = parameters.predictor.hash_algorithm;
+            stats.hash_algorithm = parameters.hash_algorithm;
         }
     }
     Ok(None)
@@ -769,7 +769,7 @@ impl ProcessBuffer for RecreateFromChunksContext {
                     );
 
                     let r = ReconstructionData::read(&corrections)?;
-                    let mut predictor = TokenPredictor::new(&r.parameters.predictor);
+                    let mut predictor = TokenPredictor::new(&r.parameters);
 
                     self.result.extend(recompress_deflate_stream_with_predictor(
                         &plain_text,

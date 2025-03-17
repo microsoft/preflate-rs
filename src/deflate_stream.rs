@@ -15,7 +15,9 @@ use crate::{
         deflate_reader::DeflateParser, deflate_token::DeflateTokenBlock,
         deflate_writer::DeflateWriter,
     },
-    estimator::preflate_parameter_estimator::PreflateParameters,
+    estimator::preflate_parameter_estimator::{
+        estimate_preflate_parameters, TokenPredictorParameters,
+    },
     preflate_error::{AddContext, ExitCode, PreflateError},
     preflate_input::{PlainText, PreflateInput},
     statistical_codec::{CodecCorrection, PredictionDecoder, PredictionEncoder},
@@ -26,7 +28,7 @@ use crate::{
 /// the data required to reconstruct the deflate stream exactly the way that it was
 #[derive(Encode, Decode)]
 pub struct ReconstructionData {
-    pub parameters: PreflateParameters,
+    pub parameters: TokenPredictorParameters,
     pub corrections: Vec<u8>,
 }
 
@@ -51,7 +53,7 @@ pub struct DecompressResult {
     pub compressed_size: usize,
 
     /// the parameters that were used to compress the stream (informational)
-    pub parameters: Option<PreflateParameters>,
+    pub parameters: Option<TokenPredictorParameters>,
 }
 
 #[derive(Debug)]
@@ -115,15 +117,12 @@ impl DeflateStreamState {
                 parameters: None,
             })
         } else {
-            let params = PreflateParameters::estimate_preflate_parameters(
-                &contents,
-                &self.parser.plain_text(),
-            )
-            .context()?;
+            let params =
+                estimate_preflate_parameters(&contents, &self.parser.plain_text()).context()?;
 
             let mut input = PreflateInput::new(&self.parser.plain_text());
 
-            let mut token_predictor = TokenPredictor::new(&params.predictor);
+            let mut token_predictor = TokenPredictor::new(&params);
 
             predict_blocks(
                 &contents.blocks,
@@ -149,7 +148,7 @@ impl DeflateStreamState {
                 let recompressed = recompress_deflate_stream_with_predictor(
                     &self.parser.plain_text(),
                     &r.corrections,
-                    &mut TokenPredictor::new(&r.parameters.predictor),
+                    &mut TokenPredictor::new(&r.parameters),
                 )?;
 
                 // we should always succeed here in test code
@@ -197,7 +196,7 @@ pub fn recompress_deflate_stream(
     recompress_deflate_stream_with_predictor(
         plain_text,
         &r.corrections,
-        &mut TokenPredictor::new(&r.parameters.predictor),
+        &mut TokenPredictor::new(&r.parameters),
     )
 }
 
@@ -229,12 +228,12 @@ pub fn recompress_deflate_stream_with_predictor(
 fn encode_mispredictions(
     deflate: &crate::deflate::deflate_reader::DeflateContents,
     plain_text: &PlainText,
-    params: &PreflateParameters,
+    params: &TokenPredictorParameters,
     encoder: &mut impl PredictionEncoder,
 ) -> Result<()> {
     let mut input = PreflateInput::new(plain_text);
 
-    let mut token_predictor = TokenPredictor::new(&params.predictor);
+    let mut token_predictor = TokenPredictor::new(&params);
 
     predict_blocks(&deflate.blocks, &mut token_predictor, encoder, &mut input)?;
 
@@ -262,12 +261,12 @@ fn predict_blocks(
 
 #[cfg(test)]
 fn decode_mispredictions(
-    params: &PreflateParameters,
+    params: &TokenPredictorParameters,
     input: &mut PreflateInput,
     decoder: &mut impl crate::statistical_codec::PredictionDecoder,
 ) -> Result<(Vec<u8>, Vec<DeflateTokenBlock>)> {
     let mut deflate_writer: DeflateWriter = DeflateWriter::new();
-    let mut predictor = TokenPredictor::new(&params.predictor);
+    let mut predictor = TokenPredictor::new(&params);
 
     let output_blocks = recreate_blocks(&mut predictor, decoder, &mut deflate_writer, input)?;
 
@@ -320,8 +319,7 @@ fn decompress_deflate_stream_assert(
 
     let (contents, plain_text) = parse_deflate_whole(compressed_data)?;
 
-    let params =
-        PreflateParameters::estimate_preflate_parameters(&contents, &plain_text).context()?;
+    let params = estimate_preflate_parameters(&contents, &plain_text).context()?;
 
     encode_mispredictions(&contents, &plain_text, &params, &mut cabac_encoder)?;
     assert_eq!(contents.compressed_size, compressed_data.len());
@@ -443,7 +441,7 @@ fn analyze_compressed_data_fast(
 
     let (contents, plain_text) = parse_deflate_whole(compressed_data).unwrap();
 
-    let params = PreflateParameters::estimate_preflate_parameters(&contents, &plain_text).unwrap();
+    let params = estimate_preflate_parameters(&contents, &plain_text).unwrap();
 
     println!("params: {:?}", params);
 
@@ -500,7 +498,7 @@ fn analyze_compressed_data_verify(
 
     let (contents, plain_text) = parse_deflate_whole(compressed_data).unwrap();
 
-    let params = PreflateParameters::estimate_preflate_parameters(&contents, &plain_text).unwrap();
+    let params = estimate_preflate_parameters(&contents, &plain_text).unwrap();
 
     println!("params: {:?}", params);
 
@@ -602,8 +600,7 @@ fn verify_zlib_perfect_compression() {
 
         let (contents, plain_text) = parse_deflate_whole(compressed_data).unwrap();
 
-        let params =
-            PreflateParameters::estimate_preflate_parameters(&contents, &plain_text).unwrap();
+        let params = estimate_preflate_parameters(&contents, &plain_text).unwrap();
 
         println!("params: {:?}", params);
 

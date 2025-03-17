@@ -7,7 +7,7 @@
 use crate::bit_helper::DebugHash;
 use crate::deflate::deflate_constants::{MAX_MATCH, MIN_LOOKAHEAD, MIN_MATCH};
 use crate::deflate::deflate_token::DeflateTokenReference;
-use crate::estimator::preflate_parameter_estimator::PreflateStrategy;
+use crate::estimator::preflate_parameter_estimator::{PreflateStrategy, TokenPredictorParameters};
 use crate::hash_algorithm::{
     Crc32cHash, HashAlgorithm, LibdeflateHash4Fast, MiniZHash, RandomVectorHash, ZlibNGHash,
     ZlibRotatingHash, ZlibRotatingHashFixed,
@@ -15,7 +15,6 @@ use crate::hash_algorithm::{
 use crate::hash_chain::{HashChain, HashChainDefault, HashChainLibflate4, MAX_UPDATE_HASH_BATCH};
 use crate::preflate_error::{err_exit_code, ExitCode, Result};
 use crate::preflate_input::PreflateInput;
-use crate::token_predictor::TokenPredictorParameters;
 
 use std::cmp;
 

@@ -2,7 +2,7 @@ use std::{io::Cursor, ops::Range};
 
 use crate::{
     deflate_stream::{DecompressResult, DeflateStreamState},
-    estimator::preflate_parameter_estimator::PreflateParameters,
+    estimator::preflate_parameter_estimator::TokenPredictorParameters,
     idat_parse::{parse_idat, IdatContents},
     preflate_error::{err_exit_code, ExitCode},
     preflate_input::PlainText,
@@ -23,11 +23,11 @@ pub struct FoundStream {
 
 pub enum FoundStreamType {
     /// Deflate stream
-    DeflateStream(PreflateParameters, DeflateStreamState),
+    DeflateStream(TokenPredictorParameters, DeflateStreamState),
 
     /// PNG IDAT, which is a concatenated Zlib stream of IDAT chunks. This
     /// is special since the Deflate stream is split into IDAT chunks.
-    IDATDeflate(PreflateParameters, IdatContents, PlainText),
+    IDATDeflate(TokenPredictorParameters, IdatContents, PlainText),
 }
 
 #[derive(Hash, Eq, PartialEq, Clone, Debug)]
