@@ -48,6 +48,11 @@ pub enum ExitCode {
 
     /// Non-zero padding found in deflate, which we currently don't handle
     NonZeroPadding = 25,
+
+    /// Unable to predict the sequence of compression. Doesn't mean that
+    /// the deflate content was invalid, but just that we don't handle
+    /// some of the rare corner cases.
+    PredictionFailure = 26,
 }
 
 impl Display for ExitCode {

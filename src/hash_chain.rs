@@ -8,6 +8,7 @@ use default_boxed::DefaultBoxed;
 
 use crate::{
     bit_helper::DebugHash,
+    deflate::deflate_token::DeflateTokenReference,
     hash_algorithm::{HashImplementation, LibdeflateHash3Secondary, LibdeflateHash4},
     preflate_input::PreflateInput,
 };
@@ -137,6 +138,14 @@ pub trait HashChain {
     fn update_hash(&mut self, input: &[u8], pos: u32, length: u32);
 
     fn checksum(&self, checksum: &mut DebugHash);
+
+    /// debug function to validate that a hash table entry
+    /// was correctly added for the match we were expection
+    fn assert_dictionary_valid(
+        &self,
+        target_reference: DeflateTokenReference,
+        input: &PreflateInput,
+    );
 }
 
 /// Default hash chain for a given hash function periodically normalizes the hash table
@@ -243,6 +252,35 @@ impl<H: HashImplementation> HashChain for HashChainDefault<H> {
         self.hash_table.update_chain(self.hash, input, pos, length);
     }
 
+    fn assert_dictionary_valid(
+        &self,
+        target_reference: DeflateTokenReference,
+        input: &PreflateInput,
+    ) {
+        println!(
+            "tried to match {:?} at input: {:?}",
+            target_reference, input
+        );
+
+        assert_eq!(
+            &input.cur_chars(0)[..(target_reference.len() as usize)],
+            &input.cur_chars(-(target_reference.dist() as i32))
+                [..(target_reference.len() as usize)],
+            "dictionary out of sync for {:?}",
+            target_reference
+        );
+
+        let curr_hash = self.hash.get_hash(input.cur_chars(0));
+        println!("hash {}", curr_hash);
+
+        for dist in self.iterate::<0>(input) {
+            println!(" dist = {}", dist);
+            if dist > target_reference.dist() {
+                break;
+            }
+        }
+    }
+
     fn get_num_hash_bytes() -> usize {
         H::NUM_HASH_BYTES
     }
@@ -335,6 +373,14 @@ impl HashChain for HashChainLibflate4 {
     #[allow(dead_code)]
     fn checksum(&self, _checksum: &mut DebugHash) {
         //checksum.update_slice(&self.hash_table.chain_depth);
+    }
+
+    fn assert_dictionary_valid(
+        &self,
+        _target_reference: DeflateTokenReference,
+        _input: &PreflateInput,
+    ) {
+        todo!();
     }
 
     fn update_hash(&mut self, input: &[u8], pos: u32, length: u32) {

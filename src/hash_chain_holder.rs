@@ -248,6 +248,7 @@ impl<H: HashChain> HashChainHolder for HashChainHolderImpl<H> {
 
             max_chain -= 1;
         }
+        self.hash.assert_dictionary_valid(*target_reference, input);
 
         err_exit_code(ExitCode::MatchNotFound, "no match found")
     }

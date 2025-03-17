@@ -134,7 +134,7 @@ impl PlainText {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct PreflateInput<'a> {
     data: &'a PlainText,
     pos: i32,

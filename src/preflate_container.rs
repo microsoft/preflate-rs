@@ -502,23 +502,34 @@ impl ProcessBuffer for PreflateCompressionContext {
                 ChunkParseState::DeflateContinue(state) => {
                     // here we have a deflate stream that we need to continue
                     // right now we error out if the continuation cannot be processed
-                    let res = state.decompress(&self.content, true, 0).context()?;
-                    self.result.write_all(&[!state.is_done() as u8])?;
+                    match state.decompress(&self.content, true, 0) {
+                        Err(e) => {
+                            // indicate that we got an error while trying to continue
+                            // the compression of a previous chunk, this happens
+                            // when the stream diverged from the behavior we estimated
+                            // in the first chunk that we saw
+                            self.result.write_all(&[3])?;
+                            self.state = ChunkParseState::Searching;
+                        }
+                        Ok(res) => {
+                            self.result.write_all(&[!state.is_done() as u8])?;
 
-                    write_varint(&mut self.result, res.corrections.len() as u32)?;
-                    write_varint(&mut self.result, state.plain_text().len() as u32)?;
+                            write_varint(&mut self.result, res.corrections.len() as u32)?;
+                            write_varint(&mut self.result, state.plain_text().len() as u32)?;
 
-                    self.result.write_all(&res.corrections)?;
-                    self.result.write_all(&state.plain_text().text())?;
+                            self.result.write_all(&res.corrections)?;
+                            self.result.write_all(&state.plain_text().text())?;
 
-                    self.compression_stats.overhead_bytes += res.corrections.len() as u64;
+                            self.compression_stats.overhead_bytes += res.corrections.len() as u64;
 
-                    self.content.drain(0..res.compressed_size);
+                            self.content.drain(0..res.compressed_size);
 
-                    if state.is_done() {
-                        self.state = ChunkParseState::Searching;
-                    } else {
-                        state.shrink_to_dictionary();
+                            if state.is_done() {
+                                self.state = ChunkParseState::Searching;
+                            } else {
+                                state.shrink_to_dictionary();
+                            }
+                        }
                     }
                 }
             }
@@ -777,40 +788,53 @@ impl ProcessBuffer for RecreateFromChunksContext {
                 }
 
                 DecompressionState::DeflateBlockContinue(dictionary, predictor) => {
-                    let (partial, correction_length, uncompressed_length) =
+                    if let Some((partial, correction_length, uncompressed_length)) =
                         self.input.scoped_read(|r| {
-                            Ok((
-                                r.read_u8()? != 0,
-                                read_varint(r)? as usize,
-                                read_varint(r)? as usize,
-                            ))
-                        })?;
+                            let b = r.read_u8()?;
+                            match b {
+                                0 | 1 => Ok(Some((
+                                    b != 0,
+                                    read_varint(r)? as usize,
+                                    read_varint(r)? as usize,
+                                ))),
+                                2 => Ok(None),
+                                _ => err_exit_code(
+                                    ExitCode::InvalidCompressedWrapper,
+                                    "invalid continue block",
+                                ),
+                            }
+                        })?
+                    {
+                        let source_size = self.input.len();
+                        let total_length = correction_length + uncompressed_length;
 
-                    let source_size = self.input.len();
-                    let total_length = correction_length + uncompressed_length;
-
-                    if source_size < total_length {
-                        if self.input_complete {
-                            return Err(PreflateError::new(
-                                ExitCode::InvalidCompressedWrapper,
-                                "unexpected end of input",
-                            ));
+                        if source_size < total_length {
+                            if self.input_complete {
+                                return Err(PreflateError::new(
+                                    ExitCode::InvalidCompressedWrapper,
+                                    "unexpected end of input",
+                                ));
+                            }
+                            break;
                         }
-                        break;
-                    }
 
-                    let corrections: Vec<u8> = self.input.drain(0..correction_length).collect();
-                    dictionary.append_iter(self.input.drain(0..uncompressed_length));
+                        let corrections: Vec<u8> = self.input.drain(0..correction_length).collect();
+                        dictionary.append_iter(self.input.drain(0..uncompressed_length));
 
-                    self.result.extend(recompress_deflate_stream_with_predictor(
-                        dictionary,
-                        &corrections,
-                        predictor,
-                    )?);
+                        self.result.extend(recompress_deflate_stream_with_predictor(
+                            dictionary,
+                            &corrections,
+                            predictor,
+                        )?);
 
-                    if partial {
-                        dictionary.shrink_to_dictionary();
+                        if partial {
+                            dictionary.shrink_to_dictionary();
+                        } else {
+                            self.state = DecompressionState::StartSegment;
+                        }
                     } else {
+                        // the attempt to continue the compression failed,
+                        // so just continue with a new segment.
                         self.state = DecompressionState::StartSegment;
                     }
                 }

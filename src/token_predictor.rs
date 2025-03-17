@@ -563,7 +563,7 @@ impl TokenPredictor {
     ) -> Result<DeflateTokenReference> {
         if input.pos() == 0 || input.remaining() < MIN_MATCH {
             return err_exit_code(
-                ExitCode::RecompressFailed,
+                ExitCode::PredictionFailure,
                 "Not enough space left to find a reference",
             );
         }
@@ -596,7 +596,7 @@ impl TokenPredictor {
         }
 
         err_exit_code(
-            ExitCode::RecompressFailed,
+            ExitCode::PredictionFailure,
             format!("Didnt find a match {:?}", match_token).as_str(),
         )
     }
