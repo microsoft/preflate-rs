@@ -19,11 +19,9 @@ pub enum DeflateToken {
 }
 
 impl DeflateToken {
+    #[cfg(test)]
     pub fn new_ref(len: u32, dist: u32, irregular258: bool) -> DeflateToken {
         DeflateToken::Reference(DeflateTokenReference::new(len, dist, irregular258))
-    }
-    pub fn new_lit(lit: u8) -> DeflateToken {
-        DeflateToken::Literal(lit)
     }
 }
 

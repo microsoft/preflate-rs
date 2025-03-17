@@ -165,7 +165,7 @@ impl HashChainHolder for () {
         unimplemented!()
     }
 
-    fn add_missing_previous_hash(&mut self, input: &PreflateInput) {}
+    fn add_missing_previous_hash(&mut self, _input: &PreflateInput) {}
 
     fn verify_hash(&self, _dist: Option<DeflateTokenReference>) {}
 

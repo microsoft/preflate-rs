@@ -16,7 +16,8 @@ use crate::{
         huffman_calc::HufftreeBitCalc,
     },
     estimator::{
-        preflate_parameter_estimator::TokenPredictorParameters, preflate_parse_config::MatchingType,
+        preflate_parameter_estimator::{BlockTypeStrategy, TokenPredictorParameters},
+        preflate_parse_config::MatchingType,
     },
     hash_chain_holder::{new_hash_chain_holder, HashChainHolder, MatchResult},
     preflate_error::{err_exit_code, AddContext, ExitCode, Result},
@@ -73,6 +74,15 @@ impl TokenPredictor {
         self.state.add_missing_previous_hash(input);
     }
 
+    pub fn predict_block_type(&self) -> u32 {
+        match self.params.block_type_strategy {
+            BlockTypeStrategy::Dynamic => BT_DYNAMICHUFF,
+            BlockTypeStrategy::Mixed => BT_DYNAMICHUFF,
+            BlockTypeStrategy::Static => BT_STATICHUFF,
+            BlockTypeStrategy::Uncompressed => BT_STORED,
+        }
+    }
+
     pub fn predict_block<D: PredictionEncoder>(
         &mut self,
         block: &DeflateTokenBlock,
@@ -92,7 +102,7 @@ impl TokenPredictor {
                 codec.encode_correction_diff(
                     CodecCorrection::BlockTypeCorrection,
                     BT_STORED,
-                    BT_DYNAMICHUFF,
+                    self.predict_block_type(),
                 );
 
                 codec.encode_correction_diff(
@@ -117,7 +127,7 @@ impl TokenPredictor {
                         codec.encode_correction_diff(
                             CodecCorrection::BlockTypeCorrection,
                             BT_STATICHUFF,
-                            BT_DYNAMICHUFF,
+                            self.predict_block_type(),
                         );
                         huffman_encoding = None;
                     }
@@ -128,7 +138,7 @@ impl TokenPredictor {
                         codec.encode_correction_diff(
                             CodecCorrection::BlockTypeCorrection,
                             BT_DYNAMICHUFF,
-                            BT_DYNAMICHUFF,
+                            self.predict_block_type(),
                         );
                         huffman_encoding = Some(h);
                     }
@@ -309,7 +319,10 @@ impl TokenPredictor {
 
         codec.decode_verify_state("blocktypestart", 0);
 
-        let bt = codec.decode_correction_diff(CodecCorrection::BlockTypeCorrection, BT_DYNAMICHUFF);
+        let bt = codec.decode_correction_diff(
+            CodecCorrection::BlockTypeCorrection,
+            self.predict_block_type(),
+        );
 
         match bt {
             BT_STORED => {

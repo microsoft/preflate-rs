@@ -503,13 +503,16 @@ impl ProcessBuffer for PreflateCompressionContext {
                     // here we have a deflate stream that we need to continue
                     // right now we error out if the continuation cannot be processed
                     match state.decompress(&self.content, true, 0) {
-                        Err(e) => {
+                        Err(_e) => {
                             // indicate that we got an error while trying to continue
                             // the compression of a previous chunk, this happens
                             // when the stream diverged from the behavior we estimated
                             // in the first chunk that we saw
                             self.result.write_all(&[3])?;
                             self.state = ChunkParseState::Searching;
+
+                            #[cfg(test)]
+                            println!("Error while trying to continue compression {:?}", _e);
                         }
                         Ok(res) => {
                             self.result.write_all(&[!state.is_done() as u8])?;
@@ -893,7 +896,7 @@ fn test_baseline_calc() {
 
     // these change if the compression algorithm is altered, update them
     assert_eq!(stats.overhead_bytes, 466);
-    assert_eq!(stats.zstd_compressed_size, 12432);
+    assert_eq!(stats.zstd_compressed_size, 12434);
     assert_eq!(stats.zstd_baseline_size, 13661);
 }
 

@@ -4,8 +4,6 @@
  *  This software incorporates material from third parties. See NOTICE.txt for details.
  *--------------------------------------------------------------------------------------------*/
 
-use std::future::pending;
-
 use crate::cabac_codec::{decode_difference, encode_difference};
 
 /// correction indictions, which are followed by a 16 bit value
