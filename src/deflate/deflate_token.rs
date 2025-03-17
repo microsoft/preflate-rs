@@ -102,22 +102,11 @@ impl Default for DeflateHuffmanType {
     }
 }
 
-#[derive(Copy, Clone, Debug, PartialEq)]
-pub enum PartialBlock {
-    Whole,
-    Start,
-    Middle,
-    End,
-}
-
 #[derive(PartialEq)]
 pub enum DeflateTokenBlockType {
     Huffman {
         tokens: Vec<DeflateToken>,
         huffman_type: DeflateHuffmanType,
-
-        /// If we have partial blocks written, this will indicate if this block is the start, middle, or end of the partial block.
-        partial: PartialBlock,
     },
     Stored {
         uncompressed: Vec<u8>,
@@ -130,27 +119,15 @@ impl std::fmt::Debug for DeflateTokenBlockType {
         match self {
             DeflateTokenBlockType::Huffman {
                 tokens,
-                partial,
                 huffman_type: DeflateHuffmanType::Static { .. },
             } => {
-                write!(
-                    f,
-                    "StaticHuffman {{ tokens: len={}, partial={:?}  }}",
-                    tokens.len(),
-                    partial,
-                )
+                write!(f, "StaticHuffman {{ tokens: len={} }}", tokens.len(),)
             }
             DeflateTokenBlockType::Huffman {
                 tokens,
-                partial,
                 huffman_type: DeflateHuffmanType::Dynamic { .. },
             } => {
-                write!(
-                    f,
-                    "DynamicHuffman {{ tokens: len={}, partial={:?}  }}",
-                    tokens.len(),
-                    partial,
-                )
+                write!(f, "DynamicHuffman {{ tokens: len={} }}", tokens.len(),)
             }
             DeflateTokenBlockType::Stored { uncompressed } => {
                 write!(f, "Stored {{ uncompressed: len={} }}", uncompressed.len(),)

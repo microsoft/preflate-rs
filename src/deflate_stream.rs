@@ -541,17 +541,14 @@ fn analyze_compressed_data_verify(
                 DeflateTokenBlockType::Huffman {
                     tokens: t1,
                     huffman_type: h1,
-                    partial: part1,
                 },
                 DeflateTokenBlockType::Huffman {
                     tokens: t2,
                     huffman_type: h2,
-                    partial: part2,
                 },
             ) => {
                 assert_eq_array(t1, t2);
                 assert_eq!(h1, h2, "huffman type differs {index}");
-                assert_eq!(part1, part2, "partial differ {index}");
             }
             _ => panic!("block type differs {index}"),
         });

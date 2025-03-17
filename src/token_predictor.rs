@@ -10,8 +10,7 @@ use crate::{
         deflate_constants::MIN_MATCH,
         deflate_token::{
             DeflateHuffmanType, DeflateToken, DeflateTokenBlock, DeflateTokenBlockType,
-            DeflateTokenReference, PartialBlock, TokenFrequency, BT_DYNAMICHUFF, BT_STATICHUFF,
-            BT_STORED,
+            DeflateTokenReference, TokenFrequency, BT_DYNAMICHUFF, BT_STATICHUFF, BT_STORED,
         },
         huffman_calc::HufftreeBitCalc,
     },
@@ -461,7 +460,6 @@ impl TokenPredictor {
             last,
             block_type: DeflateTokenBlockType::Huffman {
                 tokens,
-                partial: PartialBlock::Whole,
                 huffman_type,
             },
         };

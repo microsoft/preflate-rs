@@ -15,7 +15,7 @@ use std::io::Cursor;
 use super::{
     bit_reader::ReadBits,
     deflate_constants,
-    deflate_token::{DeflateTokenBlock, DeflateTokenBlockType, PartialBlock},
+    deflate_token::{DeflateTokenBlock, DeflateTokenBlockType},
 };
 
 use super::{
@@ -39,7 +39,6 @@ pub struct DeflateParser {
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 enum DeflateParserState {
     StartBlock,
-    ContinueStaticBlock { last: bool },
     Done,
 }
 
@@ -142,7 +141,6 @@ impl DeflateParser {
                     self.bit_reader.get(1, reader)? != 0,
                     self.bit_reader.get(2, reader)?,
                 ),
-                DeflateParserState::ContinueStaticBlock { last } => (last, 1),
                 DeflateParserState::Done => {
                     return Ok(());
                 }
@@ -205,7 +203,6 @@ impl DeflateParser {
                         block_type: DeflateTokenBlockType::Huffman {
                             tokens,
                             huffman_type: DeflateHuffmanType::Static,
-                            partial: PartialBlock::Whole,
                         },
                         last,
                     });
@@ -234,7 +231,6 @@ impl DeflateParser {
                         block_type: DeflateTokenBlockType::Huffman {
                             tokens,
                             huffman_type: DeflateHuffmanType::Dynamic { huffman_encoding },
-                            partial: PartialBlock::Whole,
                         },
                         last,
                     });

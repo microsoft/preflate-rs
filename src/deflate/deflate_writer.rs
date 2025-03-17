@@ -6,7 +6,7 @@
 
 use crate::preflate_error::Result;
 
-use super::deflate_token::{DeflateHuffmanType, DeflateTokenBlockType, PartialBlock};
+use super::deflate_token::{DeflateHuffmanType, DeflateTokenBlockType};
 use super::{
     deflate_constants::{
         quantize_distance, quantize_length, DIST_BASE_TABLE, DIST_EXTRA_TABLE, LENGTH_BASE_TABLE,
@@ -59,24 +59,19 @@ impl DeflateWriter {
             DeflateTokenBlockType::Huffman {
                 tokens,
                 huffman_type,
-                partial,
             } => {
                 match huffman_type {
                     DeflateHuffmanType::Static => {
-                        if *partial == PartialBlock::Start || *partial == PartialBlock::Whole {
-                            self.bitwriter.write(block.last as u32, 1, &mut self.output);
-                            self.bitwriter.write(1, 2, &mut self.output);
-                        }
+                        self.bitwriter.write(block.last as u32, 1, &mut self.output);
+                        self.bitwriter.write(1, 2, &mut self.output);
                         let huffman_writer = HuffmanWriter::start_fixed_huffman_table();
-                        self.encode_huffman(tokens, &huffman_writer, *partial);
+                        self.encode_huffman(tokens, &huffman_writer);
                     }
                     DeflateHuffmanType::Dynamic {
                         huffman_encoding, ..
                     } => {
-                        if *partial == PartialBlock::Start || *partial == PartialBlock::Whole {
-                            self.bitwriter.write(block.last as u32, 1, &mut self.output);
-                            self.bitwriter.write(2, 2, &mut self.output);
-                        }
+                        self.bitwriter.write(block.last as u32, 1, &mut self.output);
+                        self.bitwriter.write(2, 2, &mut self.output);
 
                         let huffman_writer = HuffmanWriter::start_dynamic_huffman_table(
                             &mut self.bitwriter,
@@ -84,12 +79,11 @@ impl DeflateWriter {
                             &mut self.output,
                         )?;
 
-                        self.encode_huffman(tokens, &huffman_writer, *partial);
+                        self.encode_huffman(tokens, &huffman_writer);
                     }
                 }
 
-                if block.last && (*partial == PartialBlock::End || *partial == PartialBlock::Whole)
-                {
+                if block.last {
                     self.bitwriter.pad(0, &mut self.output);
                 }
             }
@@ -102,12 +96,7 @@ impl DeflateWriter {
         self.bitwriter.flush_whole_bytes(&mut self.output);
     }
 
-    fn encode_huffman(
-        &mut self,
-        tokens: &Vec<DeflateToken>,
-        huffman_writer: &HuffmanWriter,
-        partial: PartialBlock,
-    ) {
+    fn encode_huffman(&mut self, tokens: &Vec<DeflateToken>, huffman_writer: &HuffmanWriter) {
         for token in tokens {
             match token {
                 DeflateToken::Literal(lit) => {
@@ -162,9 +151,7 @@ impl DeflateWriter {
             }
         }
 
-        if partial == PartialBlock::Whole || partial == PartialBlock::End {
-            huffman_writer.write_literal(&mut self.bitwriter, &mut self.output, 256);
-        }
+        huffman_writer.write_literal(&mut self.bitwriter, &mut self.output, 256);
     }
 }
 
@@ -184,7 +171,6 @@ fn roundtrip_deflate_writer() {
                     DeflateToken::Literal(3),
                 ],
                 huffman_type: DeflateHuffmanType::Static,
-                partial: PartialBlock::Whole,
             },
             last: false,
         },
@@ -196,7 +182,6 @@ fn roundtrip_deflate_writer() {
                     DeflateToken::Literal(3),
                 ],
                 huffman_type: DeflateHuffmanType::Static,
-                partial: PartialBlock::Whole,
             },
             last: false,
         },
@@ -215,7 +200,6 @@ fn roundtrip_deflate_writer() {
                     DeflateToken::new_ref(258, 1, true),
                     DeflateToken::Literal(3),
                 ],
-                partial: PartialBlock::Whole,
                 huffman_type: DeflateHuffmanType::Static,
             },
             last: true,
