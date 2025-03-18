@@ -110,7 +110,8 @@ fn libzng() {
 }
 
 fn verifyresult(compressed_data: &[u8]) {
-    let (result, plain_text) = decompress_deflate_stream(compressed_data, true, 1).unwrap();
+    let (result, plain_text) =
+        decompress_deflate_stream(compressed_data, true, 1, 128 * 1024 * 1024).unwrap();
     let recomp = recompress_deflate_stream(&plain_text, &result.corrections).unwrap();
 
     println!(
@@ -393,15 +394,15 @@ fn compression_benchmark_overhead_size() {
             name: "libngzsys",
             compress_fn: libngzsys,
             overhead: [
-                Ok(32),
-                Ok(39),
+                Ok(30),
+                Ok(37),
                 Ok(25),
                 Ok(27),
                 Ok(4071),
                 Ok(4474),
                 Ok(3760),
                 Ok(49),
-                Ok(37),
+                Ok(38),
                 Err(ExitCode::NoCompressionCandidates),
             ],
         },
@@ -409,7 +410,7 @@ fn compression_benchmark_overhead_size() {
             name: "zlib",
             compress_fn: zlib,
             overhead: [
-                Ok(32),
+                Ok(30),
                 Ok(30),
                 Ok(30),
                 Ok(30),
@@ -425,7 +426,7 @@ fn compression_benchmark_overhead_size() {
             name: "libdeflate",
             compress_fn: libdeflate,
             overhead: [
-                Ok(32),
+                Ok(30),
                 Ok(1031),
                 Ok(4371),
                 Ok(3818),
@@ -441,7 +442,7 @@ fn compression_benchmark_overhead_size() {
             name: "miniz_oxide",
             compress_fn: miniz_oxide,
             overhead: [
-                Ok(50),
+                Ok(47),
                 Ok(260),
                 Ok(11316),
                 Ok(7454),
@@ -461,7 +462,7 @@ fn compression_benchmark_overhead_size() {
         for level in 0..=9 {
             let compressed = (i.compress_fn)(&original, level);
 
-            let r = decompress_deflate_stream(&compressed, true, 0);
+            let r = decompress_deflate_stream(&compressed, true, 0, 1024 * 1024 * 128);
 
             match r {
                 Ok((r, _)) => {

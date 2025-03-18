@@ -34,6 +34,10 @@ pub struct DeflateParser {
     state: DeflateParserState,
     bit_reader: BitReader,
     plain_text: PlainText,
+
+    /// how big the plain text can get before we return an error
+    /// this is to prevent a zipbomb from blowing up our memory usage
+    plain_text_limit: usize,
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
@@ -43,11 +47,12 @@ enum DeflateParserState {
 }
 
 impl DeflateParser {
-    pub fn new() -> Self {
+    pub fn new(plain_text_limit: usize) -> Self {
         Self {
             state: DeflateParserState::StartBlock,
             bit_reader: BitReader::new(),
             plain_text: PlainText::new(),
+            plain_text_limit,
         }
     }
 
@@ -103,7 +108,12 @@ impl DeflateParser {
 
                 // if nothing was successfully read or we didn't
                 // get the out-of-data error, then just exit
-                if checkpoint.position == 0 || e.exit_code() != ExitCode::ShortRead {
+                // if we get a plain-text too big error, also checkpoint back
+                // to how far we got and the next part of the plaintext will be put in the next chunk
+                if checkpoint.position == 0
+                    || (e.exit_code() != ExitCode::ShortRead
+                        && e.exit_code() != ExitCode::PlainTextLimit)
+                {
                     return Err(e);
                 }
 
@@ -189,6 +199,7 @@ impl DeflateParser {
                         &mut self.plain_text,
                         &mut self.bit_reader,
                         reader,
+                        self.plain_text_limit,
                     )
                     .context()?;
 
@@ -224,6 +235,7 @@ impl DeflateParser {
                         &mut self.plain_text,
                         &mut self.bit_reader,
                         reader,
+                        self.plain_text_limit,
                     )
                     .context()?;
 
@@ -254,11 +266,16 @@ fn decode_tokens(
     plain_text: &mut PlainText,
     bit_reader: &mut BitReader,
     reader: &mut Cursor<&[u8]>,
+    plain_text_limit: usize,
 ) -> Result<()> {
     let mut earliest_reference = i32::MAX;
     let mut cur_pos = 0;
 
     loop {
+        if plain_text.len() > plain_text_limit {
+            return err_exit_code(ExitCode::PlainTextLimit, "Plain text limit exceeded");
+        }
+
         let lit_len: u32 = decoder.fetch_next_literal_code(bit_reader, reader)?.into();
         if lit_len < 256 {
             plain_text.push(lit_len as u8);
@@ -324,7 +341,7 @@ impl std::fmt::Debug for DeflateContents {
 /// parses an entire deflate stream and asserts if it isn't complete
 #[cfg(test)]
 pub fn parse_deflate_whole(compressed_data: &[u8]) -> Result<(DeflateContents, PlainText)> {
-    let mut parse = DeflateParser::new();
+    let mut parse = DeflateParser::new(usize::MAX);
     let deflate_content = parse.parse(compressed_data)?;
 
     match parse.state {
@@ -351,7 +368,7 @@ pub fn test_partial_read_for_buffer(d: &[u8]) {
     let mut end_offset = 1;
     let mut allblocks = Vec::new();
 
-    let mut deflate_parser = DeflateParser::new();
+    let mut deflate_parser = DeflateParser::new(usize::MAX);
 
     while !deflate_parser.is_done() {
         match deflate_parser.parse(&d[start_offset..end_offset]) {

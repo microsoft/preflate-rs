@@ -81,7 +81,6 @@ pub struct ZstdCompressContext<D: ProcessBuffer> {
     test_baseline: Option<zstd::stream::write::Encoder<'static, MeasureWriteSink>>,
 
     zstd_baseline_size: u64,
-    uncompressed_size: u64,
     zstd_compressed_size: u64,
 
     done_write: bool,
@@ -96,7 +95,6 @@ impl<D: ProcessBuffer> ZstdCompressContext<D> {
             done_write: false,
             internal,
             zstd_baseline_size: 0,
-            uncompressed_size: 0,
             zstd_compressed_size: 0,
             test_baseline: if test_baseline {
                 Some(
@@ -129,8 +127,6 @@ impl<D: ProcessBuffer> ProcessBuffer for ZstdCompressContext<D> {
         }
 
         if input.len() > 0 {
-            self.uncompressed_size += input.len() as u64;
-
             if let Some(encoder) = &mut self.test_baseline {
                 encoder.write_all(input).context()?;
             }
@@ -166,7 +162,6 @@ impl<D: ProcessBuffer> ProcessBuffer for ZstdCompressContext<D> {
         CompressionStats {
             zstd_compressed_size: self.zstd_compressed_size,
             zstd_baseline_size: self.zstd_baseline_size,
-            uncompressed_size: self.uncompressed_size,
             ..self.internal.stats()
         }
     }
@@ -196,7 +191,7 @@ pub fn compress_zstd(
     compression_stats: &mut CompressionStats,
 ) -> Result<Vec<u8>> {
     let mut ctx = ZstdCompressContext::new(
-        PreflateCompressionContext::new(loglevel, 1024 * 1024),
+        PreflateCompressionContext::new(loglevel, 1024 * 1024, 128 * 1024 * 1024),
         9,
         false,
     );

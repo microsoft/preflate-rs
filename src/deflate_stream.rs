@@ -63,10 +63,10 @@ pub struct DeflateStreamState {
 }
 
 impl DeflateStreamState {
-    pub fn new() -> Self {
+    pub fn new(plain_text_limit: usize) -> Self {
         Self {
             predictor: None,
-            parser: DeflateParser::new(),
+            parser: DeflateParser::new(plain_text_limit),
         }
     }
 
@@ -149,6 +149,7 @@ impl DeflateStreamState {
                     &self.parser.plain_text(),
                     &r.corrections,
                     &mut TokenPredictor::new(&r.parameters),
+                    &mut DeflateWriter::new(),
                 )?;
 
                 // we should always succeed here in test code
@@ -179,8 +180,9 @@ pub fn decompress_deflate_stream(
     compressed_data: &[u8],
     verify: bool,
     _loglevel: u32,
+    plain_text_limit: usize,
 ) -> Result<(DecompressResult, PlainText)> {
-    let mut state = DeflateStreamState::new();
+    let mut state = DeflateStreamState::new(plain_text_limit);
     let r = state.decompress(compressed_data, verify, 1)?;
 
     Ok((r, state.parser.detach_plain_text()))
@@ -197,6 +199,7 @@ pub fn recompress_deflate_stream(
         plain_text,
         &r.corrections,
         &mut TokenPredictor::new(&r.parameters),
+        &mut DeflateWriter::new(),
     )
 }
 
@@ -204,19 +207,13 @@ pub fn recompress_deflate_stream_with_predictor(
     plain_text: &PlainText,
     corrections: &[u8],
     predictor: &mut TokenPredictor,
+    deflate_writer: &mut DeflateWriter,
 ) -> Result<Vec<u8>> {
     let mut cabac_decoder =
         PredictionDecoderCabac::new(VP8Reader::new(Cursor::new(corrections)).unwrap());
     let mut input = PreflateInput::new(plain_text);
 
-    let mut deflate_writer = DeflateWriter::new();
-    recreate_blocks(
-        predictor,
-        &mut cabac_decoder,
-        &mut deflate_writer,
-        &mut input,
-    )
-    .context()?;
+    recreate_blocks(predictor, &mut cabac_decoder, deflate_writer, &mut input).context()?;
 
     deflate_writer.flush();
     Ok(deflate_writer.detach_output())
@@ -396,7 +393,7 @@ fn verify_file(filename: &str) {
     use crate::utils::read_file;
     let v = read_file(filename);
 
-    let (r, plain_text) = decompress_deflate_stream(&v, true, 1).unwrap();
+    let (r, plain_text) = decompress_deflate_stream(&v, true, 1, usize::MAX).unwrap();
     let recompressed = recompress_deflate_stream(&plain_text, &r.corrections).unwrap();
     assert!(v == recompressed);
 }
@@ -644,7 +641,7 @@ pub fn analyze_compressed_data_verify_incremental(compressed_data: &[u8]) {
     let mut start_offset = 0;
     let mut end_offset = compressed_data.len().min(100001);
 
-    let mut stream = DeflateStreamState::new();
+    let mut stream = DeflateStreamState::new(usize::MAX);
 
     let mut corrections = Vec::new();
     while !stream.is_done() {

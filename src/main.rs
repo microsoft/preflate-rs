@@ -54,7 +54,7 @@ fn main() {
         let file = std::fs::read(entry).unwrap();
 
         let mut ctx = ZstdCompressContext::new(
-            PreflateCompressionContext::new(loglevel, 1024 * 1024),
+            PreflateCompressionContext::new(loglevel, 1024 * 1024, 1024 * 1024 * 128),
             9,
             true,
         );

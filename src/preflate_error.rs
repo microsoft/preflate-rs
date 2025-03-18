@@ -53,6 +53,9 @@ pub enum ExitCode {
     /// the deflate content was invalid, but just that we don't handle
     /// some of the rare corner cases.
     PredictionFailure = 26,
+
+    /// Plain text memory limit exceeded
+    PlainTextLimit = 27,
 }
 
 impl Display for ExitCode {
