@@ -1,7 +1,7 @@
 use std::{io::Cursor, ops::Range};
 
 use crate::{
-    deflate_stream::{DecompressResult, DeflateStreamState},
+    chunk_processor::{PreflateChunkProcessor, PreflateChunkResult},
     estimator::preflate_parameter_estimator::TokenPredictorParameters,
     idat_parse::{parse_idat, IdatContents},
     preflate_error::{err_exit_code, ExitCode},
@@ -23,7 +23,7 @@ pub struct FoundStream {
 
 pub enum FoundStreamType {
     /// Deflate stream
-    DeflateStream(TokenPredictorParameters, DeflateStreamState),
+    DeflateStream(TokenPredictorParameters, PreflateChunkProcessor),
 
     /// PNG IDAT, which is a concatenated Zlib stream of IDAT chunks. This
     /// is special since the Deflate stream is split into IDAT chunks.
@@ -75,7 +75,7 @@ pub fn find_deflate_stream(
     while let Some(signature) = next_signature(src, &mut index) {
         match signature {
             Signature::Zlib(_) => {
-                let mut state = DeflateStreamState::new(plain_text_limit, true);
+                let mut state = PreflateChunkProcessor::new(plain_text_limit, true);
 
                 if let Ok(res) = state.decompress(&src[index + 2..], loglevel) {
                     if state.plain_text().len() > MIN_BLOCKSIZE {
@@ -99,7 +99,7 @@ pub fn find_deflate_stream(
                 if skip_gzip_header(&mut cursor).is_ok() {
                     let start = index + cursor.position() as usize;
 
-                    let mut state = DeflateStreamState::new(plain_text_limit, true);
+                    let mut state = PreflateChunkProcessor::new(plain_text_limit, true);
                     if let Ok(res) = state.decompress(&src[start..], loglevel) {
                         if state.plain_text().len() > MIN_BLOCKSIZE {
                             return Some((
@@ -142,7 +142,7 @@ pub fn find_deflate_stream(
                     // if we find and IDAT
                     let real_start = index - 4;
                     if let Ok((idat_contents, payload)) = parse_idat(&src[real_start..], 0) {
-                        let mut state = DeflateStreamState::new(plain_text_limit, true);
+                        let mut state = PreflateChunkProcessor::new(plain_text_limit, true);
 
                         if let Ok(res) = state.decompress(&payload, loglevel) {
                             let length = idat_contents.total_chunk_length;
@@ -251,7 +251,7 @@ fn parse_zip_stream(
     contents: &[u8],
     loglevel: u32,
     plain_text_limit: usize,
-) -> Result<(usize, DecompressResult, DeflateStreamState)> {
+) -> Result<(usize, PreflateChunkResult, PreflateChunkProcessor)> {
     let mut binary_reader = Cursor::new(&contents);
 
     // read the signature
@@ -275,7 +275,7 @@ fn parse_zip_stream(
     if zip_local_file_header.compression_method == 8 {
         let deflate_start_position = binary_reader.stream_position()? as usize;
 
-        let mut state = DeflateStreamState::new(plain_text_limit, true);
+        let mut state = PreflateChunkProcessor::new(plain_text_limit, true);
 
         if let Ok(res) = state.decompress(&contents[deflate_start_position..], loglevel) {
             return Ok((deflate_start_position, res, state));

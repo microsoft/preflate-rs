@@ -7,8 +7,8 @@ use std::{collections::VecDeque, io::Write};
 
 use crate::{
     preflate_container::CompressionConfig, preflate_error::AddContext, utils::write_dequeue,
-    CompressionStats, ExitCode, PreflateCompressionContext, PreflateError, ProcessBuffer,
-    RecreateFromChunksContext, Result,
+    CompressionStats, ExitCode, PreflateContainerProcessor, PreflateError, ProcessBuffer,
+    RecreateContainerProcessor, Result,
 };
 
 pub struct ZstdDecompressContext<D: ProcessBuffer> {
@@ -191,7 +191,7 @@ pub fn compress_zstd(
     config: CompressionConfig,
     compression_stats: &mut CompressionStats,
 ) -> Result<Vec<u8>> {
-    let mut ctx = ZstdCompressContext::new(PreflateCompressionContext::new(config), 9, false);
+    let mut ctx = ZstdCompressContext::new(PreflateContainerProcessor::new(config), 9, false);
 
     let r = ctx.process_vec(zlib_compressed_data, usize::MAX, usize::MAX)?;
 
@@ -203,8 +203,8 @@ pub fn compress_zstd(
 /// decompresses the Zstd compressed data and then recompresses the result back
 /// to the original Zlib compressed streams.
 pub fn decompress_zstd(compressed_data: &[u8], capacity: usize) -> Result<Vec<u8>> {
-    let mut ctx = ZstdDecompressContext::<RecreateFromChunksContext>::new(
-        RecreateFromChunksContext::new(capacity),
+    let mut ctx = ZstdDecompressContext::<RecreateContainerProcessor>::new(
+        RecreateContainerProcessor::new(capacity),
     );
 
     Ok(ctx.process_vec(compressed_data, 10 * 1024 * 1024, 10 * 1024 * 1024)?)

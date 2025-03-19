@@ -8,7 +8,7 @@ use crate::{
     preflate_container::CompressionConfig,
     preflate_error::ExitCode,
     zstd_compression::{ZstdCompressContext, ZstdDecompressContext},
-    PreflateCompressionContext, PreflateError, ProcessBuffer, RecreateFromChunksContext,
+    PreflateContainerProcessor, PreflateError, ProcessBuffer, RecreateContainerProcessor,
 };
 
 /// Helper function to catch panics and convert them into the appropriate LeptonError
@@ -77,7 +77,7 @@ pub unsafe extern "C" fn create_compression_context(flags: u32) -> *mut std::ffi
         let context = Box::new((
             12345678u32,
             CompressionContext::new(
-                PreflateCompressionContext::new(CompressionConfig::default()),
+                PreflateContainerProcessor::new(CompressionConfig::default()),
                 9,
                 test_baseline,
             ),
@@ -179,8 +179,8 @@ pub unsafe extern "C" fn get_compression_stats(
     *hash_algorithm = stats.hash_algorithm.to_u16() as u32;
 }
 
-type DecompressionContext = ZstdDecompressContext<RecreateFromChunksContext>;
-type CompressionContext = ZstdCompressContext<PreflateCompressionContext>;
+type DecompressionContext = ZstdDecompressContext<RecreateContainerProcessor>;
+type CompressionContext = ZstdCompressContext<PreflateContainerProcessor>;
 
 #[no_mangle]
 pub unsafe extern "C" fn create_decompression_context(
@@ -190,7 +190,7 @@ pub unsafe extern "C" fn create_decompression_context(
     match catch_unwind_result(|| {
         let context = Box::new((
             87654321u32,
-            DecompressionContext::new(RecreateFromChunksContext::new(capacity as usize)),
+            DecompressionContext::new(RecreateContainerProcessor::new(capacity as usize)),
         ));
         Ok(Box::into_raw(context) as *mut std::ffi::c_void)
     }) {

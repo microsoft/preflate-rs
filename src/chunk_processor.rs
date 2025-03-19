@@ -4,6 +4,8 @@
  *  This software incorporates material from third parties. See NOTICE.txt for details.
  *--------------------------------------------------------------------------------------------*/
 
+//! Responsible for performing preflate and recreation on a chunk by chunk basis
+
 use std::io::Cursor;
 
 use bitcode::{Decode, Encode};
@@ -27,7 +29,7 @@ use crate::{
 
 /// the data required to reconstruct the deflate stream exactly the way that it was
 #[derive(Encode, Decode)]
-pub struct ReconstructionData {
+struct ReconstructionData {
     pub parameters: TokenPredictorParameters,
     pub corrections: Vec<u8>,
 }
@@ -44,7 +46,7 @@ impl ReconstructionData {
 }
 
 /// result of decompress_deflate_stream
-pub struct DecompressResult {
+pub struct PreflateChunkResult {
     /// the extra data that is needed to reconstruct the deflate stream exactly as it was written
     pub corrections: Vec<u8>,
 
@@ -59,19 +61,19 @@ pub struct DecompressResult {
 }
 
 #[derive(Debug)]
-pub struct DeflateStreamState {
+pub struct PreflateChunkProcessor {
     predictor: Option<TokenPredictor>,
-    validator: Option<ReconstructStreamState>,
+    validator: Option<RecreateChunkProcessor>,
     parser: DeflateParser,
 }
 
-impl DeflateStreamState {
+impl PreflateChunkProcessor {
     pub fn new(plain_text_limit: usize, verify: bool) -> Self {
         Self {
             predictor: None,
             parser: DeflateParser::new(plain_text_limit),
             validator: if verify {
-                Some(ReconstructStreamState::new())
+                Some(RecreateChunkProcessor::new())
             } else {
                 None
             },
@@ -99,7 +101,7 @@ impl DeflateStreamState {
         &mut self,
         compressed_data: &[u8],
         _loglevel: u32,
-    ) -> Result<DecompressResult> {
+    ) -> Result<PreflateChunkResult> {
         let contents = self.parser.parse(compressed_data)?;
 
         let mut cabac_encoded = Vec::new();
@@ -144,7 +146,7 @@ impl DeflateStreamState {
                 }
             }
 
-            Ok(DecompressResult {
+            Ok(PreflateChunkResult {
                 corrections: cabac_encoded,
                 compressed_size: contents.compressed_size,
                 parameters: None,
@@ -200,7 +202,7 @@ impl DeflateStreamState {
                 }
             }
 
-            Ok(DecompressResult {
+            Ok(PreflateChunkResult {
                 corrections: reconstruction_data,
                 compressed_size: contents.compressed_size,
                 parameters: Some(params),
@@ -215,21 +217,22 @@ pub fn decompress_whole_deflate_stream(
     verify: bool,
     _loglevel: u32,
     plain_text_limit: usize,
-) -> Result<(DecompressResult, PlainText)> {
-    let mut state = DeflateStreamState::new(plain_text_limit, verify);
+) -> Result<(PreflateChunkResult, PlainText)> {
+    let mut state = PreflateChunkProcessor::new(plain_text_limit, verify);
     let r = state.decompress(compressed_data, 1)?;
 
     Ok((r, state.parser.detach_plain_text()))
 }
 
+/// recreates the original deflate stream
 #[derive(Debug)]
-pub struct ReconstructStreamState {
+pub struct RecreateChunkProcessor {
     predictor: Option<TokenPredictor>,
     writer: DeflateWriter,
     plain_text: PlainText,
 }
 
-impl ReconstructStreamState {
+impl RecreateChunkProcessor {
     pub fn new() -> Self {
         Self {
             predictor: None,
@@ -293,7 +296,7 @@ pub fn recompress_whole_deflate_stream(
     plain_text: &[u8],
     prediction_corrections: &[u8],
 ) -> Result<Vec<u8>> {
-    let mut state = ReconstructStreamState::new();
+    let mut state = RecreateChunkProcessor::new();
 
     let (recompressed, _) = state.recompress(|p| p.append(plain_text), prediction_corrections)?;
 
@@ -384,7 +387,7 @@ fn recreate_blocks<D: PredictionDecoder>(
 fn decompress_deflate_stream_assert(
     compressed_data: &[u8],
     verify: bool,
-) -> Result<(DecompressResult, PlainText)> {
+) -> Result<(PreflateChunkResult, PlainText)> {
     use crate::deflate::deflate_reader::parse_deflate_whole;
     use cabac::debug::{DebugReader, DebugWriter};
 
@@ -428,7 +431,7 @@ fn decompress_deflate_stream_assert(
     }
 
     Ok((
-        DecompressResult {
+        PreflateChunkResult {
             corrections: reconstruction_data,
             compressed_size: contents.compressed_size,
             parameters: Some(params),
@@ -727,7 +730,7 @@ pub fn analyze_compressed_data_verify_incremental(compressed_data: &[u8], plain_
     let mut start_offset = 0;
     let mut end_offset = compressed_data.len().min(100001);
 
-    let mut stream = DeflateStreamState::new(plain_text_limit, true);
+    let mut stream = PreflateChunkProcessor::new(plain_text_limit, true);
 
     let mut plain_text_offset = 0;
 
@@ -772,7 +775,7 @@ pub fn analyze_compressed_data_verify_incremental(compressed_data: &[u8], plain_
     let mut recompressed = Vec::new();
     let mut reconstructed_blocks = Vec::new();
 
-    let mut reconstruct = ReconstructStreamState::new();
+    let mut reconstruct = RecreateChunkProcessor::new();
     for i in 0..expanded_contents.len() {
         let (mut r, mut b) = reconstruct
             .recompress(

@@ -5,7 +5,7 @@ use std::{
 };
 
 use preflate_rs::{
-    CompressionConfig, PreflateCompressionContext, ProcessBuffer, ZstdCompressContext,
+    CompressionConfig, PreflateContainerProcessor, ProcessBuffer, ZstdCompressContext,
 };
 
 fn enumerate_directory_recursively(path: &Path) -> Result<Vec<PathBuf>, std::io::Error> {
@@ -53,7 +53,7 @@ fn main() {
         let file = std::fs::read(entry).unwrap();
 
         let mut ctx = ZstdCompressContext::new(
-            PreflateCompressionContext::new(CompressionConfig::default()),
+            PreflateContainerProcessor::new(CompressionConfig::default()),
             9,
             true,
         );
