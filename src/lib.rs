@@ -27,17 +27,20 @@ mod utils;
 
 pub mod unmanaged_api;
 
-pub use chunk_processor::{decompress_whole_deflate_stream, recompress_whole_deflate_stream};
+pub use chunk_processor::{
+    decompress_whole_deflate_stream, recompress_whole_deflate_stream, PreflateChunkProcessor,
+    PreflateChunkResult, RecreateChunkProcessor,
+};
 
-pub use preflate_container::{prefate_container, recreated_container};
 pub use zstd_compression::{compress_zstd, decompress_zstd};
 
 pub use preflate_error::ExitCode;
 pub use preflate_error::{PreflateError, Result};
 
-pub use preflate_container::{CompressionConfig, CompressionStats};
 pub use preflate_container::{
-    PreflateContainerProcessor, ProcessBuffer, RecreateContainerProcessor,
+    prefate_container, recreated_container, PreflateContainerProcessor, ProcessBuffer,
+    RecreateContainerProcessor,
 };
+pub use preflate_container::{CompressionConfig, CompressionStats};
 
 pub use zstd_compression::{ZstdCompressContext, ZstdDecompressContext};
