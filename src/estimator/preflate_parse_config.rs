@@ -20,6 +20,9 @@ pub enum MatchingType {
 
 pub struct PreflateParserConfig {
     pub match_type: MatchingType,
+
+    // used for testing
+    #[allow(dead_code)]
     pub dictionary_add_policy: DictionaryAddPolicy,
 
     /// if we get this length of a match we immediately stop searching for more

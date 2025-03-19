@@ -19,6 +19,7 @@ use crate::preflate_input::PreflateInput;
 use std::cmp;
 
 #[derive(Debug, Copy, Clone)]
+#[allow(dead_code)]
 pub enum MatchResult {
     Success(DeflateTokenReference),
     DistanceLargerThanHop0(u32, u32),

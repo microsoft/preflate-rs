@@ -5,8 +5,7 @@ use std::{
 };
 
 use preflate_rs::{
-    decompress_zstd, CompressionConfig, PreflateCompressionContext, ProcessBuffer,
-    ZstdCompressContext,
+    CompressionConfig, PreflateCompressionContext, ProcessBuffer, ZstdCompressContext,
 };
 
 fn enumerate_directory_recursively(path: &Path) -> Result<Vec<PathBuf>, std::io::Error> {
@@ -44,8 +43,6 @@ fn main() {
     let mut totalseen = 0u64;
     let mut totalbaseline = 0u64;
     let mut totalzstd = 0u64;
-
-    let loglevel = 0;
 
     // Use WalkDir to recursively search for files in the directory
     for entry in enumerate_directory_recursively(Path::new(&current_dir)).unwrap() {
