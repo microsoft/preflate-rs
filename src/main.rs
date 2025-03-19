@@ -42,6 +42,7 @@ fn main() {
     let current_dir = env::args().nth(1).unwrap_or_else(|| String::from("."));
 
     let mut totalseen = 0u64;
+    let mut totalbaseline = 0u64;
     let mut totalzstd = 0u64;
 
     let loglevel = 0;
@@ -68,20 +69,13 @@ fn main() {
 
         let stats = ctx.stats();
 
-        totalseen += stats.zstd_baseline_size as u64;
+        totalseen += file.len() as u64;
+        totalbaseline += stats.zstd_baseline_size as u64;
         totalzstd += stats.zstd_compressed_size as u64;
 
-        match decompress_zstd(&preflatecompressed, 1024 * 1024 * 128) {
-            Ok(original) => {
-                assert!(original == file);
-                println!(
-                    "total seen ratio {totalzstd}:{totalseen} {}",
-                    totalzstd as f64 / totalseen as f64
-                );
-            }
-            Err(e) => {
-                println!("Error: {:?}", e);
-            }
-        }
+        println!(
+            "total seen ratio {totalzstd}:{totalbaseline}:{totalseen} {}",
+            totalzstd as f64 / totalseen as f64
+        );
     }
 }

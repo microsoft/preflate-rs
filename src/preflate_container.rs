@@ -20,6 +20,7 @@ pub struct CompressionConfig {
     pub log_level: u32,
     pub min_chunk_size: usize,
     pub plain_text_limit: usize,
+    pub total_plain_text_limit: u64,
 }
 
 impl Default for CompressionConfig {
@@ -28,6 +29,7 @@ impl Default for CompressionConfig {
             log_level: 0,
             min_chunk_size: 1024 * 1024,
             plain_text_limit: 128 * 1024 * 1024,
+            total_plain_text_limit: 512 * 1024 * 1024,
         }
     }
 }
@@ -436,6 +438,7 @@ pub struct PreflateCompressionContext {
     result: VecDeque<u8>,
     compression_stats: CompressionStats,
     input_complete: bool,
+    total_plain_text_seen: u64,
 
     state: ChunkParseState,
     config: CompressionConfig,
@@ -449,6 +452,7 @@ impl PreflateCompressionContext {
             result: VecDeque::new(),
             input_complete: false,
             state: ChunkParseState::Start,
+            total_plain_text_seen: 0,
             config,
         }
     }
@@ -487,6 +491,16 @@ impl ProcessBuffer for PreflateCompressionContext {
                     self.state = ChunkParseState::Searching;
                 }
                 ChunkParseState::Searching => {
+                    if self.total_plain_text_seen > self.config.total_plain_text_limit {
+                        // once we've exceeded our limit, we don't do any more compression
+                        // this is to ensure we don't suck the CPU time for too long on
+                        // a single file
+                        write_literal_block(&self.content, &mut self.result)?;
+
+                        self.content.clear();
+                        break;
+                    }
+
                     // here we are looking for a deflate stream or PNG chunk
                     if let Some((next, chunk)) = find_deflate_stream(
                         &self.content,
@@ -503,6 +517,7 @@ impl ProcessBuffer for PreflateCompressionContext {
                             write_chunk_block(&mut self.result, chunk, &mut self.compression_stats)
                                 .context()?
                         {
+                            self.total_plain_text_seen += state.plain_text().len() as u64;
                             state.shrink_to_dictionary();
 
                             self.state = ChunkParseState::DeflateContinue(state);
@@ -547,6 +562,7 @@ impl ProcessBuffer for PreflateCompressionContext {
                             self.result.write_all(&res.corrections)?;
                             self.result.write_all(&state.plain_text().text())?;
 
+                            self.total_plain_text_seen += state.plain_text().len() as u64;
                             self.compression_stats.overhead_bytes += res.corrections.len() as u64;
                             self.compression_stats.uncompressed_size +=
                                 state.plain_text().len() as u64;
@@ -907,6 +923,7 @@ fn roundtrip_small_chunk() {
         log_level: 1,
         min_chunk_size: 100000,
         plain_text_limit: usize::MAX,
+        total_plain_text_limit: u64::MAX,
     });
 
     let compressed = context.process_vec(&original, 20001, 997).unwrap();
@@ -927,6 +944,7 @@ fn roundtrip_small_plain_text() {
         log_level: 1,
         min_chunk_size: 100000,
         plain_text_limit: 1000000,
+        total_plain_text_limit: u64::MAX,
     });
 
     let compressed = context.process_vec(&original, 2001, 20001).unwrap();

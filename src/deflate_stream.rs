@@ -110,8 +110,6 @@ impl DeflateStreamState {
         if let Some(predictor) = &mut self.predictor {
             let mut input = PreflateInput::new(&self.parser.plain_text());
 
-            println!("decompress input {:?}", self.parser.plain_text());
-
             // we are missing the last couple hashes in the dictionary since we didn't
             // have the full plaintext yet.
             predictor.add_missing_previous_hash(&input);
@@ -126,7 +124,6 @@ impl DeflateStreamState {
                     &cabac_encoded,
                 )?;
 
-                println!("1req {:?}", _rec_blocks);
                 #[cfg(test)]
                 for i in 0..contents.blocks.len() {
                     crate::utils::assert_block_eq(&contents.blocks[i], &_rec_blocks[i]);
@@ -182,8 +179,6 @@ impl DeflateStreamState {
                     |p| p.append(self.parser.plain_text().text()),
                     &reconstruction_data,
                 )?;
-
-                println!("2req {:?}", _rec_blocks);
 
                 #[cfg(test)]
                 for i in 0..contents.blocks.len() {

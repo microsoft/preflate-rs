@@ -207,7 +207,7 @@ pub fn decompress_zstd(compressed_data: &[u8], capacity: usize) -> Result<Vec<u8
         RecreateFromChunksContext::new(capacity),
     );
 
-    Ok(ctx.process_vec(compressed_data, usize::MAX, usize::MAX)?)
+    Ok(ctx.process_vec(compressed_data, 10 * 1024 * 1024, 10 * 1024 * 1024)?)
 }
 
 #[test]
