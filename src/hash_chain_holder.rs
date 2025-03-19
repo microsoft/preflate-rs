@@ -19,6 +19,7 @@ use crate::preflate_input::PreflateInput;
 use std::cmp;
 
 #[derive(Debug, Copy, Clone)]
+#[allow(dead_code)]
 pub enum MatchResult {
     Success(DeflateTokenReference),
     DistanceLargerThanHop0(u32, u32),
@@ -339,7 +340,7 @@ impl<H: HashChain> HashChainHolderImpl<H> {
         input: &PreflateInput,
     ) -> MatchResult {
         let start_pos = input.pos() + OFFSET;
-        let max_len = std::cmp::min(input.size() - start_pos, MAX_MATCH);
+        let max_len = std::cmp::min(input.total_length() - start_pos, MAX_MATCH);
         if max_len
             < std::cmp::max(
                 prev_len + 1,
@@ -386,6 +387,7 @@ impl<H: HashChain> HashChainHolderImpl<H> {
         let mut first = true;
         let mut best_dist = 0;
 
+        // look at last two characters of best length so far
         let mut c0 = read_u16_le(input_chars, (best_len - 1) as usize);
 
         for dist in self.hash.iterate::<OFFSET>(input) {
@@ -449,44 +451,35 @@ impl<H: HashChain> HashChainHolderImpl<H> {
 
 #[inline(always)]
 fn prefix_compare(s1: &[u8], s2: &[u8], max_len: u32) -> u32 {
-    prefix_cmp_odd_size(max_len, s1, s2)
-    /*
-    not working yet
-
     if max_len == 258 {
-        assert!(s1.len() >= 258 && s2.len() >= 258);
-
-        let c = comp_8_bytes(&s1[0..8], &s2[0..8]);
-        if c != 0 {
-            let d = calc_diff(c);
-            if d < 3 {
-                return 0;
-            } else {
-                return d;
-            }
-        }
-
-        for i in 0..7 {
-            let c = comp_8_bytes(
-                &s1[i as usize..(i + 8) as usize],
-                &s2[i as usize..(i + 8) as usize],
-            );
-            if c != 0 {
-                return calc_diff(c) + (i + 1) * 8;
-            }
-        }
-        if s1[256] != s2[256] {
-            return 256;
-        }
-        if s1[257] != s2[257] {
-            return 257;
-        }
-        return 258;
+        prefix_compare_fast(s1, s2)
     } else {
-        prefix_cmp_odd_size(max_len, s1, s2, best_len)
-    }*/
+        prefix_cmp_odd_size(max_len, s1, s2)
+    }
 }
 
+#[inline(always)]
+fn prefix_compare_fast(s1: &[u8], s2: &[u8]) -> u32 {
+    assert!(s1.len() >= 258 && s2.len() >= 258);
+    for i in 0..32 {
+        let c = comp_8_bytes(
+            &s1[(i * 8) as usize..(i * 8 + 8) as usize],
+            &s2[(i * 8) as usize..(i * 8 + 8) as usize],
+        );
+        if c != 0 {
+            return calc_diff(c) + (i * 8);
+        }
+    }
+    if s1[256] != s2[256] {
+        return 256;
+    }
+    if s1[257] != s2[257] {
+        return 257;
+    }
+    return 258;
+}
+
+#[inline(never)]
 fn prefix_cmp_odd_size(max_len: u32, s1: &[u8], s2: &[u8]) -> u32 {
     assert!(
         max_len >= 3 && s1.len() >= max_len as usize && s2.len() >= max_len as usize,
