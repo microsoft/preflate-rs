@@ -54,19 +54,27 @@ pub struct DecompressResult {
 
     /// the parameters that were used to compress the stream (informational)
     pub parameters: Option<TokenPredictorParameters>,
+
+    pub blocks: Vec<DeflateTokenBlock>,
 }
 
 #[derive(Debug)]
 pub struct DeflateStreamState {
     predictor: Option<TokenPredictor>,
+    validator: Option<ReconstructStreamState>,
     parser: DeflateParser,
 }
 
 impl DeflateStreamState {
-    pub fn new(plain_text_limit: usize) -> Self {
+    pub fn new(plain_text_limit: usize, verify: bool) -> Self {
         Self {
             predictor: None,
             parser: DeflateParser::new(plain_text_limit),
+            validator: if verify {
+                Some(ReconstructStreamState::new())
+            } else {
+                None
+            },
         }
     }
 
@@ -90,7 +98,6 @@ impl DeflateStreamState {
     pub fn decompress(
         &mut self,
         compressed_data: &[u8],
-        verify: bool,
         _loglevel: u32,
     ) -> Result<DecompressResult> {
         let contents = self.parser.parse(compressed_data)?;
@@ -103,6 +110,8 @@ impl DeflateStreamState {
         if let Some(predictor) = &mut self.predictor {
             let mut input = PreflateInput::new(&self.parser.plain_text());
 
+            println!("decompress input {:?}", self.parser.plain_text());
+
             // we are missing the last couple hashes in the dictionary since we didn't
             // have the full plaintext yet.
             predictor.add_missing_previous_hash(&input);
@@ -111,10 +120,37 @@ impl DeflateStreamState {
 
             cabac_encoder.finish();
 
+            if let Some(validator) = &mut self.validator {
+                let (recompressed, _rec_blocks) = validator.recompress(
+                    |p| p.append(self.parser.plain_text().text()),
+                    &cabac_encoded,
+                )?;
+
+                #[cfg(test)]
+                for i in 0..contents.blocks.len() {
+                    crate::utils::assert_block_eq(&contents.blocks[i], &_rec_blocks[i]);
+                }
+
+                // we should always succeed here in test code
+                #[cfg(test)]
+                crate::utils::assert_eq_array(
+                    &recompressed,
+                    &compressed_data[..contents.compressed_size],
+                );
+
+                if recompressed[..] != compressed_data[..contents.compressed_size] {
+                    return Err(PreflateError::new(
+                        ExitCode::RoundtripMismatch,
+                        "recompressed data does not match original",
+                    ));
+                }
+            }
+
             Ok(DecompressResult {
                 corrections: cabac_encoded,
                 compressed_size: contents.compressed_size,
                 parameters: None,
+                blocks: contents.blocks,
             })
         } else {
             let params =
@@ -140,16 +176,10 @@ impl DeflateStreamState {
 
             self.predictor = Some(token_predictor);
 
-            if verify {
-                let r = ReconstructionData::read(&reconstruction_data)?;
-
-                assert_eq!(r.parameters, params);
-
-                let recompressed = recompress_deflate_stream_with_predictor(
-                    &self.parser.plain_text(),
-                    &r.corrections,
-                    &mut TokenPredictor::new(&r.parameters),
-                    &mut DeflateWriter::new(),
+            if let Some(validator) = &mut self.validator {
+                let (recompressed, _) = validator.recompress(
+                    |p| p.append(self.parser.plain_text().text()),
+                    &reconstruction_data,
                 )?;
 
                 // we should always succeed here in test code
@@ -171,52 +201,100 @@ impl DeflateStreamState {
                 corrections: reconstruction_data,
                 compressed_size: contents.compressed_size,
                 parameters: Some(params),
+                blocks: contents.blocks,
             })
         }
     }
 }
 
-pub fn decompress_deflate_stream(
+pub fn decompress_whole_deflate_stream(
     compressed_data: &[u8],
     verify: bool,
     _loglevel: u32,
     plain_text_limit: usize,
 ) -> Result<(DecompressResult, PlainText)> {
-    let mut state = DeflateStreamState::new(plain_text_limit);
-    let r = state.decompress(compressed_data, verify, 1)?;
+    let mut state = DeflateStreamState::new(plain_text_limit, verify);
+    let r = state.decompress(compressed_data, 1)?;
 
     Ok((r, state.parser.detach_plain_text()))
 }
 
-/// recompresses a deflate stream using the cabac_encoded data that was returned from decompress_deflate_stream
-pub fn recompress_deflate_stream(
-    plain_text: &PlainText,
-    prediction_corrections: &[u8],
-) -> Result<Vec<u8>> {
-    let r = ReconstructionData::read(prediction_corrections)?;
-
-    recompress_deflate_stream_with_predictor(
-        plain_text,
-        &r.corrections,
-        &mut TokenPredictor::new(&r.parameters),
-        &mut DeflateWriter::new(),
-    )
+#[derive(Debug)]
+pub struct ReconstructStreamState {
+    predictor: Option<TokenPredictor>,
+    writer: DeflateWriter,
+    plain_text: PlainText,
 }
 
-pub fn recompress_deflate_stream_with_predictor(
-    plain_text: &PlainText,
-    corrections: &[u8],
-    predictor: &mut TokenPredictor,
-    deflate_writer: &mut DeflateWriter,
+impl ReconstructStreamState {
+    pub fn new() -> Self {
+        Self {
+            predictor: None,
+            writer: DeflateWriter::new(),
+            plain_text: PlainText::new(),
+        }
+    }
+
+    pub fn recompress(
+        &mut self,
+        append_to_plain_text: impl FnOnce(&mut PlainText),
+        corrections: &[u8],
+    ) -> Result<(Vec<u8>, Vec<DeflateTokenBlock>)> {
+        append_to_plain_text(&mut self.plain_text);
+        let mut input = PreflateInput::new(&self.plain_text);
+
+        if let Some(predictor) = &mut self.predictor {
+            let mut cabac_decoder =
+                PredictionDecoderCabac::new(VP8Reader::new(Cursor::new(corrections)).unwrap());
+
+            predictor.add_missing_previous_hash(&input);
+
+            let blocks =
+                recreate_blocks(predictor, &mut cabac_decoder, &mut self.writer, &mut input)
+                    .context()?;
+
+            self.plain_text.shrink_to_dictionary();
+
+            self.writer.flush();
+
+            Ok((self.writer.detach_output(), blocks))
+        } else {
+            let r = ReconstructionData::read(corrections)?;
+
+            let mut predictor = TokenPredictor::new(&r.parameters);
+
+            let mut cabac_decoder =
+                PredictionDecoderCabac::new(VP8Reader::new(Cursor::new(r.corrections)).unwrap());
+
+            let blocks = recreate_blocks(
+                &mut predictor,
+                &mut cabac_decoder,
+                &mut self.writer,
+                &mut input,
+            )
+            .context()?;
+
+            self.predictor = Some(predictor);
+
+            self.plain_text.shrink_to_dictionary();
+
+            self.writer.flush();
+
+            Ok((self.writer.detach_output(), blocks))
+        }
+    }
+}
+
+/// recompresses a deflate stream using the cabac_encoded data that was returned from decompress_deflate_stream
+pub fn recompress_whole_deflate_stream(
+    plain_text: &[u8],
+    prediction_corrections: &[u8],
 ) -> Result<Vec<u8>> {
-    let mut cabac_decoder =
-        PredictionDecoderCabac::new(VP8Reader::new(Cursor::new(corrections)).unwrap());
-    let mut input = PreflateInput::new(plain_text);
+    let mut state = ReconstructStreamState::new();
 
-    recreate_blocks(predictor, &mut cabac_decoder, deflate_writer, &mut input).context()?;
+    let (recompressed, _) = state.recompress(|p| p.append(plain_text), prediction_corrections)?;
 
-    deflate_writer.flush();
-    Ok(deflate_writer.detach_output())
+    Ok(recompressed)
 }
 
 /// takes a deflate compressed stream, analyzes it, decoompresses it, and records
@@ -244,7 +322,7 @@ fn predict_blocks(
     input: &mut PreflateInput,
 ) -> Result<()> {
     for i in 0..blocks.len() {
-        token_predictor.predict_block(&blocks[i], encoder, input)?;
+        token_predictor.predict_block(&blocks[i], encoder, input, i == blocks.len() - 1)?;
         // end of stream normally is the last block
         encoder.encode_correction_bool(
             CodecCorrection::EndOfStream,
@@ -351,6 +429,7 @@ fn decompress_deflate_stream_assert(
             corrections: reconstruction_data,
             compressed_size: contents.compressed_size,
             parameters: Some(params),
+            blocks: contents.blocks,
         },
         plain_text,
     ))
@@ -393,8 +472,8 @@ fn verify_file(filename: &str) {
     use crate::utils::read_file;
     let v = read_file(filename);
 
-    let (r, plain_text) = decompress_deflate_stream(&v, true, 1, usize::MAX).unwrap();
-    let recompressed = recompress_deflate_stream(&plain_text, &r.corrections).unwrap();
+    let (r, plain_text) = decompress_whole_deflate_stream(&v, true, 1, usize::MAX).unwrap();
+    let recompressed = recompress_whole_deflate_stream(plain_text.text(), &r.corrections).unwrap();
     assert!(v == recompressed);
 }
 
@@ -637,22 +716,36 @@ fn verify_png_deflate() {
 }
 
 #[cfg(test)]
-pub fn analyze_compressed_data_verify_incremental(compressed_data: &[u8]) {
+pub fn analyze_compressed_data_verify_incremental(compressed_data: &[u8], plain_text_limit: usize) {
+    use crate::{deflate::deflate_reader::parse_deflate_whole, utils::assert_eq_array};
+
+    let (original_con, _) = parse_deflate_whole(compressed_data).unwrap();
+
     let mut start_offset = 0;
     let mut end_offset = compressed_data.len().min(100001);
 
-    let mut stream = DeflateStreamState::new(usize::MAX);
+    let mut stream = DeflateStreamState::new(plain_text_limit, true);
 
-    let mut corrections = Vec::new();
+    let mut plain_text_offset = 0;
+
+    let mut expanded_contents = Vec::new();
     while !stream.is_done() {
-        let result = stream.decompress(&compressed_data[start_offset..end_offset], false, 0);
+        let result = stream.decompress(&compressed_data[start_offset..end_offset], 1);
         match result {
             Ok(r) => {
-                println!("chunk start={} size={}", start_offset, r.compressed_size);
+                println!(
+                    "chunk cmp_start={} cmp_size={} blocks={} pt_off={}({})",
+                    start_offset,
+                    r.compressed_size,
+                    r.blocks.len(),
+                    plain_text_offset,
+                    stream.plain_text().len()
+                );
                 start_offset += r.compressed_size;
                 end_offset = (start_offset + 10001).min(compressed_data.len());
 
-                corrections.push(r.corrections);
+                plain_text_offset += stream.plain_text().len();
+                expanded_contents.push((r.corrections, stream.plain_text().text().to_vec()));
 
                 stream.shrink_to_dictionary();
             }
@@ -671,15 +764,55 @@ pub fn analyze_compressed_data_verify_incremental(compressed_data: &[u8]) {
             }
         }
     }
+
+    // now reconstruct the data and make sure it is identical
+    let mut recompressed = Vec::new();
+    let mut reconstructed_blocks = Vec::new();
+
+    let mut reconstruct = ReconstructStreamState::new();
+    for i in 0..expanded_contents.len() {
+        let (mut r, mut b) = reconstruct
+            .recompress(
+                |p| p.append(&expanded_contents[i].1),
+                &expanded_contents[i].0,
+            )
+            .unwrap();
+
+        println!(
+            "reconstruct block offset={} blocks={} pt={}",
+            i,
+            b.len(),
+            expanded_contents[i].1.len()
+        );
+
+        recompressed.append(&mut r);
+        reconstructed_blocks.append(&mut b);
+    }
+
+    //assert_eq!(original_con.blocks.len(), reconstructed_blocks.len());
+    for i in 0..original_con.blocks.len() {
+        println!("block {}", i);
+        crate::utils::assert_block_eq(&original_con.blocks[i], &reconstructed_blocks[i]);
+    }
+
+    assert_eq_array(compressed_data, &recompressed);
+}
+
+#[test]
+fn verify_plain_text_limit() {
+    analyze_compressed_data_verify_incremental(
+        &crate::utils::read_file("compressed_zlib_level3.deflate"),
+        1 * 1024 * 1024,
+    );
 }
 
 /// test partial reading reading
 #[test]
 fn verify_partial_blocks() {
     for i in 0..=9 {
-        analyze_compressed_data_verify_incremental(&crate::utils::read_file(&format!(
-            "compressed_zlib_level{}.deflate",
-            i
-        )));
+        analyze_compressed_data_verify_incremental(
+            &crate::utils::read_file(&format!("compressed_zlib_level{}.deflate", i)),
+            usize::MAX,
+        );
     }
 }

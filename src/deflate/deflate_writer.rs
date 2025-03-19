@@ -27,6 +27,17 @@ pub struct DeflateWriter {
     output: Vec<u8>,
 }
 
+impl std::fmt::Debug for DeflateWriter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "DeflateWriter {{ bitwriter: {:?}, output: len={} }}",
+            self.bitwriter,
+            self.output.len()
+        )
+    }
+}
+
 impl DeflateWriter {
     pub fn new() -> Self {
         Self {

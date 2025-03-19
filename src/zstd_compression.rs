@@ -6,8 +6,9 @@
 use std::{collections::VecDeque, io::Write};
 
 use crate::{
-    preflate_error::AddContext, utils::write_dequeue, CompressionStats, ExitCode,
-    PreflateCompressionContext, PreflateError, ProcessBuffer, RecreateFromChunksContext, Result,
+    preflate_container::CompressionConfig, preflate_error::AddContext, utils::write_dequeue,
+    CompressionStats, ExitCode, PreflateCompressionContext, PreflateError, ProcessBuffer,
+    RecreateFromChunksContext, Result,
 };
 
 pub struct ZstdDecompressContext<D: ProcessBuffer> {
@@ -187,14 +188,10 @@ impl Write for MeasureWriteSink {
 /// with Zstd with the maximum level.
 pub fn compress_zstd(
     zlib_compressed_data: &[u8],
-    loglevel: u32,
+    config: CompressionConfig,
     compression_stats: &mut CompressionStats,
 ) -> Result<Vec<u8>> {
-    let mut ctx = ZstdCompressContext::new(
-        PreflateCompressionContext::new(loglevel, 1024 * 1024, 128 * 1024 * 1024),
-        9,
-        false,
-    );
+    let mut ctx = ZstdCompressContext::new(PreflateCompressionContext::new(config), 9, false);
 
     let r = ctx.process_vec(zlib_compressed_data, usize::MAX, usize::MAX)?;
 
@@ -219,7 +216,7 @@ fn verify_zip_compress_zstd() {
     let v = read_file("samplezip.zip");
 
     let mut stats = CompressionStats::default();
-    let compressed = compress_zstd(&v, 1, &mut stats).unwrap();
+    let compressed = compress_zstd(&v, CompressionConfig::default(), &mut stats).unwrap();
 
     let recreated = decompress_zstd(&compressed, 256 * 1024 * 1024).unwrap();
 

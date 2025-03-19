@@ -11,7 +11,8 @@ use std::{mem, ptr};
 
 use libdeflate_sys::{libdeflate_alloc_compressor, libdeflate_deflate_compress};
 use preflate_rs::{
-    compress_zstd, decompress_deflate_stream, decompress_zstd, recompress_deflate_stream,
+    compress_zstd, decompress_whole_deflate_stream, decompress_zstd,
+    recompress_whole_deflate_stream,
 };
 
 #[cfg(test)]
@@ -77,7 +78,7 @@ fn test_docx() {
 fn test_container(filename: &str) {
     let v = read_file(filename);
     let mut stats = preflate_rs::CompressionStats::default();
-    let c = compress_zstd(&v, 1, &mut stats).unwrap();
+    let c = compress_zstd(&v, preflate_rs::CompressionConfig::default(), &mut stats).unwrap();
 
     let r = decompress_zstd(&c, 1024 * 1024 * 128).unwrap();
     assert!(v == r);
@@ -111,8 +112,8 @@ fn libzng() {
 
 fn verifyresult(compressed_data: &[u8]) {
     let (result, plain_text) =
-        decompress_deflate_stream(compressed_data, true, 1, 128 * 1024 * 1024).unwrap();
-    let recomp = recompress_deflate_stream(&plain_text, &result.corrections).unwrap();
+        decompress_whole_deflate_stream(compressed_data, true, 1, 128 * 1024 * 1024).unwrap();
+    let recomp = recompress_whole_deflate_stream(&plain_text.text(), &result.corrections).unwrap();
 
     println!(
         "compressed size: {}, cabac: {}",
@@ -462,7 +463,7 @@ fn compression_benchmark_overhead_size() {
         for level in 0..=9 {
             let compressed = (i.compress_fn)(&original, level);
 
-            let r = decompress_deflate_stream(&compressed, true, 0, 1024 * 1024 * 128);
+            let r = decompress_whole_deflate_stream(&compressed, true, 0, 1024 * 1024 * 128);
 
             match r {
                 Ok((r, _)) => {

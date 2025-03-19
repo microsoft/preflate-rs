@@ -35,6 +35,18 @@ pub struct TokenPredictor {
     max_token_count: u32,
 }
 
+impl Clone for TokenPredictor {
+    fn clone(&self) -> Self {
+        Self {
+            state: self.state.clone(),
+            params: self.params,
+            pending_reference: self.pending_reference,
+            current_token_count: self.current_token_count,
+            max_token_count: self.max_token_count,
+        }
+    }
+}
+
 impl std::fmt::Debug for TokenPredictor {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TokenPredictor")
@@ -87,6 +99,7 @@ impl TokenPredictor {
         block: &DeflateTokenBlock,
         codec: &mut D,
         input: &mut PreflateInput,
+        final_block_in_chunk: bool,
     ) -> Result<()> {
         self.current_token_count = 0;
         self.pending_reference = None;
@@ -149,7 +162,7 @@ impl TokenPredictor {
 
         // if the block ends at an unexpected point, or it contains more tokens
         // than expected, we will need to encode the block size
-        if (!block.last && tokens.len() != self.max_token_count as usize)
+        if (!final_block_in_chunk && tokens.len() != self.max_token_count as usize)
             || tokens.len() > self.max_token_count as usize
         {
             codec.encode_correction(
@@ -643,7 +656,12 @@ pub fn test_predictor_block_perfect() {
 
     for i in 0..contents.blocks.len() {
         predictor
-            .predict_block(&contents.blocks[i], &mut codec, &mut input)
+            .predict_block(
+                &contents.blocks[i],
+                &mut codec,
+                &mut input,
+                i == contents.blocks.len() - 1,
+            )
             .unwrap();
     }
 }

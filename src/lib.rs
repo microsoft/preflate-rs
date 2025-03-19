@@ -27,7 +27,7 @@ mod utils;
 
 pub mod unmanaged_api;
 
-pub use deflate_stream::{decompress_deflate_stream, recompress_deflate_stream};
+pub use deflate_stream::{decompress_whole_deflate_stream, recompress_whole_deflate_stream};
 
 pub use preflate_container::{expand_zlib_chunks, recreated_zlib_chunks};
 pub use zstd_compression::{compress_zstd, decompress_zstd};
@@ -35,7 +35,7 @@ pub use zstd_compression::{compress_zstd, decompress_zstd};
 pub use preflate_error::ExitCode;
 pub use preflate_error::{PreflateError, Result};
 
-pub use preflate_container::CompressionStats;
+pub use preflate_container::{CompressionConfig, CompressionStats};
 pub use preflate_container::{
     PreflateCompressionContext, ProcessBuffer, RecreateFromChunksContext,
 };

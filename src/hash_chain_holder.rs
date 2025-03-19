@@ -128,6 +128,8 @@ pub trait HashChainHolder {
     fn verify_hash(&self, _dist: Option<DeflateTokenReference>);
 
     fn checksum(&self, checksum: &mut DebugHash);
+
+    fn clone(&self) -> Box<dyn HashChainHolder>;
 }
 
 /// empty implementation of HashChainHolder if there is no dictionary
@@ -170,6 +172,10 @@ impl HashChainHolder for () {
     fn verify_hash(&self, _dist: Option<DeflateTokenReference>) {}
 
     fn checksum(&self, _checksum: &mut DebugHash) {}
+
+    fn clone(&self) -> Box<dyn HashChainHolder> {
+        Box::new(())
+    }
 }
 
 /// implemenation of HashChainHolder depends type of hash implemenatation
@@ -179,7 +185,7 @@ struct HashChainHolderImpl<H: HashChain> {
     window_bytes: u32,
 }
 
-impl<H: HashChain> HashChainHolder for HashChainHolderImpl<H> {
+impl<H: HashChain + 'static> HashChainHolder for HashChainHolderImpl<H> {
     fn update_hash(&mut self, length: u32, input: &PreflateInput) {
         debug_assert!(length <= MAX_UPDATE_HASH_BATCH);
 
@@ -302,6 +308,10 @@ impl<H: HashChain> HashChainHolder for HashChainHolderImpl<H> {
     #[allow(dead_code)]
     fn checksum(&self, checksum: &mut DebugHash) {
         self.hash.checksum(checksum);
+    }
+
+    fn clone(&self) -> Box<dyn HashChainHolder> {
+        Box::new(HashChainHolderImpl::new(&self.params, self.hash.clone()))
     }
 }
 

@@ -358,9 +358,15 @@ fn test_partial_read() {
     test_partial_read_for_buffer(&crate::utils::read_file("compressed_zlib_level1.deflate"));
 }
 
+/// tests the partial read which allows for blocks to be read incrementally
+#[test]
+fn test_partial_read_plaintext() {
+    test_partial_read_for_buffer(&crate::utils::read_file("pptxplaintext.deflate"));
+}
+
 #[cfg(test)]
 pub fn test_partial_read_for_buffer(d: &[u8]) {
-    use crate::utils::assert_eq_array;
+    use crate::utils::{assert_block_eq, assert_eq_array};
 
     let (complete, _plain_text_complete) = parse_deflate_whole(&d).unwrap();
 
@@ -368,7 +374,7 @@ pub fn test_partial_read_for_buffer(d: &[u8]) {
     let mut end_offset = 1;
     let mut allblocks = Vec::new();
 
-    let mut deflate_parser = DeflateParser::new(usize::MAX);
+    let mut deflate_parser = DeflateParser::new(1 * 1024 * 1024);
 
     while !deflate_parser.is_done() {
         match deflate_parser.parse(&d[start_offset..end_offset]) {
@@ -386,7 +392,9 @@ pub fn test_partial_read_for_buffer(d: &[u8]) {
                 start_offset += dc.compressed_size;
 
                 // end offset plus a bit
-                end_offset = (start_offset + 10977).min(d.len());
+                end_offset = (start_offset + 50977).min(d.len());
+
+                deflate_parser.shrink_to_dictionary();
             }
             Err(e) => {
                 assert!(
@@ -395,38 +403,21 @@ pub fn test_partial_read_for_buffer(d: &[u8]) {
                     e
                 );
 
-                assert_eq!(e.exit_code(), ExitCode::ShortRead);
+                assert!(e.exit_code() == ExitCode::ShortRead);
                 // get some more this buffer was readable due to lack of data
-                end_offset = (end_offset + 10997).min(d.len());
+                end_offset = (end_offset + 50997).min(d.len());
             }
         }
     }
 
-    assert_eq_array(&get_tokens(&allblocks), &get_tokens(&complete.blocks));
+    assert_eq!(allblocks.len(), complete.blocks.len());
+    for i in 0..allblocks.len() {
+        assert_block_eq(&allblocks[i], &complete.blocks[i]);
+    }
 
     let reconstruct = crate::deflate::deflate_writer::write_deflate_blocks(&allblocks);
 
     // data we reconstruct should be the same, minus if there was extra data passed
     // start_offset that we dedidn't decode
     assert_eq_array(&reconstruct, &d[..start_offset]);
-}
-
-/// grabs all the tokens and put them in a single buffer. This
-/// allows us to compare two token block vectors for equlity even if
-/// the buffer has some partial blocks.
-#[cfg(test)]
-fn get_tokens(blocks: &[DeflateTokenBlock]) -> Vec<DeflateToken> {
-    let mut tokens = Vec::new();
-    for b in blocks {
-        match &b.block_type {
-            DeflateTokenBlockType::Huffman { tokens: t, .. } => tokens.extend_from_slice(t),
-            DeflateTokenBlockType::Stored { uncompressed, .. } => {
-                for u in uncompressed {
-                    tokens.push(DeflateToken::Literal(*u));
-                }
-            }
-        }
-    }
-
-    tokens
 }

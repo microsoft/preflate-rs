@@ -32,6 +32,10 @@ pub fn write_dequeue(
 #[allow(dead_code)]
 #[cfg(test)]
 pub fn write_file(filename: &str, data: &[u8]) {
+    let filename = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("samples")
+        .join(filename);
+
     let mut writecomp = std::fs::File::create(filename).unwrap();
     std::io::Write::write_all(&mut writecomp, data).unwrap();
 }
@@ -87,6 +91,48 @@ pub fn assert_eq_array<T: PartialEq + std::fmt::Debug>(a: &[T], b: &[T]) {
             );
         }
     }
+}
+
+#[cfg(test)]
+pub fn assert_block_eq(
+    a: &crate::deflate::deflate_token::DeflateTokenBlock,
+    b: &crate::deflate::deflate_token::DeflateTokenBlock,
+) {
+    use crate::deflate::deflate_token::DeflateTokenBlockType;
+
+    if a == b {
+        return;
+    }
+
+    if std::mem::discriminant(&a.block_type) != std::mem::discriminant(&b.block_type) {
+        panic!("block type mismatch {:?} {:?}", a.block_type, b.block_type);
+    }
+
+    match (&a.block_type, &b.block_type) {
+        (
+            DeflateTokenBlockType::Huffman {
+                tokens: ta,
+                huffman_type: ha,
+            },
+            DeflateTokenBlockType::Huffman {
+                tokens: tb,
+                huffman_type: hb,
+            },
+        ) => {
+            assert_eq_array(&ta, &tb);
+            assert_eq!(ha, hb);
+        }
+        (
+            DeflateTokenBlockType::Stored { uncompressed: ua },
+            DeflateTokenBlockType::Stored { uncompressed: ub },
+        ) => {
+            assert_eq_array(&ua, &ub);
+        }
+        _ => {
+            panic!("unexpected block type");
+        }
+    }
+    assert_eq!(a.last, b.last, "last flag mismatch");
 }
 
 #[cfg(test)]

@@ -5,7 +5,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 /// Used to write a variable number of bits to a byte buffer.
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct BitWriter {
     pub bit_buffer: u64,
     pub bits_in: u32,

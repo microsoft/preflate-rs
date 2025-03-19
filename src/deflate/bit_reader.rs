@@ -15,36 +15,36 @@ pub trait ReadBits {
 /// BitReader reads a variable number of bits from a byte stream.
 #[derive(Debug, Clone)]
 pub struct BitReader {
-    bits_read: u32,
-    bit_count: u32,
+    bits: u32,
+    bits_left: u32,
 }
 
 impl BitReader {
     pub fn new() -> Self {
         BitReader {
-            bits_read: 0,
-            bit_count: 0,
+            bits: 0,
+            bits_left: 0,
         }
     }
 
     pub fn bits_left(&self) -> u32 {
-        self.bit_count
+        self.bits_left
     }
 
     /// reads the bits until the next byte boundary
     pub fn read_padding_bits(&mut self) -> u8 {
-        let cbit = self.bit_count & 7;
+        let cbit = self.bits_left & 7;
 
-        let wret = self.bits_read & ((1 << cbit) - 1);
+        let wret = self.bits & ((1 << cbit) - 1);
 
-        self.bits_read >>= cbit;
-        self.bit_count -= cbit;
+        self.bits >>= cbit;
+        self.bits_left -= cbit;
 
         wret as u8
     }
 
     pub fn read_byte(&mut self, reader: &mut impl Read) -> Result<u8> {
-        debug_assert!(self.bit_count == 0);
+        debug_assert!(self.bits_left == 0);
         let r = reader.read_u8()?;
         Ok(r)
     }
@@ -65,17 +65,17 @@ impl ReadBits for BitReader {
             ));
         }
 
-        while self.bit_count < cbit {
+        while self.bits_left < cbit {
             let b = reader.read_u8()? as u32;
 
-            self.bits_read |= b << self.bit_count;
-            self.bit_count += 8;
+            self.bits |= b << self.bits_left;
+            self.bits_left += 8;
         }
 
-        let wret = self.bits_read & ((1 << cbit) - 1);
+        let wret = self.bits & ((1 << cbit) - 1);
 
-        self.bits_read >>= cbit;
-        self.bit_count -= cbit;
+        self.bits >>= cbit;
+        self.bits_left -= cbit;
 
         Ok(wret)
     }
