@@ -339,7 +339,7 @@ impl<H: HashChain> HashChainHolderImpl<H> {
         input: &PreflateInput,
     ) -> MatchResult {
         let start_pos = input.pos() + OFFSET;
-        let max_len = std::cmp::min(input.size() - start_pos, MAX_MATCH);
+        let max_len = std::cmp::min(input.total_length() - start_pos, MAX_MATCH);
         if max_len
             < std::cmp::max(
                 prev_len + 1,
@@ -386,6 +386,7 @@ impl<H: HashChain> HashChainHolderImpl<H> {
         let mut first = true;
         let mut best_dist = 0;
 
+        // look at last two characters of best length so far
         let mut c0 = read_u16_le(input_chars, (best_len - 1) as usize);
 
         for dist in self.hash.iterate::<OFFSET>(input) {

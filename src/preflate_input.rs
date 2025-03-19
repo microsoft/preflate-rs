@@ -77,6 +77,11 @@ impl PlainText {
         self.data.len() - (self.prefix_length as usize)
     }
 
+    /// the total length of the data from the beginning
+    pub fn total_length(&self) -> u32 {
+        self.pos_offset as u32 + self.len() as u32
+    }
+
     /// the data excluding the prefix
     pub fn text(&self) -> &[u8] {
         &self.data[self.prefix_length as usize..]
@@ -142,38 +147,42 @@ pub struct PreflateInput<'a> {
 
 impl<'a> PreflateInput<'a> {
     pub fn new(v: &'a PlainText) -> Self {
-        PreflateInput { data: v, pos: 0 }
+        PreflateInput {
+            data: v,
+            pos: v.prefix_length,
+        }
     }
 
     #[inline(always)]
     pub fn pos(&self) -> u32 {
-        (self.pos + self.data.pos_offset) as u32
+        (self.pos + self.data.pos_offset - self.data.prefix_length) as u32
     }
 
+    /// total length of the data all the way back to the beginning
     #[inline(always)]
-    pub fn size(&self) -> u32 {
-        (self.data.data.len() as i32 - self.data.prefix_length + self.data.pos_offset) as u32
+    pub fn total_length(&self) -> u32 {
+        self.data.total_length()
     }
 
     #[inline(always)]
     pub fn cur_chars(&self, offset: i32) -> &[u8] {
-        &self.data.data[(self.pos + self.data.prefix_length + offset) as usize..]
+        &self.data.data[(self.pos + offset) as usize..]
     }
 
     #[inline(always)]
     pub fn cur_char(&self, offset: i32) -> u8 {
-        self.data.data[(self.pos + self.data.prefix_length + offset) as usize]
+        self.data.data[(self.pos + offset) as usize]
     }
 
     #[inline(always)]
     pub fn advance(&mut self, l: u32) {
         self.pos += l as i32;
-        debug_assert!((self.pos + self.data.prefix_length) <= self.data.data.len() as i32);
+        debug_assert!((self.pos) <= self.data.data.len() as i32);
     }
 
     #[inline(always)]
     pub fn remaining(&self) -> u32 {
-        (self.data.data.len() as i32 - self.pos - self.data.prefix_length) as u32
+        (self.data.data.len() as i32 - self.pos) as u32
     }
 }
 
@@ -182,17 +191,17 @@ fn test_length_behavior() {
     let mut data = PlainText::new_with_data(vec![0; 10000]);
 
     let mut input = PreflateInput::new(&data);
-    assert_eq!(input.size(), 10000);
+    assert_eq!(input.total_length(), 10000);
     assert_eq!(input.pos(), 0);
     assert_eq!(input.remaining(), 10000);
 
     input.advance(1000);
-    assert_eq!(input.size(), 10000);
+    assert_eq!(input.total_length(), 10000);
     assert_eq!(input.pos(), 1000);
     assert_eq!(input.remaining(), 9000);
 
     input.advance(9000);
-    assert_eq!(input.size(), 10000);
+    assert_eq!(input.total_length(), 10000);
     assert_eq!(input.pos(), 10000);
     assert_eq!(input.remaining(), 0);
 
@@ -200,7 +209,7 @@ fn test_length_behavior() {
     data.append(&[1; 10000]);
 
     let mut input = PreflateInput::new(&data);
-    assert_eq!(input.size(), 20000);
+    assert_eq!(input.total_length(), 20000);
     assert_eq!(input.pos(), 10000);
     assert_eq!(input.remaining(), 10000);
     assert_eq!(input.cur_char(0), 1);
@@ -208,7 +217,7 @@ fn test_length_behavior() {
     assert_eq!(input.cur_char(-1000), 0);
 
     input.advance(1000);
-    assert_eq!(input.size(), 20000);
+    assert_eq!(input.total_length(), 20000);
     assert_eq!(input.pos(), 11000);
     assert_eq!(input.remaining(), 9000);
 
