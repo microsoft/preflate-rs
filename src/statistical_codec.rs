@@ -25,7 +25,7 @@ pub enum CodecCorrection {
     UncompressBlockLenCorrection,
 
     Last,
-    EndOfStream,
+    EndOfChunk,
     LiteralPredictionWrong,
     ReferencePredictionWrong,
     IrregularLen258,
@@ -125,7 +125,7 @@ impl CountNonDefaultActions {
             DistanceCountCorrection,
             UncompressBlockLenCorrection,
             Last,
-            EndOfStream,
+            EndOfChunk,
             LiteralPredictionWrong,
             ReferencePredictionWrong,
             IrregularLen258,

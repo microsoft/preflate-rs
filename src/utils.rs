@@ -94,6 +94,7 @@ pub fn assert_eq_array<T: PartialEq + std::fmt::Debug>(a: &[T], b: &[T]) {
 }
 
 #[cfg(test)]
+#[track_caller]
 pub fn assert_block_eq(
     a: &crate::deflate::deflate_token::DeflateTokenBlock,
     b: &crate::deflate::deflate_token::DeflateTokenBlock,

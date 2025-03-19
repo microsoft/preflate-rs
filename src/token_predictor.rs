@@ -127,6 +127,16 @@ impl TokenPredictor {
                     self.state.update_hash(1, &input);
                     input.advance(1);
                 }
+
+                // last indicator is predicted by reaching the end of the input, although
+                // we could have some empty blocks after this just for fun
+                codec.encode_correction_bool(
+                    CodecCorrection::Last,
+                    block.last,
+                    input.remaining() == 0,
+                );
+
+                codec.encode_verify_state("done", if VERIFY { self.checksum().hash() } else { 0 });
                 return Ok(());
             }
             DeflateTokenBlockType::Huffman {

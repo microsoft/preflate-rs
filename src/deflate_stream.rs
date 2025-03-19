@@ -126,6 +126,7 @@ impl DeflateStreamState {
                     &cabac_encoded,
                 )?;
 
+                println!("1req {:?}", _rec_blocks);
                 #[cfg(test)]
                 for i in 0..contents.blocks.len() {
                     crate::utils::assert_block_eq(&contents.blocks[i], &_rec_blocks[i]);
@@ -177,10 +178,17 @@ impl DeflateStreamState {
             self.predictor = Some(token_predictor);
 
             if let Some(validator) = &mut self.validator {
-                let (recompressed, _) = validator.recompress(
+                let (recompressed, _rec_blocks) = validator.recompress(
                     |p| p.append(self.parser.plain_text().text()),
                     &reconstruction_data,
                 )?;
+
+                println!("2req {:?}", _rec_blocks);
+
+                #[cfg(test)]
+                for i in 0..contents.blocks.len() {
+                    crate::utils::assert_block_eq(&contents.blocks[i], &_rec_blocks[i]);
+                }
 
                 // we should always succeed here in test code
                 #[cfg(test)]
@@ -325,7 +333,7 @@ fn predict_blocks(
         token_predictor.predict_block(&blocks[i], encoder, input, i == blocks.len() - 1)?;
         // end of stream normally is the last block
         encoder.encode_correction_bool(
-            CodecCorrection::EndOfStream,
+            CodecCorrection::EndOfChunk,
             i == blocks.len() - 1,
             input.remaining() == 0,
         );
@@ -366,7 +374,7 @@ fn recreate_blocks<D: PredictionDecoder>(
 
         // end of stream normally is the last block
         let last =
-            decoder.decode_correction_bool(CodecCorrection::EndOfStream, input.remaining() == 0);
+            decoder.decode_correction_bool(CodecCorrection::EndOfChunk, input.remaining() == 0);
 
         if last {
             break;
