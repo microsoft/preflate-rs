@@ -7,7 +7,7 @@ use crate::{
         deflate_token::{DeflateToken, DeflateTokenBlockType, DeflateTokenReference},
     },
     hash_algorithm::*,
-    preflate_input::PreflateInput,
+    preflate_input::{PlainText, PreflateInput},
 };
 
 use super::add_policy_estimator::DictionaryAddPolicy;
@@ -360,9 +360,10 @@ fn update_candidate_hashes(
 pub fn run_depth_candidates(
     add_policy: DictionaryAddPolicy,
     deflate: &DeflateContents,
+    plain_text: &PlainText,
     candidates: &mut Vec<Box<dyn HashTableDepthEstimator>>,
 ) {
-    let mut input = PreflateInput::new(&deflate.plain_text);
+    let mut input = PreflateInput::new(&plain_text);
 
     for (_i, b) in deflate.blocks.iter().enumerate() {
         match &b.block_type {
@@ -396,7 +397,7 @@ pub fn run_depth_candidates(
 
 #[test]
 fn verify_max_chain_length() {
-    use crate::deflate::deflate_reader::parse_deflate;
+    use crate::deflate::deflate_reader::parse_deflate_whole;
 
     let zlib = HashAlgorithm::Zlib {
         hash_mask: 0x7FFF,
@@ -433,9 +434,9 @@ fn verify_max_chain_length() {
 
     for (filename, hash_algorithm, add_policy, max_chain_length) in levels {
         println!("testing {}", filename);
-        let compressed_data = crate::process::read_file(filename);
+        let compressed_data = crate::utils::read_file(filename);
 
-        let parsed = parse_deflate(&compressed_data, 0).unwrap();
+        let (parsed, plain_text) = parse_deflate_whole(&compressed_data).unwrap();
 
         let add_policy_estimator = super::add_policy_estimator::estimate_add_policy(&parsed.blocks);
 
@@ -448,7 +449,7 @@ fn verify_max_chain_length() {
         let estimator = new_depth_estimator(hash_algorithm);
 
         let mut candidates = vec![estimator];
-        run_depth_candidates(add_policy, &parsed, &mut candidates);
+        run_depth_candidates(add_policy, &parsed, &plain_text, &mut candidates);
 
         assert!(candidates.len() == 1);
 

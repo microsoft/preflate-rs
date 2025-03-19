@@ -10,7 +10,6 @@ use crate::cabac_codec::{decode_difference, encode_difference};
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum CodecCorrection {
     TokenCount,
-    NonZeroPadding,
     BlockTypeCorrection,
     LenCorrection,
     DistOnlyCorrection,
@@ -25,7 +24,8 @@ pub enum CodecCorrection {
     DistanceCountCorrection,
     UncompressBlockLenCorrection,
 
-    EOFMisprediction,
+    Last,
+    EndOfChunk,
     LiteralPredictionWrong,
     ReferencePredictionWrong,
     IrregularLen258,
@@ -51,6 +51,16 @@ pub trait PredictionEncoder {
     fn encode_misprediction(&mut self, action: CodecCorrection, actual_value: bool) {
         self.encode_correction(action, actual_value as u32);
     }
+
+    /// if a bool is not equal, then we encode a 1, otherwise a 0
+    fn encode_correction_bool(
+        &mut self,
+        action: CodecCorrection,
+        actual_value: bool,
+        predicted_value: bool,
+    ) {
+        self.encode_correction(action, (actual_value != predicted_value) as u32)
+    }
 }
 
 pub trait PredictionDecoder {
@@ -64,6 +74,15 @@ pub trait PredictionDecoder {
 
     fn decode_misprediction(&mut self, correction: CodecCorrection) -> bool {
         self.decode_correction(correction) != 0
+    }
+
+    /// if we encoded a 1 then swap the predicted value
+    fn decode_correction_bool(
+        &mut self,
+        correction: CodecCorrection,
+        predicted_value: bool,
+    ) -> bool {
+        predicted_value ^ (self.decode_correction(correction) != 0)
     }
 }
 
@@ -93,7 +112,6 @@ impl CountNonDefaultActions {
 
         let corr = [
             TokenCount,
-            NonZeroPadding,
             BlockTypeCorrection,
             LenCorrection,
             DistOnlyCorrection,
@@ -106,7 +124,8 @@ impl CountNonDefaultActions {
             LiteralCountCorrection,
             DistanceCountCorrection,
             UncompressBlockLenCorrection,
-            EOFMisprediction,
+            Last,
+            EndOfChunk,
             LiteralPredictionWrong,
             ReferencePredictionWrong,
             IrregularLen258,
@@ -203,11 +222,15 @@ impl PredictionDecoder for VerifyPredictionDecoder {
 
     fn decode_correction(&mut self, correction: CodecCorrection) -> u32 {
         let x = self.pop().unwrap();
-        if let CodecAction::Correction(c, value) = x {
-            assert_eq!(correction, c);
-            return value;
+        match x {
+            CodecAction::Correction(c, value) => {
+                assert_eq!(correction, c);
+                return value;
+            }
+            CodecAction::VerifyState(s, _h) => {
+                panic!("found VerifyState {}, expected {:?}", s, correction);
+            }
         }
-        unreachable!("{:?}", x);
     }
 }
 

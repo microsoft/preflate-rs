@@ -214,8 +214,8 @@ pub fn recreate_idat(
 
 #[test]
 fn parse_and_recreate_png() {
-    use crate::deflate::deflate_reader::parse_deflate;
-    let f = crate::process::read_file("treegdi.png");
+    use crate::deflate::deflate_reader::parse_deflate_whole;
+    let f = crate::utils::read_file("treegdi.png");
 
     // we know the first IDAT chunk starts at 83 (avoid testing the scan_deflate code in a unit teast)
     let (idat_contents, deflate_stream) = parse_idat(&f[83..], 1).unwrap();
@@ -224,7 +224,7 @@ fn parse_and_recreate_png() {
     assert_eq!(idat_contents.chunk_sizes, [65445, 65524, 40164]);
     assert_eq!(idat_contents.zlib_header, [120, 94]);
 
-    let contents = parse_deflate(&deflate_stream, 1).unwrap();
+    let (contents, _plain_text) = parse_deflate_whole(&deflate_stream).unwrap();
 
     assert_eq!(deflate_stream.len(), contents.compressed_size as usize);
 

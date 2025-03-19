@@ -8,6 +8,7 @@ use default_boxed::DefaultBoxed;
 
 use crate::{
     bit_helper::DebugHash,
+    deflate::deflate_token::DeflateTokenReference,
     hash_algorithm::{HashImplementation, LibdeflateHash3Secondary, LibdeflateHash4},
     preflate_input::PreflateInput,
 };
@@ -70,6 +71,14 @@ struct HashTable {
 }
 
 impl HashTable {
+    fn clone(&self) -> Box<Self> {
+        let mut b = HashTable::default_boxed();
+        b.head = self.head;
+        b.prev = self.prev;
+
+        b
+    }
+
     #[inline]
     fn get_head(&self, h: u16) -> InternalPosition {
         self.head[usize::from(h)]
@@ -81,12 +90,13 @@ impl HashTable {
         hash: H,
         chars: &[u8],
         mut pos: InternalPosition,
-        length: u32,
+        mut length: u32,
     ) {
         debug_assert!(length as usize <= chars.len());
+
         if length as usize + H::NUM_HASH_BYTES - 1 >= chars.len() {
-            // reached on of the stream so there will be no more matches
-            return;
+            // if we reached the end of the buffer, hash only while we have characters left
+            length = chars.len().saturating_sub(H::NUM_HASH_BYTES - 1) as u32;
         }
 
         for i in 0..length {
@@ -136,6 +146,18 @@ pub trait HashChain {
     fn update_hash(&mut self, input: &[u8], pos: u32, length: u32);
 
     fn checksum(&self, checksum: &mut DebugHash);
+
+    /// debug function to validate that a hash table entry
+    /// was correctly added for the match we were expection
+    fn assert_dictionary_valid(
+        &self,
+        target_reference: DeflateTokenReference,
+        input: &PreflateInput,
+    );
+
+    fn clone(&self) -> Self
+    where
+        Self: Sized;
 }
 
 /// Default hash chain for a given hash function periodically normalizes the hash table
@@ -242,8 +264,48 @@ impl<H: HashImplementation> HashChain for HashChainDefault<H> {
         self.hash_table.update_chain(self.hash, input, pos, length);
     }
 
+    fn assert_dictionary_valid(
+        &self,
+        target_reference: DeflateTokenReference,
+        input: &PreflateInput,
+    ) {
+        println!(
+            "tried to match {:?} at input: {:?}",
+            target_reference, input
+        );
+
+        assert_eq!(
+            &input.cur_chars(0)[..(target_reference.len() as usize)],
+            &input.cur_chars(-(target_reference.dist() as i32))
+                [..(target_reference.len() as usize)],
+            "dictionary out of sync for {:?}",
+            target_reference
+        );
+
+        let curr_hash = self.hash.get_hash(input.cur_chars(0));
+        println!("hash {}", curr_hash);
+
+        for dist in self.iterate::<0>(input) {
+            println!(" dist = {}", dist);
+            if dist > target_reference.dist() {
+                break;
+            }
+        }
+    }
+
     fn get_num_hash_bytes() -> usize {
         H::NUM_HASH_BYTES
+    }
+
+    fn clone(&self) -> Self
+    where
+        Self: Sized,
+    {
+        Self {
+            hash_table: self.hash_table.clone(),
+            total_shift: self.total_shift,
+            hash: self.hash.clone(),
+        }
     }
 }
 
@@ -336,6 +398,14 @@ impl HashChain for HashChainLibflate4 {
         //checksum.update_slice(&self.hash_table.chain_depth);
     }
 
+    fn assert_dictionary_valid(
+        &self,
+        _target_reference: DeflateTokenReference,
+        _input: &PreflateInput,
+    ) {
+        todo!();
+    }
+
     fn update_hash(&mut self, input: &[u8], pos: u32, length: u32) {
         assert!(length <= MAX_UPDATE_HASH_BATCH);
 
@@ -359,5 +429,16 @@ impl HashChain for HashChainLibflate4 {
 
     fn get_num_hash_bytes() -> usize {
         4
+    }
+
+    fn clone(&self) -> Self
+    where
+        Self: Sized,
+    {
+        Self {
+            hash_table: self.hash_table.clone(),
+            hash_table_3: self.hash_table_3.clone(),
+            total_shift: self.total_shift,
+        }
     }
 }

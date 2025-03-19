@@ -5,7 +5,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 /// Used to write a variable number of bits to a byte buffer.
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct BitWriter {
     pub bit_buffer: u64,
     pub bits_in: u32,
@@ -98,10 +98,10 @@ fn write_roundtrip() {
     b.pad(0, &mut data_buffer);
     b.flush_whole_bytes(&mut data_buffer);
 
-    let cursor = std::io::Cursor::new(data_buffer);
-    let mut reader = BitReader::new(cursor);
+    let mut cursor = std::io::Cursor::new(data_buffer);
+    let mut reader = BitReader::new();
 
     for &(bits, len) in pattern.iter() {
-        assert_eq!(reader.get(len).unwrap(), bits);
+        assert_eq!(reader.get(len, &mut cursor).unwrap(), bits);
     }
 }

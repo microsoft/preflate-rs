@@ -7,7 +7,7 @@
 use crate::bit_helper::DebugHash;
 use crate::deflate::deflate_constants::{MAX_MATCH, MIN_LOOKAHEAD, MIN_MATCH};
 use crate::deflate::deflate_token::DeflateTokenReference;
-use crate::estimator::preflate_parameter_estimator::PreflateStrategy;
+use crate::estimator::preflate_parameter_estimator::{PreflateStrategy, TokenPredictorParameters};
 use crate::hash_algorithm::{
     Crc32cHash, HashAlgorithm, LibdeflateHash4Fast, MiniZHash, RandomVectorHash, ZlibNGHash,
     ZlibRotatingHash, ZlibRotatingHashFixed,
@@ -15,7 +15,6 @@ use crate::hash_algorithm::{
 use crate::hash_chain::{HashChain, HashChainDefault, HashChainLibflate4, MAX_UPDATE_HASH_BATCH};
 use crate::preflate_error::{err_exit_code, ExitCode, Result};
 use crate::preflate_input::PreflateInput;
-use crate::token_predictor::TokenPredictorParameters;
 
 use std::cmp;
 
@@ -120,11 +119,17 @@ pub trait HashChainHolder {
     /// get the new distance based on the number of hops
     fn hop_match(&self, len: u32, hops: u32, input: &PreflateInput) -> Result<u32>;
 
+    /// when we continue compression on a block, we won't have added the last
+    /// n - 1 hashes to the dictionary. Add them here.
+    fn add_missing_previous_hash(&mut self, input: &PreflateInput);
+
     /// debugging function to verify that the hash chain is correct
     #[allow(dead_code)]
     fn verify_hash(&self, _dist: Option<DeflateTokenReference>);
 
     fn checksum(&self, checksum: &mut DebugHash);
+
+    fn clone(&self) -> Box<dyn HashChainHolder>;
 }
 
 /// empty implementation of HashChainHolder if there is no dictionary
@@ -162,9 +167,15 @@ impl HashChainHolder for () {
         unimplemented!()
     }
 
+    fn add_missing_previous_hash(&mut self, _input: &PreflateInput) {}
+
     fn verify_hash(&self, _dist: Option<DeflateTokenReference>) {}
 
     fn checksum(&self, _checksum: &mut DebugHash) {}
+
+    fn clone(&self) -> Box<dyn HashChainHolder> {
+        Box::new(())
+    }
 }
 
 /// implemenation of HashChainHolder depends type of hash implemenatation
@@ -174,7 +185,7 @@ struct HashChainHolderImpl<H: HashChain> {
     window_bytes: u32,
 }
 
-impl<H: HashChain> HashChainHolder for HashChainHolderImpl<H> {
+impl<H: HashChain + 'static> HashChainHolder for HashChainHolderImpl<H> {
     fn update_hash(&mut self, length: u32, input: &PreflateInput) {
         debug_assert!(length <= MAX_UPDATE_HASH_BATCH);
 
@@ -242,6 +253,7 @@ impl<H: HashChain> HashChainHolder for HashChainHolderImpl<H> {
 
             max_chain -= 1;
         }
+        self.hash.assert_dictionary_valid(*target_reference, input);
 
         err_exit_code(ExitCode::MatchNotFound, "no match found")
     }
@@ -276,6 +288,17 @@ impl<H: HashChain> HashChainHolder for HashChainHolderImpl<H> {
         err_exit_code(ExitCode::RecompressFailed, "no match found")
     }
 
+    /// adds the hashes that couldn't be added because we were at the boundary.
+    fn add_missing_previous_hash(&mut self, input: &PreflateInput) {
+        let length = H::get_num_hash_bytes() as u32 - 1;
+
+        self.hash.update_hash(
+            input.cur_chars(-(length as i32)),
+            input.pos() - length,
+            length,
+        );
+    }
+
     /// debugging function to verify that the hash chain is correct
     #[allow(dead_code)]
     fn verify_hash(&self, _dist: Option<DeflateTokenReference>) {
@@ -285,6 +308,10 @@ impl<H: HashChain> HashChainHolder for HashChainHolderImpl<H> {
     #[allow(dead_code)]
     fn checksum(&self, checksum: &mut DebugHash) {
         self.hash.checksum(checksum);
+    }
+
+    fn clone(&self) -> Box<dyn HashChainHolder> {
+        Box::new(HashChainHolderImpl::new(&self.params, self.hash.clone()))
     }
 }
 

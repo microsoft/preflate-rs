@@ -43,8 +43,19 @@ pub enum ExitCode {
 
     InvalidParameter = 23,
 
-    // panic in rust code
+    /// panic in rust code
     AssertionFailure = 24,
+
+    /// Non-zero padding found in deflate, which we currently don't handle
+    NonZeroPadding = 25,
+
+    /// Unable to predict the sequence of compression. Doesn't mean that
+    /// the deflate content was invalid, but just that we don't handle
+    /// some of the rare corner cases.
+    PredictionFailure = 26,
+
+    /// Plain text memory limit exceeded
+    PlainTextLimit = 27,
 }
 
 impl Display for ExitCode {

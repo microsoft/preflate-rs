@@ -209,11 +209,11 @@ pub(super) fn estimate_add_policy(token_blocks: &[DeflateTokenBlock]) -> Diction
 
 #[test]
 fn verify_miniz1_recognition() {
-    use crate::deflate::deflate_reader::parse_deflate;
+    use crate::deflate::deflate_reader::parse_deflate_whole;
 
-    let v = crate::process::read_file("compressed_minizoxide_level1.deflate");
+    let v = crate::utils::read_file("compressed_minizoxide_level1.deflate");
 
-    let contents = parse_deflate(&v, 1).unwrap();
+    let (contents, _) = parse_deflate_whole(&v).unwrap();
 
     let add_policy = estimate_add_policy(&contents.blocks);
 
@@ -222,7 +222,7 @@ fn verify_miniz1_recognition() {
 
 #[test]
 fn verify_zlib_level_recognition() {
-    use crate::deflate::deflate_reader::parse_deflate;
+    use crate::deflate::deflate_reader::parse_deflate_whole;
 
     let levels = [
         DictionaryAddPolicy::AddFirst(4),
@@ -232,9 +232,9 @@ fn verify_zlib_level_recognition() {
     ];
 
     for i in 1..=4 {
-        let v = crate::process::read_file(&format!("compressed_zlib_level{}.deflate", i));
+        let v = crate::utils::read_file(&format!("compressed_zlib_level{}.deflate", i));
 
-        let contents = parse_deflate(&v, 1).unwrap();
+        let (contents, _plain_text) = parse_deflate_whole(&v).unwrap();
         let add_policy = estimate_add_policy(&contents.blocks);
 
         assert_eq!(add_policy, levels[i - 1]);
@@ -243,7 +243,7 @@ fn verify_zlib_level_recognition() {
 
 #[test]
 fn verify_zlibng_level_recognition() {
-    use crate::deflate::deflate_reader::parse_deflate;
+    use crate::deflate::deflate_reader::parse_deflate_whole;
     let levels = [
         DictionaryAddPolicy::AddFirstWith32KBoundary, // 1 quick
         DictionaryAddPolicy::AddFirstAndLast(4),      // 2 fast
@@ -252,9 +252,9 @@ fn verify_zlibng_level_recognition() {
     ];
 
     for i in 1..=4 {
-        let v = crate::process::read_file(&format!("compressed_zlibng_level{}.deflate", i));
+        let v = crate::utils::read_file(&format!("compressed_zlibng_level{}.deflate", i));
 
-        let contents = parse_deflate(&v, 1).unwrap();
+        let (contents, _) = parse_deflate_whole(&v).unwrap();
         let add_policy = estimate_add_policy(&contents.blocks);
 
         assert_eq!(add_policy, levels[i - 1]);
@@ -264,12 +264,12 @@ fn verify_zlibng_level_recognition() {
 /// libflate always adds all matches to the dictionary
 #[test]
 fn verify_libdeflate_level_recognition() {
-    use crate::deflate::deflate_reader::parse_deflate;
+    use crate::deflate::deflate_reader::parse_deflate_whole;
 
     for i in 1..=9 {
-        let v = crate::process::read_file(&format!("compressed_libdeflate_level{}.deflate", i));
+        let v = crate::utils::read_file(&format!("compressed_libdeflate_level{}.deflate", i));
 
-        let contents = parse_deflate(&v, 1).unwrap();
+        let (contents, _) = parse_deflate_whole(&v).unwrap();
         let add_policy = estimate_add_policy(&contents.blocks);
 
         assert_eq!(add_policy, DictionaryAddPolicy::AddAll);

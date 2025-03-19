@@ -4,7 +4,10 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use preflate_rs::{decompress_zstd, PreflateCompressionContext, ProcessBuffer};
+use preflate_rs::{
+    decompress_zstd, CompressionConfig, PreflateCompressionContext, ProcessBuffer,
+    ZstdCompressContext,
+};
 
 fn enumerate_directory_recursively(path: &Path) -> Result<Vec<PathBuf>, std::io::Error> {
     let mut results = Vec::new();
@@ -51,7 +54,11 @@ fn main() {
 
         let file = std::fs::read(entry).unwrap();
 
-        let mut ctx = PreflateCompressionContext::new(true, loglevel, 9);
+        let mut ctx = ZstdCompressContext::new(
+            PreflateCompressionContext::new(CompressionConfig::default()),
+            9,
+            true,
+        );
 
         let mut preflatecompressed = Vec::with_capacity(file.len());
         if let Err(e) = ctx.copy_to_end(&mut Cursor::new(&file), &mut preflatecompressed) {

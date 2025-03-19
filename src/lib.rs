@@ -7,6 +7,7 @@
 mod bit_helper;
 mod cabac_codec;
 mod deflate;
+mod deflate_stream;
 mod estimator;
 mod hash_algorithm;
 mod hash_chain;
@@ -15,23 +16,28 @@ mod idat_parse;
 mod preflate_container;
 mod preflate_error;
 mod preflate_input;
-mod process;
 mod scan_deflate;
 mod scoped_read;
 mod statistical_codec;
 mod token_predictor;
 mod tree_predictor;
+mod zstd_compression;
+
+mod utils;
 
 pub mod unmanaged_api;
 
-pub use preflate_container::{
-    compress_zstd, decompress_deflate_stream, decompress_zstd, expand_zlib_chunks,
-    recompress_deflate_stream, recreated_zlib_chunks,
-};
+pub use deflate_stream::{decompress_whole_deflate_stream, recompress_whole_deflate_stream};
+
+pub use preflate_container::{expand_zlib_chunks, recreated_zlib_chunks};
+pub use zstd_compression::{compress_zstd, decompress_zstd};
+
 pub use preflate_error::ExitCode;
 pub use preflate_error::{PreflateError, Result};
 
-pub use preflate_container::CompressionStats;
+pub use preflate_container::{CompressionConfig, CompressionStats};
 pub use preflate_container::{
-    PreflateCompressionContext, PreflateDecompressionContext, ProcessBuffer,
+    PreflateCompressionContext, ProcessBuffer, RecreateFromChunksContext,
 };
+
+pub use zstd_compression::{ZstdCompressContext, ZstdDecompressContext};

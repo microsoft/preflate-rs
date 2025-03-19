@@ -5,8 +5,10 @@ use std::{
 };
 
 use crate::{
-    preflate_container::ProcessBuffer, preflate_error::ExitCode, PreflateCompressionContext,
-    PreflateDecompressionContext, PreflateError,
+    preflate_container::CompressionConfig,
+    preflate_error::ExitCode,
+    zstd_compression::{ZstdCompressContext, ZstdDecompressContext},
+    PreflateCompressionContext, PreflateError, ProcessBuffer, RecreateFromChunksContext,
 };
 
 /// Helper function to catch panics and convert them into the appropriate LeptonError
@@ -74,7 +76,11 @@ pub unsafe extern "C" fn create_compression_context(flags: u32) -> *mut std::ffi
         let test_baseline = (flags & 1) != 0;
         let context = Box::new((
             12345678u32,
-            PreflateCompressionContext::new(test_baseline, 0, 9),
+            CompressionContext::new(
+                PreflateCompressionContext::new(CompressionConfig::default()),
+                9,
+                test_baseline,
+            ),
         ));
         Ok(Box::into_raw(context) as *mut std::ffi::c_void)
     }) {
@@ -88,7 +94,7 @@ pub unsafe extern "C" fn create_compression_context(flags: u32) -> *mut std::ffi
 
 #[no_mangle]
 pub unsafe extern "C" fn free_compression_context(context: *mut std::ffi::c_void) {
-    let x = Box::from_raw(context as *mut (u32, PreflateCompressionContext));
+    let x = Box::from_raw(context as *mut (u32, CompressionContext));
     assert_eq!(x.0, 12345678, "invalid context passed in");
     // let Box destroy the object. If this asserts, we have some kind of memory corruption so better to just kill the process.
 }
@@ -110,7 +116,7 @@ pub unsafe extern "C" fn compress_buffer(
     error_string_buffer_len: u64,
 ) -> i32 {
     match catch_unwind_result(|| {
-        let context = context as *mut (u32, PreflateCompressionContext);
+        let context = context as *mut (u32, CompressionContext);
         let (magic, context) = &mut *context;
         assert_eq!(*magic, 12345678, "invalid context passed in");
 
@@ -159,7 +165,7 @@ pub unsafe extern "C" fn get_compression_stats(
     overhead_bytes: *mut u64,
     hash_algorithm: *mut u32,
 ) {
-    let context = context as *mut (u32, PreflateCompressionContext);
+    let context = context as *mut (u32, CompressionContext);
     let (magic, context) = &*context;
     assert_eq!(*magic, 12345678, "invalid context passed in");
 
@@ -173,6 +179,9 @@ pub unsafe extern "C" fn get_compression_stats(
     *hash_algorithm = stats.hash_algorithm.to_u16() as u32;
 }
 
+type DecompressionContext = ZstdDecompressContext<RecreateFromChunksContext>;
+type CompressionContext = ZstdCompressContext<PreflateCompressionContext>;
+
 #[no_mangle]
 pub unsafe extern "C" fn create_decompression_context(
     _flags: u32,
@@ -181,7 +190,7 @@ pub unsafe extern "C" fn create_decompression_context(
     match catch_unwind_result(|| {
         let context = Box::new((
             87654321u32,
-            PreflateDecompressionContext::new(capacity as usize),
+            DecompressionContext::new(RecreateFromChunksContext::new(capacity as usize)),
         ));
         Ok(Box::into_raw(context) as *mut std::ffi::c_void)
     }) {
@@ -195,7 +204,7 @@ pub unsafe extern "C" fn create_decompression_context(
 
 #[no_mangle]
 pub unsafe extern "C" fn free_decompression_context(context: *mut std::ffi::c_void) {
-    let x = Box::from_raw(context as *mut (u32, PreflateDecompressionContext));
+    let x = Box::from_raw(context as *mut (u32, DecompressionContext));
     assert_eq!(x.0, 87654321, "invalid context passed in");
     // let Box destroy the object
 }
@@ -217,7 +226,7 @@ pub unsafe extern "C" fn decompress_buffer(
     error_string_buffer_len: u64,
 ) -> i32 {
     match catch_unwind_result(|| {
-        let context = context as *mut (u32, PreflateDecompressionContext);
+        let context = context as *mut (u32, DecompressionContext);
         let (magic, context) = &mut *context;
         assert_eq!(*magic, 87654321, "invalid context passed in");
 
@@ -256,7 +265,7 @@ pub unsafe extern "C" fn decompress_buffer(
 
 #[test]
 fn extern_interface() {
-    use crate::process::read_file;
+    use crate::utils::read_file;
     let input = read_file("samplezip.zip");
 
     let mut compressed = Vec::new();
@@ -424,15 +433,15 @@ fn test_error_translation() {
             error_string.len() as u64,
         );
 
-        assert!(retval == -(ExitCode::InvalidParameter as i32));
+        assert_eq!(retval, -(ExitCode::InvalidParameter as i32));
 
         let len = error_string.iter().position(|&x| x == 0).unwrap();
 
         let error_string = std::ffi::CStr::from_bytes_with_nul(&error_string[0..len + 1]).unwrap();
 
-        assert_eq!(
-            error_string.to_str().unwrap(),
-            "more data provided after input_complete signaled"
-        );
+        assert!(error_string
+            .to_str()
+            .unwrap()
+            .starts_with("more data provided after input_complete signaled"),);
     }
 }

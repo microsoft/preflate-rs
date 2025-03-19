@@ -6,12 +6,8 @@
 
 use crate::deflate::huffman_encoding::HuffmanOriginalEncoding;
 
-use super::{
-    deflate_constants::{
-        quantize_distance, quantize_length, DIST_CODE_COUNT, LITLENDIST_CODE_COUNT,
-        NONLEN_CODE_COUNT,
-    },
-    deflate_reader::append_reference_to_plaintext,
+use super::deflate_constants::{
+    quantize_distance, quantize_length, DIST_CODE_COUNT, LITLENDIST_CODE_COUNT, NONLEN_CODE_COUNT,
 };
 
 /// In a DEFLATE stream, tokens are either literals (bytes) or references to previous bytes
@@ -23,11 +19,9 @@ pub enum DeflateToken {
 }
 
 impl DeflateToken {
+    #[cfg(test)]
     pub fn new_ref(len: u32, dist: u32, irregular258: bool) -> DeflateToken {
         DeflateToken::Reference(DeflateTokenReference::new(len, dist, irregular258))
-    }
-    pub fn new_lit(lit: u8) -> DeflateToken {
-        DeflateToken::Literal(lit)
     }
 }
 
@@ -36,11 +30,32 @@ impl DeflateToken {
 ///
 /// the irregular258 field is used to indicate that the 258 length code was used but in a
 /// suboptimal way (the RFC allows for two different ways to encode 258)
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[derive(Copy, Clone, Eq, PartialEq)]
 pub struct DeflateTokenReference {
     len: u8,
     dist: u16,
     irregular258: bool,
+}
+
+impl std::fmt::Debug for DeflateTokenReference {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.irregular258 {
+            write!(
+                f,
+                "DeflateTokenReference {{ len: {}, dist: {}, irregular258: {} }}",
+                self.len(),
+                self.dist(),
+                self.irregular258
+            )
+        } else {
+            write!(
+                f,
+                "DeflateTokenReference {{ len: {}, dist: {} }}",
+                self.len(),
+                self.dist()
+            )
+        }
+    }
 }
 
 impl DeflateTokenReference {
@@ -87,7 +102,7 @@ impl Default for DeflateHuffmanType {
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(PartialEq)]
 pub enum DeflateTokenBlockType {
     Huffman {
         tokens: Vec<DeflateToken>,
@@ -95,37 +110,37 @@ pub enum DeflateTokenBlockType {
     },
     Stored {
         uncompressed: Vec<u8>,
-        padding_bits: u8,
     },
+}
+
+/// Debug implementation for DeflateTokenBlockType doesn't print all the tokens
+impl std::fmt::Debug for DeflateTokenBlockType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DeflateTokenBlockType::Huffman {
+                tokens,
+                huffman_type: DeflateHuffmanType::Static { .. },
+            } => {
+                write!(f, "StaticHuffman {{ tokens: len={} }}", tokens.len(),)
+            }
+            DeflateTokenBlockType::Huffman {
+                tokens,
+                huffman_type: DeflateHuffmanType::Dynamic { .. },
+            } => {
+                write!(f, "DynamicHuffman {{ tokens: len={} }}", tokens.len(),)
+            }
+            DeflateTokenBlockType::Stored { uncompressed } => {
+                write!(f, "Stored {{ uncompressed: len={} }}", uncompressed.len(),)
+            }
+        }
+    }
 }
 
 #[derive(Debug, PartialEq)]
 pub struct DeflateTokenBlock {
     pub block_type: DeflateTokenBlockType,
-    pub last: bool,
-    pub tail_padding_bits: u8,
-}
 
-impl DeflateTokenBlockType {
-    pub fn append_to_plaintext(&self, dest: &mut Vec<u8>) {
-        match self {
-            DeflateTokenBlockType::Huffman { tokens, .. } => {
-                for &token in tokens.iter() {
-                    match token {
-                        DeflateToken::Literal(l) => {
-                            dest.push(l);
-                        }
-                        DeflateToken::Reference(r) => {
-                            append_reference_to_plaintext(dest, r.dist(), r.len());
-                        }
-                    }
-                }
-            }
-            DeflateTokenBlockType::Stored { uncompressed, .. } => {
-                dest.extend_from_slice(&uncompressed);
-            }
-        }
-    }
+    pub last: bool,
 }
 
 /// Used to track the frequence of tokens in the DEFLATE stream
