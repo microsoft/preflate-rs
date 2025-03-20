@@ -194,13 +194,18 @@ impl Write for MeasureWriteSink {
 }
 
 /// Expands the Zlib compressed streams in the data and then recompresses the result
-/// with Zstd with the maximum level.
+/// with Zstd with the given level.
 pub fn zstd_preflate_whole_deflate_stream(
     config: PreflateConfig,
     input: &mut impl BufRead,
     output: &mut impl Write,
+    compression_level: i32,
 ) -> Result<PreflateStats> {
-    let mut ctx = ZstdCompressContext::new(PreflateContainerProcessor::new(config), 9, false);
+    let mut ctx = ZstdCompressContext::new(
+        PreflateContainerProcessor::new(config),
+        compression_level,
+        false,
+    );
 
     ctx.copy_to_end(input, output).context()?;
 
@@ -232,6 +237,7 @@ fn verify_zip_compress_zstd() {
         PreflateConfig::default(),
         &mut std::io::Cursor::new(&v),
         &mut compressed,
+        1, // for testing use a lower level to save CPU
     )
     .unwrap();
 

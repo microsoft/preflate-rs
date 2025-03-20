@@ -84,6 +84,7 @@ fn test_container(filename: &str) {
         preflate_rs::PreflateConfig::default(),
         &mut std::io::Cursor::new(&v),
         &mut c,
+        4, // use lower level to save CPU on testing
     )
     .unwrap();
 
