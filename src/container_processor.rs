@@ -181,9 +181,7 @@ pub fn preflate_whole_into_container(
     write: &mut impl Write,
 ) -> Result<PreflateStats> {
     let mut context = PreflateContainerProcessor::new(config);
-    context
-        .copy_to_end(compressed_data, write, 1024 * 1024)
-        .unwrap();
+    context.copy_to_end(compressed_data, write).unwrap();
 
     Ok(context.stats())
 }
@@ -196,16 +194,16 @@ pub fn recreate_whole_from_container(
     destination: &mut impl Write,
 ) -> Result<()> {
     let mut recreate = RecreateContainerProcessor::new(usize::MAX);
-    recreate.copy_to_end(source, destination, 1024 * 1024)
+    recreate.copy_to_end(source, destination).context()
 }
 
 #[cfg(test)]
-fn read_chunk_block(
-    source: &mut impl Read,
+fn read_chunk_block_slow(
+    source: &mut impl BufRead,
     destination: &mut impl Write,
 ) -> std::result::Result<(), PreflateError> {
     let mut p = RecreateContainerProcessor::new_single_chunk(usize::MAX);
-    p.copy_to_end_slow(source, destination).context()
+    p.copy_to_end_size(source, destination, 1, 1).context()
 }
 
 #[test]
@@ -216,7 +214,7 @@ fn roundtrip_chunk_block_literal() {
 
     let mut read_cursor = std::io::Cursor::new(buffer);
     let mut destination = Vec::new();
-    read_chunk_block(&mut read_cursor, &mut destination).unwrap();
+    read_chunk_block_slow(&mut read_cursor, &mut destination).unwrap();
 
     assert!(destination == b"hello");
 }
@@ -243,7 +241,7 @@ fn roundtrip_chunk_block_deflate() {
 
     let mut read_cursor = std::io::Cursor::new(buffer);
     let mut destination = Vec::new();
-    read_chunk_block(&mut read_cursor, &mut destination).unwrap();
+    read_chunk_block_slow(&mut read_cursor, &mut destination).unwrap();
 
     assert!(destination == contents);
 }
@@ -278,7 +276,7 @@ fn roundtrip_chunk_block_png() {
 
     let mut read_cursor = std::io::Cursor::new(buffer);
     let mut destination = Vec::new();
-    read_chunk_block(&mut read_cursor, &mut destination).unwrap();
+    read_chunk_block_slow(&mut read_cursor, &mut destination).unwrap();
 
     assert!(destination == &f[83..83 + total_chunk_length]);
 }
@@ -369,41 +367,50 @@ pub trait ProcessBuffer {
         max_output_write: usize,
     ) -> Result<bool>;
 
-    fn process_vec(
+    #[cfg(test)]
+    fn process_vec(&mut self, input: &[u8]) -> Result<Vec<u8>> {
+        let mut writer = Vec::new();
+
+        self.copy_to_end(&mut std::io::Cursor::new(&input), &mut writer)
+            .context()?;
+
+        Ok(writer)
+    }
+
+    #[cfg(test)]
+    fn process_vec_size(
         &mut self,
         input: &[u8],
         read_chunk_size: usize,
         write_chunk_size: usize,
     ) -> Result<Vec<u8>> {
         let mut writer = Vec::new();
-        let mut done = false;
 
-        let mut input_start_offset: usize = 0;
+        self.copy_to_end_size(
+            &mut std::io::Cursor::new(&input),
+            &mut writer,
+            read_chunk_size,
+            write_chunk_size,
+        )
+        .context()?;
 
-        while !done {
-            let input_end_offset =
-                (input_start_offset.saturating_add(read_chunk_size)).min(input.len());
-
-            done = self.process_buffer(
-                &input[input_start_offset..input_end_offset],
-                input_start_offset == input.len(),
-                &mut writer,
-                write_chunk_size,
-            )?;
-
-            input_start_offset = input_end_offset;
-        }
         Ok(writer)
     }
 
-    /// reads everything from input and writes it to the output.
-    ///
-    /// Simplifies calls to process_buffer
-    fn copy_to_end(
+    /// Reads everything from input and writes it to the output.
+    /// Wraps calls to process buffer
+    fn copy_to_end(&mut self, input: &mut impl BufRead, output: &mut impl Write) -> Result<()> {
+        self.copy_to_end_size(input, output, 1024 * 1024, 1024 * 1024)
+    }
+
+    /// Reads everything from input and writes it to the output.
+    /// Wraps calls to process buffer
+    fn copy_to_end_size(
         &mut self,
         input: &mut impl BufRead,
         output: &mut impl Write,
-        buffer_size: usize,
+        read_chunk_size: usize,
+        write_chunk_size: usize,
     ) -> Result<()> {
         let mut input_complete = false;
         loop {
@@ -428,7 +435,7 @@ pub trait ProcessBuffer {
                 // process buffer a piece at a time to avoid overflowing memory
                 let mut amount_read = 0;
                 while amount_read < buffer.len() {
-                    let chunk_size = (buffer.len() - amount_read).min(buffer_size);
+                    let chunk_size = (buffer.len() - amount_read).min(read_chunk_size);
 
                     assert!(
                         !self
@@ -436,7 +443,7 @@ pub trait ProcessBuffer {
                                 &buffer[amount_read..amount_read + chunk_size],
                                 false,
                                 output,
-                                usize::MAX
+                                write_chunk_size,
                             )
                             .context()?,
                         "process_buffer should not return done until input is done"
@@ -447,34 +454,6 @@ pub trait ProcessBuffer {
 
                 let buflen = buffer.len();
                 input.consume(buflen);
-            }
-        }
-
-        Ok(())
-    }
-
-    /// reads everything from input and writes it to the output, but one byte a time to test worst case parsing
-    #[cfg(test)]
-    fn copy_to_end_slow(&mut self, input: &mut impl Read, output: &mut impl Write) -> Result<()> {
-        let mut buffer = [0; 1];
-        let mut input_complete = false;
-        loop {
-            let amount_read;
-
-            if input_complete {
-                amount_read = 0;
-            } else {
-                amount_read = input.read(&mut buffer).context()?;
-                if amount_read == 0 {
-                    input_complete = true
-                }
-            };
-
-            let done = self
-                .process_buffer(&buffer[0..amount_read], input_complete, output, 1)
-                .context()?;
-            if done {
-                break;
             }
         }
 
@@ -968,7 +947,7 @@ fn test_baseline_calc() {
         true,
     );
 
-    let _r = context.process_vec(&v, usize::MAX, usize::MAX).unwrap();
+    let _r = context.process_vec(&v).unwrap();
 
     let stats = context.stats();
 
@@ -994,10 +973,10 @@ fn roundtrip_small_chunk() {
         total_plain_text_limit: u64::MAX,
     });
 
-    let compressed = context.process_vec(&original, 20001, 997).unwrap();
+    let compressed = context.process_vec_size(&original, 20001, 997).unwrap();
 
     let mut context = RecreateContainerProcessor::new(usize::MAX);
-    let recreated = context.process_vec(&compressed, 20001, 997).unwrap();
+    let recreated = context.process_vec_size(&compressed, 20001, 997).unwrap();
 
     assert_eq_array(&original, &recreated);
 }
@@ -1015,10 +994,10 @@ fn roundtrip_small_plain_text() {
         total_plain_text_limit: u64::MAX,
     });
 
-    let compressed = context.process_vec(&original, 2001, 20001).unwrap();
+    let compressed = context.process_vec_size(&original, 2001, 20001).unwrap();
 
     let mut context = RecreateContainerProcessor::new(usize::MAX);
-    let recreated = context.process_vec(&compressed, 2001, 20001).unwrap();
+    let recreated = context.process_vec_size(&compressed, 2001, 20001).unwrap();
 
     assert_eq_array(&original, &recreated);
 }

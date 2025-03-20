@@ -58,7 +58,7 @@ fn main() {
         );
 
         let mut preflatecompressed = Vec::new();
-        if let Err(e) = ctx.copy_to_end(&mut filehandle, &mut preflatecompressed, 1024 * 1024) {
+        if let Err(e) = ctx.copy_to_end(&mut filehandle, &mut preflatecompressed) {
             println!("Skipping due to error: {:?}", e);
             continue;
         }

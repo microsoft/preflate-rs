@@ -3,7 +3,10 @@
 //! the other ProcessBuffer implementations to create a full compression or
 //! decompression pipeline.
 
-use std::{collections::VecDeque, io::Write};
+use std::{
+    collections::VecDeque,
+    io::{BufRead, Write},
+};
 
 use crate::{
     container_processor::PreflateConfig, preflate_error::AddContext, utils::write_dequeue,
@@ -193,30 +196,30 @@ impl Write for MeasureWriteSink {
 /// Expands the Zlib compressed streams in the data and then recompresses the result
 /// with Zstd with the maximum level.
 pub fn zstd_preflate_whole_deflate_stream(
-    zlib_compressed_data: &[u8],
     config: PreflateConfig,
-    compression_stats: &mut PreflateStats,
-) -> Result<Vec<u8>> {
+    input: &mut impl BufRead,
+    output: &mut impl Write,
+) -> Result<PreflateStats> {
     let mut ctx = ZstdCompressContext::new(PreflateContainerProcessor::new(config), 9, false);
 
-    let r = ctx.process_vec(zlib_compressed_data, usize::MAX, usize::MAX)?;
+    ctx.copy_to_end(input, output).context()?;
 
-    *compression_stats = ctx.stats();
-
-    Ok(r)
+    Ok(ctx.stats())
 }
 
 /// Decompresses the Zstd compressed data and then recompresses the result back
 /// to the original Zlib compressed streams.
 pub fn zstd_recreate_whole_deflate_stream(
-    compressed_data: &[u8],
-    capacity: usize,
-) -> Result<Vec<u8>> {
+    input: &mut impl BufRead,
+    output: &mut impl Write,
+) -> Result<()> {
     let mut ctx = ZstdDecompressContext::<RecreateContainerProcessor>::new(
-        RecreateContainerProcessor::new(capacity),
+        RecreateContainerProcessor::new(1024 * 1024 * 128),
     );
 
-    Ok(ctx.process_vec(compressed_data, 10 * 1024 * 1024, 10 * 1024 * 1024)?)
+    ctx.copy_to_end(input, output).context()?;
+
+    Ok(())
 }
 
 #[test]
@@ -224,16 +227,23 @@ fn verify_zip_compress_zstd() {
     use crate::utils::read_file;
     let v = read_file("samplezip.zip");
 
-    let mut stats = PreflateStats::default();
-    let compressed =
-        zstd_preflate_whole_deflate_stream(&v, PreflateConfig::default(), &mut stats).unwrap();
+    let mut compressed = Vec::new();
+    let stats = zstd_preflate_whole_deflate_stream(
+        PreflateConfig::default(),
+        &mut std::io::Cursor::new(&v),
+        &mut compressed,
+    )
+    .unwrap();
 
-    let recreated = zstd_recreate_whole_deflate_stream(&compressed, 256 * 1024 * 1024).unwrap();
+    let mut recreated = Vec::new();
+    zstd_recreate_whole_deflate_stream(&mut std::io::Cursor::new(&compressed), &mut recreated)
+        .unwrap();
 
     assert!(v == recreated);
     println!(
-        "original zip = {} bytes, recompressed zip = {} bytes",
+        "original zip = {} bytes, expanded = {} bytes recompressed zip = {} bytes",
         v.len(),
+        stats.uncompressed_size,
         compressed.len()
     );
 }
@@ -248,10 +258,10 @@ fn roundtrip_zstd_only_contexts() {
     let original = read_file("samplezip.zip");
 
     let mut context = ZstdCompressContext::new(NopProcessBuffer::new(), 9, false);
-    let compressed = context.process_vec(&original, 997, 997).unwrap();
+    let compressed = context.process_vec_size(&original, 997, 997).unwrap();
 
     let mut context = ZstdDecompressContext::new(NopProcessBuffer::new());
-    let recreated = context.process_vec(&compressed, 997, 997).unwrap();
+    let recreated = context.process_vec_size(&compressed, 997, 997).unwrap();
 
     assert_eq_array(&original, &recreated);
 }

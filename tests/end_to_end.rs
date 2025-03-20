@@ -77,12 +77,19 @@ fn test_docx() {
 
 fn test_container(filename: &str) {
     let v = read_file(filename);
-    let mut stats = preflate_rs::PreflateStats::default();
-    let c =
-        zstd_preflate_whole_deflate_stream(&v, preflate_rs::PreflateConfig::default(), &mut stats)
-            .unwrap();
 
-    let r = zstd_recreate_whole_deflate_stream(&c, 1024 * 1024 * 128).unwrap();
+    let mut c = Vec::new();
+
+    let stats = zstd_preflate_whole_deflate_stream(
+        preflate_rs::PreflateConfig::default(),
+        &mut std::io::Cursor::new(&v),
+        &mut c,
+    )
+    .unwrap();
+
+    let mut r = Vec::new();
+
+    zstd_recreate_whole_deflate_stream(&mut std::io::Cursor::new(&c), &mut r).unwrap();
     assert!(v == r);
 
     println!(
@@ -90,7 +97,7 @@ fn test_container(filename: &str) {
         filename,
         v.len(),
         c.len(),
-        r.len()
+        stats.uncompressed_size
     );
 }
 
