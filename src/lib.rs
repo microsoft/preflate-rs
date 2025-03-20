@@ -8,13 +8,13 @@
 
 mod bit_helper;
 mod cabac_codec;
+mod container_processor;
 mod deflate;
 mod estimator;
 mod hash_algorithm;
 mod hash_chain;
 mod hash_chain_holder;
 mod idat_parse;
-mod container_processor;
 mod preflate_error;
 mod preflate_input;
 mod scan_deflate;

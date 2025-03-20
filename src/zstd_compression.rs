@@ -6,8 +6,8 @@
 use std::{collections::VecDeque, io::Write};
 
 use crate::{
-    container_processor::PreflateConfig, preflate_error::AddContext, utils::write_dequeue, ExitCode,
-    PreflateContainerProcessor, PreflateError, PreflateStats, ProcessBuffer,
+    container_processor::PreflateConfig, preflate_error::AddContext, utils::write_dequeue,
+    ExitCode, PreflateContainerProcessor, PreflateError, PreflateStats, ProcessBuffer,
     RecreateContainerProcessor, Result,
 };
 

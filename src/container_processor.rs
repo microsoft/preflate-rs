@@ -17,12 +17,29 @@ use crate::{
     utils::write_dequeue,
 };
 
-/// configuration for the deflate process
+/// Configuration for the deflate process
 #[derive(Debug, Copy, Clone)]
 pub struct PreflateConfig {
+    /// internal log level for the deflate process (used only by testing)
     pub log_level: u32,
+
+    /// As we scan for deflate streams, we need to have a minimum memory
+    /// chunk to process. We scan this chunk for deflate streams and at least
+    /// deflate one block has to fit into a chunk for us to recognize it.
     pub min_chunk_size: usize,
+
+    /// The maximum size of a plain text block that we will compress per
+    /// deflate stream we find. This is in proportion to the min_chunk_size,
+    /// so as we are decompressing we don't run out of memory. If we hit
+    /// this limit, then we will skip this stream and write out the
+    /// deflate stream without decompressing it.
     pub plain_text_limit: usize,
+
+    /// The maximum overall size of plain text that we will compress. This is
+    /// global to the entire container and limits the amount of processing that
+    /// we will do to avoid running out of CPU time on a single file. Once we
+    /// hit this limit, we will stop looking for deflate streams and just write
+    /// out the rest of the data as literal blocks.
     pub total_plain_text_limit: u64,
 }
 
@@ -150,9 +167,9 @@ fn write_chunk_block(
     Ok(None)
 }
 
-/// Scans for deflate streams in a zlib compressed file, decompresses the streams and
+/// Scans for multiple deflate streams in an arbitrary binary file, decompresses the streams and
 /// returns an uncompressed file that can then be recompressed using a better algorithm.
-/// This can then be passed back into recreated_zlib_chunks to recreate the exact original file.
+/// This can then be passed back into recreate_whole_from_container to recreate the exact original file.
 ///
 /// Note that the result is NOT compressed and has to be compressed by some other algorithm
 /// in order to see any savings.
@@ -171,8 +188,7 @@ pub fn preflate_whole_into_container(
     Ok(context.stats())
 }
 
-/// Takes a binary array of data that was created by expand_zlib_chunks and recompresses it back to its
-/// original form.
+/// Takes the binary output of preflate_whole_into_container and recreates the original file.
 ///
 /// This is a wrapper for RecreateContainerProcessor.
 pub fn recreate_whole_from_container(
