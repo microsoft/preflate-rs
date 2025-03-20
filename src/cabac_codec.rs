@@ -4,7 +4,7 @@
  *  This software incorporates material from third parties. See NOTICE.txt for details.
  *--------------------------------------------------------------------------------------------*/
 
-use cabac::traits::{CabacReader, CabacWriter};
+use cabac::{CabacReader, CabacWriter};
 
 use crate::{
     bit_helper::bit_length,

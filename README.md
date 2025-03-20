@@ -1,5 +1,7 @@
 # preflate-rs
-preflate-rs is a port of the C++ [preflate library](https://github.com/deus-libri/preflate/) to split deflate streams into uncompressed data and reconstruction information, or reconstruct the original deflate stream from those two.
+Preflate-rs is a library initally based on a port of the C++ [preflate library](https://github.com/deus-libri/preflate/) with the purpose of splitting deflate streams into uncompressed data and reconstruction information, or reconstruct the original deflate stream from those two.
+
+Other similar libraries include precomp, reflate, grittibanzli, although this libary is probably the most feature rich and supports a lower overhead from more libraries.
 
 IMPORTANT: This library is still in initial development, so there are probably breaking changes being done fairly frequently.
 
@@ -13,15 +15,18 @@ The library tries to detect the following compressors to try to do a reasonable 
 - [Zlib](https://github.com/madler/zlib): Zlib is more or less perfectly compressed.
 - [MiniZ](https://github.com/richgel999/miniz): The fastest mode uses a different hash function.
 - [Libdeflate](https://github.com/ebiggers/libdeflate): This library uses 4 byte hash-tables, which we try to detect.
+- [Libzng](https://github.com/zlib-ng/zlib-ng): Works well except level 9
+- Windows zlib implementation (used by the built-in PNG codec and shell ZIP compression) 
 
 The general approach is as follows:
 1. Decompress stream into plaintext and a list of blocks containing tokens that are either literals (bytes) or distance, length pairs.
-2. Estimation scan of content to estimate parameters used for compression. The better the estimation, the less corrections we need when we try to recreate the compression.
-3. Rerun compression using the zlib algorithm using the parameters gathered above. A difference encoder is used to record each instance where the token predicted by our implementation of DEFLATE differs from what we found in the file. 
+2. Estimate the dictionary update strategy by looking at which strings are referenced by the compressed data. For example, zlib will only add the beginning of each compressed token for low compression levels.
+3. Estimate the maximum number times we execute the loop to look for matches (also called chains, as in walking the chain of the hash table). We also test with different hash functions to figure out which hash funciton was likely used. Given the chain length, we estimate the other parameters that were likely used.
+4. Rerun compression using the zlib algorithm using the parameters gathered above. A difference encoder is used to record each instance where the token predicted by our implementation of DEFLATE differs from what we found in the file. 
 
 The following differences are corrected:
 - Type of block (uncompressed, static huffman, dynamic huffman)
-- Number of tokens in block (normally 16386)
+- Number of tokens in block (normally 16385)
 - Dynamic huffman encoding (estimated using the zlib algorithm, but there are multiple ways to construct more or less optimal length limited Huffman codes)
 - Literal vs (distance, length) pair (corrected by a single bit)
 - Length or distance is incorrect (corrected by encoding the number of hops backwards until the correct one)
@@ -55,7 +60,7 @@ that much better to make it worthwhile to recompress.
 
 - [Rust 1.70 or Above](https://www.rust-lang.org/tools/install)
 
-```
+```Shell
 git clone https://github.com/microsoft/preflate-rs
 cd preflate-rs
 cargo build
@@ -84,4 +89,4 @@ This project has adopted the [Microsoft Open Source Code of Conduct](https://ope
 
 Copyright (c) Microsoft Corporation. All rights reserved.
 
-Licensed under the [Apache 2.0](LICENSE) license.
+Licensed under the Apache 2.0 license.

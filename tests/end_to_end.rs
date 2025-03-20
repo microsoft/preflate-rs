@@ -11,8 +11,8 @@ use std::{mem, ptr};
 
 use libdeflate_sys::{libdeflate_alloc_compressor, libdeflate_deflate_compress};
 use preflate_rs::{
-    compress_zstd, decompress_whole_deflate_stream, decompress_zstd,
-    recompress_whole_deflate_stream,
+    preflate_whole_deflate_stream, recreate_whole_deflate_stream,
+    zstd_preflate_whole_deflate_stream, zstd_recreate_whole_deflate_stream,
 };
 
 #[cfg(test)]
@@ -77,10 +77,20 @@ fn test_docx() {
 
 fn test_container(filename: &str) {
     let v = read_file(filename);
-    let mut stats = preflate_rs::CompressionStats::default();
-    let c = compress_zstd(&v, preflate_rs::CompressionConfig::default(), &mut stats).unwrap();
 
-    let r = decompress_zstd(&c, 1024 * 1024 * 128).unwrap();
+    let mut c = Vec::new();
+
+    let stats = zstd_preflate_whole_deflate_stream(
+        preflate_rs::PreflateConfig::default(),
+        &mut std::io::Cursor::new(&v),
+        &mut c,
+        4, // use lower level to save CPU on testing
+    )
+    .unwrap();
+
+    let mut r = Vec::new();
+
+    zstd_recreate_whole_deflate_stream(&mut std::io::Cursor::new(&c), &mut r).unwrap();
     assert!(v == r);
 
     println!(
@@ -88,7 +98,7 @@ fn test_container(filename: &str) {
         filename,
         v.len(),
         c.len(),
-        r.len()
+        stats.uncompressed_size
     );
 }
 
@@ -112,8 +122,8 @@ fn libzng() {
 
 fn verifyresult(compressed_data: &[u8]) {
     let (result, plain_text) =
-        decompress_whole_deflate_stream(compressed_data, true, 1, 128 * 1024 * 1024).unwrap();
-    let recomp = recompress_whole_deflate_stream(&plain_text.text(), &result.corrections).unwrap();
+        preflate_whole_deflate_stream(compressed_data, true, 1, 128 * 1024 * 1024).unwrap();
+    let recomp = recreate_whole_deflate_stream(&plain_text.text(), &result.corrections).unwrap();
 
     println!(
         "compressed size: {}, cabac: {}",
@@ -396,14 +406,14 @@ fn compression_benchmark_overhead_size() {
             compress_fn: libngzsys,
             overhead: [
                 Ok(30),
-                Ok(37),
+                Ok(36),
+                Ok(23),
                 Ok(25),
-                Ok(27),
-                Ok(4071),
+                Ok(4070),
                 Ok(4474),
                 Ok(3760),
                 Ok(49),
-                Ok(38),
+                Ok(37),
                 Err(ExitCode::NoCompressionCandidates),
             ],
         },
@@ -412,15 +422,15 @@ fn compression_benchmark_overhead_size() {
             compress_fn: zlib,
             overhead: [
                 Ok(30),
+                Ok(28),
+                Ok(28),
+                Ok(28),
                 Ok(30),
                 Ok(30),
                 Ok(30),
-                Ok(32),
-                Ok(32),
-                Ok(32),
-                Ok(329),
-                Ok(131),
-                Ok(30),
+                Ok(328),
+                Ok(130),
+                Ok(28),
             ],
         },
         BenchmarkResult {
@@ -429,14 +439,14 @@ fn compression_benchmark_overhead_size() {
             overhead: [
                 Ok(30),
                 Ok(1031),
-                Ok(4371),
-                Ok(3818),
+                Ok(4370),
+                Ok(3817),
                 Ok(6311),
-                Ok(4352),
-                Ok(4022),
-                Ok(3626),
-                Ok(4365),
-                Ok(4331),
+                Ok(4351),
+                Ok(4021),
+                Ok(3625),
+                Ok(4364),
+                Ok(4330),
             ],
         },
         BenchmarkResult {
@@ -445,14 +455,14 @@ fn compression_benchmark_overhead_size() {
             overhead: [
                 Ok(47),
                 Ok(260),
-                Ok(11316),
+                Ok(11315),
                 Ok(7454),
-                Ok(2225),
+                Ok(2224),
                 Ok(1265),
                 Ok(360),
-                Ok(258),
-                Ok(338),
-                Ok(282),
+                Ok(257),
+                Ok(337),
+                Ok(281),
             ],
         },
     ];
@@ -463,7 +473,7 @@ fn compression_benchmark_overhead_size() {
         for level in 0..=9 {
             let compressed = (i.compress_fn)(&original, level);
 
-            let r = decompress_whole_deflate_stream(&compressed, true, 0, 1024 * 1024 * 128);
+            let r = preflate_whole_deflate_stream(&compressed, true, 0, 1024 * 1024 * 128);
 
             match r {
                 Ok((r, _)) => {

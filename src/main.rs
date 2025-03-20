@@ -1,12 +1,10 @@
 use std::{
     env, fs,
-    io::Cursor,
+    io::BufReader,
     path::{Path, PathBuf},
 };
 
-use preflate_rs::{
-    CompressionConfig, PreflateContainerProcessor, ProcessBuffer, ZstdCompressContext,
-};
+use preflate_rs::{PreflateConfig, PreflateContainerProcessor, ProcessBuffer, ZstdCompressContext};
 
 fn enumerate_directory_recursively(path: &Path) -> Result<Vec<PathBuf>, std::io::Error> {
     let mut results = Vec::new();
@@ -50,23 +48,24 @@ fn main() {
         // scan file for compressed data
         println!("Processing file: {:?}", entry);
 
-        let file = std::fs::read(entry).unwrap();
+        // open file for reading
+        let mut filehandle = BufReader::new(fs::File::open(&entry).unwrap());
 
         let mut ctx = ZstdCompressContext::new(
-            PreflateContainerProcessor::new(CompressionConfig::default()),
+            PreflateContainerProcessor::new(PreflateConfig::default()),
             9,
             true,
         );
 
-        let mut preflatecompressed = Vec::with_capacity(file.len());
-        if let Err(e) = ctx.copy_to_end(&mut Cursor::new(&file), &mut preflatecompressed) {
+        let mut preflatecompressed = Vec::new();
+        if let Err(e) = ctx.copy_to_end(&mut filehandle, &mut preflatecompressed) {
             println!("Skipping due to error: {:?}", e);
             continue;
         }
 
         let stats = ctx.stats();
 
-        totalseen += file.len() as u64;
+        totalseen += stats.deflate_compressed_size as u64;
         totalbaseline += stats.zstd_baseline_size as u64;
         totalzstd += stats.zstd_compressed_size as u64;
 

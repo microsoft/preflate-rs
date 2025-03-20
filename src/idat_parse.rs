@@ -3,7 +3,7 @@ use std::io::{Read, Write};
 use crate::preflate_error::Result;
 
 use crate::{
-    preflate_container::{read_varint, write_varint},
+    container_processor::{read_varint, write_varint},
     preflate_error::{err_exit_code, ExitCode},
 };
 
