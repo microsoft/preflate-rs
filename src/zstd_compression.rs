@@ -6,7 +6,7 @@
 use std::{collections::VecDeque, io::Write};
 
 use crate::{
-    preflate_container::PreflateConfig, preflate_error::AddContext, utils::write_dequeue, ExitCode,
+    container_processor::PreflateConfig, preflate_error::AddContext, utils::write_dequeue, ExitCode,
     PreflateContainerProcessor, PreflateError, PreflateStats, ProcessBuffer,
     RecreateContainerProcessor, Result,
 };
@@ -241,7 +241,7 @@ fn verify_zip_compress_zstd() {
 /// tests zstd compression buffer processing without involving preflate code
 #[test]
 fn roundtrip_zstd_only_contexts() {
-    use crate::preflate_container::NopProcessBuffer;
+    use crate::container_processor::NopProcessBuffer;
     use crate::utils::{assert_eq_array, read_file};
     use crate::zstd_compression::{ZstdCompressContext, ZstdDecompressContext};
 

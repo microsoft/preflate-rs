@@ -5,7 +5,7 @@ use std::{
 };
 
 use crate::{
-    preflate_container::PreflateConfig,
+    container_processor::PreflateConfig,
     preflate_error::ExitCode,
     zstd_compression::{ZstdCompressContext, ZstdDecompressContext},
     PreflateContainerProcessor, PreflateError, ProcessBuffer, RecreateContainerProcessor,

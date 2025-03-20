@@ -4,8 +4,6 @@
  *  This software incorporates material from third parties. See NOTICE.txt for details.
  *--------------------------------------------------------------------------------------------*/
 
-//! Responsible for performing preflate and recreation on a chunk by chunk basis
-
 use std::io::Cursor;
 
 use bitcode::{Decode, Encode};
@@ -45,8 +43,8 @@ impl ReconstructionData {
     }
 }
 
-/// result of decompress_deflate_stream
-pub struct PreflateChunkResult {
+/// Result of a call to PreflateStreamProcessor::decompress
+pub struct PreflateStreamChunkResult {
     /// the extra data that is needed to reconstruct the deflate stream exactly as it was written
     pub corrections: Vec<u8>,
 
@@ -54,28 +52,32 @@ pub struct PreflateChunkResult {
     /// data that will be recreated using the cabac_encoded data)
     pub compressed_size: usize,
 
-    /// the parameters that were used to compress the stream (informational)
+    /// the parameters that were used to compress the stream. Only returned for the first
+    /// chunk that is passed in.
     pub parameters: Option<TokenPredictorParameters>,
 
     pub blocks: Vec<DeflateTokenBlock>,
 }
 
-/// Takes a stream of deflate compressed data and decompresses it, recording the data
+/// Takes a stream of deflate compressed data removes the deflate compression, recording the data
 /// that can be used to reconstruct it along with the plain-text.
 #[derive(Debug)]
-pub struct PreflateChunkProcessor {
+pub struct PreflateStreamProcessor {
     predictor: Option<TokenPredictor>,
-    validator: Option<RecreateChunkProcessor>,
+    validator: Option<RecreateStreamProcessor>,
     parser: DeflateParser,
 }
 
-impl PreflateChunkProcessor {
+impl PreflateStreamProcessor {
+    /// Creates a new PreflateStreamProcessor
+    /// plain_text_limit: the maximum size of the plain text that will decompressed to memory
+    /// verify: if true, the decompressed data will be recompressed and compared to the original as it is run
     pub fn new(plain_text_limit: usize, verify: bool) -> Self {
         Self {
             predictor: None,
             parser: DeflateParser::new(plain_text_limit),
             validator: if verify {
-                Some(RecreateChunkProcessor::new())
+                Some(RecreateStreamProcessor::new())
             } else {
                 None
             },
@@ -103,7 +105,7 @@ impl PreflateChunkProcessor {
         &mut self,
         compressed_data: &[u8],
         _loglevel: u32,
-    ) -> Result<PreflateChunkResult> {
+    ) -> Result<PreflateStreamChunkResult> {
         let contents = self.parser.parse(compressed_data)?;
 
         let mut cabac_encoded = Vec::new();
@@ -148,7 +150,7 @@ impl PreflateChunkProcessor {
                 }
             }
 
-            Ok(PreflateChunkResult {
+            Ok(PreflateStreamChunkResult {
                 corrections: cabac_encoded,
                 compressed_size: contents.compressed_size,
                 parameters: None,
@@ -204,7 +206,7 @@ impl PreflateChunkProcessor {
                 }
             }
 
-            Ok(PreflateChunkResult {
+            Ok(PreflateStreamChunkResult {
                 corrections: reconstruction_data,
                 compressed_size: contents.compressed_size,
                 parameters: Some(params),
@@ -219,24 +221,24 @@ impl PreflateChunkProcessor {
 pub fn preflate_whole_deflate_stream(
     compressed_data: &[u8],
     verify: bool,
-    _loglevel: u32,
+    loglevel: u32,
     plain_text_limit: usize,
-) -> Result<(PreflateChunkResult, PlainText)> {
-    let mut state = PreflateChunkProcessor::new(plain_text_limit, verify);
-    let r = state.decompress(compressed_data, 1)?;
+) -> Result<(PreflateStreamChunkResult, PlainText)> {
+    let mut state = PreflateStreamProcessor::new(plain_text_limit, verify);
+    let r = state.decompress(compressed_data, loglevel)?;
 
     Ok((r, state.parser.detach_plain_text()))
 }
 
-/// recreates the original deflate stream
+/// recreates the original deflate stream, piece-by-piece
 #[derive(Debug)]
-pub struct RecreateChunkProcessor {
+pub struct RecreateStreamProcessor {
     predictor: Option<TokenPredictor>,
     writer: DeflateWriter,
     plain_text: PlainText,
 }
 
-impl RecreateChunkProcessor {
+impl RecreateStreamProcessor {
     pub fn new() -> Self {
         Self {
             predictor: None,
@@ -300,7 +302,7 @@ pub fn recreate_whole_deflate_stream(
     plain_text: &[u8],
     prediction_corrections: &[u8],
 ) -> Result<Vec<u8>> {
-    let mut state = RecreateChunkProcessor::new();
+    let mut state = RecreateStreamProcessor::new();
 
     let (recompressed, _) = state.recompress(|p| p.append(plain_text), prediction_corrections)?;
 
@@ -391,7 +393,7 @@ fn recreate_blocks<D: PredictionDecoder>(
 fn decompress_deflate_stream_assert(
     compressed_data: &[u8],
     verify: bool,
-) -> Result<(PreflateChunkResult, PlainText)> {
+) -> Result<(PreflateStreamChunkResult, PlainText)> {
     use crate::deflate::deflate_reader::parse_deflate_whole;
     use cabac::debug::{DebugReader, DebugWriter};
 
@@ -435,7 +437,7 @@ fn decompress_deflate_stream_assert(
     }
 
     Ok((
-        PreflateChunkResult {
+        PreflateStreamChunkResult {
             corrections: reconstruction_data,
             compressed_size: contents.compressed_size,
             parameters: Some(params),
@@ -734,7 +736,7 @@ pub fn analyze_compressed_data_verify_incremental(compressed_data: &[u8], plain_
     let mut start_offset = 0;
     let mut end_offset = compressed_data.len().min(100001);
 
-    let mut stream = PreflateChunkProcessor::new(plain_text_limit, true);
+    let mut stream = PreflateStreamProcessor::new(plain_text_limit, true);
 
     let mut plain_text_offset = 0;
 
@@ -779,7 +781,7 @@ pub fn analyze_compressed_data_verify_incremental(compressed_data: &[u8], plain_
     let mut recompressed = Vec::new();
     let mut reconstructed_blocks = Vec::new();
 
-    let mut reconstruct = RecreateChunkProcessor::new();
+    let mut reconstruct = RecreateStreamProcessor::new();
     for i in 0..expanded_contents.len() {
         let (mut r, mut b) = reconstruct
             .recompress(
