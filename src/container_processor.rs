@@ -731,7 +731,7 @@ impl ProcessBuffer for RecreateContainerProcessor {
         input: &[u8],
         input_complete: bool,
         writer: &mut impl Write,
-        max_output_write: usize,
+        mut max_output_write: usize,
     ) -> Result<bool> {
         if self.input_complete && (input.len() > 0 || !input_complete) {
             return Err(PreflateError::new(
@@ -740,21 +740,37 @@ impl ProcessBuffer for RecreateContainerProcessor {
             ));
         }
 
-        if input.len() > 0 {
-            self.input.write_all(input).context()?;
+        // we could have been passed a big buffer, so we need to process it in chunks
+        let mut amount_read = 0;
+        loop {
+            let amount_to_read = (input.len() - amount_read).min(self.capacity);
 
-            if self.input.len() > self.capacity {
-                return Err(PreflateError::new(
-                    ExitCode::InvalidParameter,
-                    "input data exceeds capacity",
-                ));
+            // when we get to the end and we've read everything, we can signal that we are done
+            if amount_read + amount_to_read == input.len() && input_complete {
+                self.input_complete = true;
+            }
+
+            self.input
+                .extend(&input[amount_read..amount_read + amount_to_read]);
+
+            amount_read += amount_to_read;
+
+            self.process_buffer_internal()?;
+            let amount_written =
+                write_dequeue(&mut self.result, writer, max_output_write).context()?;
+
+            max_output_write -= amount_written;
+            if amount_read == input.len() {
+                break;
             }
         }
 
-        if input_complete {
-            self.input_complete = true;
-        }
+        Ok(self.input_complete && self.result.len() == 0)
+    }
+}
 
+impl RecreateContainerProcessor {
+    fn process_buffer_internal(&mut self) -> Result<()> {
         loop {
             match &mut self.state {
                 DecompressionState::Start => {
@@ -929,9 +945,7 @@ impl ProcessBuffer for RecreateContainerProcessor {
             }
         }
 
-        write_dequeue(&mut self.result, writer, max_output_write).context()?;
-
-        Ok(self.input_complete && self.result.len() == 0)
+        Ok(())
     }
 }
 
