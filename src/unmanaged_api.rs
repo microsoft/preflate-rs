@@ -275,7 +275,7 @@ pub unsafe extern "C" fn decompress_buffer(
 #[test]
 fn extern_interface() {
     use crate::utils::read_file;
-    let input = read_file("samplezip.zip");
+    let original = read_file("samplezip.zip");
 
     let mut compressed = Vec::new();
 
@@ -285,7 +285,7 @@ fn extern_interface() {
         let mut compressed_chunk = Vec::new();
         compressed_chunk.resize(10000, 0);
 
-        input.chunks(10000).for_each(|chunk| {
+        original.chunks(10000).for_each(|chunk| {
             let mut result_size: u64 = 0;
 
             let retval = compress_buffer(
@@ -349,7 +349,7 @@ fn extern_interface() {
         free_compression_context(compression_context);
     }
 
-    let mut original = Vec::new();
+    let mut recreated = Vec::new();
 
     unsafe {
         let decompression_context = create_decompression_context(0, 1024 * 1024 * 50);
@@ -373,7 +373,7 @@ fn extern_interface() {
             );
             assert_eq!(retval, 0);
 
-            original.extend_from_slice(&decompressed_chunk[..(result_size as usize)]);
+            recreated.extend_from_slice(&decompressed_chunk[..(result_size as usize)]);
         });
 
         loop {
@@ -392,7 +392,7 @@ fn extern_interface() {
             );
             assert!(retval >= 0, "not expecting an error");
 
-            original.extend_from_slice(&decompressed_chunk[..(result_size as usize)]);
+            recreated.extend_from_slice(&decompressed_chunk[..(result_size as usize)]);
 
             if retval == 1 {
                 break;
@@ -402,8 +402,8 @@ fn extern_interface() {
         free_decompression_context(decompression_context);
     }
 
-    assert_eq!(input.len() as u64, original.len() as u64);
-    assert_eq!(input[..], original[..]);
+    assert_eq!(original.len() as u64, recreated.len() as u64);
+    assert_eq!(original[..], recreated[..]);
 }
 
 /// tests the error message translation
