@@ -7,7 +7,7 @@ use std::{
 
 use crate::{
     chunk_processor::{
-        recompress_whole_deflate_stream, PreflateChunkProcessor, RecreateChunkProcessor,
+        recreate_whole_deflate_stream, PreflateChunkProcessor, RecreateChunkProcessor,
     },
     hash_algorithm::HashAlgorithm,
     idat_parse::{recreate_idat, IdatContents},
@@ -17,17 +17,18 @@ use crate::{
     utils::write_dequeue,
 };
 
+/// configuration for the deflate process
 #[derive(Debug, Copy, Clone)]
-pub struct CompressionConfig {
+pub struct PreflateConfig {
     pub log_level: u32,
     pub min_chunk_size: usize,
     pub plain_text_limit: usize,
     pub total_plain_text_limit: u64,
 }
 
-impl Default for CompressionConfig {
+impl Default for PreflateConfig {
     fn default() -> Self {
-        CompressionConfig {
+        PreflateConfig {
             log_level: 0,
             min_chunk_size: 1024 * 1024,
             plain_text_limit: 128 * 1024 * 1024,
@@ -111,7 +112,7 @@ fn write_literal_block(content: &[u8], destination: &mut impl Write) -> Result<(
 fn write_chunk_block(
     result: &mut impl Write,
     chunk: FoundStream,
-    stats: &mut CompressionStats,
+    stats: &mut PreflateStats,
 ) -> Result<Option<PreflateChunkProcessor>> {
     match chunk.chunk_type {
         FoundStreamType::DeflateStream(parameters, state) => {
@@ -182,7 +183,7 @@ fn roundtrip_chunk_block_deflate() {
 
     let mut buffer = Vec::new();
 
-    let mut stats = CompressionStats::default();
+    let mut stats = PreflateStats::default();
     write_chunk_block(
         &mut buffer,
         FoundStream {
@@ -213,7 +214,7 @@ fn roundtrip_chunk_block_png() {
 
     let mut buffer = Vec::new();
 
-    let mut stats = CompressionStats::default();
+    let mut stats = PreflateStats::default();
     write_chunk_block(
         &mut buffer,
         FoundStream {
@@ -235,14 +236,17 @@ fn roundtrip_chunk_block_png() {
     assert!(destination == &f[83..83 + total_chunk_length]);
 }
 
-/// scans for deflate streams in a zlib compressed file, decompresses the streams and
+/// Scans for deflate streams in a zlib compressed file, decompresses the streams and
 /// returns an uncompressed file that can then be recompressed using a better algorithm.
 /// This can then be passed back into recreated_zlib_chunks to recreate the exact original file.
-pub fn prefate_container(
+///
+/// This interface does not use streaming, so is limited in size. Use PreflateContainerProcessor
+/// to process larger files.
+pub fn preflate_whole_into_container(
     compressed_data: &[u8],
-    config: CompressionConfig,
+    config: PreflateConfig,
     write: &mut impl Write,
-) -> Result<CompressionStats> {
+) -> Result<PreflateStats> {
     let mut context = PreflateContainerProcessor::new(config);
     context
         .copy_to_end(&mut Cursor::new(compressed_data), write)
@@ -251,9 +255,14 @@ pub fn prefate_container(
     Ok(context.stats())
 }
 
-/// takes a binary chunk of data that was created by expand_zlib_chunks and recompresses it back to its
+/// Takes a binary array of data that was created by expand_zlib_chunks and recompresses it back to its
 /// original form.
-pub fn recreated_container(source: &mut impl Read, destination: &mut impl Write) -> Result<()> {
+///
+/// This interface does not use streaming, so is limited in size. Use RecreateContainerProcessor.
+pub fn recreate_whole_from_container(
+    source: &mut impl Read,
+    destination: &mut impl Write,
+) -> Result<()> {
     let mut recreate = RecreateContainerProcessor::new(usize::MAX);
     recreate.copy_to_end(source, destination)
 }
@@ -265,12 +274,12 @@ fn roundtrip_deflate_chunks(filename: &str) {
     let f = crate::utils::read_file(filename);
 
     let mut expanded = Vec::new();
-    prefate_container(&f, CompressionConfig::default(), &mut expanded).unwrap();
+    preflate_whole_into_container(&f, PreflateConfig::default(), &mut expanded).unwrap();
 
     let mut read_cursor = std::io::Cursor::new(expanded);
 
     let mut destination = Vec::new();
-    recreated_container(&mut read_cursor, &mut destination).unwrap();
+    recreate_whole_from_container(&mut read_cursor, &mut destination).unwrap();
 
     assert_eq_array(&destination, &f);
 }
@@ -306,16 +315,17 @@ fn verify_zip_compress() {
     let v = read_file("samplezip.zip");
 
     let mut expanded = Vec::new();
-    prefate_container(&v, CompressionConfig::default(), &mut expanded).unwrap();
+    preflate_whole_into_container(&v, PreflateConfig::default(), &mut expanded).unwrap();
 
     let mut recompressed = Vec::new();
-    recreated_container(&mut Cursor::new(expanded), &mut recompressed).unwrap();
+    recreate_whole_from_container(&mut Cursor::new(expanded), &mut recompressed).unwrap();
 
     assert!(v == recompressed);
 }
 
+/// Statistics about the preflate process
 #[derive(Debug, Copy, Clone, Default)]
-pub struct CompressionStats {
+pub struct PreflateStats {
     pub deflate_compressed_size: u64,
     pub zstd_compressed_size: u64,
     pub uncompressed_size: u64,
@@ -415,8 +425,8 @@ pub trait ProcessBuffer {
         Ok(())
     }
 
-    fn stats(&self) -> CompressionStats {
-        CompressionStats::default()
+    fn stats(&self) -> PreflateStats {
+        PreflateStats::default()
     }
 }
 
@@ -437,19 +447,19 @@ enum ChunkParseState {
 pub struct PreflateContainerProcessor {
     content: Vec<u8>,
     result: VecDeque<u8>,
-    compression_stats: CompressionStats,
+    compression_stats: PreflateStats,
     input_complete: bool,
     total_plain_text_seen: u64,
 
     state: ChunkParseState,
-    config: CompressionConfig,
+    config: PreflateConfig,
 }
 
 impl PreflateContainerProcessor {
-    pub fn new(config: CompressionConfig) -> Self {
+    pub fn new(config: PreflateConfig) -> Self {
         PreflateContainerProcessor {
             content: Vec::new(),
-            compression_stats: CompressionStats::default(),
+            compression_stats: PreflateStats::default(),
             result: VecDeque::new(),
             input_complete: false,
             state: ChunkParseState::Start,
@@ -596,7 +606,7 @@ impl ProcessBuffer for PreflateContainerProcessor {
         Ok(self.input_complete && self.result.len() == 0)
     }
 
-    fn stats(&self) -> CompressionStats {
+    fn stats(&self) -> PreflateStats {
         self.compression_stats
     }
 }
@@ -873,7 +883,7 @@ impl ProcessBuffer for RecreateContainerProcessor {
                     let plain_text: Vec<u8> = self.input.drain(0..*uncompressed_length).collect();
 
                     let recompressed =
-                        recompress_whole_deflate_stream(&plain_text, &corrections).context()?;
+                        recreate_whole_deflate_stream(&plain_text, &corrections).context()?;
 
                     recreate_idat(&idat, &recompressed[..], &mut self.result).context()?;
 
@@ -896,7 +906,7 @@ fn test_baseline_calc() {
     let v = read_file("samplezip.zip");
 
     let mut context = ZstdCompressContext::new(
-        PreflateContainerProcessor::new(CompressionConfig::default()),
+        PreflateContainerProcessor::new(PreflateConfig::default()),
         9,
         true,
     );
@@ -920,7 +930,7 @@ fn roundtrip_small_chunk() {
 
     let original = read_file("pptxplaintext.zip");
 
-    let mut context = PreflateContainerProcessor::new(CompressionConfig {
+    let mut context = PreflateContainerProcessor::new(PreflateConfig {
         log_level: 1,
         min_chunk_size: 100000,
         plain_text_limit: usize::MAX,
@@ -941,7 +951,7 @@ fn roundtrip_small_plain_text() {
 
     let original = read_file("pptxplaintext.zip");
 
-    let mut context = PreflateContainerProcessor::new(CompressionConfig {
+    let mut context = PreflateContainerProcessor::new(PreflateConfig {
         log_level: 1,
         min_chunk_size: 100000,
         plain_text_limit: 1000000,

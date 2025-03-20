@@ -5,7 +5,7 @@ use std::{
 };
 
 use crate::{
-    preflate_container::CompressionConfig,
+    preflate_container::PreflateConfig,
     preflate_error::ExitCode,
     zstd_compression::{ZstdCompressContext, ZstdDecompressContext},
     PreflateContainerProcessor, PreflateError, ProcessBuffer, RecreateContainerProcessor,
@@ -77,7 +77,7 @@ pub unsafe extern "C" fn create_compression_context(flags: u32) -> *mut std::ffi
         let context = Box::new((
             12345678u32,
             CompressionContext::new(
-                PreflateContainerProcessor::new(CompressionConfig::default()),
+                PreflateContainerProcessor::new(PreflateConfig::default()),
                 9,
                 test_baseline,
             ),

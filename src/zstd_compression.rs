@@ -6,11 +6,14 @@
 use std::{collections::VecDeque, io::Write};
 
 use crate::{
-    preflate_container::CompressionConfig, preflate_error::AddContext, utils::write_dequeue,
-    CompressionStats, ExitCode, PreflateContainerProcessor, PreflateError, ProcessBuffer,
+    preflate_container::PreflateConfig, preflate_error::AddContext, utils::write_dequeue, ExitCode,
+    PreflateContainerProcessor, PreflateError, PreflateStats, ProcessBuffer,
     RecreateContainerProcessor, Result,
 };
 
+/// Processor that decompresses the input using Zstandard
+///
+/// Designed to wrap around the RecreateContainerProcessor.
 pub struct ZstdDecompressContext<D: ProcessBuffer> {
     zstd_decompress: zstd::stream::write::Decoder<'static, VecDeque<u8>>,
     input_complete: bool,
@@ -68,6 +71,9 @@ impl<D: ProcessBuffer> ProcessBuffer for ZstdDecompressContext<D> {
     }
 }
 
+/// processor that compresses the input using Zstandard
+///
+/// Designed to wrap around the PreflateChunkProcessor.
 pub struct ZstdCompressContext<D: ProcessBuffer> {
     zstd_compress: zstd::stream::write::Encoder<'static, VecDeque<u8>>,
     input_complete: bool,
@@ -159,8 +165,8 @@ impl<D: ProcessBuffer> ProcessBuffer for ZstdCompressContext<D> {
         Ok(done_write && output.len() == 0)
     }
 
-    fn stats(&self) -> CompressionStats {
-        CompressionStats {
+    fn stats(&self) -> PreflateStats {
+        PreflateStats {
             zstd_compressed_size: self.zstd_compressed_size,
             zstd_baseline_size: self.zstd_baseline_size,
             ..self.internal.stats()
@@ -184,12 +190,12 @@ impl Write for MeasureWriteSink {
     }
 }
 
-/// expands the Zlib compressed streams in the data and then recompresses the result
+/// Expands the Zlib compressed streams in the data and then recompresses the result
 /// with Zstd with the maximum level.
-pub fn compress_zstd(
+pub fn zstd_preflate_whole_deflate_stream(
     zlib_compressed_data: &[u8],
-    config: CompressionConfig,
-    compression_stats: &mut CompressionStats,
+    config: PreflateConfig,
+    compression_stats: &mut PreflateStats,
 ) -> Result<Vec<u8>> {
     let mut ctx = ZstdCompressContext::new(PreflateContainerProcessor::new(config), 9, false);
 
@@ -200,9 +206,12 @@ pub fn compress_zstd(
     Ok(r)
 }
 
-/// decompresses the Zstd compressed data and then recompresses the result back
+/// Decompresses the Zstd compressed data and then recompresses the result back
 /// to the original Zlib compressed streams.
-pub fn decompress_zstd(compressed_data: &[u8], capacity: usize) -> Result<Vec<u8>> {
+pub fn zstd_recreate_whole_deflate_stream(
+    compressed_data: &[u8],
+    capacity: usize,
+) -> Result<Vec<u8>> {
     let mut ctx = ZstdDecompressContext::<RecreateContainerProcessor>::new(
         RecreateContainerProcessor::new(capacity),
     );
@@ -215,10 +224,11 @@ fn verify_zip_compress_zstd() {
     use crate::utils::read_file;
     let v = read_file("samplezip.zip");
 
-    let mut stats = CompressionStats::default();
-    let compressed = compress_zstd(&v, CompressionConfig::default(), &mut stats).unwrap();
+    let mut stats = PreflateStats::default();
+    let compressed =
+        zstd_preflate_whole_deflate_stream(&v, PreflateConfig::default(), &mut stats).unwrap();
 
-    let recreated = decompress_zstd(&compressed, 256 * 1024 * 1024).unwrap();
+    let recreated = zstd_recreate_whole_deflate_stream(&compressed, 256 * 1024 * 1024).unwrap();
 
     assert!(v == recreated);
     println!(

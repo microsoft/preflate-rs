@@ -60,6 +60,8 @@ pub struct PreflateChunkResult {
     pub blocks: Vec<DeflateTokenBlock>,
 }
 
+/// Takes a stream of deflate compressed data and decompresses it, recording the data
+/// that can be used to reconstruct it along with the plain-text.
 #[derive(Debug)]
 pub struct PreflateChunkProcessor {
     predictor: Option<TokenPredictor>,
@@ -212,7 +214,9 @@ impl PreflateChunkProcessor {
     }
 }
 
-pub fn decompress_whole_deflate_stream(
+/// Decompresses a deflate stream and returns the plaintext and diff data that can be used to reconstruct it
+/// via recreate_whole_deflate_stream
+pub fn preflate_whole_deflate_stream(
     compressed_data: &[u8],
     verify: bool,
     _loglevel: u32,
@@ -292,7 +296,7 @@ impl RecreateChunkProcessor {
 }
 
 /// recompresses a deflate stream using the cabac_encoded data that was returned from decompress_deflate_stream
-pub fn recompress_whole_deflate_stream(
+pub fn recreate_whole_deflate_stream(
     plain_text: &[u8],
     prediction_corrections: &[u8],
 ) -> Result<Vec<u8>> {
@@ -478,8 +482,8 @@ fn verify_file(filename: &str) {
     use crate::utils::read_file;
     let v = read_file(filename);
 
-    let (r, plain_text) = decompress_whole_deflate_stream(&v, true, 1, usize::MAX).unwrap();
-    let recompressed = recompress_whole_deflate_stream(plain_text.text(), &r.corrections).unwrap();
+    let (r, plain_text) = preflate_whole_deflate_stream(&v, true, 1, usize::MAX).unwrap();
+    let recompressed = recreate_whole_deflate_stream(plain_text.text(), &r.corrections).unwrap();
     assert!(v == recompressed);
 }
 
