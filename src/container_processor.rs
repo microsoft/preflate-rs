@@ -358,6 +358,7 @@ pub struct PreflateStats {
     pub zstd_baseline_size: u64,
 }
 
+/// Processes an input buffer and writes the output to a writer
 pub trait ProcessBuffer {
     fn process_buffer(
         &mut self,
