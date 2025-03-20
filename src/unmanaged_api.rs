@@ -70,15 +70,20 @@ fn test_copy_cstring_utf8_to_buffer() {
     );
 }
 
+/// Allocates new compression context, must be freed with free_compression_context
+/// flags:
+///  bits 0-4 zstd level to use (0-16)
+///  bit 5: test baseline (does a baseline zstd compression of the input passed in so we
+/// can compare the preflate compression + zstd to just plain zstd compression)
 #[no_mangle]
 pub unsafe extern "C" fn create_compression_context(flags: u32) -> *mut std::ffi::c_void {
     match catch_unwind_result(|| {
-        let test_baseline = (flags & 1) != 0;
+        let test_baseline = (flags & 0x10) != 0;
         let context = Box::new((
             12345678u32,
             CompressionContext::new(
                 PreflateContainerProcessor::new(PreflateConfig::default()),
-                9,
+                (flags & 0xf) as i32,
                 test_baseline,
             ),
         ));
@@ -92,6 +97,7 @@ pub unsafe extern "C" fn create_compression_context(flags: u32) -> *mut std::ffi
     }
 }
 
+/// Frees the compression context
 #[no_mangle]
 pub unsafe extern "C" fn free_compression_context(context: *mut std::ffi::c_void) {
     let x = Box::from_raw(context as *mut (u32, CompressionContext));
@@ -101,8 +107,8 @@ pub unsafe extern "C" fn free_compression_context(context: *mut std::ffi::c_void
 
 /// Compresses a file using the preflate algorithm.
 ///
-/// Returns -1 if more data is needed or if there is more data available, or 0 if done successfully.
-/// Returns > 0 if there is an error
+/// Returns 0 if more data is needed or if there is more data available, or 1 if done successfully.
+/// Returns < 0 if there is an error (negative value is the error code)
 #[no_mangle]
 pub unsafe extern "C" fn compress_buffer(
     context: *mut std::ffi::c_void,
@@ -155,6 +161,7 @@ pub unsafe extern "C" fn compress_buffer(
     }
 }
 
+/// returns the compression statistics associated with the compression context
 #[no_mangle]
 pub unsafe extern "C" fn get_compression_stats(
     context: *mut std::ffi::c_void,
@@ -182,6 +189,7 @@ pub unsafe extern "C" fn get_compression_stats(
 type DecompressionContext = ZstdDecompressContext<RecreateContainerProcessor>;
 type CompressionContext = ZstdCompressContext<PreflateContainerProcessor>;
 
+/// Allocates new decompression context, must be freed with free_decompression_context
 #[no_mangle]
 pub unsafe extern "C" fn create_decompression_context(
     _flags: u32,
@@ -202,6 +210,7 @@ pub unsafe extern "C" fn create_decompression_context(
     }
 }
 
+/// Frees the decompression context
 #[no_mangle]
 pub unsafe extern "C" fn free_decompression_context(context: *mut std::ffi::c_void) {
     let x = Box::from_raw(context as *mut (u32, DecompressionContext));
@@ -209,10 +218,10 @@ pub unsafe extern "C" fn free_decompression_context(context: *mut std::ffi::c_vo
     // let Box destroy the object
 }
 
-/// Compresses a file using the preflate algorithm.
+/// Recreates the original file using the preflate algorithm.
 ///
-/// Returns -1 if more data is needed or if there is more data available, or 0 if done successfully.
-/// Returns > 0 if there is an error
+/// Returns 0 if more data is needed or if there is more data available, or 1 if done successfully.
+/// Returns < 0 if there is an error (negative value is the error code)
 #[no_mangle]
 pub unsafe extern "C" fn decompress_buffer(
     context: *mut std::ffi::c_void,
