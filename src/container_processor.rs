@@ -223,8 +223,6 @@ fn roundtrip_chunk_block_literal() {
 
 #[test]
 fn roundtrip_chunk_block_deflate() {
-    use crate::stream_processor::PreflateStreamProcessor;
-
     let contents = crate::utils::read_file("compressed_zlib_level1.deflate");
 
     let mut stream_state = PreflateStreamProcessor::new(usize::MAX, true);
@@ -977,8 +975,8 @@ fn test_baseline_calc() {
     println!("stats: {:?}", stats);
 
     // these change if the compression algorithm is altered, update them
-    assert_eq!(stats.overhead_bytes, 466);
-    assert_eq!(stats.zstd_compressed_size, 12437);
+    assert_eq!(stats.overhead_bytes, 463);
+    assert_eq!(stats.zstd_compressed_size, 12436);
     assert_eq!(stats.uncompressed_size, 54871);
     assert_eq!(stats.zstd_baseline_size, 13661);
 }
