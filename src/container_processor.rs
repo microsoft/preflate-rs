@@ -14,7 +14,7 @@ use crate::{
     stream_processor::{
         recreate_whole_deflate_stream, PreflateStreamProcessor, RecreateStreamProcessor,
     },
-    utils::write_dequeue,
+    utils::{write_dequeue, TakeReader},
 };
 
 /// Configuration for the deflate process
@@ -895,7 +895,7 @@ impl RecreateContainerProcessor {
                     if let Some(reconstruct) = &mut self.deflate_continue_state {
                         let (comp, _) = reconstruct
                             .recompress(
-                                |p| p.append_iter(self.input.drain(0..*uncompressed_length)),
+                                &mut TakeReader::new(&mut self.input, *uncompressed_length),
                                 &corrections,
                             )
                             .context()?;
@@ -905,7 +905,7 @@ impl RecreateContainerProcessor {
                         let mut reconstruct = RecreateStreamProcessor::new();
                         let (comp, _) = reconstruct
                             .recompress(
-                                |p| p.append_iter(self.input.drain(0..*uncompressed_length)),
+                                &mut TakeReader::new(&mut self.input, *uncompressed_length),
                                 &corrections,
                             )
                             .context()?;

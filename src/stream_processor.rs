@@ -6,7 +6,7 @@
 
 //! Responsible for performing preflate and recreation on a chunk by chunk basis
 
-use std::io::Cursor;
+use std::io::{BufRead, Cursor};
 
 use bitcode::{Decode, Encode};
 use cabac::vp8::{VP8Reader, VP8Writer};
@@ -128,7 +128,7 @@ impl PreflateStreamProcessor {
 
             if let Some(validator) = &mut self.validator {
                 let (recompressed, _rec_blocks) = validator.recompress(
-                    |p| p.append(self.parser.plain_text().text()),
+                    &mut Cursor::new(self.parser.plain_text().text()),
                     &cabac_encoded,
                 )?;
 
@@ -184,7 +184,7 @@ impl PreflateStreamProcessor {
 
             if let Some(validator) = &mut self.validator {
                 let (recompressed, _rec_blocks) = validator.recompress(
-                    |p| p.append(self.parser.plain_text().text()),
+                    &mut Cursor::new(self.parser.plain_text().text()),
                     &reconstruction_data,
                 )?;
 
@@ -251,10 +251,21 @@ impl RecreateStreamProcessor {
 
     pub fn recompress(
         &mut self,
-        append_to_plain_text: impl FnOnce(&mut PlainText),
+        plain_text: &mut impl BufRead,
         corrections: &[u8],
     ) -> Result<(Vec<u8>, Vec<DeflateTokenBlock>)> {
-        append_to_plain_text(&mut self.plain_text);
+        loop {
+            let buf = plain_text.fill_buf().context()?;
+            let buf_len = buf.len();
+            if buf_len == 0 {
+                break;
+            }
+
+            self.plain_text.append(&buf);
+
+            plain_text.consume(buf_len);
+        }
+
         let mut input = PreflateInput::new(&self.plain_text);
 
         if let Some(predictor) = &mut self.predictor {
@@ -306,7 +317,8 @@ pub fn recreate_whole_deflate_stream(
 ) -> Result<Vec<u8>> {
     let mut state = RecreateStreamProcessor::new();
 
-    let (recompressed, _) = state.recompress(|p| p.append(plain_text), prediction_corrections)?;
+    let (recompressed, _) =
+        state.recompress(&mut Cursor::new(&plain_text), prediction_corrections)?;
 
     Ok(recompressed)
 }
@@ -787,7 +799,7 @@ pub fn analyze_compressed_data_verify_incremental(compressed_data: &[u8], plain_
     for i in 0..expanded_contents.len() {
         let (mut r, mut b) = reconstruct
             .recompress(
-                |p| p.append(&expanded_contents[i].1),
+                &mut Cursor::new(&expanded_contents[i].1),
                 &expanded_contents[i].0,
             )
             .unwrap();

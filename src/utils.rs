@@ -1,4 +1,7 @@
-use std::{collections::VecDeque, io::Write};
+use std::{
+    collections::VecDeque,
+    io::{BufRead, Read, Write},
+};
 
 use crate::Result;
 
@@ -26,6 +29,42 @@ pub fn write_dequeue(
         Ok(amount_written)
     } else {
         Ok(0)
+    }
+}
+
+/// A BufRead implementation that reads at most `limit` bytes from the underlying reader.
+pub struct TakeReader<T> {
+    inner: T,
+    amount_left: usize,
+}
+
+impl<T> TakeReader<T> {
+    pub fn new(inner: T, limit: usize) -> Self {
+        TakeReader {
+            inner,
+            amount_left: limit,
+        }
+    }
+}
+
+impl<T: BufRead + Read> BufRead for TakeReader<T> {
+    fn fill_buf(&mut self) -> std::io::Result<&[u8]> {
+        let buf = self.inner.fill_buf()?;
+        Ok(&buf[..buf.len().min(self.amount_left)])
+    }
+
+    fn consume(&mut self, amt: usize) {
+        self.amount_left -= amt;
+        self.inner.consume(amt);
+    }
+}
+
+impl<T: Read> Read for TakeReader<T> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let len = buf.len().min(self.amount_left);
+        let read = self.inner.read(&mut buf[..len])?;
+        self.amount_left -= read;
+        Ok(read)
     }
 }
 
