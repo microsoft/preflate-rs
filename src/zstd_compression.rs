@@ -14,66 +14,6 @@ use crate::{
     RecreateContainerProcessor, Result,
 };
 
-/// Processor that decompresses the input using Zstandard
-///
-/// Designed to wrap around the RecreateContainerProcessor.
-pub struct ZstdDecompressContext<D: ProcessBuffer> {
-    zstd_decompress: zstd::stream::write::Decoder<'static, VecDeque<u8>>,
-    input_complete: bool,
-    internal: D,
-}
-
-impl<D: ProcessBuffer> ZstdDecompressContext<D> {
-    pub fn new(internal: D) -> Self {
-        ZstdDecompressContext {
-            zstd_decompress: zstd::stream::write::Decoder::new(VecDeque::new()).unwrap(),
-            input_complete: false,
-            internal,
-        }
-    }
-}
-
-impl<D: ProcessBuffer> ProcessBuffer for ZstdDecompressContext<D> {
-    fn process_buffer(
-        &mut self,
-        input: &[u8],
-        input_complete: bool,
-        writer: &mut impl Write,
-        max_output_write: usize,
-    ) -> Result<bool> {
-        if self.input_complete && (input.len() > 0 || !input_complete) {
-            return Err(PreflateError::new(
-                ExitCode::InvalidParameter,
-                "more data provided after input_complete signaled",
-            ));
-        }
-
-        if input.len() > 0 {
-            self.zstd_decompress.write_all(input).context()?;
-        }
-
-        if input_complete && !self.input_complete {
-            self.input_complete = true;
-            self.zstd_decompress.flush().context()?;
-        }
-
-        let output = self.zstd_decompress.get_mut();
-        let slice0 = output.as_slices().0;
-        let is_complete = input_complete && output.len() == slice0.len();
-
-        let r = self.internal.process_buffer(
-            output.as_slices().0,
-            is_complete,
-            writer,
-            max_output_write,
-        );
-
-        output.drain(..slice0.len());
-
-        r
-    }
-}
-
 /// processor that compresses the input using Zstandard
 ///
 /// Designed to wrap around the PreflateChunkProcessor.
@@ -190,6 +130,93 @@ impl Write for MeasureWriteSink {
 
     fn flush(&mut self) -> std::io::Result<()> {
         Ok(())
+    }
+}
+
+/// Processor that decompresses the input using Zstandard
+///
+/// Designed to wrap around the RecreateContainerProcessor.
+pub struct ZstdDecompressContext<D: ProcessBuffer> {
+    zstd_decompress: zstd::stream::write::Decoder<'static, AcceptWrite<D, VecDeque<u8>>>,
+}
+
+/// used to accept the output from the Zstandard decoder and write it to the output buffer.
+/// Since the plain text is significantly larger than the compressed version, we want
+/// to avoid buffering the output in memory, so we send it directly to the recreator.
+struct AcceptWrite<D: ProcessBuffer, O: Write> {
+    internal: D,
+    output: O,
+    input_complete: bool,
+    output_complete: bool,
+}
+
+impl<P: ProcessBuffer, O: Write> Write for AcceptWrite<P, O> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.output_complete =
+            self.internal
+                .process_buffer(buf, self.input_complete, &mut self.output, usize::MAX)?;
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<D: ProcessBuffer> ZstdDecompressContext<D> {
+    pub fn new(internal: D) -> Self {
+        ZstdDecompressContext {
+            zstd_decompress: zstd::stream::write::Decoder::new(AcceptWrite {
+                internal: internal,
+                output: VecDeque::new(),
+                input_complete: false,
+                output_complete: false,
+            })
+            .unwrap(),
+        }
+    }
+}
+
+impl<D: ProcessBuffer> ProcessBuffer for ZstdDecompressContext<D> {
+    fn process_buffer(
+        &mut self,
+        input: &[u8],
+        input_complete: bool,
+        writer: &mut impl Write,
+        max_output_write: usize,
+    ) -> Result<bool> {
+        if self.zstd_decompress.get_mut().input_complete && (input.len() > 0 || !input_complete) {
+            return Err(PreflateError::new(
+                ExitCode::InvalidParameter,
+                "more data provided after input_complete signaled",
+            ));
+        }
+
+        if input.len() > 0 {
+            self.zstd_decompress.write_all(input).context()?;
+        }
+
+        if input_complete && !self.zstd_decompress.get_mut().input_complete {
+            self.zstd_decompress.flush().context()?;
+
+            self.zstd_decompress.get_mut().input_complete = true;
+        }
+
+        let a = self.zstd_decompress.get_mut();
+
+        let amount_written = write_dequeue(&mut a.output, writer, max_output_write).context()?;
+
+        if input_complete
+            && !a.output_complete
+            && a.output.len() == 0
+            && amount_written < max_output_write
+        {
+            a.output_complete =
+                a.internal
+                    .process_buffer(&[], true, writer, max_output_write - amount_written)?;
+        }
+
+        Ok(a.output_complete && a.output.len() == 0)
     }
 }
 
