@@ -191,8 +191,15 @@ pub fn decode_symbol(
         return Ok(code);
     }
 
-    let mut i_node_cur: i32 = huffman_tree.tree.len() as i32 - 2; // Start at the root of the Huffman tree
+    decode_symbol_cold(bit_reader, reader, huffman_tree)
+}
 
+fn decode_symbol_cold(
+    bit_reader: &mut impl ReadBits,
+    reader: &mut impl Read,
+    huffman_tree: &HuffmanTree,
+) -> Result<u16> {
+    let mut i_node_cur: i32 = huffman_tree.tree.len() as i32 - 2;
     loop {
         // Use next bit of input to decide next node
         i_node_cur = huffman_tree.tree[(bit_reader.get(1, reader)? as i32 + i_node_cur) as usize];

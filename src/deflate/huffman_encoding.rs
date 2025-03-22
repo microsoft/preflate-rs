@@ -244,7 +244,7 @@ pub(super) struct HuffmanTree {
 
     /// Fast decode table to get the symbol directly from the
     /// byte if we have enough bits available. This code
-    /// the u8 as the number of bits required and the u16 
+    /// the u8 as the number of bits required and the u16
     /// as the symbol to return.
     pub fast_decode: [(u8, u16); 256],
 }
