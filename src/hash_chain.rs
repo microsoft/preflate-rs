@@ -41,7 +41,7 @@ impl InternalPosition {
     }
 
     fn dist(&self, pos: InternalPosition) -> u32 {
-        u32::from(self.pos - pos.pos)
+        u32::from(self.pos) - u32::from(pos.pos)
     }
 }
 
@@ -228,10 +228,13 @@ impl<H: HashImplementation> HashChain for HashChainDefault<H> {
         let mut cur_pos = self.hash_table.get_head(curr_hash);
 
         std::iter::from_fn(move || {
-            if let Some(d) = first_match {
-                first_match = None;
-                Some(d)
-            } else if cur_pos.is_valid() {
+            if OFFSET != 0 {
+                if let Some(d) = first_match {
+                    first_match = None;
+                    return Some(d);
+                }
+            }
+            if cur_pos.is_valid() {
                 let d = ref_pos.dist(cur_pos);
                 cur_pos = self.hash_table.prev[cur_pos.to_index()];
                 Some(d)
