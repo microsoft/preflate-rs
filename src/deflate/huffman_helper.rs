@@ -7,7 +7,7 @@
 use crate::preflate_error::{err_exit_code, ExitCode, Result};
 use std::{io::Read, vec};
 
-use super::bit_reader::ReadBits;
+use super::{bit_reader::ReadBits, huffman_encoding::HuffmanTree};
 
 /// Calculates Huffman code array given an array of Huffman Code Lengths using the RFC 1951 algorithm
 pub fn calc_huffman_codes(code_lengths: &[u8]) -> Result<Vec<u16>> {
@@ -102,7 +102,7 @@ fn is_valid_huffman_code_lengths(code_lengths: &[u8]) -> bool {
 ///    rg_huff_nodes[N+1] is the array index of the '1' child
 /// 2. If rg_huff_nodes[i] is less than zero then it is a leaf and the literal alphabet value is -rg_huff_nodes[i] + 1
 /// 3. The root node index 'N' is rg_huff_nodes.len() - 2. Search should start at that node.
-pub fn calculate_huffman_code_tree(code_lengths: &[u8]) -> Result<Vec<i32>> {
+pub fn calculate_huffman_code_tree(code_lengths: &[u8]) -> Result<HuffmanTree> {
     if !is_valid_huffman_code_lengths(code_lengths) {
         return err_exit_code(ExitCode::InvalidDeflate, "Invalid Huffman code lengths");
     }
@@ -147,7 +147,32 @@ pub fn calculate_huffman_code_tree(code_lengths: &[u8]) -> Result<Vec<i32>> {
         i_huff_nodes_previous_level = i_huff_nodes_start;
     }
 
-    Ok(rg_huff_nodes)
+    let mut fast_decode = [(0u8, 0u16); 256];
+    for i in 0..256 {
+        let mut i_node_cur = rg_huff_nodes.len() - 2; // Start at the root of the Huffman tree
+
+        let mut v = i;
+        let mut num_bits = 1;
+        loop {
+            // Use next bit of input to decide next node
+            let next = rg_huff_nodes[(v & 1) + i_node_cur];
+
+            // Negative indicates a leaf node, return alphabet char for this leaf
+            if next < 0 {
+                fast_decode[i] = (num_bits, (0 - (next + 1)) as u16);
+                break;
+            }
+
+            i_node_cur = next as usize;
+            v >>= 1;
+            num_bits += 1;
+        }
+    }
+
+    Ok(HuffmanTree {
+        tree: rg_huff_nodes,
+        fast_decode,
+    })
 }
 
 /// Reads the next Huffman encoded char from bitReader using the Huffman tree encoded in huffman_tree
@@ -157,13 +182,20 @@ pub fn calculate_huffman_code_tree(code_lengths: &[u8]) -> Result<Vec<i32>> {
 pub fn decode_symbol(
     bit_reader: &mut impl ReadBits,
     reader: &mut impl Read,
-    huffman_tree: &[i32],
+    huffman_tree: &HuffmanTree,
 ) -> Result<u16> {
-    let mut i_node_cur: i32 = huffman_tree.len() as i32 - 2; // Start at the root of the Huffman tree
+    // try fast decode the entire symbol if we have enough bits available
+    let (num_bits, code) = huffman_tree.fast_decode[bit_reader.peek_byte() as usize];
+    if u32::from(num_bits) <= bit_reader.bits_left() {
+        bit_reader.consume(u32::from(num_bits));
+        return Ok(code);
+    }
+
+    let mut i_node_cur: i32 = huffman_tree.tree.len() as i32 - 2; // Start at the root of the Huffman tree
 
     loop {
         // Use next bit of input to decide next node
-        i_node_cur = huffman_tree[(bit_reader.get(1, reader)? as i32 + i_node_cur) as usize];
+        i_node_cur = huffman_tree.tree[(bit_reader.get(1, reader)? as i32 + i_node_cur) as usize];
 
         // Negative indicates a leaf node, return alphabet char for this leaf
         if i_node_cur < 0 {
@@ -185,6 +217,18 @@ impl ReadBits for SingleCode {
         self.code >>= cbits;
 
         Ok(result)
+    }
+
+    fn peek_byte(&self) -> u8 {
+        (self.code & 0xff) as u8
+    }
+
+    fn bits_left(&self) -> u32 {
+        8
+    }
+
+    fn consume(&mut self, cbits: u32) {
+        self.code >>= cbits;
     }
 }
 

@@ -10,6 +10,9 @@ use byteorder::ReadBytesExt;
 
 pub trait ReadBits {
     fn get(&mut self, cbit: u32, reader: &mut impl Read) -> Result<u32>;
+    fn peek_byte(&self) -> u8;
+    fn bits_left(&self) -> u32;
+    fn consume(&mut self, cbit: u32);
 }
 
 /// BitReader reads a variable number of bits from a byte stream.
@@ -25,10 +28,6 @@ impl BitReader {
             bits: 0,
             bits_left: 0,
         }
-    }
-
-    pub fn bits_left(&self) -> u32 {
-        self.bits_left
     }
 
     /// reads the bits until the next byte boundary
@@ -51,6 +50,19 @@ impl BitReader {
 }
 
 impl ReadBits for BitReader {
+    fn bits_left(&self) -> u32 {
+        self.bits_left
+    }
+
+    fn consume(&mut self, cbit: u32) {
+        self.bits >>= cbit;
+        self.bits_left -= cbit;
+    }
+
+    fn peek_byte(&self) -> u8 {
+        self.bits as u8
+    }
+
     /// Read cbit bits from the input stream return
     /// Only supports read of 1 to 32 bits.
     fn get(&mut self, cbit: u32, reader: &mut impl Read) -> Result<u32> {

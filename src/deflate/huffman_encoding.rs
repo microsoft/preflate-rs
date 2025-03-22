@@ -239,9 +239,19 @@ impl HuffmanOriginalEncoding {
     }
 }
 
+pub(super) struct HuffmanTree {
+    pub tree: Vec<i32>,
+
+    /// Fast decode table to get the symbol directly from the
+    /// byte if we have enough bits available. This code
+    /// the u8 as the number of bits required and the u16 
+    /// as the symbol to return.
+    pub fast_decode: [(u8, u16); 256],
+}
+
 pub(super) struct HuffmanReader {
-    lit_huff_code_tree: Vec<i32>,
-    dist_huff_code_tree: Vec<i32>,
+    lit_huff_code_tree: HuffmanTree,
+    dist_huff_code_tree: HuffmanTree,
 }
 
 pub(super) struct HuffmanWriter {
