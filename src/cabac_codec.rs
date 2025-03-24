@@ -232,11 +232,38 @@ impl<R: CabacReader<CTX>, CTX: Default> PredictionDecoderCabac<R, CTX> {
             reader,
         }
     }
+
+    #[cold]
+    fn decode_correction_slow(&mut self, c: usize) -> Result<u32, u32> {
+        if self
+            .reader
+            .get(&mut self.context.default_signal_ctx[c])
+            .unwrap()
+        {
+            let value = PredictionCabacContext::read_exp_value(
+                &mut self.context.default_ctx[c],
+                &mut self.context.default_ctx_bits[c],
+                &mut self.reader,
+            ) + 1;
+
+            self.default_actions[c] = value - 1;
+            return Err(0);
+        } else {
+            let value = PredictionCabacContext::read_exp_value(
+                &mut self.context.correction_ctx[c],
+                &mut self.context.correction_ctx_bits[c],
+                &mut self.reader,
+            ) + 1;
+
+            return Err(value);
+        }
+    }
 }
 
-impl<R: CabacReader<CTX>, CTX> PredictionDecoder for PredictionDecoderCabac<R, CTX> {
+impl<R: CabacReader<CTX>, CTX: Default> PredictionDecoder for PredictionDecoderCabac<R, CTX> {
     fn decode_verify_state(&mut self, _message: &'static str, _checksum: u64) {}
 
+    #[inline]
     fn decode_correction(&mut self, correction: CodecCorrection) -> u32 {
         // if the action hasn't been seen at all, then always return 0
         if !self.actions_seen[correction as usize] {
@@ -244,34 +271,15 @@ impl<R: CabacReader<CTX>, CTX> PredictionDecoder for PredictionDecoderCabac<R, C
         }
 
         // otherwise if we still have default actions left, use those
-        let i = correction as usize;
-        if self.default_actions[i] > 0 {
-            self.default_actions[i] -= 1;
+        let c = correction as usize;
+        if self.default_actions[c] > 0 {
+            self.default_actions[c] -= 1;
             return 0;
         }
 
-        // otherwise we need to decide whether we are a default action or not
-        if self
-            .reader
-            .get(&mut self.context.default_signal_ctx[i])
-            .unwrap()
-        {
-            let value = PredictionCabacContext::read_exp_value(
-                &mut self.context.default_ctx[i],
-                &mut self.context.default_ctx_bits[i],
-                &mut self.reader,
-            ) + 1;
-
-            self.default_actions[i] = value - 1;
-            return 0;
-        } else {
-            let value = PredictionCabacContext::read_exp_value(
-                &mut self.context.correction_ctx[i],
-                &mut self.context.correction_ctx_bits[i],
-                &mut self.reader,
-            ) + 1;
-
-            return value;
+        match self.decode_correction_slow(c) {
+            Ok(value) => value,
+            Err(value) => return value,
         }
     }
 }

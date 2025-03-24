@@ -4,7 +4,7 @@
  *  This software incorporates material from third parties. See NOTICE.txt for details.
  *--------------------------------------------------------------------------------------------*/
 
-use std::io::Read;
+use std::io::BufRead;
 
 use crate::preflate_error::{err_exit_code, ExitCode, Result};
 
@@ -55,7 +55,7 @@ impl HuffmanOriginalEncoding {
     /// exactly as it was written.
     pub fn read(
         bit_reader: &mut BitReader,
-        reader: &mut impl Read,
+        reader: &mut impl BufRead,
     ) -> Result<HuffmanOriginalEncoding> {
         // 5 Bits: HLIT, # of Literal/Length codes - 257 (257 - 286)
         let hlit = bit_reader.get(5, reader)? as usize + 257;
@@ -307,7 +307,7 @@ impl HuffmanReader {
     pub fn fetch_next_literal_code(
         &self,
         bit_reader: &mut BitReader,
-        reader: &mut impl Read,
+        reader: &mut impl BufRead,
     ) -> Result<u16> {
         decode_symbol(bit_reader, reader, &self.lit_huff_code_tree)
     }
@@ -315,7 +315,7 @@ impl HuffmanReader {
     pub fn fetch_next_distance_char(
         &self,
         bit_reader: &mut BitReader,
-        reader: &mut impl Read,
+        reader: &mut impl BufRead,
     ) -> Result<u16> {
         decode_symbol(bit_reader, reader, &self.dist_huff_code_tree)
     }

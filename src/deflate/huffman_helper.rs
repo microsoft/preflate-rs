@@ -5,7 +5,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 use crate::preflate_error::{err_exit_code, ExitCode, Result};
-use std::{io::Read, vec};
+use std::{io::BufRead, vec};
 
 use super::{bit_reader::ReadBits, huffman_encoding::HuffmanTree};
 
@@ -179,9 +179,10 @@ pub fn calculate_huffman_code_tree(code_lengths: &[u8]) -> Result<HuffmanTree> {
 /// Huffman Nodes are encoded in the array of ints as follows:
 /// '0' child link of node 'N' is at huffman_tree[N], '1' child link is at huffman_tree[N + 1]
 /// Root of tree is at huffman_tree.len() - 2
+#[inline]
 pub fn decode_symbol(
     bit_reader: &mut impl ReadBits,
-    reader: &mut impl Read,
+    reader: &mut impl BufRead,
     huffman_tree: &HuffmanTree,
 ) -> Result<u16> {
     // try fast decode the entire symbol if we have enough bits available
@@ -191,23 +192,26 @@ pub fn decode_symbol(
         return Ok(code);
     }
 
-    decode_symbol_cold(bit_reader, reader, huffman_tree)
+    decode_symbol_slow(bit_reader, reader, huffman_tree)
 }
 
-fn decode_symbol_cold(
+#[inline]
+fn decode_symbol_slow(
     bit_reader: &mut impl ReadBits,
-    reader: &mut impl Read,
+    reader: &mut impl BufRead,
     huffman_tree: &HuffmanTree,
 ) -> Result<u16> {
-    let mut i_node_cur: i32 = huffman_tree.tree.len() as i32 - 2;
+    let mut i_node_cur: usize = huffman_tree.tree.len() - 2;
     loop {
         // Use next bit of input to decide next node
-        i_node_cur = huffman_tree.tree[(bit_reader.get(1, reader)? as i32 + i_node_cur) as usize];
+        let node = huffman_tree.tree[bit_reader.get(1, reader)? as usize + i_node_cur];
 
         // Negative indicates a leaf node, return alphabet char for this leaf
-        if i_node_cur < 0 {
-            return Ok((0 - (i_node_cur + 1)) as u16);
+        if node < 0 {
+            return Ok((0 - (node + 1)) as u16);
         }
+
+        i_node_cur = node as usize;
     }
 }
 
@@ -219,7 +223,7 @@ struct SingleCode {
 
 #[cfg(test)]
 impl ReadBits for SingleCode {
-    fn get(&mut self, cbits: u32, _: &mut impl Read) -> std::io::Result<u32> {
+    fn get(&mut self, cbits: u32, _: &mut impl BufRead) -> std::io::Result<u32> {
         let result = self.code & ((1 << cbits) - 1);
         self.code >>= cbits;
 

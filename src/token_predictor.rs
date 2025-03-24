@@ -492,6 +492,7 @@ impl TokenPredictor {
         Ok(b)
     }
 
+    #[inline(always)]
     fn predict_token(&mut self, input: &PreflateInput) -> DeflateToken {
         if input.pos() == 0 || input.remaining() < MIN_MATCH {
             return DeflateToken::Literal(input.cur_char(0));

@@ -4,6 +4,8 @@
  *  This software incorporates material from third parties. See NOTICE.txt for details.
  *--------------------------------------------------------------------------------------------*/
 
+use byteorder::{LittleEndian, ReadBytesExt};
+
 use crate::{
     deflate::deflate_token::{DeflateHuffmanType, DeflateToken, DeflateTokenReference},
     preflate_error::{err_exit_code, AddContext, ExitCode, Result},
@@ -72,7 +74,9 @@ impl DeflateParser {
         self.plain_text
     }
 
-    fn checkpoint(&self, reader: &Cursor<&[u8]>) -> Checkpoint {
+    fn checkpoint(&mut self, reader: &mut Cursor<&[u8]>) -> Checkpoint {
+        self.bit_reader.consume_read(reader);
+
         Checkpoint {
             plain_text: self.plain_text().len(),
             bit_reader: self.bit_reader.clone(),
@@ -88,7 +92,7 @@ impl DeflateParser {
         // our first checkpoint is right at the beginning so that if we get to the
         // end of the stream before seeing a whole block, we just revert back to
         // the beginning to try again with more data.
-        let mut checkpoint = self.checkpoint(&cursor);
+        let mut checkpoint = self.checkpoint(&mut cursor);
 
         let bits_left = self.bit_reader.bits_left();
         if bits_left > 0 {
@@ -133,6 +137,8 @@ impl DeflateParser {
             Ok(()) => {}
         }
 
+        self.bit_reader.consume_read(&mut cursor);
+
         Ok(DeflateContents {
             compressed_size: cursor.position() as usize,
             blocks,
@@ -166,10 +172,13 @@ impl DeflateParser {
                         );
                     }
 
+                    // consume any buffered read bits since we are just going to read bytes now
+                    self.bit_reader.consume_read(reader);
+
                     assert!(self.bit_reader.bits_left() == 0);
 
-                    let len = self.bit_reader.get(16, reader)?;
-                    let ilen = self.bit_reader.get(16, reader)?;
+                    let len = reader.read_u16::<LittleEndian>()?;
+                    let ilen = reader.read_u16::<LittleEndian>()?;
                     if (len ^ ilen) != 0xffff {
                         return err_exit_code(ExitCode::InvalidDeflate, "Block length mismatch");
                     }
@@ -177,7 +186,7 @@ impl DeflateParser {
                     let mut uncompressed = Vec::with_capacity(len as usize);
 
                     for _i in 0..len {
-                        let b = self.bit_reader.read_byte(reader)?;
+                        let b = reader.read_u8()?;
                         uncompressed.push(b);
                         self.plain_text.push(b);
                     }
@@ -202,13 +211,6 @@ impl DeflateParser {
                         self.plain_text_limit,
                     )
                     .context()?;
-
-                    if last && self.bit_reader.read_padding_bits() != 0 {
-                        return err_exit_code(
-                            ExitCode::NonZeroPadding,
-                            "nonzero padding found at end of stream",
-                        );
-                    }
 
                     blocks.push(DeflateTokenBlock {
                         block_type: DeflateTokenBlockType::Huffman {
@@ -252,6 +254,13 @@ impl DeflateParser {
             }
 
             if last {
+                if self.bit_reader.read_padding_bits() != 0 {
+                    return err_exit_code(
+                        ExitCode::NonZeroPadding,
+                        "nonzero padding found at end of stream",
+                    );
+                }
+
                 self.state = DeflateParserState::Done;
             }
 

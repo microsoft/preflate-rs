@@ -4,12 +4,12 @@
  *  This software incorporates material from third parties. See NOTICE.txt for details.
  *--------------------------------------------------------------------------------------------*/
 
-use std::io::{Error, ErrorKind, Read, Result};
+use std::io::{BufRead, Error, Result};
 
 use byteorder::ReadBytesExt;
 
 pub trait ReadBits {
-    fn get(&mut self, cbit: u32, reader: &mut impl Read) -> Result<u32>;
+    fn get(&mut self, cbit: u32, reader: &mut impl BufRead) -> Result<u32>;
     fn peek_byte(&self) -> u8;
     fn bits_left(&self) -> u32;
     fn consume(&mut self, cbit: u32);
@@ -18,8 +18,9 @@ pub trait ReadBits {
 /// BitReader reads a variable number of bits from a byte stream.
 #[derive(Debug, Clone)]
 pub struct BitReader {
-    bits: u32,
+    bits: u64,
     bits_left: u32,
+    read_ahead: u32,
 }
 
 impl BitReader {
@@ -27,6 +28,7 @@ impl BitReader {
         BitReader {
             bits: 0,
             bits_left: 0,
+            read_ahead: 0,
         }
     }
 
@@ -42,16 +44,69 @@ impl BitReader {
         wret as u8
     }
 
-    pub fn read_byte(&mut self, reader: &mut impl Read) -> Result<u8> {
-        debug_assert!(self.bits_left == 0);
-        let r = reader.read_u8()?;
-        Ok(r)
+    pub fn consume_read(&mut self, reader: &mut impl BufRead) {
+        while self.bits_left >= 8 && self.read_ahead > 0 {
+            self.bits_left -= 8;
+            self.read_ahead -= 1;
+        }
+
+        self.bits = self.bits & ((1 << self.bits_left) - 1);
+
+        if self.read_ahead > 0 {
+            reader.consume(self.read_ahead as usize);
+            self.read_ahead = 0;
+        }
+    }
+
+    #[cold]
+    fn fill_register(
+        &mut self,
+        cbit: u32,
+        reader: &mut impl BufRead,
+        mask: u64,
+    ) -> std::result::Result<u32, Error> {
+        reader.consume(self.read_ahead as usize);
+        self.read_ahead = 0;
+
+        let buffer = reader.fill_buf()?;
+        if buffer.len() > 8 {
+            let mut i = 0;
+            while self.bits_left <= 56 {
+                let b = buffer[i] as u64;
+
+                self.bits |= b << self.bits_left;
+                self.bits_left += 8;
+                i += 1;
+            }
+
+            self.read_ahead = i as u32;
+
+            let w = self.bits & mask;
+            self.bits >>= cbit;
+            self.bits_left -= cbit;
+
+            return Ok(w as u32);
+        }
+
+        while self.bits_left < cbit {
+            let b = reader.read_u8()? as u64;
+
+            self.bits |= b << self.bits_left;
+            self.bits_left += 8;
+        }
+
+        let wret = self.bits & ((1 << cbit) - 1);
+
+        self.bits >>= cbit;
+        self.bits_left -= cbit;
+
+        Ok(wret as u32)
     }
 }
 
 impl ReadBits for BitReader {
     fn bits_left(&self) -> u32 {
-        self.bits_left
+        self.bits_left & 7
     }
 
     fn consume(&mut self, cbit: u32) {
@@ -65,30 +120,19 @@ impl ReadBits for BitReader {
 
     /// Read cbit bits from the input stream return
     /// Only supports read of 1 to 32 bits.
-    fn get(&mut self, cbit: u32, reader: &mut impl Read) -> Result<u32> {
-        if cbit == 0 {
-            return Ok(0);
+    #[inline]
+    fn get(&mut self, cbit: u32, reader: &mut impl BufRead) -> Result<u32> {
+        let mask = (1u64 << cbit) - 1;
+
+        if cbit < self.bits_left {
+            let wret = self.bits & mask;
+
+            self.bits >>= cbit;
+            self.bits_left -= cbit;
+
+            return Ok(wret as u32);
         }
 
-        if cbit > 24 {
-            return Err(Error::new(
-                ErrorKind::InvalidInput,
-                "BitReader Error: Attempt to read more than 24 bits",
-            ));
-        }
-
-        while self.bits_left < cbit {
-            let b = reader.read_u8()? as u32;
-
-            self.bits |= b << self.bits_left;
-            self.bits_left += 8;
-        }
-
-        let wret = self.bits & ((1 << cbit) - 1);
-
-        self.bits >>= cbit;
-        self.bits_left -= cbit;
-
-        Ok(wret)
+        self.fill_register(cbit, reader, mask)
     }
 }
