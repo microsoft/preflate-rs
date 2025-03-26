@@ -110,6 +110,7 @@ impl PlainText {
     /// writes a reference to the buffer, which copies the text from a previous location
     /// to the current location. In most cases this is non-overlapping, but there are some
     /// cases where there is overlap between the source and destination.
+    #[inline(always)]
     pub fn append_reference(&mut self, dist: u32, len: u32) -> Result<()> {
         if dist as usize > self.data.len() {
             return err_exit_code(ExitCode::InvalidDeflate, "Invalid distance in reference");
