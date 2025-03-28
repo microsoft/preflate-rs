@@ -102,11 +102,11 @@ fn is_valid_huffman_code_lengths(code_lengths: &[u8]) -> bool {
 }
 
 /// Calculates Huffman code array given an array of Huffman Code Lengths using the RFC 1951 algorithm
-/// Huffman tree will be returned in rg_huff_nodes where:
-/// 1. when N is an even number rg_huff_nodes[N] is the array index of the '0' child and
-///    rg_huff_nodes[N+1] is the array index of the '1' child
-/// 2. If rg_huff_nodes[i] is less than zero then it is a leaf and the literal alphabet value is -rg_huff_nodes[i] + 1
-/// 3. The root node index 'N' is rg_huff_nodes.len() - 2. Search should start at that node.
+/// Huffman tree will be returned in tree where:
+/// 1. when N is an even number tree[N] is the array index of the '0' child and
+///    tree[N+1] is the array index of the '1' child
+/// 2. If tree[i] is less than zero then it is a leaf and the literal alphabet value is !tree[i]
+/// 3. The root node index 'N' is tree.len() - 2. Search should start at that node.
 fn calculate_huffman_code_tree(code_lengths: &[u8]) -> Result<HuffmanTree> {
     if !is_valid_huffman_code_lengths(code_lengths) {
         return err_exit_code(ExitCode::InvalidDeflate, "Invalid Huffman code lengths");
@@ -127,7 +127,7 @@ fn calculate_huffman_code_tree(code_lengths: &[u8]) -> Result<HuffmanTree> {
     }
 
     // Number of internal nodes in the tree will be the ((number of leaf nodes) - 1)
-    let mut rg_huff_nodes: Vec<u16> = vec![0; ((c_codes - 1) * 2) as usize]; // Allocation is double as each node has 2 links
+    let mut tree: Vec<u16> = vec![0; ((c_codes - 1) * 2) as usize]; // Allocation is double as each node has 2 links
 
     let mut i_huff_nodes: i32 = 0;
     let mut i_huff_nodes_previous_level: i32 = 0;
@@ -138,29 +138,30 @@ fn calculate_huffman_code_tree(code_lengths: &[u8]) -> Result<HuffmanTree> {
         // Create parent nodes for all leaf codes at current bit length
         for j in 0..code_lengths.len() {
             if code_lengths[j] == c_bits_cur {
-                rg_huff_nodes[i_huff_nodes as usize] = !(j as u16); // Leaf nodes links store the actual literal character negative biased by -1
+                tree[i_huff_nodes as usize] = !(j as u16); // Leaf nodes links store the actual literal character negative biased by -1
                 i_huff_nodes += 1;
             }
         }
 
         // Create parent node links for all remaining nodes from previous iteration
         for j in (i_huff_nodes_previous_level..i_huff_nodes_start).step_by(2) {
-            rg_huff_nodes[i_huff_nodes as usize] = j as u16;
+            tree[i_huff_nodes as usize] = j as u16;
             i_huff_nodes += 1;
         }
 
         i_huff_nodes_previous_level = i_huff_nodes_start;
     }
 
+    // build a fast decoder that lets us decode the entire symbol given a byte of input
     let mut fast_decode = [(0u8, 0u16); 256];
     for i in 0..256 {
-        let mut i_node_cur = rg_huff_nodes.len() - 2; // Start at the root of the Huffman tree
+        let mut i_node_cur = tree.len() - 2; // Start at the root of the Huffman tree
 
         let mut v = i;
         let mut num_bits = 1;
         loop {
             // Use next bit of input to decide next node
-            let next = rg_huff_nodes[(v & 1) + i_node_cur];
+            let next = tree[(v & 1) + i_node_cur];
 
             // High bit indicates a leaf node, return alphabet char for this leaf
             if (next & 0x8000) != 0 {
@@ -174,10 +175,7 @@ fn calculate_huffman_code_tree(code_lengths: &[u8]) -> Result<HuffmanTree> {
         }
     }
 
-    Ok(HuffmanTree {
-        tree: rg_huff_nodes,
-        fast_decode,
-    })
+    Ok(HuffmanTree { tree, fast_decode })
 }
 
 /// Reads the next Huffman encoded char from bitReader using the Huffman tree encoded in huffman_tree
