@@ -164,8 +164,8 @@ fn calculate_huffman_code_tree(code_lengths: &[u8]) -> Result<HuffmanTree> {
             let next = tree[(v & 1) + i_node_cur];
 
             // High bit indicates a leaf node, return alphabet char for this leaf
-            if (next & 0x8000) != 0 {
-                fast_decode[i] = (num_bits, !next);
+            if (next & 0x8000) != 0 || num_bits == 8 {
+                fast_decode[i] = (num_bits, next);
                 break;
             }
 
@@ -182,23 +182,32 @@ fn calculate_huffman_code_tree(code_lengths: &[u8]) -> Result<HuffmanTree> {
 /// Huffman Nodes are encoded in the array of ints as follows:
 /// '0' child link of node 'N' is at huffman_tree[N], '1' child link is at huffman_tree[N + 1]
 /// Root of tree is at huffman_tree.len() - 2
-#[inline]
+#[inline(always)]
 fn decode_symbol(
     bit_reader: &mut impl ReadBits,
     reader: &mut impl BufRead,
     huffman_tree: &HuffmanTree,
 ) -> Result<u16> {
-    // try fast decode the entire symbol if we have enough bits available
-    let (num_bits, code) = huffman_tree.fast_decode[bit_reader.peek_byte() as usize];
-    if u32::from(num_bits) <= bit_reader.bits_left() {
-        bit_reader.consume(u32::from(num_bits));
-        return Ok(code);
+    // we need at least 8 bits to fast decode the symbol, which is almost always available
+    if bit_reader.bits_left() < 8 {
+        return decode_symbol_slow(bit_reader, reader, huffman_tree);
     }
 
-    decode_symbol_slow(bit_reader, reader, huffman_tree)
+    let (num_bits, mut node) = huffman_tree.fast_decode[bit_reader.peek_byte() as usize];
+    bit_reader.consume(num_bits as u32);
+
+    loop {
+        // High bit indicates a leaf node, return alphabet char for this leaf
+        if (node & 0x8000) != 0 {
+            return Ok(!node);
+        }
+
+        // Use next bit of input to decide next node
+        node = huffman_tree.tree[bit_reader.get(1, reader)? as usize + node as usize];
+    }
 }
 
-#[inline]
+#[cold]
 fn decode_symbol_slow(
     bit_reader: &mut impl ReadBits,
     reader: &mut impl BufRead,

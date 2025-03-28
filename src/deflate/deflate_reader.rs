@@ -123,7 +123,7 @@ impl DeflateParser {
 
                 // if we had bits left to read, then we didn't compress the entire
                 // block, and save the bits for later
-                let compressed_size = if self.bit_reader.bits_left() > 0 {
+                let compressed_size = if (self.bit_reader.bits_left() & 0x7) > 0 {
                     (checkpoint.position - 1) as usize
                 } else {
                     checkpoint.position as usize
@@ -281,6 +281,8 @@ fn decode_tokens(
     let mut cur_pos = 0;
 
     loop {
+        bit_reader.opportunistic_fill(reader);
+
         if plain_text.len() > plain_text_limit {
             return err_exit_code(ExitCode::PlainTextLimit, "Plain text limit exceeded");
         }

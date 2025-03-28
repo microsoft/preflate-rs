@@ -58,35 +58,33 @@ impl BitReader {
         }
     }
 
+    pub fn opportunistic_fill(&mut self, reader: &mut impl BufRead) {
+        if let Ok(buffer) = reader.fill_buf() {
+            let buffer = &buffer[self.read_ahead as usize..];
+
+            if buffer.len() > 8 {
+                let mut i = 0;
+                while self.bits_left <= 56 {
+                    let b = buffer[i] as u64;
+
+                    self.bits |= b << self.bits_left;
+                    self.bits_left += 8;
+                    i += 1;
+                }
+
+                self.read_ahead += i as u32;
+            }
+        }
+    }
+
     #[cold]
     fn fill_register(
         &mut self,
         cbit: u32,
         reader: &mut impl BufRead,
-        mask: u64,
     ) -> std::result::Result<u32, Error> {
         reader.consume(self.read_ahead as usize);
         self.read_ahead = 0;
-
-        let buffer = reader.fill_buf()?;
-        if buffer.len() > 8 {
-            let mut i = 0;
-            while self.bits_left <= 56 {
-                let b = buffer[i] as u64;
-
-                self.bits |= b << self.bits_left;
-                self.bits_left += 8;
-                i += 1;
-            }
-
-            self.read_ahead = i as u32;
-
-            let w = self.bits & mask;
-            self.bits >>= cbit;
-            self.bits_left -= cbit;
-
-            return Ok(w as u32);
-        }
 
         while self.bits_left < cbit {
             let b = reader.read_u8()? as u64;
@@ -106,7 +104,7 @@ impl BitReader {
 
 impl ReadBits for BitReader {
     fn bits_left(&self) -> u32 {
-        self.bits_left & 7
+        self.bits_left
     }
 
     fn consume(&mut self, cbit: u32) {
@@ -133,6 +131,6 @@ impl ReadBits for BitReader {
             return Ok(wret as u32);
         }
 
-        self.fill_register(cbit, reader, mask)
+        self.fill_register(cbit, reader)
     }
 }
