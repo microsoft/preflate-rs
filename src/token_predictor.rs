@@ -512,7 +512,8 @@ impl TokenPredictor {
             }
 
             // match is too small and far way to be worth encoding as a distance/length pair.
-            if match_token.len() == 3 && match_token.dist() > self.params.max_dist_3_matches.into()
+            if match_token.len() == 3
+                && match_token.dist() > u32::from(self.params.max_dist_3_matches)
             {
                 return DeflateToken::Literal(input.cur_char(0));
             }

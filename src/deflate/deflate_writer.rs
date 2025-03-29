@@ -130,13 +130,15 @@ impl DeflateWriter {
                         huffman_writer.write_literal(
                             &mut self.bitwriter,
                             &mut self.output,
-                            NONLEN_CODE_COUNT as u16 + lencode as u16,
+                            NONLEN_CODE_COUNT as u16 + u16::from(lencode.get()),
                         );
 
-                        let lenextra = LENGTH_EXTRA_TABLE[lencode];
+                        let lenextra = LENGTH_EXTRA_TABLE[usize::from(lencode.get())];
                         if lenextra > 0 {
                             self.bitwriter.write(
-                                reference.len() - MIN_MATCH - LENGTH_BASE_TABLE[lencode] as u32,
+                                reference.len()
+                                    - MIN_MATCH
+                                    - LENGTH_BASE_TABLE[usize::from(lencode.get())] as u32,
                                 lenextra.into(),
                                 &mut self.output,
                             );
@@ -144,16 +146,14 @@ impl DeflateWriter {
                     }
 
                     let distcode = quantize_distance(reference.dist());
-                    huffman_writer.write_distance(
-                        &mut self.bitwriter,
-                        &mut self.output,
-                        distcode as u16,
-                    );
+                    huffman_writer.write_distance(&mut self.bitwriter, &mut self.output, distcode);
 
-                    let distextra = DIST_EXTRA_TABLE[distcode];
+                    let distextra = DIST_EXTRA_TABLE[usize::from(distcode.get())];
                     if distextra > 0 {
                         self.bitwriter.write(
-                            reference.dist() - 1 - DIST_BASE_TABLE[distcode] as u32,
+                            reference.dist()
+                                - 1
+                                - DIST_BASE_TABLE[usize::from(distcode.get())] as u32,
                             distextra.into(),
                             &mut self.output,
                         );

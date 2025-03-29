@@ -172,8 +172,9 @@ impl TokenFrequency {
                 self.literal_codes[*lit as usize] += 1;
             }
             DeflateToken::Reference(t) => {
-                self.literal_codes[NONLEN_CODE_COUNT + quantize_length(t.len())] += 1;
-                self.distance_codes[quantize_distance(t.dist())] += 1;
+                self.literal_codes
+                    [NONLEN_CODE_COUNT + usize::from(quantize_length(t.len()).get())] += 1;
+                self.distance_codes[usize::from(quantize_distance(t.dist()).get())] += 1;
             }
         }
     }

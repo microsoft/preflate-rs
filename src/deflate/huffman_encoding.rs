@@ -13,6 +13,7 @@ use crate::deflate::{
 };
 
 use super::bit_reader::BitReader;
+use super::deflate_constants::{DistCode, LITLEN_CODE_COUNT, MAX_DIST_CODE};
 
 /// Calculates Huffman code array given an array of Huffman Code Lengths using the RFC 1951 algorithm
 pub fn calc_huffman_codes(code_lengths: &[u8]) -> Result<Vec<u16>> {
@@ -536,10 +537,10 @@ pub(super) struct HuffmanReader {
 }
 
 pub(super) struct HuffmanWriter {
-    lit_code_lengths: Vec<u8>,
-    lit_huffman_codes: Vec<u16>,
-    dist_code_lengths: Vec<u8>,
-    dist_huffman_codes: Vec<u16>,
+    lit_code_lengths: [u8; LITLEN_CODE_COUNT + 1],
+    lit_huffman_codes: [u16; LITLEN_CODE_COUNT + 1],
+    dist_code_lengths: [u8; MAX_DIST_CODE as usize + 1],
+    dist_huffman_codes: [u16; MAX_DIST_CODE as usize + 1],
 }
 
 impl HuffmanReader {
@@ -602,6 +603,16 @@ impl HuffmanReader {
     }
 }
 
+fn copy_to_array<const N: usize, T: Copy + Clone + Default>(src: &[T]) -> [T; N] {
+    let mut dst = [T::default(); N];
+
+    for i in 0..src.len().min(N) {
+        dst[i] = src[i];
+    }
+
+    dst
+}
+
 impl HuffmanWriter {
     pub fn start_dynamic_huffman_table(
         bitwriter: &mut BitWriter,
@@ -616,10 +627,10 @@ impl HuffmanWriter {
         let dist_codes = calc_huffman_codes(&dist_lengths)?;
 
         Ok(HuffmanWriter {
-            lit_code_lengths: lit_lengths,
-            lit_huffman_codes: lit_codes,
-            dist_code_lengths: dist_lengths,
-            dist_huffman_codes: dist_codes,
+            lit_code_lengths: copy_to_array(&lit_lengths),
+            lit_huffman_codes: copy_to_array(&lit_codes),
+            dist_code_lengths: copy_to_array(&dist_lengths),
+            dist_huffman_codes: copy_to_array(&dist_codes),
         })
     }
 
@@ -630,10 +641,10 @@ impl HuffmanWriter {
         let dist_codes = calc_huffman_codes(&dist_lengths).unwrap();
 
         HuffmanWriter {
-            lit_code_lengths: lit_lengths,
-            lit_huffman_codes: lit_codes,
-            dist_code_lengths: dist_lengths,
-            dist_huffman_codes: dist_codes,
+            lit_code_lengths: copy_to_array(&lit_lengths),
+            lit_huffman_codes: copy_to_array(&lit_codes),
+            dist_code_lengths: copy_to_array(&dist_lengths),
+            dist_huffman_codes: copy_to_array(&dist_codes),
         }
     }
 
@@ -650,10 +661,10 @@ impl HuffmanWriter {
         &self,
         bitwriter: &mut BitWriter,
         output_buffer: &mut Vec<u8>,
-        dist: u16,
+        dist: DistCode,
     ) {
-        let code = self.dist_huffman_codes[dist as usize];
-        let c_bits = self.dist_code_lengths[dist as usize];
+        let code = self.dist_huffman_codes[usize::from(dist.get())];
+        let c_bits = self.dist_code_lengths[usize::from(dist.get())];
 
         bitwriter.write(code.into(), c_bits.into(), output_buffer);
     }
