@@ -436,7 +436,7 @@ fn match_less3<const OFFSET: u32>(
             let match_length = prefix_compare(match_start, input_chars, max_len);
 
             if match_length >= 3 && match_length > best_len {
-                best = MatchResult::Success(DeflateTokenReference::new(match_length, dist, false));
+                best = MatchResult::Success(DeflateTokenReference::new(match_length, dist));
 
                 if match_length >= nice_length || match_length == max_len {
                     break;
@@ -498,7 +498,7 @@ fn match_4<const OFFSET: u32>(
             let match_length = prefix_compare(match_start, input_chars, max_len);
 
             if match_length > best_len {
-                *best = MatchResult::Success(DeflateTokenReference::new(match_length, dist, false));
+                *best = MatchResult::Success(DeflateTokenReference::new(match_length, dist));
 
                 if match_length >= nice_length || match_length == max_len {
                     break;

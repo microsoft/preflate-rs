@@ -970,7 +970,7 @@ fn test_baseline_calc() {
 
     // these change if the compression algorithm is altered, update them
     assert_eq!(stats.overhead_bytes, 463);
-    assert_eq!(stats.zstd_compressed_size, 12436);
+    assert_eq!(stats.zstd_compressed_size, 12444);
     assert_eq!(stats.uncompressed_size, 54871);
     assert_eq!(stats.zstd_baseline_size, 13661);
 }

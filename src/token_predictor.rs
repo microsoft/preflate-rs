@@ -304,13 +304,6 @@ impl TokenPredictor {
                     } else {
                         codec.encode_correction(CodecCorrection::DistOnlyCorrection, 0);
                     }
-
-                    if target_ref.len() == 258 {
-                        codec.encode_misprediction(
-                            CodecCorrection::IrregularLen258,
-                            target_ref.get_irregular258(),
-                        );
-                    }
                 }
             }
 
@@ -443,7 +436,6 @@ impl TokenPredictor {
                     self.state
                         .hop_match(new_len, hops, input)
                         .with_context(|| format!("hop_match l={} {:?}", new_len, predicted_ref))?,
-                    false,
                 );
             } else {
                 let hops = codec.decode_correction(CodecCorrection::DistOnlyCorrection);
@@ -454,14 +446,8 @@ impl TokenPredictor {
                         .with_context(|| {
                             format!("recalculate_distance token {}", self.current_token_count)
                         })?;
-                    predicted_ref = DeflateTokenReference::new(new_len, new_dist, false);
+                    predicted_ref = DeflateTokenReference::new(new_len, new_dist);
                 }
-            }
-
-            if predicted_ref.len() == 258
-                && codec.decode_misprediction(CodecCorrection::IrregularLen258)
-            {
-                predicted_ref.set_irregular258(true);
             }
 
             self.commit_token(&DeflateToken::Reference(predicted_ref), input);

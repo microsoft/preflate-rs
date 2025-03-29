@@ -335,7 +335,6 @@ fn roundtree_cabac_correction() {
         Operation::Correction(9, CodecCorrection::LenCorrection),
         Operation::Correction(0, CodecCorrection::LiteralPredictionWrong),
         Operation::Correction(100000, CodecCorrection::TokenCount),
-        Operation::Correction(0, CodecCorrection::IrregularLen258),
         Operation::Correction(1, CodecCorrection::ReferencePredictionWrong),
     ];
 

@@ -307,7 +307,9 @@ fn decode_tokens(
                 )?;
 
             // length of 258 can be encoded two ways: 284 with 5 one bits (non-standard) or as 285 with 0 extra bits (standard)
-            let irregular258 = len == 258 && lcode != deflate_constants::LEN_CODE_COUNT as u32 - 1;
+            if len == 258 && lcode != deflate_constants::LEN_CODE_COUNT as u32 - 1 {
+                return err_exit_code(ExitCode::InvalidDeflate, "Non-standard 258 length code");
+            }
 
             let dcode = decoder.fetch_next_distance_char(bit_reader, reader)? as u32;
             if dcode >= deflate_constants::DIST_CODE_COUNT as u32 {
@@ -323,9 +325,7 @@ fn decode_tokens(
 
             plain_text.append_reference(dist, len)?;
             tokens.push(DeflateToken::Reference(DeflateTokenReference::new(
-                len,
-                dist,
-                irregular258,
+                len, dist,
             )));
 
             earliest_reference = std::cmp::min(earliest_reference, cur_pos - (dist as i32));

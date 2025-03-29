@@ -28,7 +28,6 @@ pub enum CodecCorrection {
     EndOfChunk,
     LiteralPredictionWrong,
     ReferencePredictionWrong,
-    IrregularLen258,
     MAX,
 }
 
@@ -130,7 +129,6 @@ impl CountNonDefaultActions {
             EndOfChunk,
             LiteralPredictionWrong,
             ReferencePredictionWrong,
-            IrregularLen258,
         ];
 
         assert_eq!(
