@@ -44,21 +44,8 @@ impl BitReader {
         wret as u8
     }
 
-    pub fn consume_read(&mut self, reader: &mut impl BufRead) {
-        while self.bits_left >= 8 && self.read_ahead > 0 {
-            self.bits_left -= 8;
-            self.read_ahead -= 1;
-        }
-
-        self.bits = self.bits & ((1 << self.bits_left) - 1);
-
-        if self.read_ahead > 0 {
-            reader.consume(self.read_ahead as usize);
-            self.read_ahead = 0;
-        }
-    }
-
-    pub fn opportunistic_fill(&mut self, reader: &mut impl BufRead) {
+    /// Fill the buffer with the next bytes from the BufRead without consuming them.
+    pub fn read_ahead(&mut self, reader: &mut impl BufRead) {
         if let Ok(buffer) = reader.fill_buf() {
             let buffer = &buffer[self.read_ahead as usize..];
 
@@ -77,8 +64,26 @@ impl BitReader {
         }
     }
 
+    /// Undo the opportunistic fill by consuming bytes that were actually read,
+    /// and removing the extra bits that were read-ahead
+    pub fn undo_read_ahead(&mut self, reader: &mut impl BufRead) {
+        while self.bits_left >= 8 && self.read_ahead > 0 {
+            self.bits_left -= 8;
+            self.read_ahead -= 1;
+        }
+
+        self.bits = self.bits & ((1 << self.bits_left) - 1);
+
+        if self.read_ahead > 0 {
+            reader.consume(self.read_ahead as usize);
+            self.read_ahead = 0;
+        }
+    }
+
+    /// Read cbit bits from the bit buffer, reading
+    /// more bytes from the input stream if there are not enough bits.
     #[cold]
-    fn fill_register(
+    fn get_fill_register(
         &mut self,
         cbit: u32,
         reader: &mut impl BufRead,
@@ -103,16 +108,23 @@ impl BitReader {
 }
 
 impl ReadBits for BitReader {
+    /// number of bits that are available to read without reading more bytes
     fn bits_left(&self) -> u32 {
         self.bits_left
     }
 
+    /// Consume cbit bits from the input stream (must be less than bits_left)
     fn consume(&mut self, cbit: u32) {
+        debug_assert!(cbit <= self.bits_left);
+
         self.bits >>= cbit;
         self.bits_left -= cbit;
     }
 
+    /// Peek at the next 8 bits in the input buffer. Must be 8 bits in the buffer.
     fn peek_byte(&self) -> u8 {
+        debug_assert!(self.bits_left >= 8);
+
         self.bits as u8
     }
 
@@ -131,6 +143,7 @@ impl ReadBits for BitReader {
             return Ok(wret as u32);
         }
 
-        self.fill_register(cbit, reader)
+        // there weren't enough bits, so go to cold path
+        self.get_fill_register(cbit, reader)
     }
 }

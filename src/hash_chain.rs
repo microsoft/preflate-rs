@@ -71,14 +71,6 @@ struct HashTable {
 }
 
 impl HashTable {
-    fn clone(&self) -> Box<Self> {
-        let mut b = HashTable::default_boxed();
-        b.head = self.head;
-        b.prev = self.prev;
-
-        b
-    }
-
     #[inline]
     fn get_head(&self, h: u16) -> InternalPosition {
         self.head[usize::from(h)]
@@ -154,10 +146,6 @@ pub trait HashChain {
         target_reference: DeflateTokenReference,
         input: &PreflateInput,
     );
-
-    fn clone(&self) -> Self
-    where
-        Self: Sized;
 }
 
 /// Default hash chain for a given hash function periodically normalizes the hash table
@@ -299,17 +287,6 @@ impl<H: HashImplementation> HashChain for HashChainDefault<H> {
     fn get_num_hash_bytes() -> usize {
         H::NUM_HASH_BYTES
     }
-
-    fn clone(&self) -> Self
-    where
-        Self: Sized,
-    {
-        Self {
-            hash_table: self.hash_table.clone(),
-            total_shift: self.total_shift,
-            hash: self.hash.clone(),
-        }
-    }
 }
 
 /// implementation of the hash chain that uses the libdeflate rotating hash.
@@ -432,16 +409,5 @@ impl HashChain for HashChainLibflate4 {
 
     fn get_num_hash_bytes() -> usize {
         4
-    }
-
-    fn clone(&self) -> Self
-    where
-        Self: Sized,
-    {
-        Self {
-            hash_table: self.hash_table.clone(),
-            hash_table_3: self.hash_table_3.clone(),
-            total_shift: self.total_shift,
-        }
     }
 }

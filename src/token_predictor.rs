@@ -35,18 +35,6 @@ pub struct TokenPredictor {
     max_token_count: u32,
 }
 
-impl Clone for TokenPredictor {
-    fn clone(&self) -> Self {
-        Self {
-            state: self.state.clone(),
-            params: self.params,
-            pending_reference: self.pending_reference,
-            current_token_count: self.current_token_count,
-            max_token_count: self.max_token_count,
-        }
-    }
-}
-
 impl std::fmt::Debug for TokenPredictor {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TokenPredictor")

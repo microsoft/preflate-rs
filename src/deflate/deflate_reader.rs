@@ -75,7 +75,7 @@ impl DeflateParser {
     }
 
     fn checkpoint(&mut self, reader: &mut Cursor<&[u8]>) -> Checkpoint {
-        self.bit_reader.consume_read(reader);
+        self.bit_reader.undo_read_ahead(reader);
 
         Checkpoint {
             plain_text: self.plain_text().len(),
@@ -137,7 +137,7 @@ impl DeflateParser {
             Ok(()) => {}
         }
 
-        self.bit_reader.consume_read(&mut cursor);
+        self.bit_reader.undo_read_ahead(&mut cursor);
 
         Ok(DeflateContents {
             compressed_size: cursor.position() as usize,
@@ -173,7 +173,7 @@ impl DeflateParser {
                     }
 
                     // consume any buffered read bits since we are just going to read bytes now
-                    self.bit_reader.consume_read(reader);
+                    self.bit_reader.undo_read_ahead(reader);
 
                     assert!(self.bit_reader.bits_left() == 0);
 
@@ -281,7 +281,7 @@ fn decode_tokens(
     let mut cur_pos = 0;
 
     loop {
-        bit_reader.opportunistic_fill(reader);
+        bit_reader.read_ahead(reader);
 
         if plain_text.len() > plain_text_limit {
             return err_exit_code(ExitCode::PlainTextLimit, "Plain text limit exceeded");
