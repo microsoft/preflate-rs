@@ -66,6 +66,10 @@ impl BitReader {
 
     /// Undo the opportunistic fill by consuming bytes that were actually read,
     /// and removing the extra bits that were read-ahead
+    /// 
+    /// This is important when we want to position in the reader to reflect
+    /// the actual bytes read (for example if we want to look at the position
+    /// or read bytes directly).
     pub fn undo_read_ahead(&mut self, reader: &mut impl BufRead) {
         while self.bits_left >= 8 && self.read_ahead > 0 {
             self.bits_left -= 8;
