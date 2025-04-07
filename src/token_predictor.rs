@@ -35,18 +35,6 @@ pub struct TokenPredictor {
     max_token_count: u32,
 }
 
-impl Clone for TokenPredictor {
-    fn clone(&self) -> Self {
-        Self {
-            state: self.state.clone(),
-            params: self.params,
-            pending_reference: self.pending_reference,
-            current_token_count: self.current_token_count,
-            max_token_count: self.max_token_count,
-        }
-    }
-}
-
 impl std::fmt::Debug for TokenPredictor {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TokenPredictor")
@@ -304,13 +292,6 @@ impl TokenPredictor {
                     } else {
                         codec.encode_correction(CodecCorrection::DistOnlyCorrection, 0);
                     }
-
-                    if target_ref.len() == 258 {
-                        codec.encode_misprediction(
-                            CodecCorrection::IrregularLen258,
-                            target_ref.get_irregular258(),
-                        );
-                    }
                 }
             }
 
@@ -443,7 +424,6 @@ impl TokenPredictor {
                     self.state
                         .hop_match(new_len, hops, input)
                         .with_context(|| format!("hop_match l={} {:?}", new_len, predicted_ref))?,
-                    false,
                 );
             } else {
                 let hops = codec.decode_correction(CodecCorrection::DistOnlyCorrection);
@@ -454,14 +434,8 @@ impl TokenPredictor {
                         .with_context(|| {
                             format!("recalculate_distance token {}", self.current_token_count)
                         })?;
-                    predicted_ref = DeflateTokenReference::new(new_len, new_dist, false);
+                    predicted_ref = DeflateTokenReference::new(new_len, new_dist);
                 }
-            }
-
-            if predicted_ref.len() == 258
-                && codec.decode_misprediction(CodecCorrection::IrregularLen258)
-            {
-                predicted_ref.set_irregular258(true);
             }
 
             self.commit_token(&DeflateToken::Reference(predicted_ref), input);
@@ -492,6 +466,7 @@ impl TokenPredictor {
         Ok(b)
     }
 
+    #[inline(always)]
     fn predict_token(&mut self, input: &PreflateInput) -> DeflateToken {
         if input.pos() == 0 || input.remaining() < MIN_MATCH {
             return DeflateToken::Literal(input.cur_char(0));
@@ -511,7 +486,8 @@ impl TokenPredictor {
             }
 
             // match is too small and far way to be worth encoding as a distance/length pair.
-            if match_token.len() == 3 && match_token.dist() > self.params.max_dist_3_matches.into()
+            if match_token.len() == 3
+                && match_token.dist() > u32::from(self.params.max_dist_3_matches)
             {
                 return DeflateToken::Literal(input.cur_char(0));
             }

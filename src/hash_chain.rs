@@ -41,7 +41,7 @@ impl InternalPosition {
     }
 
     fn dist(&self, pos: InternalPosition) -> u32 {
-        u32::from(self.pos - pos.pos)
+        u32::from(self.pos) - u32::from(pos.pos)
     }
 }
 
@@ -71,14 +71,6 @@ struct HashTable {
 }
 
 impl HashTable {
-    fn clone(&self) -> Box<Self> {
-        let mut b = HashTable::default_boxed();
-        b.head = self.head;
-        b.prev = self.prev;
-
-        b
-    }
-
     #[inline]
     fn get_head(&self, h: u16) -> InternalPosition {
         self.head[usize::from(h)]
@@ -154,10 +146,6 @@ pub trait HashChain {
         target_reference: DeflateTokenReference,
         input: &PreflateInput,
     );
-
-    fn clone(&self) -> Self
-    where
-        Self: Sized;
 }
 
 /// Default hash chain for a given hash function periodically normalizes the hash table
@@ -228,10 +216,13 @@ impl<H: HashImplementation> HashChain for HashChainDefault<H> {
         let mut cur_pos = self.hash_table.get_head(curr_hash);
 
         std::iter::from_fn(move || {
-            if let Some(d) = first_match {
-                first_match = None;
-                Some(d)
-            } else if cur_pos.is_valid() {
+            if OFFSET != 0 {
+                if let Some(d) = first_match {
+                    first_match = None;
+                    return Some(d);
+                }
+            }
+            if cur_pos.is_valid() {
                 let d = ref_pos.dist(cur_pos);
                 cur_pos = self.hash_table.prev[cur_pos.to_index()];
                 Some(d)
@@ -295,17 +286,6 @@ impl<H: HashImplementation> HashChain for HashChainDefault<H> {
 
     fn get_num_hash_bytes() -> usize {
         H::NUM_HASH_BYTES
-    }
-
-    fn clone(&self) -> Self
-    where
-        Self: Sized,
-    {
-        Self {
-            hash_table: self.hash_table.clone(),
-            total_shift: self.total_shift,
-            hash: self.hash.clone(),
-        }
     }
 }
 
@@ -429,16 +409,5 @@ impl HashChain for HashChainLibflate4 {
 
     fn get_num_hash_bytes() -> usize {
         4
-    }
-
-    fn clone(&self) -> Self
-    where
-        Self: Sized,
-    {
-        Self {
-            hash_table: self.hash_table.clone(),
-            hash_table_3: self.hash_table_3.clone(),
-            total_shift: self.total_shift,
-        }
     }
 }

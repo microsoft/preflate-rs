@@ -22,10 +22,8 @@ use std::cmp;
 #[allow(dead_code)]
 pub enum MatchResult {
     Success(DeflateTokenReference),
-    DistanceLargerThanHop0(u32, u32),
     NoInput,
     NoMoreMatchesFound,
-    MaxChainExceeded(u32),
 }
 
 /// Factory function to create a new HashChainHolder based on the parameters and returns
@@ -129,8 +127,6 @@ pub trait HashChainHolder {
     fn verify_hash(&self, _dist: Option<DeflateTokenReference>);
 
     fn checksum(&self, checksum: &mut DebugHash);
-
-    fn clone(&self) -> Box<dyn HashChainHolder>;
 }
 
 /// empty implementation of HashChainHolder if there is no dictionary
@@ -173,10 +169,6 @@ impl HashChainHolder for () {
     fn verify_hash(&self, _dist: Option<DeflateTokenReference>) {}
 
     fn checksum(&self, _checksum: &mut DebugHash) {}
-
-    fn clone(&self) -> Box<dyn HashChainHolder> {
-        Box::new(())
-    }
 }
 
 /// implemenation of HashChainHolder depends type of hash implemenatation
@@ -310,10 +302,6 @@ impl<H: HashChain + 'static> HashChainHolder for HashChainHolderImpl<H> {
     fn checksum(&self, checksum: &mut DebugHash) {
         self.hash.checksum(checksum);
     }
-
-    fn clone(&self) -> Box<dyn HashChainHolder> {
-        Box::new(HashChainHolderImpl::new(&self.params, self.hash.clone()))
-    }
 }
 
 // Read the two bytes starting at pos and interpret them as an u16.
@@ -321,6 +309,13 @@ impl<H: HashChain + 'static> HashChainHolder for HashChainHolderImpl<H> {
 fn read_u16_le(slice: &[u8], pos: usize) -> u16 {
     // The compiler is smart enough to optimize this into an unaligned load.
     u16::from_le_bytes((&slice[pos..pos + 2]).try_into().unwrap())
+}
+
+// Read the two bytes starting at pos and interpret them as an u32.
+#[inline(always)]
+fn read_u32_le(slice: &[u8], pos: usize) -> u32 {
+    // The compiler is smart enough to optimize this into an unaligned load.
+    u32::from_le_bytes((&slice[pos..pos + 4]).try_into().unwrap())
 }
 
 impl<H: HashChain> HashChainHolderImpl<H> {
@@ -332,7 +327,7 @@ impl<H: HashChain> HashChainHolderImpl<H> {
         }
     }
 
-    #[inline(never)]
+    #[inline]
     fn match_token_offset<const OFFSET: u32>(
         &self,
         prev_len: u32,
@@ -380,71 +375,135 @@ impl<H: HashChain> HashChainHolderImpl<H> {
         }
 
         let nice_length = std::cmp::min(self.params.nice_length, max_len);
-        let mut max_chain = max_depth;
 
-        let input_chars = input.cur_chars(OFFSET as i32);
-        let mut best_len = prev_len.max(1);
-        let mut first = true;
-        let mut best_dist = 0;
+        let best_len = prev_len.max(1);
 
-        // look at last two characters of best length so far
-        let mut c0 = read_u16_le(input_chars, (best_len - 1) as usize);
+        let iter = self.hash.iterate::<OFFSET>(input);
 
-        for dist in self.hash.iterate::<OFFSET>(input) {
-            // first entry gets a special treatment to make sure it doesn't exceed
-            // the limits we calculated for the first hop
-            if first {
-                first = false;
-                if dist > cur_max_dist_hop0 {
-                    return MatchResult::DistanceLargerThanHop0(dist, cur_max_dist_hop0);
+        match_less3::<OFFSET>(
+            input,
+            max_len,
+            cur_max_dist_hop0,
+            cur_max_dist_hop1_plus,
+            nice_length,
+            max_depth,
+            best_len,
+            iter,
+        )
+    }
+}
+
+/// searches for a match that is at least 3 bytes long
+#[inline]
+fn match_less3<const OFFSET: u32>(
+    input: &PreflateInput<'_>,
+    max_len: u32,
+    cur_max_dist_hop0: u32,
+    cur_max_dist_hop1_plus: u32,
+    nice_length: u32,
+    mut max_chain: u32,
+    best_len: u32,
+    mut iter: impl Iterator<Item = u32>,
+) -> MatchResult {
+    let input_chars = input.cur_chars(OFFSET as i32);
+
+    // look at last two characters of best length so far
+    let c0 = read_u16_le(input_chars, (best_len - 1) as usize);
+
+    let mut best = MatchResult::NoMoreMatchesFound;
+    let mut max_dist = cur_max_dist_hop0;
+
+    while let Some(dist) = iter.next() {
+        if dist > max_dist {
+            break;
+        }
+
+        max_dist = cur_max_dist_hop1_plus;
+
+        let match_start = input.cur_chars(OFFSET as i32 - dist as i32);
+
+        if read_u16_le(match_start, (best_len as u32 - 1) as usize) == c0 {
+            let match_length = prefix_compare(match_start, input_chars, max_len);
+
+            if match_length >= 3 && match_length > best_len {
+                best = MatchResult::Success(DeflateTokenReference::new(match_length, dist));
+
+                if match_length >= nice_length || match_length == max_len {
+                    break;
                 }
-            } else if dist > cur_max_dist_hop1_plus {
-                break;
-            }
 
-            let match_start = input.cur_chars(OFFSET as i32 - dist as i32);
-
-            if read_u16_le(match_start, (best_len as u32 - 1) as usize) == c0 {
-                let match_length = prefix_compare(match_start, input_chars, max_len);
-
-                if match_length >= 3 && match_length > best_len {
-                    if match_length >= nice_length {
-                        return MatchResult::Success(DeflateTokenReference::new(
-                            match_length,
-                            dist,
-                            false,
-                        ));
-                    }
-
-                    best_len = match_length;
-                    best_dist = dist;
-
-                    // if we found the maximum length, we can stop since we won't find anything better
-                    if best_len == max_len {
-                        break;
-                    }
-
-                    c0 = read_u16_le(input_chars, (best_len - 1) as usize);
+                max_chain -= 1;
+                if max_chain == 0 {
+                    break;
                 }
-            }
 
-            max_chain -= 1;
-
-            if max_chain == 0 {
-                if best_dist > 0 {
-                    return MatchResult::Success(DeflateTokenReference::new(
-                        best_len, best_dist, false,
-                    ));
-                } else {
-                    return MatchResult::MaxChainExceeded(max_depth);
-                }
+                match_4::<OFFSET>(
+                    input,
+                    max_len,
+                    max_dist,
+                    nice_length,
+                    max_chain,
+                    match_length,
+                    iter,
+                    &mut best,
+                );
+                return best;
             }
         }
 
-        if best_dist > 0 {
-            return MatchResult::Success(DeflateTokenReference::new(best_len, best_dist, false));
-        } else {
-            return MatchResult::NoMoreMatchesFound;
+        max_chain -= 1;
+
+        if max_chain == 0 {
+            break;
+        }
+    }
+    best
+}
+
+/// Once we know that we have a least a 3 byte match, we can be faster by comparing 4 bytes at a time
+#[inline]
+fn match_4<const OFFSET: u32>(
+    input: &PreflateInput<'_>,
+    max_len: u32,
+    max_dist: u32,
+    nice_length: u32,
+    mut max_chain: u32,
+    mut best_len: u32,
+    mut iter: impl Iterator<Item = u32>,
+    best: &mut MatchResult,
+) {
+    let input_chars = input.cur_chars(OFFSET as i32);
+
+    // look at last 3 characters of best length so far + 1 because we want to improve the match
+    let mut c0 = read_u32_le(input_chars, (best_len - 3) as usize);
+
+    while let Some(dist) = iter.next() {
+        if dist > max_dist {
+            break;
+        }
+
+        let match_start = input.cur_chars(OFFSET as i32 - dist as i32);
+
+        if read_u32_le(match_start, (best_len as u32 - 3) as usize) == c0 {
+            let match_length = prefix_compare(match_start, input_chars, max_len);
+
+            if match_length > best_len {
+                *best = MatchResult::Success(DeflateTokenReference::new(match_length, dist));
+
+                if match_length >= nice_length || match_length == max_len {
+                    break;
+                }
+
+                best_len = match_length;
+
+                c0 = read_u32_le(input_chars, (best_len - 3) as usize);
+            }
+        }
+
+        max_chain -= 1;
+
+        if max_chain == 0 {
+            break;
         }
     }
 }

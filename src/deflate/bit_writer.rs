@@ -20,7 +20,9 @@ impl BitWriter {
         self.bits_in += len;
 
         if self.bits_in > 32 {
-            self.flush_whole_bytes(data_buffer);
+            data_buffer.extend_from_slice(&(self.bit_buffer as u32).to_le_bytes());
+            self.bit_buffer >>= 32;
+            self.bits_in -= 32;
         }
     }
 

@@ -4,18 +4,299 @@
  *  This software incorporates material from third parties. See NOTICE.txt for details.
  *--------------------------------------------------------------------------------------------*/
 
-use std::io::Read;
+use std::io::BufRead;
 
 use crate::preflate_error::{err_exit_code, ExitCode, Result};
 
 use crate::deflate::{
-    bit_reader::ReadBits,
-    bit_writer::BitWriter,
-    deflate_constants::TREE_CODE_ORDER_TABLE,
-    huffman_helper::{calc_huffman_codes, calculate_huffman_code_tree, decode_symbol},
+    bit_reader::ReadBits, bit_writer::BitWriter, deflate_constants::TREE_CODE_ORDER_TABLE,
 };
 
 use super::bit_reader::BitReader;
+use super::deflate_constants::{DistCode, LITLEN_CODE_COUNT, MAX_DIST_CODE};
+
+/// Calculates Huffman code array given an array of Huffman Code Lengths using the RFC 1951 algorithm
+pub fn calc_huffman_codes(code_lengths: &[u8]) -> Result<Vec<u16>> {
+    let mut result: Vec<u16> = vec![0; code_lengths.len()];
+
+    // The following algorithm generates the codes as integers, intended to be read
+    // from least- to most-significant bit.
+
+    // 1)  Count the number of codes for each code length.  Let
+    // bl_count[N] be the number of codes of length N, N >= 1.
+
+    let mut maxbits = 0;
+    let mut bl_count: [u16; 32] = [0; 32];
+    for cbit in code_lengths {
+        bl_count[*cbit as usize] += 1;
+        if *cbit > maxbits {
+            maxbits = *cbit;
+        }
+    }
+
+    //	2)  Find the numerical value of the smallest code for each code length:
+
+    let mut code: u16 = 0;
+    bl_count[0] = 0;
+    let mut next_code: [u16; 32] = [0; 32];
+    for bits in 1..=maxbits {
+        code = (code + bl_count[bits as usize - 1]) << 1;
+        next_code[bits as usize] = code;
+    }
+
+    // 3)  Assign numerical values to all codes, using consecutive
+    // values for all codes of the same length with the base
+    // values determined at step 2. Codes that are never used
+    // (which have a bit length of zero) must not be assigned a
+    // value.
+
+    for n in 0..code_lengths.len() {
+        let len = code_lengths[n];
+        if len != 0 {
+            let mut code = next_code[len as usize];
+
+            // code should be stored in reverse bit order
+            let mut rev_code = 0;
+            for _ in 0..len {
+                rev_code = (rev_code << 1) | (code & 1);
+                code >>= 1;
+            }
+
+            result[n] = rev_code;
+            next_code[len as usize] += 1;
+        }
+    }
+
+    Ok(result)
+}
+
+fn is_valid_huffman_code_lengths(code_lengths: &[u8]) -> bool {
+    // Ensure that the array is not empty
+    if code_lengths.is_empty() {
+        return false;
+    }
+
+    // Count the number of codes for each code length using an array
+    const MAX_CODE_LENGTH: usize = 16;
+    let mut length_count = [0; MAX_CODE_LENGTH];
+    for &length in code_lengths.iter() {
+        if length as usize >= MAX_CODE_LENGTH {
+            return false;
+        }
+        length_count[length as usize] += 1;
+    }
+
+    // essential property of huffman codes is that all internal nodes
+    // have exactly two children. This means that the number of internal
+    // nodes doubles each time we go down one level in the tree.
+    let mut internal_nodes = 2;
+    for i in 1..length_count.len() {
+        internal_nodes -= length_count[i];
+        if internal_nodes < 0 {
+            return false;
+        }
+        internal_nodes *= 2;
+    }
+
+    // there should be no more internal nodes left
+    internal_nodes == 0
+}
+
+/// Calculates Huffman code array given an array of Huffman Code Lengths using the RFC 1951 algorithm
+/// Huffman tree will be returned in tree where:
+/// 1. when N is an even number tree[N] is the array index of the '0' child and
+///    tree[N+1] is the array index of the '1' child
+/// 2. If tree[i] is less than zero then it is a leaf and the literal alphabet value is !tree[i]
+/// 3. The root node index 'N' is tree.len() - 2. Search should start at that node.
+fn calculate_huffman_code_tree(code_lengths: &[u8]) -> Result<HuffmanTree> {
+    if !is_valid_huffman_code_lengths(code_lengths) {
+        return err_exit_code(ExitCode::InvalidDeflate, "Invalid Huffman code lengths");
+    }
+
+    let mut c_codes: i32 = 0;
+    let mut c_bits_largest = 0;
+
+    // First calculate total number of leaf nodes in the Huffman Tree and the max huffman code length
+    for &c_bits in code_lengths {
+        if c_bits != 0 {
+            c_codes += 1;
+        }
+
+        if c_bits > c_bits_largest {
+            c_bits_largest = c_bits;
+        }
+    }
+
+    // Number of internal nodes in the tree will be the ((number of leaf nodes) - 1)
+    let mut tree: Vec<u16> = vec![0; ((c_codes - 1) * 2) as usize]; // Allocation is double as each node has 2 links
+
+    let mut i_huff_nodes: i32 = 0;
+    let mut i_huff_nodes_previous_level: i32 = 0;
+
+    // Build the tree from the bottom starting with leafs of longs codes
+    for c_bits_cur in (1..=c_bits_largest).rev() {
+        let i_huff_nodes_start = i_huff_nodes;
+        // Create parent nodes for all leaf codes at current bit length
+        for j in 0..code_lengths.len() {
+            if code_lengths[j] == c_bits_cur {
+                tree[i_huff_nodes as usize] = !(j as u16); // Leaf nodes links store the actual literal character negative biased by -1
+                i_huff_nodes += 1;
+            }
+        }
+
+        // Create parent node links for all remaining nodes from previous iteration
+        for j in (i_huff_nodes_previous_level..i_huff_nodes_start).step_by(2) {
+            tree[i_huff_nodes as usize] = j as u16;
+            i_huff_nodes += 1;
+        }
+
+        i_huff_nodes_previous_level = i_huff_nodes_start;
+    }
+
+    // build a fast decoder that lets us decode the entire symbol given a byte of input
+    let mut fast_decode = [(0u8, 0u16); 256];
+    for i in 0..256 {
+        let mut i_node_cur = tree.len() - 2; // Start at the root of the Huffman tree
+
+        let mut v = i;
+        let mut num_bits = 1;
+        loop {
+            // Use next bit of input to decide next node
+            let next = tree[(v & 1) + i_node_cur];
+
+            // High bit indicates a leaf node, return alphabet char for this leaf
+            if (next & 0x8000) != 0 || num_bits == 8 {
+                fast_decode[i] = (num_bits, next);
+                break;
+            }
+
+            i_node_cur = next as usize;
+            v >>= 1;
+            num_bits += 1;
+        }
+    }
+
+    Ok(HuffmanTree { tree, fast_decode })
+}
+
+/// Reads the next Huffman encoded char from bitReader using the Huffman tree encoded in huffman_tree
+/// Huffman Nodes are encoded in the array of ints as follows:
+/// '0' child link of node 'N' is at huffman_tree[N], '1' child link is at huffman_tree[N + 1]
+/// Root of tree is at huffman_tree.len() - 2
+#[inline(always)]
+fn decode_symbol(
+    bit_reader: &mut impl ReadBits,
+    reader: &mut impl BufRead,
+    huffman_tree: &HuffmanTree,
+) -> Result<u16> {
+    // we need at least 8 bits to fast decode the symbol, which is almost always available
+    if bit_reader.bits_left() < 8 {
+        return decode_symbol_slow(bit_reader, reader, huffman_tree);
+    }
+
+    let (num_bits, mut node) = huffman_tree.fast_decode[bit_reader.peek_byte() as usize];
+    bit_reader.consume(num_bits as u32);
+
+    loop {
+        // High bit indicates a leaf node, return alphabet char for this leaf
+        if (node & 0x8000) != 0 {
+            return Ok(!node);
+        }
+
+        // Use next bit of input to decide next node
+        node = huffman_tree.tree[bit_reader.get(1, reader)? as usize + node as usize];
+    }
+}
+
+#[cold]
+fn decode_symbol_slow(
+    bit_reader: &mut impl ReadBits,
+    reader: &mut impl BufRead,
+    huffman_tree: &HuffmanTree,
+) -> Result<u16> {
+    let mut i_node_cur: usize = huffman_tree.tree.len() - 2;
+    loop {
+        // Use next bit of input to decide next node
+        let node = huffman_tree.tree[bit_reader.get(1, reader)? as usize + i_node_cur];
+
+        // High bit indicates a leaf node, return alphabet char for this leaf
+        if (node & 0x8000) != 0 {
+            return Ok(!node);
+        }
+
+        i_node_cur = node as usize;
+    }
+}
+
+#[cfg(test)]
+/// A ReadBits implementation that reads bits from a single u32 used for unit tests
+struct SingleCode {
+    pub code: u32,
+}
+
+#[cfg(test)]
+impl ReadBits for SingleCode {
+    fn get(&mut self, cbits: u32, _: &mut impl BufRead) -> std::io::Result<u32> {
+        let result = self.code & ((1 << cbits) - 1);
+        self.code >>= cbits;
+
+        Ok(result)
+    }
+
+    fn peek_byte(&self) -> u8 {
+        (self.code & 0xff) as u8
+    }
+
+    fn bits_left(&self) -> u32 {
+        8
+    }
+
+    fn consume(&mut self, cbits: u32) {
+        self.code >>= cbits;
+    }
+}
+
+#[cfg(test)]
+fn roundtrip(frequencies: &[u16], huffcalc: super::huffman_calc::HufftreeBitCalc) {
+    use super::huffman_calc::calc_bit_lengths;
+
+    let code_lengths = calc_bit_lengths(huffcalc, frequencies, 7);
+
+    let codes = calc_huffman_codes(&code_lengths).unwrap();
+
+    let huffman_tree = calculate_huffman_code_tree(&code_lengths).unwrap();
+
+    for i in 0..code_lengths.len() {
+        // skip zero length codes
+        if code_lengths[i] != 0 {
+            // calculate the stream of bits for the code
+            let mut code = SingleCode {
+                code: codes[i].into(),
+            };
+
+            let symbol = decode_symbol(&mut code, &mut std::io::empty(), &huffman_tree).unwrap();
+
+            assert_eq!(i, symbol as usize);
+        }
+    }
+}
+/// verify that the huffman codes generated can be decoded with the huffman code tree
+#[test]
+fn roundtrip_huffman_code() {
+    roundtrip(
+        &[1, 0, 2, 3, 5, 8, 13, 0],
+        super::huffman_calc::HufftreeBitCalc::Miniz,
+    );
+    roundtrip(
+        &[1, 0, 2, 3, 5, 8, 13, 0],
+        super::huffman_calc::HufftreeBitCalc::Zlib,
+    );
+
+    roundtrip(
+        &[1, 0, 2, 3, 5, 1008, 113, 1, 1, 1, 100, 10000],
+        super::huffman_calc::HufftreeBitCalc::Zlib,
+    );
+}
 
 #[derive(PartialEq, Eq, Clone, Copy, Debug)]
 pub enum TreeCodeType {
@@ -55,7 +336,7 @@ impl HuffmanOriginalEncoding {
     /// exactly as it was written.
     pub fn read(
         bit_reader: &mut BitReader,
-        reader: &mut impl Read,
+        reader: &mut impl BufRead,
     ) -> Result<HuffmanOriginalEncoding> {
         // 5 Bits: HLIT, # of Literal/Length codes - 257 (257 - 286)
         let hlit = bit_reader.get(5, reader)? as usize + 257;
@@ -239,16 +520,27 @@ impl HuffmanOriginalEncoding {
     }
 }
 
+/// Huffman tree used to decode the huffman codes
+struct HuffmanTree {
+    pub tree: Vec<u16>,
+
+    /// Fast decode table to get the symbol directly from the
+    /// byte if we have enough bits available. This code
+    /// the u8 as the number of bits required and the u16
+    /// as the symbol to return.
+    pub fast_decode: [(u8, u16); 256],
+}
+
 pub(super) struct HuffmanReader {
-    lit_huff_code_tree: Vec<i32>,
-    dist_huff_code_tree: Vec<i32>,
+    lit_huff_code_tree: HuffmanTree,
+    dist_huff_code_tree: HuffmanTree,
 }
 
 pub(super) struct HuffmanWriter {
-    lit_code_lengths: Vec<u8>,
-    lit_huffman_codes: Vec<u16>,
-    dist_code_lengths: Vec<u8>,
-    dist_huffman_codes: Vec<u16>,
+    lit_code_lengths: [u8; LITLEN_CODE_COUNT + 1],
+    lit_huffman_codes: [u16; LITLEN_CODE_COUNT + 1],
+    dist_code_lengths: [u8; MAX_DIST_CODE as usize + 1],
+    dist_huffman_codes: [u16; MAX_DIST_CODE as usize + 1],
 }
 
 impl HuffmanReader {
@@ -297,7 +589,7 @@ impl HuffmanReader {
     pub fn fetch_next_literal_code(
         &self,
         bit_reader: &mut BitReader,
-        reader: &mut impl Read,
+        reader: &mut impl BufRead,
     ) -> Result<u16> {
         decode_symbol(bit_reader, reader, &self.lit_huff_code_tree)
     }
@@ -305,10 +597,20 @@ impl HuffmanReader {
     pub fn fetch_next_distance_char(
         &self,
         bit_reader: &mut BitReader,
-        reader: &mut impl Read,
+        reader: &mut impl BufRead,
     ) -> Result<u16> {
         decode_symbol(bit_reader, reader, &self.dist_huff_code_tree)
     }
+}
+
+fn copy_to_array<const N: usize, T: Copy + Clone + Default>(src: &[T]) -> [T; N] {
+    let mut dst = [T::default(); N];
+
+    for i in 0..src.len().min(N) {
+        dst[i] = src[i];
+    }
+
+    dst
 }
 
 impl HuffmanWriter {
@@ -325,10 +627,10 @@ impl HuffmanWriter {
         let dist_codes = calc_huffman_codes(&dist_lengths)?;
 
         Ok(HuffmanWriter {
-            lit_code_lengths: lit_lengths,
-            lit_huffman_codes: lit_codes,
-            dist_code_lengths: dist_lengths,
-            dist_huffman_codes: dist_codes,
+            lit_code_lengths: copy_to_array(&lit_lengths),
+            lit_huffman_codes: copy_to_array(&lit_codes),
+            dist_code_lengths: copy_to_array(&dist_lengths),
+            dist_huffman_codes: copy_to_array(&dist_codes),
         })
     }
 
@@ -339,10 +641,10 @@ impl HuffmanWriter {
         let dist_codes = calc_huffman_codes(&dist_lengths).unwrap();
 
         HuffmanWriter {
-            lit_code_lengths: lit_lengths,
-            lit_huffman_codes: lit_codes,
-            dist_code_lengths: dist_lengths,
-            dist_huffman_codes: dist_codes,
+            lit_code_lengths: copy_to_array(&lit_lengths),
+            lit_huffman_codes: copy_to_array(&lit_codes),
+            dist_code_lengths: copy_to_array(&dist_lengths),
+            dist_huffman_codes: copy_to_array(&dist_codes),
         }
     }
 
@@ -359,10 +661,10 @@ impl HuffmanWriter {
         &self,
         bitwriter: &mut BitWriter,
         output_buffer: &mut Vec<u8>,
-        dist: u16,
+        dist: DistCode,
     ) {
-        let code = self.dist_huffman_codes[dist as usize];
-        let c_bits = self.dist_code_lengths[dist as usize];
+        let code = self.dist_huffman_codes[usize::from(dist.get())];
+        let c_bits = self.dist_code_lengths[usize::from(dist.get())];
 
         bitwriter.write(code.into(), c_bits.into(), output_buffer);
     }

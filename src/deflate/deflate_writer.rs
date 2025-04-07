@@ -10,7 +10,7 @@ use super::deflate_token::{DeflateHuffmanType, DeflateTokenBlockType};
 use super::{
     deflate_constants::{
         quantize_distance, quantize_length, DIST_BASE_TABLE, DIST_EXTRA_TABLE, LENGTH_BASE_TABLE,
-        LENGTH_EXTRA_TABLE, LITLEN_CODE_COUNT, MIN_MATCH, NONLEN_CODE_COUNT,
+        LENGTH_EXTRA_TABLE, MIN_MATCH, NONLEN_CODE_COUNT,
     },
     deflate_token::{DeflateToken, DeflateTokenBlock},
 };
@@ -118,42 +118,33 @@ impl DeflateWriter {
                     );
                 }
                 DeflateToken::Reference(reference) => {
-                    if reference.get_irregular258() {
-                        huffman_writer.write_literal(
-                            &mut self.bitwriter,
-                            &mut self.output,
-                            LITLEN_CODE_COUNT as u16 - 2,
-                        );
-                        self.bitwriter.write(31, 5, &mut self.output);
-                    } else {
-                        let lencode = quantize_length(reference.len());
-                        huffman_writer.write_literal(
-                            &mut self.bitwriter,
-                            &mut self.output,
-                            NONLEN_CODE_COUNT as u16 + lencode as u16,
-                        );
+                    let lencode = quantize_length(reference.len());
+                    huffman_writer.write_literal(
+                        &mut self.bitwriter,
+                        &mut self.output,
+                        NONLEN_CODE_COUNT as u16 + u16::from(lencode.get()),
+                    );
 
-                        let lenextra = LENGTH_EXTRA_TABLE[lencode];
-                        if lenextra > 0 {
-                            self.bitwriter.write(
-                                reference.len() - MIN_MATCH - LENGTH_BASE_TABLE[lencode] as u32,
-                                lenextra.into(),
-                                &mut self.output,
-                            );
-                        }
+                    let lenextra: u8 = LENGTH_EXTRA_TABLE[usize::from(lencode.get())];
+                    if lenextra > 0 {
+                        self.bitwriter.write(
+                            reference.len()
+                                - MIN_MATCH
+                                - LENGTH_BASE_TABLE[usize::from(lencode.get())] as u32,
+                            lenextra.into(),
+                            &mut self.output,
+                        );
                     }
 
                     let distcode = quantize_distance(reference.dist());
-                    huffman_writer.write_distance(
-                        &mut self.bitwriter,
-                        &mut self.output,
-                        distcode as u16,
-                    );
+                    huffman_writer.write_distance(&mut self.bitwriter, &mut self.output, distcode);
 
-                    let distextra = DIST_EXTRA_TABLE[distcode];
+                    let distextra = DIST_EXTRA_TABLE[usize::from(distcode.get())];
                     if distextra > 0 {
                         self.bitwriter.write(
-                            reference.dist() - 1 - DIST_BASE_TABLE[distcode] as u32,
+                            reference.dist()
+                                - 1
+                                - DIST_BASE_TABLE[usize::from(distcode.get())] as u32,
                             distextra.into(),
                             &mut self.output,
                         );
@@ -207,8 +198,8 @@ fn roundtrip_deflate_writer() {
                 tokens: vec![
                     DeflateToken::Literal(0),
                     DeflateToken::Literal(1),
-                    DeflateToken::new_ref(100, 1, false),
-                    DeflateToken::new_ref(258, 1, true),
+                    DeflateToken::new_ref(100, 1),
+                    DeflateToken::new_ref(258, 1),
                     DeflateToken::Literal(3),
                 ],
                 huffman_type: DeflateHuffmanType::Static,

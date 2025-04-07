@@ -20,8 +20,8 @@ pub enum DeflateToken {
 
 impl DeflateToken {
     #[cfg(test)]
-    pub fn new_ref(len: u32, dist: u32, irregular258: bool) -> DeflateToken {
-        DeflateToken::Reference(DeflateTokenReference::new(len, dist, irregular258))
+    pub fn new_ref(len: u32, dist: u32) -> DeflateToken {
+        DeflateToken::Reference(DeflateTokenReference::new(len, dist))
     }
 }
 
@@ -34,36 +34,24 @@ impl DeflateToken {
 pub struct DeflateTokenReference {
     len: u8,
     dist: u16,
-    irregular258: bool,
 }
 
 impl std::fmt::Debug for DeflateTokenReference {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        if self.irregular258 {
-            write!(
-                f,
-                "DeflateTokenReference {{ len: {}, dist: {}, irregular258: {} }}",
-                self.len(),
-                self.dist(),
-                self.irregular258
-            )
-        } else {
-            write!(
-                f,
-                "DeflateTokenReference {{ len: {}, dist: {} }}",
-                self.len(),
-                self.dist()
-            )
-        }
+        write!(
+            f,
+            "DeflateTokenReference {{ len: {}, dist: {} }}",
+            self.len(),
+            self.dist()
+        )
     }
 }
 
 impl DeflateTokenReference {
-    pub fn new(len: u32, dist: u32, irregular258: bool) -> DeflateTokenReference {
+    pub fn new(len: u32, dist: u32) -> DeflateTokenReference {
         DeflateTokenReference {
             len: (len - 3) as u8,
             dist: dist as u16,
-            irregular258,
         }
     }
 
@@ -73,14 +61,6 @@ impl DeflateTokenReference {
 
     pub fn dist(&self) -> u32 {
         self.dist as u32
-    }
-
-    pub fn get_irregular258(&self) -> bool {
-        self.irregular258
-    }
-
-    pub fn set_irregular258(&mut self, irregular258: bool) {
-        self.irregular258 = irregular258;
     }
 }
 
@@ -172,8 +152,9 @@ impl TokenFrequency {
                 self.literal_codes[*lit as usize] += 1;
             }
             DeflateToken::Reference(t) => {
-                self.literal_codes[NONLEN_CODE_COUNT + quantize_length(t.len())] += 1;
-                self.distance_codes[quantize_distance(t.dist())] += 1;
+                self.literal_codes
+                    [NONLEN_CODE_COUNT + usize::from(quantize_length(t.len()).get())] += 1;
+                self.distance_codes[usize::from(quantize_distance(t.dist()).get())] += 1;
             }
         }
     }

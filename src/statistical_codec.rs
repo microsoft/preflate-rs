@@ -28,7 +28,6 @@ pub enum CodecCorrection {
     EndOfChunk,
     LiteralPredictionWrong,
     ReferencePredictionWrong,
-    IrregularLen258,
     MAX,
 }
 
@@ -67,11 +66,13 @@ pub trait PredictionDecoder {
     fn decode_correction(&mut self, correction: CodecCorrection) -> u32;
     fn decode_verify_state(&mut self, message: &'static str, checksum: u64);
 
+    #[inline]
     fn decode_correction_diff(&mut self, correction: CodecCorrection, predicted_value: u32) -> u32 {
         let actual_value = self.decode_correction(correction);
         decode_difference(predicted_value, actual_value)
     }
 
+    #[inline]
     fn decode_misprediction(&mut self, correction: CodecCorrection) -> bool {
         self.decode_correction(correction) != 0
     }
@@ -128,7 +129,6 @@ impl CountNonDefaultActions {
             EndOfChunk,
             LiteralPredictionWrong,
             ReferencePredictionWrong,
-            IrregularLen258,
         ];
 
         assert_eq!(

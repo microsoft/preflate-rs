@@ -30,9 +30,8 @@ The following differences are corrected:
 - Dynamic huffman encoding (estimated using the zlib algorithm, but there are multiple ways to construct more or less optimal length limited Huffman codes)
 - Literal vs (distance, length) pair (corrected by a single bit)
 - Length or distance is incorrect (corrected by encoding the number of hops backwards until the correct one)
-- Weird 258 length size (standard allows for two different encodings)
 
-Note that the data formats of the recompression information are different and incompatible to the original preflate implemenation, as this library uses a different arithmetic encoder (shared from the Lepton JPEG compression library).
+Note that the data formats of the recompression information are different and incompatible to the original preflate implementation, as this library uses a different arithmetic encoder (shared from the Lepton JPEG compression library).
 
 ### Overhead
 

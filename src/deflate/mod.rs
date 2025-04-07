@@ -3,7 +3,6 @@
 
 mod bit_reader;
 mod bit_writer;
-mod huffman_helper;
 
 pub mod deflate_constants;
 
