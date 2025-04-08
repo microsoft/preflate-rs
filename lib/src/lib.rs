@@ -4,8 +4,6 @@
  *  This software incorporates material from third parties. See NOTICE.txt for details.
  *--------------------------------------------------------------------------------------------*/
 
-#![doc = include_str!("../../README.md")]
-
 mod bit_helper;
 mod cabac_codec;
 mod container_processor;
