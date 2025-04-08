@@ -5,10 +5,8 @@ use std::{
 };
 
 use preflate_rs::{
-    PreflateConfig,
-    ExitCode,
-    ZstdCompressContext, ZstdDecompressContext,
-    PreflateContainerProcessor, PreflateError, ProcessBuffer, RecreateContainerProcessor,
+    ExitCode, PreflateConfig, PreflateContainerProcessor, PreflateError, ProcessBuffer,
+    RecreateContainerProcessor, ZstdCompressContext, ZstdDecompressContext,
 };
 
 /// Helper function to catch panics and convert them into the appropriate LeptonError
@@ -279,6 +277,7 @@ pub fn read_file(filename: &str) -> Vec<u8> {
     use std::path::Path;
 
     let filename = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
         .join("samples")
         .join(filename);
     println!("reading {0}", filename.to_str().unwrap());
