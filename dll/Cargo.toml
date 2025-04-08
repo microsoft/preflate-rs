@@ -5,7 +5,10 @@
 # predictor will break the format)
 name = "preflate_rs_0_7"
 edition = "2021"
-version = "0.7.0"
+authors = ["Kristof Roomp <kristofr@microsoft.com>"]
+license = "Apache-2.0"
+rust-version = "1.82"
+
 
 [dependencies]
 preflate-rs = { path = "../lib" }
