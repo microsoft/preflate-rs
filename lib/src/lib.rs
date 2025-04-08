@@ -4,7 +4,7 @@
  *  This software incorporates material from third parties. See NOTICE.txt for details.
  *--------------------------------------------------------------------------------------------*/
 
-#![doc = include_str!("../README.md")]
+#![doc = include_str!("../../README.md")]
 
 mod bit_helper;
 mod cabac_codec;
@@ -26,8 +26,6 @@ mod tree_predictor;
 mod zstd_compression;
 
 mod utils;
-
-pub mod unmanaged_api;
 
 pub use stream_processor::{
     preflate_whole_deflate_stream, recreate_whole_deflate_stream, PreflateStreamChunkResult,

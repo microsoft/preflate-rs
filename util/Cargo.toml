@@ -6,23 +6,8 @@ authors = ["Kristof Roomp <kristofr@microsoft.com>"]
 license = "Apache-2.0"
 rust-version = "1.70"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
-
-[profile.release]
-debug=true
-
 [dependencies]
-anyhow = { version="1.0", features = ["backtrace"]}
-byteorder = "1.4"
-cabac = "0.6.0"
-clap = { version = "4.4", features = ["derive"] }
-default-boxed = "0.2"
-crc32fast = "1.3"
-libz-sys = "1.1"
-flate2 = "1.0"
-preflate-rs = { path = ".." }
-walkdir = "2.3"
-zstd = "0.13.0"
+preflate-rs = { path = "../lib" }
 
 [[bin]]
 name = "preflate_util"

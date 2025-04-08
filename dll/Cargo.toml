@@ -1,0 +1,14 @@
+[package]
+# we have a version number on the name in order to switch the dll name if we break compatibility
+# this makes sure that we can keep old versions around to decode old encodings since the format
+# is complicated enough that maintaining backwards compat is hard (even minor changes in the
+# predictor will break the format)
+name = "preflate_rs_0_7"
+edition = "2021"
+version = "0.7.0"
+
+[dependencies]
+preflate-rs = { path = "../lib" }
+
+[lib]
+crate-type = ["cdylib"]
