@@ -53,9 +53,9 @@ steps:
     AuthSignCertName: 'CodeSigningCertificate'
     FolderPath: '$(Build.SourcesDirectory)'
     Pattern: '
-      target\debug\preflate_rs.dll,
+      target\debug\preflate_rs_0_7.dll,
       target\debug\preflate_util.exe,
-      target\release\preflate_rs.dll,
+      target\release\preflate_rs_0_7.dll,
       target\release\preflate_util.exe'
     signConfigType: 'inlineSignParams'
     inlineOperation: |
