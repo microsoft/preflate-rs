@@ -1,3 +1,6 @@
+# root project only exists to refer to the packages
+# and run the end-to-end tests in the tests directory 
+
 [package]
 name = "preflate-rs-root"
 version = "0.0.0"
