@@ -3,6 +3,14 @@
  *  Licensed under the Apache License, Version 2.0. See LICENSE.txt in the project root for license information.
  *  This software incorporates material from third parties. See NOTICE.txt for details.
  *--------------------------------------------------------------------------------------------*/
+#![forbid(unsafe_code)]
+#![forbid(trivial_casts)]
+#![forbid(trivial_numeric_casts)]
+#![forbid(non_ascii_idents)]
+#![forbid(unused_extern_crates)]
+#![forbid(unused_import_braces)]
+#![forbid(redundant_lifetimes)]
+#![forbid(single_use_lifetimes)]
 
 mod bit_helper;
 mod cabac_codec;

@@ -747,7 +747,7 @@ pub fn test_predictor_incremental() {
             }
         }
 
-        start_pos += plain_text.len() as usize;
+        start_pos += plain_text.len();
 
         plain_text.shrink_to_dictionary();
     }

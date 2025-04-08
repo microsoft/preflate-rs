@@ -226,7 +226,7 @@ fn parse_and_recreate_png() {
 
     let (contents, _plain_text) = parse_deflate_whole(&deflate_stream).unwrap();
 
-    assert_eq!(deflate_stream.len(), contents.compressed_size as usize);
+    assert_eq!(deflate_stream.len(), contents.compressed_size);
 
     let total_chunk_length = idat_contents.total_chunk_length;
 

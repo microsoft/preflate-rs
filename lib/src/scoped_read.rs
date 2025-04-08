@@ -13,11 +13,10 @@ where
     fn advance(&mut self, amount: usize);
 
     fn scoped_read<
-        'a,
         T,
         F: FnOnce(&mut ScopedReaderWrapper<Self>) -> core::result::Result<T, PreflateError>,
     >(
-        &'a mut self,
+        &mut self,
         f: F,
     ) -> core::result::Result<T, PreflateError> {
         let mut w = ScopedReaderWrapper {

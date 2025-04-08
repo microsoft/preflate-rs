@@ -252,7 +252,7 @@ fn roundtrip_chunk_block_png() {
 
     // we know the first IDAT chunk starts at 83 (avoid testing the scan_deflate code in a unit teast)
     let (idat_contents, deflate_stream) = crate::idat_parse::parse_idat(&f[83..], 1).unwrap();
-    let mut stream = crate::stream_processor::PreflateStreamProcessor::new(usize::MAX, true);
+    let mut stream = PreflateStreamProcessor::new(usize::MAX, true);
     let results = stream.decompress(&deflate_stream, 1).unwrap();
 
     let total_chunk_length = idat_contents.total_chunk_length;

@@ -159,7 +159,7 @@ impl<H: HashImplementation> HashTableDepthEstimatorImpl<H> {
 
             self.chain_depth[usize::from(pos)] =
                 self.chain_depth[self.head[h as usize] as usize] + 1;
-            self.chain_depth_hash_verify[usize::from(pos)] = h as u16;
+            self.chain_depth_hash_verify[usize::from(pos)] = h;
 
             self.head[h as usize] = pos;
 
@@ -175,8 +175,8 @@ impl<H: HashImplementation> HashTableDepthEstimatorImpl<H> {
 
         // since we already calculated the dictionary add policy, we should
         // always be on the same chain as the the head
-        let cur_depth = self.get_node_depth(head, h as u16);
-        let match_depth = self.get_node_depth(match_pos, h as u16);
+        let cur_depth = self.get_node_depth(head, h);
+        let match_depth = self.get_node_depth(match_pos, h);
 
         debug_assert!(
             cur_depth >= match_depth,

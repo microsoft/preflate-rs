@@ -57,7 +57,7 @@ impl PlainText {
     /// is a maximum of 32KB in size.
     pub fn shrink_to_dictionary(&mut self) {
         //self.prefix_length = self.data.len() as i32;
-        self.pos_offset += (self.data.len() as i32 - self.prefix_length) as i32;
+        self.pos_offset += self.data.len() as i32 - self.prefix_length;
 
         let amount_to_keep = self.data.len().min(32768);
 
