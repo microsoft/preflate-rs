@@ -3,6 +3,8 @@
  *  Licensed under the Apache License, Version 2.0. See LICENSE.txt in the project root for license information.
  *  This software incorporates material from third parties. See NOTICE.txt for details.
  *--------------------------------------------------------------------------------------------*/
+
+// forbid lints that we already have eliminated from the codebase so they don't show up in the future
 #![forbid(unsafe_code)]
 #![forbid(trivial_casts)]
 #![forbid(trivial_numeric_casts)]
@@ -11,6 +13,12 @@
 #![forbid(unused_import_braces)]
 #![forbid(redundant_lifetimes)]
 #![forbid(single_use_lifetimes)]
+#![forbid(unused_crate_dependencies)]
+#![forbid(unused_extern_crates)]
+#![forbid(unused_lifetimes)]
+#![forbid(unused_macro_rules)]
+#![forbid(macro_use_extern_crate)]
+#![forbid(missing_unsafe_on_extern)]
 
 mod bit_helper;
 mod cabac_codec;
