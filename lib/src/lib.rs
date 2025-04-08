@@ -42,8 +42,8 @@ mod zstd_compression;
 mod utils;
 
 pub use stream_processor::{
-    preflate_whole_deflate_stream, recreate_whole_deflate_stream, PreflateStreamChunkResult,
-    PreflateStreamProcessor, RecreateStreamProcessor,
+    PreflateStreamChunkResult, PreflateStreamProcessor, RecreateStreamProcessor,
+    preflate_whole_deflate_stream, recreate_whole_deflate_stream,
 };
 
 pub use zstd_compression::{
@@ -53,10 +53,10 @@ pub use zstd_compression::{
 pub use preflate_error::ExitCode;
 pub use preflate_error::{PreflateError, Result};
 
-pub use container_processor::{
-    preflate_whole_into_container, recreate_whole_from_container, PreflateContainerProcessor,
-    ProcessBuffer, RecreateContainerProcessor,
-};
 pub use container_processor::{PreflateConfig, PreflateStats};
+pub use container_processor::{
+    PreflateContainerProcessor, ProcessBuffer, RecreateContainerProcessor,
+    preflate_whole_into_container, recreate_whole_from_container,
+};
 
 pub use zstd_compression::{ZstdCompressContext, ZstdDecompressContext};

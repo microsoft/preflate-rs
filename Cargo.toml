@@ -4,7 +4,8 @@
 [package]
 name = "preflate-rs-root"
 version = "0.0.0"
-edition = "2021"
+edition = "2024"
+rust-version = "1.85"
 
 [profile.release]
 debug=true

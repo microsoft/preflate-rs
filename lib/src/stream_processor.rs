@@ -12,19 +12,19 @@ use bitcode::{Decode, Encode};
 use cabac::vp8::{VP8Reader, VP8Writer};
 
 use crate::{
+    Result,
     cabac_codec::{PredictionDecoderCabac, PredictionEncoderCabac},
     deflate::{
         deflate_reader::DeflateParser, deflate_token::DeflateTokenBlock,
         deflate_writer::DeflateWriter,
     },
     estimator::preflate_parameter_estimator::{
-        estimate_preflate_parameters, TokenPredictorParameters,
+        TokenPredictorParameters, estimate_preflate_parameters,
     },
     preflate_error::{AddContext, ExitCode, PreflateError},
     preflate_input::{PlainText, PreflateInput},
     statistical_codec::{CodecCorrection, PredictionDecoder, PredictionEncoder},
     token_predictor::TokenPredictor,
-    Result,
 };
 
 /// the data required to reconstruct the deflate stream exactly the way that it was
@@ -777,7 +777,10 @@ pub fn analyze_compressed_data_verify_incremental(compressed_data: &[u8], plain_
             }
             Err(e) => {
                 if e.exit_code() == ExitCode::PredictionFailure {
-                    println!("Prediction failure for {:?} not great, but some corner cases where the initial estimator isn't totaly right", e);
+                    println!(
+                        "Prediction failure for {:?} not great, but some corner cases where the initial estimator isn't totaly right",
+                        e
+                    );
                     return;
                 }
                 assert_eq!(

@@ -2,8 +2,8 @@ use std::{io::Cursor, ops::Range};
 
 use crate::{
     estimator::preflate_parameter_estimator::TokenPredictorParameters,
-    idat_parse::{parse_idat, IdatContents},
-    preflate_error::{err_exit_code, ExitCode},
+    idat_parse::{IdatContents, parse_idat},
+    preflate_error::{ExitCode, err_exit_code},
     preflate_input::PlainText,
     stream_processor::{PreflateStreamChunkResult, PreflateStreamProcessor},
 };

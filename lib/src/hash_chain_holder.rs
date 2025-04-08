@@ -13,7 +13,7 @@ use crate::hash_algorithm::{
     ZlibRotatingHash, ZlibRotatingHashFixed,
 };
 use crate::hash_chain::{HashChain, HashChainDefault, HashChainLibflate4, MAX_UPDATE_HASH_BATCH};
-use crate::preflate_error::{err_exit_code, ExitCode, Result};
+use crate::preflate_error::{ExitCode, Result, err_exit_code};
 use crate::preflate_input::PreflateInput;
 
 use std::cmp;

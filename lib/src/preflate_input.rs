@@ -5,8 +5,8 @@
  *--------------------------------------------------------------------------------------------*/
 
 use crate::{
-    preflate_error::{err_exit_code, Result},
     ExitCode,
+    preflate_error::{Result, err_exit_code},
 };
 
 /// represents the uncompressed data, including a prefix that is may be referenced by

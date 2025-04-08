@@ -9,8 +9,8 @@ use crate::preflate_error::Result;
 use super::deflate_token::{DeflateHuffmanType, DeflateTokenBlockType};
 use super::{
     deflate_constants::{
-        quantize_distance, quantize_length, DIST_BASE_TABLE, DIST_EXTRA_TABLE, LENGTH_BASE_TABLE,
-        LENGTH_EXTRA_TABLE, MIN_MATCH, NONLEN_CODE_COUNT,
+        DIST_BASE_TABLE, DIST_EXTRA_TABLE, LENGTH_BASE_TABLE, LENGTH_EXTRA_TABLE, MIN_MATCH,
+        NONLEN_CODE_COUNT, quantize_distance, quantize_length,
     },
     deflate_token::{DeflateToken, DeflateTokenBlock},
 };

@@ -6,7 +6,7 @@
 
 use std::io::BufRead;
 
-use crate::preflate_error::{err_exit_code, ExitCode, Result};
+use crate::preflate_error::{ExitCode, Result, err_exit_code};
 
 use crate::deflate::{
     bit_reader::ReadBits, bit_writer::BitWriter, deflate_constants::TREE_CODE_ORDER_TABLE,

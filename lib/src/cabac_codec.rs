@@ -286,7 +286,7 @@ impl<R: CabacReader<CTX>, CTX: Default> PredictionDecoder for PredictionDecoderC
 
 #[test]
 fn roundtree_cabac_decoding() {
-    use crate::statistical_codec::{drive_encoder, verify_decoder, CodecAction};
+    use crate::statistical_codec::{CodecAction, drive_encoder, verify_decoder};
     use cabac::vp8::{VP8Reader, VP8Writer};
     use std::io::Cursor;
 

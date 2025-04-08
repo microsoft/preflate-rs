@@ -4,7 +4,7 @@ use crate::preflate_error::Result;
 
 use crate::{
     container_processor::{read_varint, write_varint},
-    preflate_error::{err_exit_code, ExitCode},
+    preflate_error::{ExitCode, err_exit_code},
 };
 
 /// The contents of a PNG IDat stream. These are treated specially since they

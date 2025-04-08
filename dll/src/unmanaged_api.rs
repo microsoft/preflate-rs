@@ -1,6 +1,6 @@
 use std::{
     io::Cursor,
-    panic::{catch_unwind, AssertUnwindSafe},
+    panic::{AssertUnwindSafe, catch_unwind},
     ptr::{null, null_mut},
 };
 
@@ -73,7 +73,7 @@ fn test_copy_cstring_utf8_to_buffer() {
 ///  bits 0-4 zstd level to use (0-16)
 ///  bit 5: test baseline (does a baseline zstd compression of the input passed in so we
 /// can compare the preflate compression + zstd to just plain zstd compression)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn create_compression_context(flags: u32) -> *mut std::ffi::c_void {
     match catch_unwind_result(|| {
         let test_baseline = (flags & 0x10) != 0;
@@ -96,18 +96,20 @@ pub unsafe extern "C" fn create_compression_context(flags: u32) -> *mut std::ffi
 }
 
 /// Frees the compression context
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn free_compression_context(context: *mut std::ffi::c_void) {
-    let x = Box::from_raw(context as *mut (u32, CompressionContext));
-    assert_eq!(x.0, 12345678, "invalid context passed in");
-    // let Box destroy the object. If this asserts, we have some kind of memory corruption so better to just kill the process.
+    unsafe {
+        let x = Box::from_raw(context as *mut (u32, CompressionContext));
+        assert_eq!(x.0, 12345678, "invalid context passed in");
+        // let Box destroy the object. If this asserts, we have some kind of memory corruption so better to just kill the process.
+    }
 }
 
 /// Compresses a file using the preflate algorithm.
 ///
 /// Returns 0 if more data is needed or if there is more data available, or 1 if done successfully.
 /// Returns < 0 if there is an error (negative value is the error code)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn compress_buffer(
     context: *mut std::ffi::c_void,
     input_buffer: *const u8,
@@ -119,48 +121,53 @@ pub unsafe extern "C" fn compress_buffer(
     error_string: *mut std::os::raw::c_uchar,
     error_string_buffer_len: u64,
 ) -> i32 {
-    match catch_unwind_result(|| {
-        let context = context as *mut (u32, CompressionContext);
-        let (magic, context) = &mut *context;
-        assert_eq!(*magic, 12345678, "invalid context passed in");
+    unsafe {
+        match catch_unwind_result(|| {
+            let context = context as *mut (u32, CompressionContext);
+            let (magic, context) = &mut *context;
+            assert_eq!(*magic, 12345678, "invalid context passed in");
 
-        let input = if input_buffer == null() {
-            &[]
-        } else {
-            std::slice::from_raw_parts(input_buffer, input_buffer_size as usize)
-        };
-        let output = if output_buffer == null_mut() {
-            &mut []
-        } else {
-            std::slice::from_raw_parts_mut(output_buffer, output_buffer_size as usize)
-        };
+            let input = if input_buffer == null() {
+                &[]
+            } else {
+                std::slice::from_raw_parts(input_buffer, input_buffer_size as usize)
+            };
+            let output = if output_buffer == null_mut() {
+                &mut []
+            } else {
+                std::slice::from_raw_parts_mut(output_buffer, output_buffer_size as usize)
+            };
 
-        let mut writer = Cursor::new(output);
-        let done = context.process_buffer(
-            input,
-            input_complete,
-            &mut writer,
-            output_buffer_size as usize,
-        )?;
+            let mut writer = Cursor::new(output);
+            let done = context.process_buffer(
+                input,
+                input_complete,
+                &mut writer,
+                output_buffer_size as usize,
+            )?;
 
-        *result_size = writer.position().into();
-        Ok(done)
-    }) {
-        Ok(done) => done as i32,
-        Err(e) => {
-            if error_string != null_mut() {
-                copy_cstring_utf8_to_buffer(
-                    e.message(),
-                    std::slice::from_raw_parts_mut(error_string, error_string_buffer_len as usize),
-                );
+            *result_size = writer.position().into();
+            Ok(done)
+        }) {
+            Ok(done) => done as i32,
+            Err(e) => {
+                if error_string != null_mut() {
+                    copy_cstring_utf8_to_buffer(
+                        e.message(),
+                        std::slice::from_raw_parts_mut(
+                            error_string,
+                            error_string_buffer_len as usize,
+                        ),
+                    );
+                }
+                -e.exit_code().as_integer_error_code()
             }
-            -e.exit_code().as_integer_error_code()
         }
     }
 }
 
 /// returns the compression statistics associated with the compression context
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn get_compression_stats(
     context: *mut std::ffi::c_void,
     deflate_compressed_size: *mut u64,
@@ -170,25 +177,27 @@ pub unsafe extern "C" fn get_compression_stats(
     overhead_bytes: *mut u64,
     hash_algorithm: *mut u32,
 ) {
-    let context = context as *mut (u32, CompressionContext);
-    let (magic, context) = &*context;
-    assert_eq!(*magic, 12345678, "invalid context passed in");
+    unsafe {
+        let context = context as *mut (u32, CompressionContext);
+        let (magic, context) = &*context;
+        assert_eq!(*magic, 12345678, "invalid context passed in");
 
-    let stats = context.stats();
+        let stats = context.stats();
 
-    *deflate_compressed_size = stats.deflate_compressed_size;
-    *zstd_compressed_size = stats.zstd_compressed_size;
-    *zstd_baseline_size = stats.zstd_baseline_size;
-    *uncompressed_size = stats.uncompressed_size;
-    *overhead_bytes = stats.overhead_bytes;
-    *hash_algorithm = stats.hash_algorithm.to_u16() as u32;
+        *deflate_compressed_size = stats.deflate_compressed_size;
+        *zstd_compressed_size = stats.zstd_compressed_size;
+        *zstd_baseline_size = stats.zstd_baseline_size;
+        *uncompressed_size = stats.uncompressed_size;
+        *overhead_bytes = stats.overhead_bytes;
+        *hash_algorithm = stats.hash_algorithm.to_u16() as u32;
+    }
 }
 
 type DecompressionContext = ZstdDecompressContext<RecreateContainerProcessor>;
 type CompressionContext = ZstdCompressContext<PreflateContainerProcessor>;
 
 /// Allocates new decompression context, must be freed with free_decompression_context
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn create_decompression_context(
     _flags: u32,
     capacity: u64,
@@ -209,18 +218,20 @@ pub unsafe extern "C" fn create_decompression_context(
 }
 
 /// Frees the decompression context
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn free_decompression_context(context: *mut std::ffi::c_void) {
-    let x = Box::from_raw(context as *mut (u32, DecompressionContext));
-    assert_eq!(x.0, 87654321, "invalid context passed in");
-    // let Box destroy the object
+    unsafe {
+        let x = Box::from_raw(context as *mut (u32, DecompressionContext));
+        assert_eq!(x.0, 87654321, "invalid context passed in");
+        // let Box destroy the object
+    }
 }
 
 /// Recreates the original file using the preflate algorithm.
 ///
 /// Returns 0 if more data is needed or if there is more data available, or 1 if done successfully.
 /// Returns < 0 if there is an error (negative value is the error code)
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn decompress_buffer(
     context: *mut std::ffi::c_void,
     input_buffer: *const u8,
@@ -232,40 +243,42 @@ pub unsafe extern "C" fn decompress_buffer(
     error_string: *mut std::os::raw::c_uchar,
     error_string_buffer_len: u64,
 ) -> i32 {
-    match catch_unwind_result(|| {
-        let context = context as *mut (u32, DecompressionContext);
-        let (magic, context) = &mut *context;
-        assert_eq!(*magic, 87654321, "invalid context passed in");
+    unsafe {
+        match catch_unwind_result(|| {
+            let context = context as *mut (u32, DecompressionContext);
+            let (magic, context) = &mut *context;
+            assert_eq!(*magic, 87654321, "invalid context passed in");
 
-        let input = if input_buffer == null() {
-            &[]
-        } else {
-            std::slice::from_raw_parts(input_buffer, input_buffer_size as usize)
-        };
-        let output = if output_buffer == null_mut() {
-            &mut []
-        } else {
-            std::slice::from_raw_parts_mut(output_buffer, output_buffer_size as usize)
-        };
+            let input = if input_buffer == null() {
+                &[]
+            } else {
+                std::slice::from_raw_parts(input_buffer, input_buffer_size as usize)
+            };
+            let output = if output_buffer == null_mut() {
+                &mut []
+            } else {
+                std::slice::from_raw_parts_mut(output_buffer, output_buffer_size as usize)
+            };
 
-        let mut writer = Cursor::new(output);
-        let done = context.process_buffer(
-            input,
-            input_complete,
-            &mut writer,
-            output_buffer_size as usize,
-        )?;
+            let mut writer = Cursor::new(output);
+            let done = context.process_buffer(
+                input,
+                input_complete,
+                &mut writer,
+                output_buffer_size as usize,
+            )?;
 
-        *result_size = writer.position().into();
-        Ok(done)
-    }) {
-        Ok(done) => done as i32,
-        Err(e) => {
-            copy_cstring_utf8_to_buffer(
-                e.message(),
-                std::slice::from_raw_parts_mut(error_string, error_string_buffer_len as usize),
-            );
-            -e.exit_code().as_integer_error_code()
+            *result_size = writer.position().into();
+            Ok(done)
+        }) {
+            Ok(done) => done as i32,
+            Err(e) => {
+                copy_cstring_utf8_to_buffer(
+                    e.message(),
+                    std::slice::from_raw_parts_mut(error_string, error_string_buffer_len as usize),
+                );
+                -e.exit_code().as_integer_error_code()
+            }
         }
     }
 }
@@ -360,7 +373,9 @@ fn extern_interface() {
             &mut hash_algorithm,
         );
 
-        println!("stats: overhead={overhead_bytes}, uncompressed={uncompressed_size}, deflate_compressed={deflate_compressed_size} zstd_compressed={zstd_compressed_size}, zstd_baseline={zstd_baseline_size} hash_algorithm={hash_algorithm}");
+        println!(
+            "stats: overhead={overhead_bytes}, uncompressed={uncompressed_size}, deflate_compressed={deflate_compressed_size} zstd_compressed={zstd_compressed_size}, zstd_baseline={zstd_baseline_size} hash_algorithm={hash_algorithm}"
+        );
 
         free_compression_context(compression_context);
     }
@@ -464,9 +479,11 @@ fn test_error_translation() {
 
         let error_string = std::ffi::CStr::from_bytes_with_nul(&error_string[0..len + 1]).unwrap();
 
-        assert!(error_string
-            .to_str()
-            .unwrap()
-            .starts_with("more data provided after input_complete signaled"),);
+        assert!(
+            error_string
+                .to_str()
+                .unwrap()
+                .starts_with("more data provided after input_complete signaled"),
+        );
     }
 }

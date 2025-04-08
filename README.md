@@ -33,6 +33,8 @@ The following differences are corrected:
 
 Note that the data formats of the recompression information are different and incompatible to the original preflate implementation, as this library uses a different arithmetic encoder (shared from the Lepton JPEG compression library).
 
+[![unsafe forbidden](https://img.shields.io/badge/unsafe-forbidden-success.svg)](https://github.com/rust-secure-code/safety-dance/)
+
 ### Overhead
 
 In order to faithfully recreate the exact deflate stream, the library stores

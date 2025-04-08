@@ -18,7 +18,7 @@ use crate::{
 use super::{
     add_policy_estimator::estimate_add_policy,
     complevel_estimator::estimate_preflate_comp_level,
-    preflate_stream_info::{extract_preflate_info, PreflateStreamInfo},
+    preflate_stream_info::{PreflateStreamInfo, extract_preflate_info},
 };
 
 #[derive(Encode, Decode, Debug, Copy, Clone, Eq, PartialEq)]

@@ -8,7 +8,7 @@ use byteorder::{LittleEndian, ReadBytesExt};
 
 use crate::{
     deflate::deflate_token::{DeflateHuffmanType, DeflateToken, DeflateTokenReference},
-    preflate_error::{err_exit_code, AddContext, ExitCode, Result},
+    preflate_error::{AddContext, ExitCode, Result, err_exit_code},
     preflate_input::PlainText,
 };
 

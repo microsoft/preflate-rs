@@ -4,10 +4,10 @@
 # is complicated enough that maintaining backwards compat is hard (even minor changes in the
 # predictor will break the format)
 name = "preflate_rs_0_7"
-edition = "2021"
+edition = "2024"
 authors = ["Kristof Roomp <kristofr@microsoft.com>"]
 license = "Apache-2.0"
-rust-version = "1.82"
+rust-version = "1.85"
 
 
 [dependencies]

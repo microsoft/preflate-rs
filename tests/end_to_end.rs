@@ -299,8 +299,8 @@ fn libdeflate_compress(in_data: &[u8], level: i32) -> Vec<u8> {
 fn libngzsys_compress(input_data: &[u8], level: i32) -> Vec<u8> {
     let mut output = Vec::new();
     use libz_ng_sys::{
-        deflate, deflateEnd, deflateInit2_, z_stream, zlibVersion, Z_DEFAULT_STRATEGY, Z_DEFLATED,
-        Z_FINISH, Z_OK, Z_STREAM_END,
+        Z_DEFAULT_STRATEGY, Z_DEFLATED, Z_FINISH, Z_OK, Z_STREAM_END, deflate, deflateEnd,
+        deflateInit2_, z_stream, zlibVersion,
     };
     unsafe {
         let mut z_stream = z_stream {

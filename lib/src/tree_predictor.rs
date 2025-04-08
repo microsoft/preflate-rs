@@ -9,10 +9,10 @@ use crate::{
     deflate::deflate_constants::{CODETREE_CODE_COUNT, TREE_CODE_ORDER_TABLE},
     deflate::deflate_token::TokenFrequency,
     deflate::{
-        huffman_calc::{calc_bit_lengths, HufftreeBitCalc},
+        huffman_calc::{HufftreeBitCalc, calc_bit_lengths},
         huffman_encoding::{HuffmanOriginalEncoding, TreeCodeType},
     },
-    preflate_error::{err_exit_code, ExitCode, Result},
+    preflate_error::{ExitCode, Result, err_exit_code},
     statistical_codec::{CodecCorrection, PredictionDecoder, PredictionEncoder},
 };
 
