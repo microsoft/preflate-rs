@@ -10,7 +10,7 @@ Decompresses existing DEFLATE streams to allow for better compression (eg with Z
 allowing the exact original binary DEFLATE stream to be recreated by detecting the parameters
 used during compression.
 """
-readme = "README.md"
+readme = "../README.md"
 repository = "https://github.com/microsoft/preflate-rs"
 categories = ["compression"]
 keywords = ["gzip", "deflate", "zlib", "zip"]
