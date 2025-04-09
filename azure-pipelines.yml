@@ -21,7 +21,7 @@ steps:
 - task: ssplat.rust-build-release-tools.rust-installer-task.RustInstaller@1
   displayName: 'Install Rust '
   inputs:
-    rustVersion: 'ms-1.82'
+    rustVersion: 'ms-1.85'
     additionalTargets: 'i686-pc-windows-msvc'
     toolchainFeed: https://onedrive.pkgs.visualstudio.com/b52099a6-3b13-4b08-9270-a07884a10e3d/_packaging/RustTools/nuget/v3/index.json
     cratesIoFeedOverride: sparse+https://onedrive.pkgs.visualstudio.com/b52099a6-3b13-4b08-9270-a07884a10e3d/_packaging/RustCratesIO/Cargo/index/
@@ -60,9 +60,9 @@ steps:
     AuthSignCertName: 'CodeSigningCertificate'
     FolderPath: '$(Build.SourcesDirectory)'
     Pattern: '
-      target\debug\preflate_rs.dll,
+      target\debug\preflate_rs_0_7.dll,
       target\debug\preflate_util.exe,
-      target\release\preflate_rs.dll,
+      target\release\preflate_rs_0_7.dll,
       target\release\preflate_util.exe'
     signConfigType: 'inlineSignParams'
     inlineOperation: |
@@ -132,7 +132,7 @@ steps:
       fi
   displayName: 'Check if file has changed'
   name: CheckNuSpecFileChange
-  
+
 - task: NuGetCommand@2
   displayName: 'NuGet push'
   inputs:
@@ -140,4 +140,5 @@ steps:
     packagesToPush: '$(Build.ArtifactStagingDirectory)\*.nupkg'
     publishVstsFeed: 'b87285d9-99ab-48db-a000-cb0cc8a2a1b5'
     allowPackageConflicts: true
-  condition: and(succeeded(), in(variables['Build.Reason'], 'Manual'))
+  condition: and(succeeded(), eq(variables['nuspecFileChanged'], 'true'), eq(variables['Build.SourceBranchName'], 'main'))
+

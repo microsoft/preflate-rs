@@ -72,6 +72,7 @@ impl<T: Read> Read for TakeReader<T> {
 #[cfg(test)]
 pub fn write_file(filename: &str, data: &[u8]) {
     let filename = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
         .join("samples")
         .join(filename);
 
@@ -179,7 +180,9 @@ pub fn assert_block_eq(
 pub fn test_on_all_deflate_files(f: impl Fn(&[u8])) {
     use std::io::Read;
 
-    let searchpath = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("samples");
+    let searchpath = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("samples");
 
     for entry in std::fs::read_dir(searchpath).unwrap() {
         let entry = entry.unwrap();

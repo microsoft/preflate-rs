@@ -13,7 +13,7 @@ use crate::hash_algorithm::{
     ZlibRotatingHash, ZlibRotatingHashFixed,
 };
 use crate::hash_chain::{HashChain, HashChainDefault, HashChainLibflate4, MAX_UPDATE_HASH_BATCH};
-use crate::preflate_error::{err_exit_code, ExitCode, Result};
+use crate::preflate_error::{ExitCode, Result, err_exit_code};
 use crate::preflate_input::PreflateInput;
 
 use std::cmp;
@@ -422,7 +422,7 @@ fn match_less3<const OFFSET: u32>(
 
         let match_start = input.cur_chars(OFFSET as i32 - dist as i32);
 
-        if read_u16_le(match_start, (best_len as u32 - 1) as usize) == c0 {
+        if read_u16_le(match_start, (best_len - 1) as usize) == c0 {
             let match_length = prefix_compare(match_start, input_chars, max_len);
 
             if match_length >= 3 && match_length > best_len {
@@ -484,7 +484,7 @@ fn match_4<const OFFSET: u32>(
 
         let match_start = input.cur_chars(OFFSET as i32 - dist as i32);
 
-        if read_u32_le(match_start, (best_len as u32 - 3) as usize) == c0 {
+        if read_u32_le(match_start, (best_len - 3) as usize) == c0 {
             let match_length = prefix_compare(match_start, input_chars, max_len);
 
             if match_length > best_len {

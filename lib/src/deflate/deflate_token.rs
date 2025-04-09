@@ -7,7 +7,7 @@
 use crate::deflate::huffman_encoding::HuffmanOriginalEncoding;
 
 use super::deflate_constants::{
-    quantize_distance, quantize_length, DIST_CODE_COUNT, LITLENDIST_CODE_COUNT, NONLEN_CODE_COUNT,
+    DIST_CODE_COUNT, LITLENDIST_CODE_COUNT, NONLEN_CODE_COUNT, quantize_distance, quantize_length,
 };
 
 /// In a DEFLATE stream, tokens are either literals (bytes) or references to previous bytes

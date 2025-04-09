@@ -8,7 +8,7 @@ use byteorder::{LittleEndian, ReadBytesExt};
 
 use crate::{
     deflate::deflate_token::{DeflateHuffmanType, DeflateToken, DeflateTokenReference},
-    preflate_error::{err_exit_code, AddContext, ExitCode, Result},
+    preflate_error::{AddContext, ExitCode, Result, err_exit_code},
     preflate_input::PlainText,
 };
 
@@ -164,7 +164,7 @@ impl DeflateParser {
 
             match mode {
                 0 => {
-                    let padding_bits = self.bit_reader.read_padding_bits() as u8;
+                    let padding_bits = self.bit_reader.read_padding_bits();
                     if padding_bits != 0 {
                         return err_exit_code(
                             ExitCode::NonZeroPadding,

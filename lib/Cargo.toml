@@ -1,0 +1,33 @@
+[package]
+name = "preflate-rs"
+version = "0.7.0"
+edition = "2024"
+authors = ["Kristof Roomp <kristofr@microsoft.com>"]
+license = "Apache-2.0"
+rust-version = "1.85"
+description = """
+Decompresses existing DEFLATE streams to allow for better compression (eg with ZStandard) while 
+allowing the exact original binary DEFLATE stream to be recreated by detecting the parameters
+used during compression.
+"""
+readme = "../README.md"
+repository = "https://github.com/microsoft/preflate-rs"
+categories = ["compression"]
+keywords = ["gzip", "deflate", "zlib", "zip"]
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+byteorder = "1.4"
+cabac = "0.15.0"
+default-boxed = "0.2"
+zstd = "0.13.0"
+crc32fast = "1.3"
+bitcode = "0.6.3"
+deranged = "0.4"
+
+
+[lib]
+name = "preflate_rs"
+crate-type = ["lib"]
+

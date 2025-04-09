@@ -9,8 +9,8 @@ use crate::{
     deflate::{
         deflate_constants::MIN_MATCH,
         deflate_token::{
-            DeflateHuffmanType, DeflateToken, DeflateTokenBlock, DeflateTokenBlockType,
-            DeflateTokenReference, TokenFrequency, BT_DYNAMICHUFF, BT_STATICHUFF, BT_STORED,
+            BT_DYNAMICHUFF, BT_STATICHUFF, BT_STORED, DeflateHuffmanType, DeflateToken,
+            DeflateTokenBlock, DeflateTokenBlockType, DeflateTokenReference, TokenFrequency,
         },
         huffman_calc::HufftreeBitCalc,
     },
@@ -18,8 +18,8 @@ use crate::{
         preflate_parameter_estimator::{BlockTypeStrategy, TokenPredictorParameters},
         preflate_parse_config::MatchingType,
     },
-    hash_chain_holder::{new_hash_chain_holder, HashChainHolder, MatchResult},
-    preflate_error::{err_exit_code, AddContext, ExitCode, Result},
+    hash_chain_holder::{HashChainHolder, MatchResult, new_hash_chain_holder},
+    preflate_error::{AddContext, ExitCode, Result, err_exit_code},
     preflate_input::PreflateInput,
     statistical_codec::{CodecCorrection, PredictionDecoder, PredictionEncoder},
     tree_predictor::{predict_tree_for_block, recreate_tree_for_block},
@@ -747,7 +747,7 @@ pub fn test_predictor_incremental() {
             }
         }
 
-        start_pos += plain_text.len() as usize;
+        start_pos += plain_text.len();
 
         plain_text.shrink_to_dictionary();
     }

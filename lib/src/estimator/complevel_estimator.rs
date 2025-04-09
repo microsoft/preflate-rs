@@ -10,13 +10,13 @@
 use crate::{
     deflate::deflate_reader::DeflateContents,
     hash_algorithm::HashAlgorithm,
-    preflate_error::{err_exit_code, ExitCode, Result},
+    preflate_error::{ExitCode, Result, err_exit_code},
     preflate_input::PlainText,
 };
 
 use super::{
     add_policy_estimator::DictionaryAddPolicy,
-    depth_estimator::{new_depth_estimator, run_depth_candidates, HashTableDepthEstimator},
+    depth_estimator::{HashTableDepthEstimator, new_depth_estimator, run_depth_candidates},
     preflate_parse_config::{
         MatchingType, SLOW_PREFLATE_PARSER_SETTINGS, ZLIB_PREFLATE_PARSER_SETTINGS,
     },

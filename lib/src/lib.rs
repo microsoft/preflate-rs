@@ -4,7 +4,21 @@
  *  This software incorporates material from third parties. See NOTICE.txt for details.
  *--------------------------------------------------------------------------------------------*/
 
-#![doc = include_str!("../README.md")]
+// forbid lints that we already have eliminated from the codebase so they don't show up in the future
+#![forbid(unsafe_code)]
+#![forbid(trivial_casts)]
+#![forbid(trivial_numeric_casts)]
+#![forbid(non_ascii_idents)]
+#![forbid(unused_extern_crates)]
+#![forbid(unused_import_braces)]
+#![forbid(redundant_lifetimes)]
+#![forbid(single_use_lifetimes)]
+#![forbid(unused_crate_dependencies)]
+#![forbid(unused_extern_crates)]
+#![forbid(unused_lifetimes)]
+#![forbid(unused_macro_rules)]
+#![forbid(macro_use_extern_crate)]
+#![forbid(missing_unsafe_on_extern)]
 
 mod bit_helper;
 mod cabac_codec;
@@ -27,11 +41,9 @@ mod zstd_compression;
 
 mod utils;
 
-pub mod unmanaged_api;
-
 pub use stream_processor::{
-    preflate_whole_deflate_stream, recreate_whole_deflate_stream, PreflateStreamChunkResult,
-    PreflateStreamProcessor, RecreateStreamProcessor,
+    PreflateStreamChunkResult, PreflateStreamProcessor, RecreateStreamProcessor,
+    preflate_whole_deflate_stream, recreate_whole_deflate_stream,
 };
 
 pub use zstd_compression::{
@@ -41,10 +53,10 @@ pub use zstd_compression::{
 pub use preflate_error::ExitCode;
 pub use preflate_error::{PreflateError, Result};
 
-pub use container_processor::{
-    preflate_whole_into_container, recreate_whole_from_container, PreflateContainerProcessor,
-    ProcessBuffer, RecreateContainerProcessor,
-};
 pub use container_processor::{PreflateConfig, PreflateStats};
+pub use container_processor::{
+    PreflateContainerProcessor, ProcessBuffer, RecreateContainerProcessor,
+    preflate_whole_into_container, recreate_whole_from_container,
+};
 
 pub use zstd_compression::{ZstdCompressContext, ZstdDecompressContext};

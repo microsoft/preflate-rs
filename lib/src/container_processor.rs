@@ -7,14 +7,14 @@ use std::{
 
 use crate::{
     hash_algorithm::HashAlgorithm,
-    idat_parse::{recreate_idat, IdatContents},
-    preflate_error::{err_exit_code, AddContext, ExitCode, PreflateError, Result},
-    scan_deflate::{find_deflate_stream, FoundStream, FoundStreamType},
+    idat_parse::{IdatContents, recreate_idat},
+    preflate_error::{AddContext, ExitCode, PreflateError, Result, err_exit_code},
+    scan_deflate::{FoundStream, FoundStreamType, find_deflate_stream},
     scoped_read::ScopedRead,
     stream_processor::{
-        recreate_whole_deflate_stream, PreflateStreamProcessor, RecreateStreamProcessor,
+        PreflateStreamProcessor, RecreateStreamProcessor, recreate_whole_deflate_stream,
     },
-    utils::{write_dequeue, TakeReader},
+    utils::{TakeReader, write_dequeue},
 };
 
 /// Configuration for the deflate process
@@ -252,7 +252,7 @@ fn roundtrip_chunk_block_png() {
 
     // we know the first IDAT chunk starts at 83 (avoid testing the scan_deflate code in a unit teast)
     let (idat_contents, deflate_stream) = crate::idat_parse::parse_idat(&f[83..], 1).unwrap();
-    let mut stream = crate::stream_processor::PreflateStreamProcessor::new(usize::MAX, true);
+    let mut stream = PreflateStreamProcessor::new(usize::MAX, true);
     let results = stream.decompress(&deflate_stream, 1).unwrap();
 
     let total_chunk_length = idat_contents.total_chunk_length;
