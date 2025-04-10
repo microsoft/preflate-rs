@@ -42,7 +42,7 @@ steps:
   inputs:
     mergeTestResults: true
 
-- script: 'cargo build --locked -all --release 2>&1'
+- script: 'cargo build --locked --all --release 2>&1'
   displayName: 'Build Release'
 
 - task: UseDotNet@2
