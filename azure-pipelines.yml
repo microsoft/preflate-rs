@@ -139,5 +139,5 @@ steps:
     packagesToPush: '$(Build.ArtifactStagingDirectory)\*.nupkg'
     publishVstsFeed: 'b87285d9-99ab-48db-a000-cb0cc8a2a1b5'
     allowPackageConflicts: true
-  condition: and(succeeded(), eq(variables['nuspecFileChanged'], 'true'), eq(variables['Build.SourceBranchName'], 'main'))
+  condition: and(succeeded(), eq(variables['CheckNuSpecFileChange.nuspecFileChanged'], 'true'), eq(variables['Build.SourceBranchName'], 'main'))
 
