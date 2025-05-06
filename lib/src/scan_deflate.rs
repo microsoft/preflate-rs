@@ -21,6 +21,17 @@ pub struct FoundStream {
     pub corrections: Vec<u8>,
 }
 
+impl std::fmt::Debug for FoundStream {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "FoundStream({:?}, correction={})",
+            self.chunk_type,
+            self.corrections.len()
+        )
+    }
+}
+
 pub enum FoundStreamType {
     /// Deflate stream
     DeflateStream(TokenPredictorParameters, PreflateStreamProcessor),
@@ -28,6 +39,17 @@ pub enum FoundStreamType {
     /// PNG IDAT, which is a concatenated Zlib stream of IDAT chunks. This
     /// is special since the Deflate stream is split into IDAT chunks.
     IDATDeflate(TokenPredictorParameters, IdatContents, PlainText),
+}
+
+impl std::fmt::Debug for FoundStreamType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            FoundStreamType::DeflateStream(p, _) => write!(f, "DeflateStream({:?})", p),
+            FoundStreamType::IDATDeflate(p, idat, _) => {
+                write!(f, "IDATDeflate({:?}, {:?})", p, idat.chunk_sizes)
+            }
+        }
+    }
 }
 
 #[derive(Hash, Eq, PartialEq, Clone, Debug)]

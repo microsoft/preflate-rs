@@ -93,10 +93,15 @@ impl<D: ProcessBuffer> ProcessBuffer for ZstdCompressContext<D> {
 
         if done_write && !self.done_write {
             self.done_write = true;
-            self.zstd_compress.flush().context()?;
+            self.zstd_compress
+                .flush()
+                .map_err(|e| PreflateError::new(ExitCode::ZstdError, e.to_string()))
+                .context()?;
 
             if let Some(encoder) = &mut self.test_baseline {
-                encoder.do_finish()?;
+                encoder
+                    .do_finish()
+                    .map_err(|e| PreflateError::new(ExitCode::ZstdError, e.to_string()))?;
                 self.zstd_baseline_size = encoder.get_mut().length as u64;
             }
         }
@@ -193,11 +198,17 @@ impl<D: ProcessBuffer> ProcessBuffer for ZstdDecompressContext<D> {
         }
 
         if input.len() > 0 {
-            self.zstd_decompress.write_all(input).context()?;
+            self.zstd_decompress
+                .write_all(input)
+                .map_err(|e| PreflateError::new(ExitCode::ZstdError, e.to_string()))
+                .context()?;
         }
 
         if input_complete && !self.zstd_decompress.get_mut().input_complete {
-            self.zstd_decompress.flush().context()?;
+            self.zstd_decompress
+                .flush()
+                .map_err(|e| PreflateError::new(ExitCode::ZstdError, e.to_string()))
+                .context()?;
 
             self.zstd_decompress.get_mut().input_complete = true;
         }

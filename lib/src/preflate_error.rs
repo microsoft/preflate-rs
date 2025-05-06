@@ -11,24 +11,31 @@ use std::num::TryFromIntError;
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[non_exhaustive]
 pub enum ExitCode {
-    ReadDeflate = 1,
-    InvalidPredictionData = 2,
-    AnalyzeFailed = 3,
+    /// Could not reconstruct the deflate stream. This usually means that the data is corrupt.
     RecompressFailed = 4,
+
+    /// Rountrip check failed. This means that the data was not compressed properly.
     RoundtripMismatch = 5,
-    ReadBlock = 6,
-    PredictBlock = 7,
-    PredictTree = 8,
-    RecreateBlock = 9,
-    RecreateTree = 10,
-    EncodeBlock = 11,
+
+    /// The compression wrapper was not valid, which means we cannot decompress the data.
     InvalidCompressedWrapper = 12,
+
+    /// Error from zstd compression library.
     ZstdError = 14,
-    InvalidParameterHeader = 15,
+
+    /// Unexpected end of stream. This is usually a sign that the data is corrupt.
     ShortRead = 16,
+
+    /// Error from the IO layer, eg Reader or Writer.
     OsError = 17,
+
+    /// Internal error in the library.
     GeneralFailure = 18,
+
+    /// Invalid PNG IDat chunk.
     InvalidIDat = 19,
+
+    /// The deflate data stream contains an invalid match.
     MatchNotFound = 20,
 
     /// The deflate data stream is invalid or corrupt and cannot be properly read
@@ -41,6 +48,8 @@ pub enum ExitCode {
     /// data would be larger than the original data.
     NoCompressionCandidates = 22,
 
+    /// API was called with invalid parameters. For example, data was
+    /// passed in after indicting that the stream was finished.
     InvalidParameter = 23,
 
     /// panic in rust code
@@ -216,11 +225,11 @@ impl From<PreflateError> for std::io::Error {
 fn test_error_translation() {
     // test wrapping inside an io error
     fn my_std_error() -> core::result::Result<(), std::io::Error> {
-        Err(PreflateError::new(ExitCode::AnalyzeFailed, "test error").into())
+        Err(PreflateError::new(ExitCode::RecompressFailed, "test error").into())
     }
 
     let e: PreflateError = my_std_error().unwrap_err().into();
-    assert_eq!(e.exit_code(), ExitCode::AnalyzeFailed);
+    assert_eq!(e.exit_code(), ExitCode::RecompressFailed);
     assert_eq!(e.message(), "test error");
 
     // an IO error should be translated into an OsError
