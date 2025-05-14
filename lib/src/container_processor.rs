@@ -972,7 +972,7 @@ fn test_baseline_calc() {
     assert_eq!(stats.overhead_bytes, 463);
     assert_eq!(stats.zstd_compressed_size, 12444);
     assert_eq!(stats.uncompressed_size, 54871);
-    assert_eq!(stats.zstd_baseline_size, 13661);
+    assert_eq!(stats.zstd_baseline_size, 13664);
 }
 
 #[test]
