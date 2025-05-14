@@ -92,7 +92,10 @@ impl<D: ProcessBuffer> ProcessBuffer for ZstdCompressContext<D> {
             .context()?;
 
         if done_write && !self.done_write {
-            debug_assert!(input_complete, "can't be done writing if the input is not complete");
+            debug_assert!(
+                input_complete,
+                "can't be done writing if the input is not complete"
+            );
 
             self.done_write = true;
             self.zstd_compress.flush().context()?;
