@@ -172,7 +172,7 @@ pub fn find_deflate_stream(
                     match parse_idat(*prev_ihdr, &src[real_start..]) {
                         Ok((idat_contents, payload)) => {
                             *prev_ihdr = None;
-                            let mut state = PreflateStreamProcessor::new(plain_text_limit, true);
+                            let mut state = PreflateStreamProcessor::new(plain_text_limit, verify);
 
                             if let Ok(res) = state.decompress(&payload) {
                                 let length = idat_contents.total_chunk_length;

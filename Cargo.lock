@@ -445,6 +445,7 @@ name = "preflate_util"
 version = "0.0.0"
 dependencies = [
  "env_logger",
+ "log",
  "preflate-rs",
 ]
 
