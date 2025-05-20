@@ -36,7 +36,7 @@ fn enumerate_directory_recursively(path: &Path) -> Result<Vec<PathBuf>, std::io:
 }
 
 fn main() {
-    simple_log::quick!();
+    env_logger::init();
 
     let current_dir = env::args().nth(1).unwrap_or_else(|| String::from("."));
 

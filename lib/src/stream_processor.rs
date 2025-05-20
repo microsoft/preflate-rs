@@ -103,11 +103,7 @@ impl PreflateStreamProcessor {
     }
 
     /// decompresses a deflate stream and returns the plaintext and cabac_encoded data that can be used to reconstruct it
-    pub fn decompress(
-        &mut self,
-        compressed_data: &[u8],
-        _loglevel: u32,
-    ) -> Result<PreflateStreamChunkResult> {
+    pub fn decompress(&mut self, compressed_data: &[u8]) -> Result<PreflateStreamChunkResult> {
         let contents = self.parser.parse(compressed_data)?;
 
         let mut cabac_encoded = Vec::new();
@@ -223,11 +219,10 @@ impl PreflateStreamProcessor {
 pub fn preflate_whole_deflate_stream(
     compressed_data: &[u8],
     verify: bool,
-    loglevel: u32,
     plain_text_limit: usize,
 ) -> Result<(PreflateStreamChunkResult, PlainText)> {
     let mut state = PreflateStreamProcessor::new(plain_text_limit, verify);
-    let r = state.decompress(compressed_data, loglevel)?;
+    let r = state.decompress(compressed_data)?;
 
     Ok((r, state.parser.detach_plain_text()))
 }
@@ -463,6 +458,8 @@ fn decompress_deflate_stream_assert(
 
 #[test]
 fn verify_roundtrip_assert() {
+    crate::init_logging();
+
     use crate::utils::read_file;
 
     let v = read_file("compressed_zlib_level1.deflate");
@@ -474,6 +471,8 @@ fn verify_roundtrip_assert() {
 
 #[test]
 fn verify_roundtrip_zlib() {
+    crate::init_logging();
+
     for i in 0..9 {
         verify_file(&format!("compressed_zlib_level{}.deflate", i));
     }
@@ -481,6 +480,8 @@ fn verify_roundtrip_zlib() {
 
 #[test]
 fn verify_roundtrip_flate2() {
+    crate::init_logging();
+
     for i in 0..9 {
         verify_file(&format!("compressed_flate2_level{}.deflate", i));
     }
@@ -488,6 +489,8 @@ fn verify_roundtrip_flate2() {
 
 #[test]
 fn verify_roundtrip_libdeflate() {
+    crate::init_logging();
+
     for i in 0..9 {
         verify_file(&format!("compressed_libdeflate_level{}.deflate", i));
     }
@@ -498,7 +501,7 @@ fn verify_file(filename: &str) {
     use crate::utils::read_file;
     let v = read_file(filename);
 
-    let (r, plain_text) = preflate_whole_deflate_stream(&v, true, 1, usize::MAX).unwrap();
+    let (r, plain_text) = preflate_whole_deflate_stream(&v, true, usize::MAX).unwrap();
     let recompressed = recreate_whole_deflate_stream(plain_text.text(), &r.corrections).unwrap();
     assert!(v == recompressed);
 }
@@ -687,6 +690,8 @@ fn do_analyze(crc: Option<u32>, compressed_data: &[u8]) {
 /// Future work: figure out why level 7 and above are not perfect
 #[test]
 fn verify_zlib_perfect_compression() {
+    crate::init_logging();
+
     use crate::deflate::deflate_reader::parse_deflate_whole;
     use crate::utils::read_file;
 
@@ -713,6 +718,8 @@ fn verify_zlib_perfect_compression() {
 
 #[test]
 fn verify_longmatch() {
+    crate::init_logging();
+
     use crate::utils::read_file;
     do_analyze(
         None,
@@ -722,6 +729,8 @@ fn verify_longmatch() {
 
 #[test]
 fn verify_zlibng() {
+    crate::init_logging();
+
     use crate::utils::read_file;
 
     do_analyze(None, &read_file("compressed_zlibng_level1.deflate"));
@@ -729,6 +738,8 @@ fn verify_zlibng() {
 
 #[test]
 fn verify_miniz() {
+    crate::init_logging();
+
     use crate::utils::read_file;
 
     do_analyze(None, &read_file("compressed_minizoxide_level1.deflate"));
@@ -737,6 +748,8 @@ fn verify_miniz() {
 /// this is the deflate stream extracted out of the png file (minus the idat wrapper)
 #[test]
 fn verify_png_deflate() {
+    crate::init_logging();
+
     use crate::utils::read_file;
     do_analyze(None, &read_file("treegdi.extract.deflate"));
 }
@@ -756,7 +769,7 @@ pub fn analyze_compressed_data_verify_incremental(compressed_data: &[u8], plain_
 
     let mut expanded_contents = Vec::new();
     while !stream.is_done() {
-        let result = stream.decompress(&compressed_data[start_offset..end_offset], 1);
+        let result = stream.decompress(&compressed_data[start_offset..end_offset]);
         match result {
             Ok(r) => {
                 println!(
@@ -829,6 +842,8 @@ pub fn analyze_compressed_data_verify_incremental(compressed_data: &[u8], plain_
 
 #[test]
 fn verify_plain_text_limit() {
+    crate::init_logging();
+
     analyze_compressed_data_verify_incremental(
         &crate::utils::read_file("compressed_zlib_level3.deflate"),
         1 * 1024 * 1024,
@@ -838,6 +853,8 @@ fn verify_plain_text_limit() {
 /// test partial reading reading
 #[test]
 fn verify_partial_blocks() {
+    crate::init_logging();
+
     for i in 0..=9 {
         analyze_compressed_data_verify_incremental(
             &crate::utils::read_file(&format!("compressed_zlib_level{}.deflate", i)),

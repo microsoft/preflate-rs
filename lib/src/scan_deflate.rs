@@ -78,17 +78,17 @@ pub enum FindStreamResult {
 /// PNG IDAT chunks, and returns the locations of the streams.
 pub fn find_deflate_stream(
     src: &[u8],
-    loglevel: u32,
     plain_text_limit: usize,
     prev_ihdr: &mut Option<PngHeader>,
+    verify: bool,
 ) -> FindStreamResult {
     let mut index: usize = 0;
     while let Some(signature) = next_signature(src, &mut index) {
         match signature {
             Signature::Zlib(_) => {
-                let mut state = PreflateStreamProcessor::new(plain_text_limit, true);
+                let mut state = PreflateStreamProcessor::new(plain_text_limit, verify);
 
-                if let Ok(res) = state.decompress(&src[index + 2..], loglevel) {
+                if let Ok(res) = state.decompress(&src[index + 2..]) {
                     if state.plain_text().len() > MIN_BLOCKSIZE {
                         index += 2;
                         return FindStreamResult::Found(
@@ -110,8 +110,8 @@ pub fn find_deflate_stream(
                 if skip_gzip_header(&mut cursor).is_ok() {
                     let start = index + cursor.position() as usize;
 
-                    let mut state = PreflateStreamProcessor::new(plain_text_limit, true);
-                    if let Ok(res) = state.decompress(&src[start..], loglevel) {
+                    let mut state = PreflateStreamProcessor::new(plain_text_limit, verify);
+                    if let Ok(res) = state.decompress(&src[start..]) {
                         if state.plain_text().len() > MIN_BLOCKSIZE {
                             return FindStreamResult::Found(
                                 start..start + res.compressed_size,
@@ -130,7 +130,7 @@ pub fn find_deflate_stream(
 
             Signature::ZipLocalFileHeader => {
                 if let Ok((header_size, res, state)) =
-                    parse_zip_stream(&src[index..], loglevel, plain_text_limit)
+                    parse_zip_stream(&src[index..], plain_text_limit, verify)
                 {
                     if state.plain_text().len() > MIN_BLOCKSIZE {
                         return FindStreamResult::Found(
@@ -174,7 +174,7 @@ pub fn find_deflate_stream(
                             *prev_ihdr = None;
                             let mut state = PreflateStreamProcessor::new(plain_text_limit, true);
 
-                            if let Ok(res) = state.decompress(&payload, loglevel) {
+                            if let Ok(res) = state.decompress(&payload) {
                                 let length = idat_contents.total_chunk_length;
                                 if length > MIN_BLOCKSIZE {
                                     return FindStreamResult::Found(
@@ -291,8 +291,8 @@ impl ZipLocalFileHeader {
 /// parses the zip stream and returns the size of the header, followed by the decompressed contents
 fn parse_zip_stream(
     contents: &[u8],
-    loglevel: u32,
     plain_text_limit: usize,
+    verify: bool,
 ) -> Result<(usize, PreflateStreamChunkResult, PreflateStreamProcessor)> {
     let mut binary_reader = Cursor::new(&contents);
 
@@ -317,9 +317,9 @@ fn parse_zip_stream(
     if zip_local_file_header.compression_method == 8 {
         let deflate_start_position = binary_reader.stream_position()? as usize;
 
-        let mut state = PreflateStreamProcessor::new(plain_text_limit, true);
+        let mut state = PreflateStreamProcessor::new(plain_text_limit, verify);
 
-        if let Ok(res) = state.decompress(&contents[deflate_start_position..], loglevel) {
+        if let Ok(res) = state.decompress(&contents[deflate_start_position..]) {
             return Ok((deflate_start_position, res, state));
         }
     }
@@ -331,7 +331,7 @@ fn parse_zip_stream(
 fn parse_png() {
     let f = crate::utils::read_file("treegdi.png");
 
-    let (loc, chunk) = match find_deflate_stream(&f, 1, usize::MAX, &mut None) {
+    let (loc, chunk) = match find_deflate_stream(&f, usize::MAX, &mut None, true) {
         FindStreamResult::Found(loc, chunk) => (loc, chunk),
         _ => panic!("Expected FoundStream"),
     };
@@ -348,7 +348,7 @@ fn parse_png() {
 fn parse_gz() {
     let f = crate::utils::read_file("sample1.bin.gz");
 
-    let loc = match find_deflate_stream(&f, 1, usize::MAX, &mut None) {
+    let loc = match find_deflate_stream(&f, usize::MAX, &mut None, true) {
         FindStreamResult::Found(loc, chunk) => (loc, chunk),
         _ => panic!("Expected FoundStream"),
     };
@@ -367,7 +367,7 @@ fn parse_docx() {
 
     let mut offset = 0;
     while let FindStreamResult::Found(loc, res) =
-        find_deflate_stream(&f[offset..], 0, usize::MAX, &mut None)
+        find_deflate_stream(&f[offset..], usize::MAX, &mut None, true)
     {
         match res.chunk_type {
             FoundStreamType::DeflateStream(_, _) => {
@@ -394,7 +394,7 @@ fn parse_zip() {
 
     let mut offset = 0;
     while let FindStreamResult::Found(loc, res) =
-        find_deflate_stream(&f[offset..], 1, 1 * 1024 * 1024, &mut None)
+        find_deflate_stream(&f[offset..], 1 * 1024 * 1024, &mut None, true)
     {
         match res.chunk_type {
             FoundStreamType::DeflateStream(_, mut state) => {
@@ -410,7 +410,7 @@ fn parse_zip() {
                 // continue decompressing the compressed stream until we are done
                 offset += loc.end;
                 while !state.is_done() {
-                    let res = state.decompress(&f[offset..], 1).unwrap();
+                    let res = state.decompress(&f[offset..]).unwrap();
                     println!("continue at {}..{}", offset, offset + res.compressed_size);
                     offset += res.compressed_size;
 

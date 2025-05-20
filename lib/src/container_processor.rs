@@ -22,9 +22,6 @@ use crate::{
 /// Configuration for the deflate process
 #[derive(Debug, Copy, Clone)]
 pub struct PreflateConfig {
-    /// internal log level for the deflate process (used only by testing)
-    pub log_level: u32,
-
     /// As we scan for deflate streams, we need to have a minimum memory
     /// chunk to process. We scan this chunk for deflate streams and at least
     /// deflate one block has to fit into a chunk for us to recognize it.
@@ -48,16 +45,21 @@ pub struct PreflateConfig {
     /// hit this limit, we will stop looking for deflate streams and just write
     /// out the rest of the data as literal blocks.
     pub total_plain_text_limit: u64,
+
+    /// Whether we validate the output of the decompression process. This is
+    /// not necessary if there is a separate verification step since it will
+    /// just run the verification step twice.
+    pub verify: bool,
 }
 
 impl Default for PreflateConfig {
     fn default() -> Self {
         PreflateConfig {
-            log_level: 0,
             min_chunk_size: 1024 * 1024,
             max_chunk_size: 64 * 1024 * 1024,
             plain_text_limit: 128 * 1024 * 1024,
             total_plain_text_limit: 512 * 1024 * 1024,
+            verify: true,
         }
     }
 }
@@ -238,7 +240,7 @@ fn roundtrip_chunk_block_deflate() {
     let contents = crate::utils::read_file("compressed_zlib_level1.deflate");
 
     let mut stream_state = PreflateStreamProcessor::new(usize::MAX, true);
-    let results = stream_state.decompress(&contents, 1).unwrap();
+    let results = stream_state.decompress(&contents).unwrap();
 
     let mut buffer = Vec::new();
 
@@ -267,7 +269,7 @@ fn roundtrip_chunk_block_png() {
     // we know the first IDAT chunk starts at 83 (avoid testing the scan_deflate code in a unit teast)
     let (idat_contents, deflate_stream) = crate::idat_parse::parse_idat(None, &f[83..]).unwrap();
     let mut stream = PreflateStreamProcessor::new(usize::MAX, true);
-    let results = stream.decompress(&deflate_stream, 1).unwrap();
+    let results = stream.decompress(&deflate_stream).unwrap();
 
     let total_chunk_length = idat_contents.total_chunk_length;
 
@@ -574,9 +576,9 @@ impl ProcessBuffer for PreflateContainerProcessor {
                     // here we are looking for a deflate stream or PNG chunk
                     match find_deflate_stream(
                         &self.content,
-                        self.config.log_level,
                         self.config.plain_text_limit,
                         prev_ihdr,
+                        self.config.verify,
                     ) {
                         FindStreamResult::Found(next, chunk) => {
                             // the gap between the start and the beginning of the deflate stream
@@ -624,7 +626,7 @@ impl ProcessBuffer for PreflateContainerProcessor {
                 ChunkParseState::DeflateContinue(state) => {
                     // here we have a deflate stream that we need to continue
                     // right now we error out if the continuation cannot be processed
-                    match state.decompress(&self.content, 0) {
+                    match state.decompress(&self.content) {
                         Err(_e) => {
                             // indicate that we got an error while trying to continue
                             // the compression of a previous chunk, this happens
@@ -1142,11 +1144,11 @@ fn roundtrip_small_chunk() {
     let original = read_file("pptxplaintext.zip");
 
     let mut context = PreflateContainerProcessor::new(PreflateConfig {
-        log_level: 1,
         min_chunk_size: 100000,
         max_chunk_size: 100000,
         plain_text_limit: usize::MAX,
         total_plain_text_limit: u64::MAX,
+        verify: true,
     });
 
     let compressed = context.process_vec_size(&original, 20001, 997).unwrap();
@@ -1164,11 +1166,11 @@ fn roundtrip_small_plain_text() {
     let original = read_file("pptxplaintext.zip");
 
     let mut context = PreflateContainerProcessor::new(PreflateConfig {
-        log_level: 1,
         min_chunk_size: 100000,
         max_chunk_size: 100000,
         plain_text_limit: 1000000,
         total_plain_text_limit: u64::MAX,
+        verify: true,
     });
 
     let compressed = context.process_vec_size(&original, 2001, 20001).unwrap();
@@ -1188,11 +1190,11 @@ fn roundtrip_png_e2e() {
     println!("Compressing file");
 
     let mut context = PreflateContainerProcessor::new(PreflateConfig {
-        log_level: 1,
         min_chunk_size: 100000,
         max_chunk_size: original.len(),
         plain_text_limit: usize::MAX,
         total_plain_text_limit: u64::MAX,
+        verify: true,
     });
 
     let compressed = context.process_vec_size(&original, 100100, 100100).unwrap();
