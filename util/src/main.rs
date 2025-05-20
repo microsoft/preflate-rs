@@ -65,13 +65,19 @@ fn main() {
 
         let stats = ctx.stats();
 
+        println!(
+            "compressed ratio: {:.1}",
+            (1f64 - (stats.zstd_compressed_size as f64 / stats.deflate_compressed_size as f64))
+                * 100f64
+        );
+
         totalseen += stats.deflate_compressed_size as u64;
         totalbaseline += stats.zstd_baseline_size as u64;
         totalzstd += stats.zstd_compressed_size as u64;
 
         println!(
-            "total seen ratio {totalzstd}:{totalbaseline}:{totalseen} {}",
-            totalzstd as f64 / totalseen as f64
+            "total seen ratio {totalzstd}:{totalbaseline}:{totalseen} {:.1}",
+            (1f64 - totalzstd as f64 / totalbaseline as f64) * 100f64
         );
     }
 }
