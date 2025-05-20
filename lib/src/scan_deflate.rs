@@ -151,7 +151,7 @@ pub fn find_deflate_stream(
                 if index >= 4 {
                     match parse_ihdr(&src[index - 4..]) {
                         Ok(ihdr) => {
-                            println!("IHDR: {:?}", ihdr);
+                            log::debug!("IHDR: {:?}", ihdr);
                             *prev_ihdr = Some(ihdr);
                         }
                         Err(e) => {
@@ -169,8 +169,7 @@ pub fn find_deflate_stream(
                     // idat has the length first, then the "IDAT", so we need to look back 4 bytes
                     // if we find and IDAT
                     let real_start = index - 4;
-                    println!("IDat at {}, {:?}", real_start, prev_ihdr);
-                    match parse_idat(*prev_ihdr, &src[real_start..], 0) {
+                    match parse_idat(*prev_ihdr, &src[real_start..]) {
                         Ok((idat_contents, payload)) => {
                             *prev_ihdr = None;
                             let mut state = PreflateStreamProcessor::new(plain_text_limit, true);

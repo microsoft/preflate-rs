@@ -160,7 +160,7 @@ fn write_chunk_block(
 
         FoundStreamType::IDATDeflate(parameters, mut idat, plain_text) => {
             if webp_compress(result, &plain_text, &chunk.corrections, &idat).is_err() {
-                println!("non-Webp compressed {}", idat.total_chunk_length);
+                log::debug!("non-Webp compressed {}", idat.total_chunk_length);
 
                 result.write_all(&[PNG_COMPRESSED])?;
                 write_varint(result, chunk.corrections.len() as u32)?;
@@ -265,7 +265,7 @@ fn roundtrip_chunk_block_png() {
     let f = crate::utils::read_file("treegdi.png");
 
     // we know the first IDAT chunk starts at 83 (avoid testing the scan_deflate code in a unit teast)
-    let (idat_contents, deflate_stream) = crate::idat_parse::parse_idat(None, &f[83..], 1).unwrap();
+    let (idat_contents, deflate_stream) = crate::idat_parse::parse_idat(None, &f[83..]).unwrap();
     let mut stream = PreflateStreamProcessor::new(usize::MAX, true);
     let results = stream.decompress(&deflate_stream, 1).unwrap();
 
@@ -632,17 +632,14 @@ impl ProcessBuffer for PreflateContainerProcessor {
                             // in the first chunk that we saw
                             self.state = ChunkParseState::Searching(None);
 
-                            #[cfg(test)]
-                            println!("Error while trying to continue compression {:?}", _e);
+                            log::debug!("Error while trying to continue compression {:?}", _e);
                         }
                         Ok(res) => {
-                            if self.config.log_level > 0 {
-                                println!(
-                                    "Deflate continue: {} -> {}",
-                                    state.plain_text().len(),
-                                    res.compressed_size
-                                );
-                            }
+                            log::debug!(
+                                "Deflate continue: {} -> {}",
+                                state.plain_text().len(),
+                                res.compressed_size
+                            );
 
                             self.result.write_all(&[DEFLATE_STREAM_CONTINUE])?;
 
@@ -1025,7 +1022,7 @@ fn webp_compress(
     corrections: &[u8],
     idat: &IdatContents,
 ) -> Result<()> {
-    println!("{:?}", idat);
+    log::debug!("{:?}", idat);
 
     #[cfg(feature = "webp")]
     if let Some(png_header) = idat.png_header {
@@ -1036,7 +1033,7 @@ fn webp_compress(
         let w = png_header.width as usize;
         let h = png_header.height as usize;
 
-        println!(
+        log::debug!(
             "plain text compressing {} bytes ({}x{}x{})",
             plain_text.len(),
             w,
@@ -1064,7 +1061,7 @@ fn webp_compress(
             write_varint(result, corrections.len() as u32)?;
             write_varint(result, comp.deref().len() as u32)?;
 
-            println!(
+            log::debug!(
                 "Webp compressed {} bytes (vs {})",
                 comp.deref().len(),
                 idat.total_chunk_length

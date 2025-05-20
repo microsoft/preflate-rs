@@ -193,7 +193,6 @@ pub fn parse_ihdr(ihdr_chunk: &[u8]) -> Result<PngHeader> {
 pub fn parse_idat(
     png_header: Option<PngHeader>,
     png_idat_stream: &[u8],
-    deflate_info_dump_level: u32,
 ) -> Result<(IdatContents, Vec<u8>)> {
     if png_idat_stream.len() < 12 || &png_idat_stream[4..8] != b"IDAT" {
         return err_exit_code(ExitCode::InvalidIDat, "No IDAT chunk found");
@@ -267,9 +266,7 @@ pub fn parse_idat(
         idat_chunk_sizes.push((end - start) as u32);
     }
 
-    if deflate_info_dump_level > 0 {
-        println!("IDAT boundaries: {:?}", idat_chunk_sizes);
-    }
+    log::debug!("IDAT boundaries: {:?}", idat_chunk_sizes);
 
     if deflate_stream.len() < 3 {
         return err_exit_code(ExitCode::InvalidIDat, "No IDAT data found");
@@ -489,7 +486,7 @@ fn parse_and_recreate_png() {
 
     // we know the first IDAT chunk starts at 83 (avoid testing the scan_deflate code in a unit test)
     let (idat_contents, deflate_stream) =
-        parse_idat(Some(parse_ihdr(&f[8..8 + 8 + 13]).unwrap()), &f[83..], 1).unwrap();
+        parse_idat(Some(parse_ihdr(&f[8..8 + 8 + 13]).unwrap()), &f[83..]).unwrap();
 
     println!("locations found: {:?}", idat_contents);
     assert_eq!(idat_contents.chunk_sizes, [65445, 65524, 40164]);
