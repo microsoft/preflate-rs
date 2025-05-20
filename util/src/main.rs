@@ -1,3 +1,6 @@
+use env_logger::Builder;
+use log::LevelFilter;
+
 use std::{
     env, fs,
     io::BufReader,
@@ -36,7 +39,7 @@ fn enumerate_directory_recursively(path: &Path) -> Result<Vec<PathBuf>, std::io:
 }
 
 fn main() {
-    env_logger::init();
+    Builder::new().filter_level(LevelFilter::max()).init();
 
     let current_dir = env::args().nth(1).unwrap_or_else(|| String::from("."));
 
@@ -54,7 +57,10 @@ fn main() {
         let mut filehandle = BufReader::new(fs::File::open(&entry).unwrap());
 
         let mut ctx = ZstdCompressContext::new(
-            PreflateContainerProcessor::new(PreflateConfig::default()),
+            PreflateContainerProcessor::new(PreflateConfig {
+                verify: false,
+                ..PreflateConfig::default()
+            }),
             9,
             true,
         );

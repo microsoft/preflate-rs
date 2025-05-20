@@ -161,6 +161,12 @@ fn write_chunk_block(
         }
 
         FoundStreamType::IDATDeflate(parameters, mut idat, plain_text) => {
+            log::debug!(
+                "IDATDeflate param {:?} corrections {}",
+                parameters,
+                chunk.corrections.len()
+            );
+
             if webp_compress(result, &plain_text, &chunk.corrections, &idat).is_err() {
                 log::debug!("non-Webp compressed {}", idat.total_chunk_length);
 
