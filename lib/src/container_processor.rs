@@ -1,17 +1,16 @@
 use byteorder::ReadBytesExt;
+
 use std::{
     collections::VecDeque,
     io::{BufRead, Read, Write},
-    ops::Deref,
     usize,
 };
 
 use crate::{
     hash_algorithm::HashAlgorithm,
-    idat_parse::{
-        IdatContents, PngColorType, apply_png_filters_with_types, recreate_idat, undo_png_filters,
-    },
+    idat_parse::{IdatContents, PngHeader, recreate_idat},
     preflate_error::{AddContext, ExitCode, PreflateError, Result, err_exit_code},
+    preflate_input::PlainText,
     scan_deflate::{FindStreamResult, FoundStream, FoundStreamType, find_deflate_stream},
     scoped_read::ScopedRead,
     stream_processor::{
@@ -158,53 +157,14 @@ fn write_chunk_block(
                 return Ok(Some(state));
             }
         }
+
         FoundStreamType::IDATDeflate(parameters, mut idat, plain_text) => {
-            let mut webp_compress = None;
+            if webp_compress(result, &plain_text, &chunk.corrections, &idat).is_err() {
+                println!("non-Webp compressed {}", idat.total_chunk_length);
 
-            if let Some(png_header) = &idat.png_header {
-                let bbp = png_header.color_type.bytes_per_pixel();
-                let w = png_header.width as usize;
-                let h = png_header.height as usize;
-                // see if the bitmap looks like the way with think it should (bits per pixel map + 1 height worth of filter bytes)
-                if (bbp * w * h) + h == plain_text.len() {
-                    let (bitmap, filters) = undo_png_filters(plain_text.text(), w, h, bbp);
-
-                    let enc = webp::Encoder::new(
-                        &bitmap,
-                        match png_header.color_type {
-                            PngColorType::RGB => webp::PixelLayout::Rgb,
-                            PngColorType::RGBA => webp::PixelLayout::Rgba,
-                        },
-                        png_header.width,
-                        png_header.height,
-                    );
-
-                    webp_compress = Some((filters, enc.encode_lossless()));
-                }
-            }
-
-            if let Some((filters, comp)) = webp_compress {
-                result.write_all(&[PNG_COMPRESSED])?;
-                write_varint(result, chunk.corrections.len() as u32)?;
-                write_varint(result, comp.deref().len() as u32)?;
-
-                println!(
-                    "Webp compressed {} bytes (vs {})",
-                    comp.deref().len(),
-                    idat.total_chunk_length
-                );
-
-                idat.write_to_bytestream(result)?;
-                result.write_all(&filters)?;
-
-                result.write_all(&chunk.corrections)?;
-                result.write_all(comp.deref())?;
-            } else {
                 result.write_all(&[PNG_COMPRESSED])?;
                 write_varint(result, chunk.corrections.len() as u32)?;
                 write_varint(result, plain_text.text().len() as u32)?;
-
-                println!("non-Webp compressed");
 
                 idat.png_header = None;
                 idat.write_to_bytestream(result)?;
@@ -527,7 +487,11 @@ pub trait ProcessBuffer {
 #[derive(Debug)]
 enum ChunkParseState {
     Start,
-    Searching,
+    /// we are looking for a deflate stream or PNG chunk. The data of the PNG file
+    /// is stored later than the IHDR chunk that will tell us the dimensions of the image,
+    /// so we need to keep track of the IHDR chunk so we can use it later to properly
+    /// compress the PNG data.
+    Searching(Option<PngHeader>),
     DeflateContinue(PreflateStreamProcessor),
 }
 
@@ -594,9 +558,9 @@ impl ProcessBuffer for PreflateContainerProcessor {
             match &mut self.state {
                 ChunkParseState::Start => {
                     self.result.write_all(&[COMPRESSED_WRAPPER_VERSION_1])?;
-                    self.state = ChunkParseState::Searching;
+                    self.state = ChunkParseState::Searching(None);
                 }
-                ChunkParseState::Searching => {
+                ChunkParseState::Searching(prev_ihdr) => {
                     if self.total_plain_text_seen > self.config.total_plain_text_limit {
                         // once we've exceeded our limit, we don't do any more compression
                         // this is to ensure we don't suck the CPU time for too long on
@@ -612,6 +576,7 @@ impl ProcessBuffer for PreflateContainerProcessor {
                         &self.content,
                         self.config.log_level,
                         self.config.plain_text_limit,
+                        prev_ihdr,
                     ) {
                         FindStreamResult::Found(next, chunk) => {
                             // the gap between the start and the beginning of the deflate stream
@@ -665,7 +630,7 @@ impl ProcessBuffer for PreflateContainerProcessor {
                             // the compression of a previous chunk, this happens
                             // when the stream significantly diverged from the behavior we estimated
                             // in the first chunk that we saw
-                            self.state = ChunkParseState::Searching;
+                            self.state = ChunkParseState::Searching(None);
 
                             #[cfg(test)]
                             println!("Error while trying to continue compression {:?}", _e);
@@ -695,7 +660,7 @@ impl ProcessBuffer for PreflateContainerProcessor {
                             self.content.drain(0..res.compressed_size);
 
                             if state.is_done() {
-                                self.state = ChunkParseState::Searching;
+                                self.state = ChunkParseState::Searching(None);
                             } else {
                                 state.shrink_to_dictionary();
                             }
@@ -1033,31 +998,9 @@ impl RecreateContainerProcessor {
                     let plain_text;
 
                     if let Some(header) = &idat.png_header {
-                        println!("filter types: {:?}", filters);
-
                         let webp: Vec<u8> = self.input.drain(0..*uncompressed_length).collect();
 
-                        let decoder = webp::Decoder::new(webp.as_slice());
-                        match decoder.decode() {
-                            Some(result) => {
-                                let m = result.deref();
-
-                                plain_text = apply_png_filters_with_types(
-                                    m,
-                                    header.width as usize,
-                                    header.height as usize,
-                                    if result.is_alpha() { 4 } else { 3 },
-                                    header.color_type.bytes_per_pixel(),
-                                    &filters,
-                                );
-                            }
-                            None => {
-                                return Err(PreflateError::new(
-                                    ExitCode::InvalidCompressedWrapper,
-                                    "Webp decode failed",
-                                ));
-                            }
-                        }
+                        plain_text = webp_decompress(filters, webp, header).context()?;
                     } else {
                         plain_text = self.input.drain(0..*uncompressed_length).collect();
                     }
@@ -1074,6 +1017,99 @@ impl RecreateContainerProcessor {
 
         Ok(())
     }
+}
+
+fn webp_compress(
+    result: &mut impl Write,
+    plain_text: &PlainText,
+    corrections: &[u8],
+    idat: &IdatContents,
+) -> Result<()> {
+    println!("{:?}", idat);
+
+    #[cfg(feature = "webp")]
+    if let Some(png_header) = idat.png_header {
+        use crate::idat_parse::{PngColorType, undo_png_filters};
+        use std::ops::Deref;
+
+        let bbp = png_header.color_type.bytes_per_pixel();
+        let w = png_header.width as usize;
+        let h = png_header.height as usize;
+
+        println!(
+            "plain text compressing {} bytes ({}x{}x{})",
+            plain_text.len(),
+            w,
+            h,
+            bbp
+        );
+
+        // see if the bitmap looks like the way with think it should (bits per pixel map + 1 height worth of filter bytes)
+        if (bbp * w * h) + h == plain_text.len() {
+            let (bitmap, filters) = undo_png_filters(plain_text.text(), w, h, bbp);
+
+            let enc = webp::Encoder::new(
+                &bitmap,
+                match png_header.color_type {
+                    PngColorType::RGB => webp::PixelLayout::Rgb,
+                    PngColorType::RGBA => webp::PixelLayout::Rgba,
+                },
+                png_header.width,
+                png_header.height,
+            );
+
+            let comp = enc.encode_lossless();
+            result.write_all(&[PNG_COMPRESSED])?;
+
+            write_varint(result, corrections.len() as u32)?;
+            write_varint(result, comp.deref().len() as u32)?;
+
+            println!(
+                "Webp compressed {} bytes (vs {})",
+                comp.deref().len(),
+                idat.total_chunk_length
+            );
+
+            idat.write_to_bytestream(result)?;
+            result.write_all(&filters)?;
+
+            result.write_all(&corrections)?;
+            result.write_all(comp.deref())?;
+            return Ok(());
+        }
+    }
+
+    return err_exit_code(
+        ExitCode::InvalidCompressedWrapper,
+        "Webp compression not supported",
+    );
+}
+
+fn webp_decompress(
+    filters: &[u8],
+    webp: Vec<u8>,
+    header: &crate::idat_parse::PngHeader,
+) -> Result<Vec<u8>> {
+    #[cfg(feature = "webp")]
+    match webp::Decoder::new(webp.as_slice()).decode() {
+        Some(result) => {
+            use crate::idat_parse::apply_png_filters_with_types;
+            use std::ops::Deref;
+
+            let m = result.deref();
+
+            return Ok(apply_png_filters_with_types(
+                m,
+                header.width as usize,
+                header.height as usize,
+                if result.is_alpha() { 4 } else { 3 },
+                header.color_type.bytes_per_pixel(),
+                &filters,
+            ));
+        }
+        _ => {}
+    }
+    return err_exit_code(ExitCode::InvalidCompressedWrapper, "Webp decode failed");
 }
 
 #[test]

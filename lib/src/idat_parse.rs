@@ -147,6 +147,7 @@ impl PngColorType {
         }
     }
 
+    #[allow(dead_code)]
     pub fn bytes_per_pixel(&self) -> usize {
         match self {
             //PngColorType::Grayscale => 1,
@@ -353,7 +354,9 @@ fn paeth_predictor(a: u8, b: u8, c: u8) -> u8 {
         c as u8
     }
 }
-
+/// Undoes the PNG filters on an image to get back the original bitmap
+/// Used by webp compression to undo the PNG filters before applying
+#[allow(dead_code)]
 pub fn undo_png_filters(
     filtered: &[u8],
     width: usize,
@@ -396,6 +399,7 @@ pub fn undo_png_filters(
     (bitmap, filters)
 }
 
+#[allow(dead_code)]
 pub fn apply_png_filters_with_types(
     bitmap: &[u8],
     width: usize,
