@@ -408,7 +408,7 @@ dependencies = [
 
 [[package]]
 name = "preflate-rs"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "bitcode",
  "byteorder",
@@ -435,7 +435,7 @@ dependencies = [
 
 [[package]]
 name = "preflate_rs_0_7"
-version = "0.0.0"
+version = "0.7.1"
 dependencies = [
  "preflate-rs",
 ]
