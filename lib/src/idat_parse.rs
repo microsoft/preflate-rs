@@ -173,6 +173,7 @@ pub fn parse_ihdr(ihdr_chunk: &[u8]) -> Result<PngHeader> {
     let ihdr_data = &ihdr_chunk[8..ihdr_length + 8];
 
     if ihdr_data[8] != 8 {
+        log::debug!("IHDR bit depth cannot be {}", ihdr_data[8]);
         return err_exit_code(ExitCode::InvalidIDat, "IHDR bit depth is not 8");
     }
 
@@ -185,7 +186,8 @@ pub fn parse_ihdr(ihdr_chunk: &[u8]) -> Result<PngHeader> {
             color_type,
         })
     } else {
-        return err_exit_code(ExitCode::InvalidIDat, "IHDR bit depth is not 8");
+        log::debug!("IHDR unsupported color type {}", ihdr_data[9]);
+        return err_exit_code(ExitCode::InvalidIDat, "IHDR unsupported color type");
     }
 }
 
