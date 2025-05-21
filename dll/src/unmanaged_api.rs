@@ -72,16 +72,24 @@ fn test_copy_cstring_utf8_to_buffer() {
 /// flags:
 ///  bits 0-4 zstd level to use (0-16)
 ///  bit 5: test baseline (does a baseline zstd compression of the input passed in so we
-/// can compare the preflate compression + zstd to just plain zstd compression)
+///     can compare the preflate compression + zstd to just plain zstd compression)
+///  bit 6: if 1, skip verify after compress. This is useful if caller does a separate verify step after to save CPU time.
+///     *If this is set, the caller must verify the data after decompressing it as in some cases it may be not decompress successfully.*
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn create_compression_context(flags: u32) -> *mut std::ffi::c_void {
     match catch_unwind_result(|| {
+        let compression_level = (flags & 0xf) as i32;
         let test_baseline = (flags & 0x10) != 0;
+        let verify = (flags & 0x20) != 0;
+
         let context = Box::new((
             12345678u32,
             CompressionContext::new(
-                PreflateContainerProcessor::new(PreflateConfig::default()),
-                (flags & 0xf) as i32,
+                PreflateContainerProcessor::new(PreflateConfig {
+                    verify,
+                    ..PreflateConfig::default()
+                }),
+                compression_level,
                 test_baseline,
             ),
         ));

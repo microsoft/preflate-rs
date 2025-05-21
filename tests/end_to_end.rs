@@ -122,7 +122,7 @@ fn libzng() {
 
 fn verifyresult(compressed_data: &[u8]) {
     let (result, plain_text) =
-        preflate_whole_deflate_stream(compressed_data, true, 1, 128 * 1024 * 1024).unwrap();
+        preflate_whole_deflate_stream(compressed_data, true, 128 * 1024 * 1024).unwrap();
     let recomp = recreate_whole_deflate_stream(&plain_text.text(), &result.corrections).unwrap();
 
     println!(
@@ -473,7 +473,7 @@ fn compression_benchmark_overhead_size() {
         for level in 0..=9 {
             let compressed = (i.compress_fn)(&original, level);
 
-            let r = preflate_whole_deflate_stream(&compressed, true, 0, 1024 * 1024 * 128);
+            let r = preflate_whole_deflate_stream(&compressed, true, 1024 * 1024 * 128);
 
             match r {
                 Ok((r, _)) => {

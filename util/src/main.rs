@@ -1,3 +1,6 @@
+use env_logger::Builder;
+use log::LevelFilter;
+
 use std::{
     env, fs,
     io::BufReader,
@@ -36,6 +39,8 @@ fn enumerate_directory_recursively(path: &Path) -> Result<Vec<PathBuf>, std::io:
 }
 
 fn main() {
+    Builder::new().filter_level(LevelFilter::max()).init();
+
     let current_dir = env::args().nth(1).unwrap_or_else(|| String::from("."));
 
     let mut totalseen = 0u64;
@@ -52,7 +57,10 @@ fn main() {
         let mut filehandle = BufReader::new(fs::File::open(&entry).unwrap());
 
         let mut ctx = ZstdCompressContext::new(
-            PreflateContainerProcessor::new(PreflateConfig::default()),
+            PreflateContainerProcessor::new(PreflateConfig {
+                verify: false,
+                ..PreflateConfig::default()
+            }),
             9,
             true,
         );
@@ -65,13 +73,19 @@ fn main() {
 
         let stats = ctx.stats();
 
+        println!(
+            "compressed ratio: {:.1}",
+            (1f64 - (stats.zstd_compressed_size as f64 / stats.deflate_compressed_size as f64))
+                * 100f64
+        );
+
         totalseen += stats.deflate_compressed_size as u64;
         totalbaseline += stats.zstd_baseline_size as u64;
         totalzstd += stats.zstd_compressed_size as u64;
 
         println!(
-            "total seen ratio {totalzstd}:{totalbaseline}:{totalseen} {}",
-            totalzstd as f64 / totalseen as f64
+            "total seen ratio {totalzstd}:{totalbaseline}:{totalseen} {:.1}",
+            (1f64 - totalzstd as f64 / totalbaseline as f64) * 100f64
         );
     }
 }

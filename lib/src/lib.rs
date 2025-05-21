@@ -60,3 +60,14 @@ pub use container_processor::{
 };
 
 pub use zstd_compression::{ZstdCompressContext, ZstdDecompressContext};
+
+#[cfg(test)]
+static INIT: std::sync::Once = std::sync::Once::new();
+
+/// Initialize the logger for tests. This is a no-op if the logger is already initialized.
+#[cfg(test)]
+pub fn init_logging() {
+    INIT.call_once(|| {
+        let _ = env_logger::builder().is_test(true).try_init();
+    });
+}

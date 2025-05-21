@@ -25,9 +25,17 @@ zstd = "0.13.0"
 crc32fast = "1.3"
 bitcode = "0.6.3"
 deranged = "0.4"
+log = "0.4"
+webp = { version = "0.3", optional = true }
 
+[dev-dependencies]
+env_logger = "0.11"
 
 [lib]
 name = "preflate_rs"
 crate-type = ["lib"]
+
+[features]
+webp = ["dep:webp"]
+default = ["webp"]
 
