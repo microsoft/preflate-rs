@@ -3,7 +3,7 @@ use std::{
     io::{Cursor, Error, ErrorKind, Read, Result, SeekFrom},
 };
 
-use crate::PreflateError;
+use preflate_rs::PreflateError;
 
 pub trait ScopedRead: Read
 where

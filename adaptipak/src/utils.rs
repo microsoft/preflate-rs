@@ -3,7 +3,7 @@ use std::{
     io::{BufRead, Read, Write},
 };
 
-use crate::Result;
+use preflate_rs::Result;
 
 /// writes the pending output to the writer
 pub fn write_dequeue(
@@ -130,73 +130,6 @@ pub fn assert_eq_array<T: PartialEq + std::fmt::Debug>(a: &[T], b: &[T]) {
                 a.len(),
                 i
             );
-        }
-    }
-}
-
-#[cfg(test)]
-#[track_caller]
-pub fn assert_block_eq(
-    a: &crate::deflate::deflate_token::DeflateTokenBlock,
-    b: &crate::deflate::deflate_token::DeflateTokenBlock,
-) {
-    use crate::deflate::deflate_token::DeflateTokenBlockType;
-
-    if a == b {
-        return;
-    }
-
-    if std::mem::discriminant(&a.block_type) != std::mem::discriminant(&b.block_type) {
-        panic!("block type mismatch {:?} {:?}", a.block_type, b.block_type);
-    }
-
-    match (&a.block_type, &b.block_type) {
-        (
-            DeflateTokenBlockType::Huffman {
-                tokens: ta,
-                huffman_type: ha,
-            },
-            DeflateTokenBlockType::Huffman {
-                tokens: tb,
-                huffman_type: hb,
-            },
-        ) => {
-            assert_eq_array(&ta, &tb);
-            assert_eq!(ha, hb);
-        }
-        (
-            DeflateTokenBlockType::Stored { uncompressed: ua },
-            DeflateTokenBlockType::Stored { uncompressed: ub },
-        ) => {
-            assert_eq_array(&ua, &ub);
-        }
-        _ => {
-            panic!("unexpected block type");
-        }
-    }
-    assert_eq!(a.last, b.last, "last flag mismatch");
-}
-
-#[cfg(test)]
-pub fn test_on_all_deflate_files(f: impl Fn(&[u8])) {
-    use std::io::Read;
-
-    let searchpath = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("samples");
-
-    for entry in std::fs::read_dir(searchpath).unwrap() {
-        let entry = entry.unwrap();
-        let path = entry.path();
-
-        if path.extension().is_some() && path.extension().unwrap() == "deflate" {
-            println!("Testing {:?}", path);
-
-            let mut file = std::fs::File::open(&path).unwrap();
-            let mut buffer = Vec::new();
-            file.read_to_end(&mut buffer).unwrap();
-
-            f(&buffer);
         }
     }
 }

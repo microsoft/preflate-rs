@@ -1,17 +1,16 @@
 use std::{io::Cursor, ops::Range};
 
-use crate::{
-    estimator::preflate_parameter_estimator::TokenPredictorParameters,
-    idat_parse::{IdatContents, PngHeader, parse_idat, parse_ihdr},
-    preflate_error::{ExitCode, err_exit_code},
-    preflate_input::PlainText,
-    stream_processor::{PreflateStreamChunkResult, PreflateStreamProcessor},
+use crate::idat_parse::{IdatContents, PngHeader, parse_idat, parse_ihdr};
+
+use preflate_rs::{
+    ExitCode, PlainText, PreflateStreamChunkResult, PreflateStreamProcessor,
+    TokenPredictorParameters, err_exit_code,
 };
 
 use byteorder::{LittleEndian, ReadBytesExt};
 use std::io::{Read, Seek, SeekFrom};
 
-use crate::preflate_error::Result;
+use preflate_rs::Result;
 
 /// The minimum size of a block that is considered for splitting into chunks
 const MIN_BLOCKSIZE: usize = 1024;

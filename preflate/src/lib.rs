@@ -22,44 +22,31 @@
 
 mod bit_helper;
 mod cabac_codec;
-mod container_processor;
 mod deflate;
 mod estimator;
 mod hash_algorithm;
 mod hash_chain;
 mod hash_chain_holder;
-mod idat_parse;
+
 mod preflate_error;
 mod preflate_input;
-mod scan_deflate;
-mod scoped_read;
+
 mod statistical_codec;
 mod stream_processor;
 mod token_predictor;
 mod tree_predictor;
-mod zstd_compression;
-
 mod utils;
+
+pub use estimator::preflate_parameter_estimator::TokenPredictorParameters;
+pub use hash_algorithm::HashAlgorithm;
+pub use preflate_error::ExitCode;
+pub use preflate_error::{AddContext, PreflateError, Result, err_exit_code};
+pub use preflate_input::{PlainText, PreflateInput};
 
 pub use stream_processor::{
     PreflateStreamChunkResult, PreflateStreamProcessor, RecreateStreamProcessor,
     preflate_whole_deflate_stream, recreate_whole_deflate_stream,
 };
-
-pub use zstd_compression::{
-    zstd_preflate_whole_deflate_stream, zstd_recreate_whole_deflate_stream,
-};
-
-pub use preflate_error::ExitCode;
-pub use preflate_error::{PreflateError, Result};
-
-pub use container_processor::{PreflateConfig, PreflateStats};
-pub use container_processor::{
-    PreflateContainerProcessor, ProcessBuffer, RecreateContainerProcessor,
-    preflate_whole_into_container, recreate_whole_from_container,
-};
-
-pub use zstd_compression::{ZstdCompressContext, ZstdDecompressContext};
 
 #[cfg(test)]
 static INIT: std::sync::Once = std::sync::Once::new();

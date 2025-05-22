@@ -2,12 +2,9 @@ use std::io::{Read, Write};
 
 use byteorder::{ReadBytesExt, WriteBytesExt};
 
-use crate::preflate_error::Result;
+use preflate_rs::{ExitCode, Result, err_exit_code};
 
-use crate::{
-    container_processor::{read_varint, write_varint},
-    preflate_error::{ExitCode, err_exit_code},
-};
+use crate::container_processor::{read_varint, write_varint};
 
 /// The contents of a PNG IDat stream. These are treated specially since they
 /// contain a Zlib stream that is split into multiple chunks and would be
@@ -483,7 +480,6 @@ fn process_line(
 
 #[test]
 fn parse_and_recreate_png() {
-    use crate::deflate::deflate_reader::parse_deflate_whole;
     let f = crate::utils::read_file("treegdi.png");
 
     // we know the first IDAT chunk starts at 83 (avoid testing the scan_deflate code in a unit test)
@@ -494,9 +490,11 @@ fn parse_and_recreate_png() {
     assert_eq!(idat_contents.chunk_sizes, [65445, 65524, 40164]);
     assert_eq!(idat_contents.zlib_header, [120, 94]);
 
-    let (contents, _plain_text) = parse_deflate_whole(&deflate_stream).unwrap();
-
-    assert_eq!(deflate_stream.len(), contents.compressed_size);
+    let contents = miniz_oxide::inflate::decompress_to_vec(&deflate_stream).unwrap();
+    assert_eq!(
+        adler32::adler32(std::io::Cursor::new(&contents)).unwrap(),
+        idat_contents.addler32
+    );
 
     let total_chunk_length = idat_contents.total_chunk_length;
 
