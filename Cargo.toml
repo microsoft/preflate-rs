@@ -11,11 +11,12 @@ rust-version = "1.85"
 debug=true
 
 [workspace]
-members = ["lib","dll","util"]
+members = ["preflate", "adaptipak","dll","util"]
 resolver = "2"
 
 [dev-dependencies]
-preflate-rs = { path = "lib" }
+preflate-rs = { path = "preflate" }
+adaptipak = { path = "adaptipak" }
 libz-sys = "1.1"
 libdeflate-sys = "1.19"
 libz-ng-sys="1.1.12"

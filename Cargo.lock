@@ -3,10 +3,31 @@
 version = 4
 
 [[package]]
+name = "adaptipak"
+version = "0.7.1"
+dependencies = [
+ "adler32",
+ "byteorder",
+ "crc32fast",
+ "env_logger",
+ "log",
+ "miniz_oxide",
+ "preflate-rs",
+ "webp",
+ "zstd",
+]
+
+[[package]]
 name = "adler2"
 version = "2.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "512761e0bb2578dd7380c6baaa0f4ce03e84f95e960231d1dec8bf4d7d6e2627"
+
+[[package]]
+name = "adler32"
+version = "1.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "aae1277d39aeec15cb388266ecc24b11c80469deae6067e17a1a7aa9e5c1f234"
 
 [[package]]
 name = "aho-corasick"
@@ -417,15 +438,13 @@ dependencies = [
  "default-boxed",
  "deranged",
  "env_logger",
- "log",
- "webp",
- "zstd",
 ]
 
 [[package]]
 name = "preflate-rs-root"
 version = "0.0.0"
 dependencies = [
+ "adaptipak",
  "libdeflate-sys",
  "libz-ng-sys",
  "libz-sys",
@@ -437,6 +456,7 @@ dependencies = [
 name = "preflate_rs_0_7"
 version = "0.7.1"
 dependencies = [
+ "adaptipak",
  "preflate-rs",
 ]
 
@@ -444,6 +464,7 @@ dependencies = [
 name = "preflate_util"
 version = "0.0.0"
 dependencies = [
+ "adaptipak",
  "env_logger",
  "log",
  "preflate-rs",

@@ -12,7 +12,8 @@ rust-version = "1.85"
 
 
 [dependencies]
-preflate-rs = { path = "../lib" }
+preflate-rs = { path = "../preflate" }
+adaptipak = { path = "../adaptipak" }
 
 [lib]
 crate-type = ["cdylib"]
