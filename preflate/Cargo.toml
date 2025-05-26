@@ -1,14 +1,14 @@
 [package]
 name = "preflate-rs"
-version = "0.7.1"
+version = "0.7.2"
 edition = "2024"
 authors = ["Kristof Roomp <kristofr@microsoft.com>"]
 license = "Apache-2.0"
 rust-version = "1.85"
 description = """
-Decompresses existing DEFLATE streams to allow for better compression (eg with ZStandard) while 
-allowing the exact original binary DEFLATE stream to be recreated by detecting the parameters
-used during compression.
+Decompresses existing DEFLATE streams to allow for better with a more state-of-the-art compression
+(eg with ZStandard, Brotli) while allowing the exact original binary DEFLATE stream to be recreated 
+by detecting the parameters used during compression.
 """
 readme = "../README.md"
 repository = "https://github.com/microsoft/preflate-rs"

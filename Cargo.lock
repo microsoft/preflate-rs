@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "adaptipak"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "adler32",
  "byteorder",
@@ -429,7 +429,7 @@ dependencies = [
 
 [[package]]
 name = "preflate-rs"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "bitcode",
  "byteorder",
@@ -454,7 +454,7 @@ dependencies = [
 
 [[package]]
 name = "preflate_rs_0_7"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "adaptipak",
  "preflate-rs",

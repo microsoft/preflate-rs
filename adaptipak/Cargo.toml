@@ -1,6 +1,6 @@
 [package]
 name = "adaptipak"
-version = "0.7.1"
+version = "0.7.2"
 edition = "2024"
 authors = ["Kristof Roomp <kristofr@microsoft.com>"]
 license = "Apache-2.0"
