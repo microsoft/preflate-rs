@@ -4,7 +4,7 @@ use std::{
     ptr::{null, null_mut},
 };
 
-use adaptipak::{
+use preflate_container::{
     PreflateConfig, PreflateContainerProcessor, ProcessBuffer, RecreateContainerProcessor,
     ZstdCompressContext, ZstdDecompressContext,
 };

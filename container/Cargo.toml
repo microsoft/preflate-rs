@@ -1,5 +1,5 @@
 [package]
-name = "adaptipak"
+name = "preflate-container"
 version = "0.7.2"
 edition = "2024"
 authors = ["Kristof Roomp <kristofr@microsoft.com>"]
@@ -29,7 +29,7 @@ miniz_oxide = "0.8"
 adler32 = "1.2.0"
 
 [lib]
-name = "adaptipak"
+name = "preflate_container"
 crate-type = ["lib"]
 
 [features]

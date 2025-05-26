@@ -7,7 +7,7 @@ rust-version = "1.85"
 
 [dependencies]
 preflate-rs = { path = "../preflate" }
-adaptipak = { path = "../adaptipak" }
+preflate-container = { path = "../container" }
 env_logger = "0.11"
 log = "0.4"
 

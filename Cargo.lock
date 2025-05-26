@@ -3,21 +3,6 @@
 version = 4
 
 [[package]]
-name = "adaptipak"
-version = "0.7.2"
-dependencies = [
- "adler32",
- "byteorder",
- "crc32fast",
- "env_logger",
- "log",
- "miniz_oxide",
- "preflate-rs",
- "webp",
- "zstd",
-]
-
-[[package]]
 name = "adler2"
 version = "2.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -428,6 +413,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "preflate-container"
+version = "0.7.2"
+dependencies = [
+ "adler32",
+ "byteorder",
+ "crc32fast",
+ "env_logger",
+ "log",
+ "miniz_oxide",
+ "preflate-rs",
+ "webp",
+ "zstd",
+]
+
+[[package]]
 name = "preflate-rs"
 version = "0.7.2"
 dependencies = [
@@ -444,11 +444,11 @@ dependencies = [
 name = "preflate-rs-root"
 version = "0.0.0"
 dependencies = [
- "adaptipak",
  "libdeflate-sys",
  "libz-ng-sys",
  "libz-sys",
  "miniz_oxide",
+ "preflate-container",
  "preflate-rs",
 ]
 
@@ -456,7 +456,7 @@ dependencies = [
 name = "preflate_rs_0_7"
 version = "0.7.2"
 dependencies = [
- "adaptipak",
+ "preflate-container",
  "preflate-rs",
 ]
 
@@ -464,9 +464,9 @@ dependencies = [
 name = "preflate_util"
 version = "0.0.0"
 dependencies = [
- "adaptipak",
  "env_logger",
  "log",
+ "preflate-container",
  "preflate-rs",
 ]
 
