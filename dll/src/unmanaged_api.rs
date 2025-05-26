@@ -4,10 +4,11 @@ use std::{
     ptr::{null, null_mut},
 };
 
-use preflate_rs::{
-    ExitCode, PreflateConfig, PreflateContainerProcessor, PreflateError, ProcessBuffer,
-    RecreateContainerProcessor, ZstdCompressContext, ZstdDecompressContext,
+use preflate_container::{
+    PreflateConfig, PreflateContainerProcessor, ProcessBuffer, RecreateContainerProcessor,
+    ZstdCompressContext, ZstdDecompressContext,
 };
+use preflate_rs::{ExitCode, PreflateError};
 
 /// Helper function to catch panics and convert them into the appropriate LeptonError
 fn catch_unwind_result<R>(

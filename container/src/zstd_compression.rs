@@ -9,10 +9,11 @@ use std::{
 };
 
 use crate::{
-    ExitCode, PreflateContainerProcessor, PreflateError, PreflateStats, ProcessBuffer,
-    RecreateContainerProcessor, Result, container_processor::PreflateConfig,
-    preflate_error::AddContext, utils::write_dequeue,
+    PreflateContainerProcessor, PreflateStats, ProcessBuffer, RecreateContainerProcessor,
+    container_processor::PreflateConfig, utils::write_dequeue,
 };
+
+use preflate_rs::{AddContext, ExitCode, PreflateError, Result};
 
 /// processor that compresses the input using Zstandard
 ///

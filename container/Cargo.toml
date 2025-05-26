@@ -1,16 +1,14 @@
 [package]
-name = "preflate-rs"
-version = "0.7.1"
+name = "preflate-container"
+version = "0.7.2"
 edition = "2024"
 authors = ["Kristof Roomp <kristofr@microsoft.com>"]
 license = "Apache-2.0"
 rust-version = "1.85"
 description = """
-Decompresses existing DEFLATE streams to allow for better compression (eg with ZStandard) while 
-allowing the exact original binary DEFLATE stream to be recreated by detecting the parameters
-used during compression.
+Scans binary files for zStd streams and uses Preflate-rs to decompress the stream and repack with
+zStd compression. For PNG files, we use WEBP compression for RGB and RGBA to get better results. 
 """
-readme = "../README.md"
 repository = "https://github.com/microsoft/preflate-rs"
 categories = ["compression"]
 keywords = ["gzip", "deflate", "zlib", "zip"]
@@ -19,23 +17,21 @@ keywords = ["gzip", "deflate", "zlib", "zip"]
 
 [dependencies]
 byteorder = "1.4"
-cabac = "0.15.0"
-default-boxed = "0.2"
-zstd = "0.13.0"
-crc32fast = "1.3"
-bitcode = "0.6.3"
-deranged = "0.4"
+preflate-rs = { path = "../preflate" }
 log = "0.4"
 webp = { version = "0.3", optional = true }
+crc32fast = "1.3"
+zstd = "0.13.0"
 
 [dev-dependencies]
 env_logger = "0.11"
+miniz_oxide = "0.8"
+adler32 = "1.2.0"
 
 [lib]
-name = "preflate_rs"
+name = "preflate_container"
 crate-type = ["lib"]
 
 [features]
 webp = ["dep:webp"]
 default = ["webp"]
-

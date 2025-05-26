@@ -3,7 +3,7 @@
 # this makes sure that we can keep old versions around to decode old encodings since the format
 # is complicated enough that maintaining backwards compat is hard (even minor changes in the
 # predictor will break the format)
-version = "0.7.1"
+version = "0.7.2"
 name = "preflate_rs_0_7"
 edition = "2024"
 authors = ["Kristof Roomp <kristofr@microsoft.com>"]
@@ -12,7 +12,8 @@ rust-version = "1.85"
 
 
 [dependencies]
-preflate-rs = { path = "../lib" }
+preflate-rs = { path = "../preflate" }
+preflate-container = { path = "../container" }
 
 [lib]
 crate-type = ["cdylib"]

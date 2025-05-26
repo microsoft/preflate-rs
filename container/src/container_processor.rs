@@ -7,16 +7,15 @@ use std::{
 };
 
 use crate::{
-    hash_algorithm::HashAlgorithm,
     idat_parse::{IdatContents, PngHeader, recreate_idat},
-    preflate_error::{AddContext, ExitCode, PreflateError, Result, err_exit_code},
-    preflate_input::PlainText,
     scan_deflate::{FindStreamResult, FoundStream, FoundStreamType, find_deflate_stream},
     scoped_read::ScopedRead,
-    stream_processor::{
-        PreflateStreamProcessor, RecreateStreamProcessor, recreate_whole_deflate_stream,
-    },
     utils::{TakeReader, write_dequeue},
+};
+
+use preflate_rs::{
+    AddContext, ExitCode, HashAlgorithm, PreflateError, PreflateStreamProcessor,
+    RecreateStreamProcessor, Result, err_exit_code, recreate_whole_deflate_stream,
 };
 
 /// Configuration for the deflate process
@@ -167,7 +166,7 @@ fn write_chunk_block(
                 chunk.corrections.len()
             );
 
-            if webp_compress(result, &plain_text, &chunk.corrections, &idat).is_err() {
+            if webp_compress(result, plain_text.text(), &chunk.corrections, &idat).is_err() {
                 log::debug!("non-Webp compressed {}", idat.total_chunk_length);
 
                 result.write_all(&[PNG_COMPRESSED])?;
@@ -1026,7 +1025,7 @@ impl RecreateContainerProcessor {
 
 fn webp_compress(
     result: &mut impl Write,
-    plain_text: &PlainText,
+    plain_text: &[u8],
     corrections: &[u8],
     idat: &IdatContents,
 ) -> Result<()> {
@@ -1051,7 +1050,7 @@ fn webp_compress(
 
         // see if the bitmap looks like the way with think it should (bits per pixel map + 1 height worth of filter bytes)
         if (bbp * w * h) + h == plain_text.len() {
-            let (bitmap, filters) = undo_png_filters(plain_text.text(), w, h, bbp);
+            let (bitmap, filters) = undo_png_filters(plain_text, w, h, bbp);
 
             let enc = webp::Encoder::new(
                 &bitmap,
