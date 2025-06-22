@@ -2,6 +2,7 @@ use std::{io::Cursor, ops::Range};
 
 use crate::idat_parse::{IdatContents, PngHeader, parse_idat, parse_ihdr};
 
+use lepton_jpeg::EnabledFeatures;
 use preflate_rs::{
     ExitCode, PlainText, PreflateStreamChunkResult, PreflateStreamProcessor,
     TokenPredictorParameters, err_exit_code,
@@ -27,6 +28,9 @@ pub enum FoundStreamType {
     /// PNG IDAT, which is a concatenated Zlib stream of IDAT chunks. This
     /// is special since the Deflate stream is split into IDAT chunks.
     IDATDeflate(TokenPredictorParameters, IdatContents, PlainText),
+
+    /// JPEG stream, which is a Lepton JPEG stream.
+    JPEGLepton(Vec<u8>),
 }
 
 #[derive(Hash, Eq, PartialEq, Clone, Debug)]
@@ -39,6 +43,8 @@ enum Signature {
     IHDR,
     /// PNG IDAT, which is a concatenated Zlib stream of IDAT chunks, each of the size given in the Vec.
     IDAT,
+    /// JPEG start marker
+    JPEG,
 }
 
 fn next_signature(src: &[u8], index: &mut usize) -> Option<Signature> {
@@ -58,6 +64,7 @@ fn next_signature(src: &[u8], index: &mut usize) -> Option<Signature> {
             0x8B1F => Signature::Gzip,
             0x4449 => Signature::IDAT,
             0x4849 => Signature::IHDR,
+            0xD8FF => Signature::JPEG,
             _ => continue,
         };
 
@@ -79,6 +86,7 @@ pub fn find_deflate_stream(
     src: &[u8],
     plain_text_limit: usize,
     prev_ihdr: &mut Option<PngHeader>,
+    input_complete: bool,
     verify: bool,
 ) -> FindStreamResult {
     let mut index: usize = 0;
@@ -154,7 +162,7 @@ pub fn find_deflate_stream(
                             *prev_ihdr = Some(ihdr);
                         }
                         Err(e) => {
-                            if e.exit_code() == ExitCode::ShortRead {
+                            if e.exit_code() == ExitCode::ShortRead && !input_complete {
                                 // we don't have the whole IHDR chunk yet, so tell the caller they need to extend the buffer
                                 return FindStreamResult::ShortRead;
                             }
@@ -196,12 +204,51 @@ pub fn find_deflate_stream(
                             }
                         }
                         Err(e) => {
-                            if e.exit_code() == ExitCode::ShortRead {
+                            if e.exit_code() == ExitCode::ShortRead && !input_complete {
                                 // we don't have the whole IDAT chunk yet, so tell the caller they need to extend the buffer
                                 return FindStreamResult::ShortRead;
                             }
                         }
                     }
+                }
+            }
+            Signature::JPEG => {
+                // find end of JPEG marker
+                let mut end_index = index + 2;
+
+                let mut found_end = false;
+
+                // find 0xff 0xd9 marker which indicates the end of the JPEG stream
+                while end_index < src.len() - 1 {
+                    if src[end_index] == 0xFF && src[end_index + 1] == 0xD9 {
+                        end_index += 2; // include the end marker
+                        found_end = true;
+                        break;
+                    }
+                    end_index += 1;
+                }
+
+                if !found_end && !input_complete {
+                    // we don't have the whole JPEG stream yet, so tell the caller they need to extend the buffer
+                    return FindStreamResult::ShortRead;
+                }
+
+                let mut output = Vec::new();
+                let mut input = Cursor::new(&src[index..end_index]);
+                if let Ok(_m) = lepton_jpeg::encode_lepton(
+                    &mut input,
+                    &mut Cursor::new(&mut output),
+                    8,
+                    &EnabledFeatures::default(),
+                ) {
+                    // successfully encoded the JPEG stream, return the found stream
+                    return FindStreamResult::Found(
+                        index..index + input.position() as usize,
+                        FoundStream {
+                            chunk_type: FoundStreamType::JPEGLepton(output),
+                            corrections: Vec::new(),
+                        },
+                    );
                 }
             }
         }
@@ -330,7 +377,7 @@ fn parse_zip_stream(
 fn parse_png() {
     let f = crate::utils::read_file("treegdi.png");
 
-    let (loc, chunk) = match find_deflate_stream(&f, usize::MAX, &mut None, true) {
+    let (loc, chunk) = match find_deflate_stream(&f, usize::MAX, &mut None, true, true) {
         FindStreamResult::Found(loc, chunk) => (loc, chunk),
         _ => panic!("Expected FoundStream"),
     };
@@ -347,7 +394,7 @@ fn parse_png() {
 fn parse_gz() {
     let f = crate::utils::read_file("sample1.bin.gz");
 
-    let loc = match find_deflate_stream(&f, usize::MAX, &mut None, true) {
+    let loc = match find_deflate_stream(&f, usize::MAX, &mut None, true, true) {
         FindStreamResult::Found(loc, chunk) => (loc, chunk),
         _ => panic!("Expected FoundStream"),
     };
@@ -366,7 +413,7 @@ fn parse_docx() {
 
     let mut offset = 0;
     while let FindStreamResult::Found(loc, res) =
-        find_deflate_stream(&f[offset..], usize::MAX, &mut None, true)
+        find_deflate_stream(&f[offset..], usize::MAX, &mut None, true, true)
     {
         match res.chunk_type {
             FoundStreamType::DeflateStream(_, _) => {
@@ -393,7 +440,7 @@ fn parse_zip() {
 
     let mut offset = 0;
     while let FindStreamResult::Found(loc, res) =
-        find_deflate_stream(&f[offset..], 1 * 1024 * 1024, &mut None, true)
+        find_deflate_stream(&f[offset..], 1 * 1024 * 1024, &mut None, true, true)
     {
         match res.chunk_type {
             FoundStreamType::DeflateStream(_, mut state) => {

@@ -2,7 +2,7 @@ use byteorder::ReadBytesExt;
 
 use std::{
     collections::VecDeque,
-    io::{BufRead, Read, Write},
+    io::{BufRead, Cursor, Read, Write},
     usize,
 };
 
@@ -76,6 +76,9 @@ const PNG_COMPRESSED: u8 = 2;
 
 /// deflate stream that continues the previous one with the same dictionary, bitstream etc
 const DEFLATE_STREAM_CONTINUE: u8 = 3;
+
+/// JPEG Lepton compressed chunks are JPEG Lepton compressed
+const JPEG_LEPTON_COMPRESSED: u8 = 4;
 
 pub(crate) fn write_varint(destination: &mut impl Write, value: u32) -> std::io::Result<()> {
     let mut value = value;
@@ -183,6 +186,14 @@ fn write_chunk_block(
             stats.uncompressed_size += plain_text.len() as u64;
             stats.hash_algorithm = parameters.hash_algorithm;
             stats.overhead_bytes += chunk.corrections.len() as u64;
+        }
+        FoundStreamType::JPEGLepton(data) => {
+            result.write_all(&[JPEG_LEPTON_COMPRESSED])?;
+            write_varint(result, data.len() as u32)?;
+
+            result.write_all(&data)?;
+
+            stats.uncompressed_size += data.len() as u64;
         }
     }
     Ok(None)
@@ -583,6 +594,7 @@ impl ProcessBuffer for PreflateContainerProcessor {
                         &self.content,
                         self.config.plain_text_limit,
                         prev_ihdr,
+                        input_complete,
                         self.config.verify,
                     ) {
                         FindStreamResult::Found(next, chunk) => {
@@ -735,6 +747,9 @@ enum DecompressionState {
         uncompressed_length: usize,
         idat: IdatContents,
         filters: Vec<u8>,
+    },
+    JPEGBlock {
+        lepton_length: usize,
     },
 }
 
@@ -899,6 +914,11 @@ impl RecreateContainerProcessor {
                                 filters,
                             })
                         }
+                        JPEG_LEPTON_COMPRESSED => {
+                            let lepton_length = read_varint(r)? as usize;
+
+                            Ok(DecompressionState::JPEGBlock { lepton_length })
+                        }
 
                         _ => Err(PreflateError::new(
                             ExitCode::InvalidCompressedWrapper,
@@ -1013,6 +1033,36 @@ impl RecreateContainerProcessor {
                         recreate_whole_deflate_stream(&plain_text, &corrections).context()?;
 
                     recreate_idat(&idat, &recompressed[..], &mut self.result).context()?;
+
+                    self.state = DecompressionState::StartSegment;
+                }
+                DecompressionState::JPEGBlock { lepton_length } => {
+                    let source_size = self.input.len();
+                    if source_size < *lepton_length {
+                        if self.input_complete {
+                            return Err(PreflateError::new(
+                                ExitCode::InvalidCompressedWrapper,
+                                "unexpected end of input",
+                            ));
+                        }
+                        break;
+                    }
+
+                    let lepton_data: Vec<u8> = self.input.drain(0..*lepton_length).collect();
+
+                    match lepton_jpeg::decode_lepton(
+                        &mut Cursor::new(&lepton_data),
+                        &mut self.result,
+                        8,
+                    ) {
+                        Err(e) => {
+                            return Err(PreflateError::new(
+                                ExitCode::InvalidCompressedWrapper,
+                                format!("JPEG Lepton decode failed: {}", e),
+                            ));
+                        }
+                        Ok(_) => {}
+                    }
 
                     self.state = DecompressionState::StartSegment;
                 }
@@ -1188,9 +1238,41 @@ fn roundtrip_small_plain_text() {
 
 #[test]
 fn roundtrip_png_e2e() {
+    crate::init_logging();
+    
     use crate::utils::{assert_eq_array, read_file};
 
     let original = read_file("figma.png");
+
+    println!("Compressing file");
+
+    let mut context = PreflateContainerProcessor::new(PreflateConfig {
+        min_chunk_size: 100000,
+        max_chunk_size: original.len(),
+        plain_text_limit: usize::MAX,
+        total_plain_text_limit: u64::MAX,
+        verify: true,
+    });
+
+    let compressed = context.process_vec_size(&original, 100100, 100100).unwrap();
+
+    println!("Recreating file");
+
+    let mut context = RecreateContainerProcessor::new(usize::MAX);
+    let recreated = context
+        .process_vec_size(&compressed, 100100, 100100)
+        .unwrap();
+
+    assert_eq_array(&original, &recreated);
+}
+
+#[test]
+fn roundtrip_jpg() {
+    crate::init_logging();
+
+    use crate::utils::{assert_eq_array, read_file};
+
+    let original = read_file("android.jpg");
 
     println!("Compressing file");
 
