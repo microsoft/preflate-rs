@@ -12,7 +12,7 @@ use bitcode::{Decode, Encode};
 use cabac::vp8::{VP8Reader, VP8Writer};
 
 use crate::{
-    Result,
+    PreflateConfig, Result,
     cabac_codec::{PredictionDecoderCabac, PredictionEncoderCabac},
     deflate::{
         deflate_reader::DeflateParser, deflate_token::DeflateTokenBlock,
@@ -68,17 +68,19 @@ pub struct PreflateStreamProcessor {
     predictor: Option<TokenPredictor>,
     validator: Option<RecreateStreamProcessor>,
     parser: DeflateParser,
+    max_chain_length: u32,
 }
 
 impl PreflateStreamProcessor {
     /// Creates a new PreflateStreamProcessor
     /// plain_text_limit: the maximum size of the plain text that will decompressed to memory
     /// verify: if true, the decompressed data will be recompressed and compared to the original as it is run
-    pub fn new(plain_text_limit: usize, verify: bool) -> Self {
+    pub fn new(config: &PreflateConfig) -> Self {
         Self {
             predictor: None,
-            parser: DeflateParser::new(plain_text_limit),
-            validator: if verify {
+            parser: DeflateParser::new(config.plain_text_limit),
+            max_chain_length: config.max_chain_length,
+            validator: if config.verify_compression {
                 Some(RecreateStreamProcessor::new())
             } else {
                 None
@@ -158,6 +160,16 @@ impl PreflateStreamProcessor {
             let params =
                 estimate_preflate_parameters(&contents, &self.parser.plain_text()).context()?;
 
+            if params.max_chain > self.max_chain_length {
+                return Err(PreflateError::new(
+                    ExitCode::NoCompressionCandidates,
+                    format!(
+                        "max_chain {} is larger than configured max_chain_length {}",
+                        params.max_chain, self.max_chain_length
+                    ),
+                ));
+            }
+
             let mut input = PreflateInput::new(&self.parser.plain_text());
 
             let mut token_predictor = TokenPredictor::new(&params);
@@ -218,10 +230,9 @@ impl PreflateStreamProcessor {
 /// via recreate_whole_deflate_stream
 pub fn preflate_whole_deflate_stream(
     compressed_data: &[u8],
-    verify: bool,
-    plain_text_limit: usize,
+    config: &PreflateConfig,
 ) -> Result<(PreflateStreamChunkResult, PlainText)> {
-    let mut state = PreflateStreamProcessor::new(plain_text_limit, verify);
+    let mut state = PreflateStreamProcessor::new(config);
     let r = state.decompress(compressed_data)?;
 
     Ok((r, state.parser.detach_plain_text()))
@@ -501,7 +512,7 @@ fn verify_file(filename: &str) {
     use crate::utils::read_file;
     let v = read_file(filename);
 
-    let (r, plain_text) = preflate_whole_deflate_stream(&v, true, usize::MAX).unwrap();
+    let (r, plain_text) = preflate_whole_deflate_stream(&v, &PreflateConfig::default()).unwrap();
     let recompressed = recreate_whole_deflate_stream(plain_text.text(), &r.corrections).unwrap();
     assert!(v == recompressed);
 }
@@ -755,7 +766,7 @@ fn verify_png_deflate() {
 }
 
 #[cfg(test)]
-pub fn analyze_compressed_data_verify_incremental(compressed_data: &[u8], plain_text_limit: usize) {
+pub fn analyze_compressed_data_verify_incremental(compressed_data: &[u8], config: &PreflateConfig) {
     use crate::{deflate::deflate_reader::parse_deflate_whole, utils::assert_eq_array};
 
     let (original_con, _) = parse_deflate_whole(compressed_data).unwrap();
@@ -763,7 +774,7 @@ pub fn analyze_compressed_data_verify_incremental(compressed_data: &[u8], plain_
     let mut start_offset = 0;
     let mut end_offset = compressed_data.len().min(100001);
 
-    let mut stream = PreflateStreamProcessor::new(plain_text_limit, true);
+    let mut stream = PreflateStreamProcessor::new(&config);
 
     let mut plain_text_offset = 0;
 
@@ -846,7 +857,10 @@ fn verify_plain_text_limit() {
 
     analyze_compressed_data_verify_incremental(
         &crate::utils::read_file("compressed_zlib_level3.deflate"),
-        1 * 1024 * 1024,
+        &PreflateConfig {
+            plain_text_limit: 1 * 1024 * 1024,
+            ..Default::default()
+        },
     );
 }
 
@@ -858,7 +872,7 @@ fn verify_partial_blocks() {
     for i in 0..=9 {
         analyze_compressed_data_verify_incremental(
             &crate::utils::read_file(&format!("compressed_zlib_level{}.deflate", i)),
-            usize::MAX,
+            &PreflateConfig::default(),
         );
     }
 }

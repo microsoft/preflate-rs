@@ -1,10 +1,13 @@
 use std::{io::Cursor, ops::Range};
 
-use crate::idat_parse::{IdatContents, PngHeader, parse_idat, parse_ihdr};
+use crate::{
+    PreflateContainerConfig,
+    idat_parse::{IdatContents, PngHeader, parse_idat, parse_ihdr},
+};
 
 use lepton_jpeg::EnabledFeatures;
 use preflate_rs::{
-    ExitCode, PlainText, PreflateStreamChunkResult, PreflateStreamProcessor,
+    ExitCode, PlainText, PreflateConfig, PreflateStreamChunkResult, PreflateStreamProcessor,
     TokenPredictorParameters, err_exit_code,
 };
 
@@ -82,18 +85,17 @@ pub enum FindStreamResult {
 
 /// Scans for deflate streams in a zlib compressed file, decompresses the streams and
 /// PNG IDAT chunks, and returns the locations of the streams.
-pub fn find_deflate_stream(
+pub fn find_compressable_stream(
     src: &[u8],
-    plain_text_limit: usize,
     prev_ihdr: &mut Option<PngHeader>,
     input_complete: bool,
-    verify: bool,
+    config: &PreflateContainerConfig,
 ) -> FindStreamResult {
     let mut index: usize = 0;
     while let Some(signature) = next_signature(src, &mut index) {
         match signature {
             Signature::Zlib(_) => {
-                let mut state = PreflateStreamProcessor::new(plain_text_limit, verify);
+                let mut state = PreflateStreamProcessor::new(&config.preflate_config);
 
                 if let Ok(res) = state.decompress(&src[index + 2..]) {
                     if state.plain_text().len() > MIN_BLOCKSIZE {
@@ -117,7 +119,7 @@ pub fn find_deflate_stream(
                 if skip_gzip_header(&mut cursor).is_ok() {
                     let start = index + cursor.position() as usize;
 
-                    let mut state = PreflateStreamProcessor::new(plain_text_limit, verify);
+                    let mut state = PreflateStreamProcessor::new(&config.preflate_config);
                     if let Ok(res) = state.decompress(&src[start..]) {
                         if state.plain_text().len() > MIN_BLOCKSIZE {
                             return FindStreamResult::Found(
@@ -137,7 +139,7 @@ pub fn find_deflate_stream(
 
             Signature::ZipLocalFileHeader => {
                 if let Ok((header_size, res, state)) =
-                    parse_zip_stream(&src[index..], plain_text_limit, verify)
+                    parse_zip_stream(&src[index..], &config.preflate_config)
                 {
                     if state.plain_text().len() > MIN_BLOCKSIZE {
                         return FindStreamResult::Found(
@@ -179,7 +181,7 @@ pub fn find_deflate_stream(
                     match parse_idat(*prev_ihdr, &src[real_start..]) {
                         Ok((idat_contents, payload)) => {
                             *prev_ihdr = None;
-                            let mut state = PreflateStreamProcessor::new(plain_text_limit, verify);
+                            let mut state = PreflateStreamProcessor::new(&config.preflate_config);
 
                             if let Ok(res) = state.decompress(&payload) {
                                 let length = idat_contents.total_chunk_length;
@@ -214,9 +216,11 @@ pub fn find_deflate_stream(
             }
             Signature::JPEG => {
                 let mut output = Vec::new();
+
+                // only required feature is that we can stop reading at the EOI marker
                 let features = EnabledFeatures {
                     stop_reading_at_eoi: true,
-                    ..EnabledFeatures::compat_lepton_vector_read()
+                    ..config.jpeg_config
                 };
 
                 let mut input = Cursor::new(&src[index..]);
@@ -329,8 +333,7 @@ impl ZipLocalFileHeader {
 /// parses the zip stream and returns the size of the header, followed by the decompressed contents
 fn parse_zip_stream(
     contents: &[u8],
-    plain_text_limit: usize,
-    verify: bool,
+    config: &PreflateConfig,
 ) -> Result<(usize, PreflateStreamChunkResult, PreflateStreamProcessor)> {
     let mut binary_reader = Cursor::new(&contents);
 
@@ -355,7 +358,7 @@ fn parse_zip_stream(
     if zip_local_file_header.compression_method == 8 {
         let deflate_start_position = binary_reader.stream_position()? as usize;
 
-        let mut state = PreflateStreamProcessor::new(plain_text_limit, verify);
+        let mut state = PreflateStreamProcessor::new(config);
 
         if let Ok(res) = state.decompress(&contents[deflate_start_position..]) {
             return Ok((deflate_start_position, res, state));
@@ -369,10 +372,11 @@ fn parse_zip_stream(
 fn parse_png() {
     let f = crate::utils::read_file("treegdi.png");
 
-    let (loc, chunk) = match find_deflate_stream(&f, usize::MAX, &mut None, true, true) {
-        FindStreamResult::Found(loc, chunk) => (loc, chunk),
-        _ => panic!("Expected FoundStream"),
-    };
+    let (loc, chunk) =
+        match find_compressable_stream(&f, &mut None, true, &PreflateContainerConfig::default()) {
+            FindStreamResult::Found(loc, chunk) => (loc, chunk),
+            _ => panic!("Expected FoundStream"),
+        };
 
     match chunk.chunk_type {
         FoundStreamType::IDATDeflate(_p, idat, _plain_text) => {
@@ -386,10 +390,11 @@ fn parse_png() {
 fn parse_gz() {
     let f = crate::utils::read_file("sample1.bin.gz");
 
-    let loc = match find_deflate_stream(&f, usize::MAX, &mut None, true, true) {
-        FindStreamResult::Found(loc, chunk) => (loc, chunk),
-        _ => panic!("Expected FoundStream"),
-    };
+    let loc =
+        match find_compressable_stream(&f, &mut None, true, &PreflateContainerConfig::default()) {
+            FindStreamResult::Found(loc, chunk) => (loc, chunk),
+            _ => panic!("Expected FoundStream"),
+        };
 
     // 10 byte header + 8 byte footer
     assert_eq!(loc.0, 10..f.len() - 8);
@@ -404,9 +409,12 @@ fn parse_docx() {
     let f = crate::utils::read_file("file-sample_1MB.docx");
 
     let mut offset = 0;
-    while let FindStreamResult::Found(loc, res) =
-        find_deflate_stream(&f[offset..], usize::MAX, &mut None, true, true)
-    {
+    while let FindStreamResult::Found(loc, res) = find_compressable_stream(
+        &f[offset..],
+        &mut None,
+        true,
+        &PreflateContainerConfig::default(),
+    ) {
         match res.chunk_type {
             FoundStreamType::DeflateStream(_, _) => {
                 println!(
@@ -427,9 +435,12 @@ fn parse_pdf_with_jpeg() {
     let f = crate::utils::read_file("embedded-images.pdf");
 
     let mut offset = 0;
-    while let FindStreamResult::Found(loc, res) =
-        find_deflate_stream(&f[offset..], usize::MAX, &mut None, true, true)
-    {
+    while let FindStreamResult::Found(loc, res) = find_compressable_stream(
+        &f[offset..],
+        &mut None,
+        true,
+        &PreflateContainerConfig::default(),
+    ) {
         match res.chunk_type {
             FoundStreamType::DeflateStream(_, _) => {
                 println!(
@@ -462,9 +473,12 @@ fn parse_zip() {
     let mut plain_text = Vec::new();
 
     let mut offset = 0;
-    while let FindStreamResult::Found(loc, res) =
-        find_deflate_stream(&f[offset..], 1 * 1024 * 1024, &mut None, true, true)
-    {
+    while let FindStreamResult::Found(loc, res) = find_compressable_stream(
+        &f[offset..],
+        &mut None,
+        true,
+        &PreflateContainerConfig::default(),
+    ) {
         match res.chunk_type {
             FoundStreamType::DeflateStream(_, mut state) => {
                 println!(

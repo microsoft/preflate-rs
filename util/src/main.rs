@@ -1,5 +1,6 @@
 use env_logger::Builder;
 use log::LevelFilter;
+use preflate_rs::PreflateConfig;
 
 use std::{
     env, fs,
@@ -8,7 +9,7 @@ use std::{
 };
 
 use preflate_container::{
-    PreflateConfig, PreflateContainerProcessor, ProcessBuffer, ZstdCompressContext,
+    PreflateContainerConfig, PreflateContainerProcessor, ProcessBuffer, ZstdCompressContext,
 };
 
 fn enumerate_directory_recursively(path: &Path) -> Result<Vec<PathBuf>, std::io::Error> {
@@ -59,9 +60,12 @@ fn main() {
         let mut filehandle = BufReader::new(fs::File::open(&entry).unwrap());
 
         let mut ctx = ZstdCompressContext::new(
-            PreflateContainerProcessor::new(PreflateConfig {
-                verify: false,
-                ..PreflateConfig::default()
+            PreflateContainerProcessor::new(PreflateContainerConfig {
+                preflate_config: PreflateConfig {
+                    verify_compression: false,
+                    ..PreflateConfig::default()
+                },
+                ..PreflateContainerConfig::default()
             }),
             9,
             true,

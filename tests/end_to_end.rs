@@ -11,7 +11,7 @@ use std::{mem, ptr};
 
 use libdeflate_sys::{libdeflate_alloc_compressor, libdeflate_deflate_compress};
 use preflate_container::{zstd_preflate_whole_deflate_stream, zstd_recreate_whole_deflate_stream};
-use preflate_rs::{preflate_whole_deflate_stream, recreate_whole_deflate_stream};
+use preflate_rs::{PreflateConfig, preflate_whole_deflate_stream, recreate_whole_deflate_stream};
 
 #[cfg(test)]
 pub fn read_file(filename: &str) -> Vec<u8> {
@@ -79,7 +79,7 @@ fn test_container(filename: &str) {
     let mut c = Vec::new();
 
     let stats = zstd_preflate_whole_deflate_stream(
-        preflate_container::PreflateConfig::default(),
+        preflate_container::PreflateContainerConfig::default(),
         &mut std::io::Cursor::new(&v),
         &mut c,
         4, // use lower level to save CPU on testing
@@ -120,7 +120,7 @@ fn libzng() {
 
 fn verifyresult(compressed_data: &[u8]) {
     let (result, plain_text) =
-        preflate_whole_deflate_stream(compressed_data, true, 128 * 1024 * 1024).unwrap();
+        preflate_whole_deflate_stream(compressed_data, &PreflateConfig::default()).unwrap();
     let recomp = recreate_whole_deflate_stream(&plain_text.text(), &result.corrections).unwrap();
 
     println!(
@@ -471,7 +471,7 @@ fn compression_benchmark_overhead_size() {
         for level in 0..=9 {
             let compressed = (i.compress_fn)(&original, level);
 
-            let r = preflate_whole_deflate_stream(&compressed, true, 1024 * 1024 * 128);
+            let r = preflate_whole_deflate_stream(&compressed, &PreflateConfig::default());
 
             match r {
                 Ok((r, _)) => {
