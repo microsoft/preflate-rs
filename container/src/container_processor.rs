@@ -203,11 +203,11 @@ fn write_chunk_block(
 ///
 /// This is a wrapper for PreflateContainerProcessor.
 pub fn preflate_whole_into_container(
-    config: PreflateContainerConfig,
+    config: &PreflateContainerConfig,
     compressed_data: &mut impl BufRead,
     write: &mut impl Write,
 ) -> Result<PreflateStats> {
-    let mut context = PreflateContainerProcessor::new(config);
+    let mut context = PreflateContainerProcessor::new(&config);
     context.copy_to_end(compressed_data, write).unwrap();
 
     Ok(context.stats())
@@ -318,7 +318,7 @@ fn roundtrip_deflate_chunks(filename: &str) {
 
     let mut expanded = Vec::new();
     preflate_whole_into_container(
-        PreflateContainerConfig::default(),
+        &PreflateContainerConfig::default(),
         &mut std::io::Cursor::new(&f),
         &mut expanded,
     )
@@ -366,7 +366,7 @@ fn verify_zip_compress() {
 
     let mut expanded = Vec::new();
     preflate_whole_into_container(
-        PreflateContainerConfig::default(),
+        &PreflateContainerConfig::default(),
         &mut std::io::Cursor::new(&v),
         &mut expanded,
     )
@@ -532,7 +532,7 @@ pub struct PreflateContainerProcessor {
 }
 
 impl PreflateContainerProcessor {
-    pub fn new(config: PreflateContainerConfig) -> Self {
+    pub fn new(config: &PreflateContainerConfig) -> Self {
         PreflateContainerProcessor {
             content: Vec::new(),
             compression_stats: PreflateStats::default(),
@@ -541,7 +541,7 @@ impl PreflateContainerProcessor {
             state: ChunkParseState::Start,
             total_plain_text_seen: 0,
             last_attempt_chunk_size: 0,
-            config,
+            config: config.clone(),
         }
     }
 }
@@ -1184,7 +1184,7 @@ fn test_baseline_calc() {
     let v = read_file("samplezip.zip");
 
     let mut context = ZstdCompressContext::new(
-        PreflateContainerProcessor::new(PreflateContainerConfig::default()),
+        PreflateContainerProcessor::new(&PreflateContainerConfig::default()),
         9,
         true,
     );
@@ -1208,7 +1208,7 @@ fn roundtrip_small_chunk() {
 
     let original = read_file("pptxplaintext.zip");
 
-    let mut context = PreflateContainerProcessor::new(PreflateContainerConfig {
+    let mut context = PreflateContainerProcessor::new(&PreflateContainerConfig {
         min_chunk_size: 100000,
         max_chunk_size: 100000,
         total_plain_text_limit: u64::MAX,
@@ -1229,7 +1229,7 @@ fn roundtrip_small_plain_text() {
 
     let original = read_file("pptxplaintext.zip");
 
-    let mut context = PreflateContainerProcessor::new(PreflateContainerConfig {
+    let mut context = PreflateContainerProcessor::new(&PreflateContainerConfig {
         min_chunk_size: 100000,
         max_chunk_size: 100000,
         total_plain_text_limit: u64::MAX,
@@ -1254,7 +1254,7 @@ fn roundtrip_png_e2e() {
 
     println!("Compressing file");
 
-    let mut context = PreflateContainerProcessor::new(PreflateContainerConfig {
+    let mut context = PreflateContainerProcessor::new(&PreflateContainerConfig {
         min_chunk_size: 100000,
         max_chunk_size: original.len(),
         ..Default::default()
@@ -1282,7 +1282,7 @@ fn roundtrip_jpg() {
 
     println!("Compressing file");
 
-    let mut context = PreflateContainerProcessor::new(PreflateContainerConfig {
+    let mut context = PreflateContainerProcessor::new(&PreflateContainerConfig {
         min_chunk_size: 1000000,
         max_chunk_size: original.len(),
         ..Default::default()

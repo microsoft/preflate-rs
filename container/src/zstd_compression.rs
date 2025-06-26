@@ -230,7 +230,7 @@ impl<D: ProcessBuffer> ProcessBuffer for ZstdDecompressContext<D> {
 /// Expands the Zlib compressed streams in the data and then recompresses the result
 /// with Zstd with the given level.
 pub fn zstd_preflate_whole_deflate_stream(
-    config: PreflateContainerConfig,
+    config: &PreflateContainerConfig,
     input: &mut impl BufRead,
     output: &mut impl Write,
     compression_level: i32,
@@ -268,7 +268,7 @@ fn verify_zip_compress_zstd() {
 
     let mut compressed = Vec::new();
     let stats = zstd_preflate_whole_deflate_stream(
-        PreflateContainerConfig::default(),
+        &PreflateContainerConfig::default(),
         &mut std::io::Cursor::new(&v),
         &mut compressed,
         1, // for testing use a lower level to save CPU

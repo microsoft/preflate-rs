@@ -1,9 +1,10 @@
+use clap::{Parser, command};
 use env_logger::Builder;
 use log::LevelFilter;
 use preflate_rs::PreflateConfig;
 
 use std::{
-    env, fs,
+    fs,
     io::BufReader,
     path::{Path, PathBuf},
 };
@@ -11,6 +12,32 @@ use std::{
 use preflate_container::{
     PreflateContainerConfig, PreflateContainerProcessor, ProcessBuffer, ZstdCompressContext,
 };
+
+#[derive(Parser)]
+#[command(name = "preflate_util")]
+#[command(about = "Tests preflate compression container", long_about = None)]
+struct Cli {
+    /// Directory to compress
+    input: PathBuf,
+
+    /// Maximum chain length to use for recreating the deflate stream. If a larger
+    /// chain length is required, the stream will not be compressed.
+    #[arg(long, default_value = "4096")]
+    max_chain: u32,
+
+    /// Compression level (0-14) to use for Zstandard compression
+    #[arg(short = 'c', long, default_value = "9")]
+    level: u32,
+
+    /// level of logging to use
+    #[arg(long, default_value = "Error")]
+    #[arg(value_enum)]
+    loglevel: LevelFilter,
+
+    /// Whether to verify the compression
+    #[arg(long, default_value = "false")]
+    verify: bool,
+}
 
 fn enumerate_directory_recursively(path: &Path) -> Result<Vec<PathBuf>, std::io::Error> {
     let mut results = Vec::new();
@@ -42,9 +69,20 @@ fn enumerate_directory_recursively(path: &Path) -> Result<Vec<PathBuf>, std::io:
 }
 
 fn main() {
-    Builder::new().filter_level(LevelFilter::max()).init();
+    let cli = Cli::parse();
 
-    let current_dir = env::args().nth(1).unwrap_or_else(|| String::from("."));
+    Builder::new().filter_level(cli.loglevel).init();
+
+    let config = PreflateContainerConfig {
+        preflate_config: PreflateConfig {
+            verify_compression: cli.verify,
+            max_chain_length: cli.max_chain,
+            ..PreflateConfig::default()
+        },
+        ..PreflateContainerConfig::default()
+    };
+
+    let current_dir = cli.input;
 
     let mut totalseen = 0u64;
     let mut totalbaseline = 0u64;
@@ -60,14 +98,8 @@ fn main() {
         let mut filehandle = BufReader::new(fs::File::open(&entry).unwrap());
 
         let mut ctx = ZstdCompressContext::new(
-            PreflateContainerProcessor::new(PreflateContainerConfig {
-                preflate_config: PreflateConfig {
-                    verify_compression: false,
-                    ..PreflateConfig::default()
-                },
-                ..PreflateContainerConfig::default()
-            }),
-            9,
+            PreflateContainerProcessor::new(&config),
+            cli.level as i32,
             true,
         );
 

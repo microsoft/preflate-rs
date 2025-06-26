@@ -79,7 +79,7 @@ fn test_container(filename: &str) {
     let mut c = Vec::new();
 
     let stats = zstd_preflate_whole_deflate_stream(
-        preflate_container::PreflateContainerConfig::default(),
+        &preflate_container::PreflateContainerConfig::default(),
         &mut std::io::Cursor::new(&v),
         &mut c,
         4, // use lower level to save CPU on testing
