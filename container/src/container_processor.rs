@@ -1,4 +1,5 @@
 use byteorder::ReadBytesExt;
+use lepton_jpeg::EnabledFeatures;
 
 use std::{
     collections::VecDeque,
@@ -527,6 +528,11 @@ pub struct PreflateContainerProcessor {
     input_complete: bool,
     total_plain_text_seen: u64,
 
+    /// used to track the last attempted chunk size, in case we
+    /// need more input to continue, we will collect at least min_chunk_size
+    /// more input before trying to process again until we reach max_chunk_size
+    last_attempt_chunk_size: usize,
+
     state: ChunkParseState,
     config: PreflateConfig,
 }
@@ -540,6 +546,7 @@ impl PreflateContainerProcessor {
             input_complete: false,
             state: ChunkParseState::Start,
             total_plain_text_seen: 0,
+            last_attempt_chunk_size: 0,
             config,
         }
     }
@@ -568,10 +575,15 @@ impl ProcessBuffer for PreflateContainerProcessor {
         loop {
             // wait until we have at least min_chunk_size before we start processing
             if self.content.is_empty()
-                || (!input_complete && self.content.len() < self.config.min_chunk_size)
+                || (!input_complete
+                    && (self.content.len() - self.last_attempt_chunk_size)
+                        < self.config.min_chunk_size
+                    && self.content.len() <= self.config.max_chunk_size)
             {
                 break;
             }
+
+            self.last_attempt_chunk_size = self.content.len();
 
             match &mut self.state {
                 ChunkParseState::Start => {
@@ -585,6 +597,7 @@ impl ProcessBuffer for PreflateContainerProcessor {
                         // a single file
                         write_literal_block(&self.content, &mut self.result)?;
 
+                        self.last_attempt_chunk_size = 0;
                         self.content.clear();
                         break;
                     }
@@ -1053,7 +1066,7 @@ impl RecreateContainerProcessor {
                     match lepton_jpeg::decode_lepton(
                         &mut Cursor::new(&lepton_data),
                         &mut self.result,
-                        8,
+                        &EnabledFeatures::compat_lepton_vector_read(),
                     ) {
                         Err(e) => {
                             return Err(PreflateError::new(
@@ -1239,7 +1252,7 @@ fn roundtrip_small_plain_text() {
 #[test]
 fn roundtrip_png_e2e() {
     crate::init_logging();
-    
+
     use crate::utils::{assert_eq_array, read_file};
 
     let original = read_file("figma.png");
@@ -1272,25 +1285,33 @@ fn roundtrip_jpg() {
 
     use crate::utils::{assert_eq_array, read_file};
 
-    let original = read_file("android.jpg");
+    let original = read_file("embedded-images.pdf");
 
     println!("Compressing file");
 
     let mut context = PreflateContainerProcessor::new(PreflateConfig {
-        min_chunk_size: 100000,
+        min_chunk_size: 1000000,
         max_chunk_size: original.len(),
         plain_text_limit: usize::MAX,
         total_plain_text_limit: u64::MAX,
         verify: true,
     });
 
-    let compressed = context.process_vec_size(&original, 100100, 100100).unwrap();
+    let compressed = context
+        .process_vec_size(&original, usize::MAX, usize::MAX)
+        .unwrap();
+
+    println!(
+        "Compressed size: {} vs {}",
+        compressed.len(),
+        original.len()
+    );
 
     println!("Recreating file");
 
     let mut context = RecreateContainerProcessor::new(usize::MAX);
     let recreated = context
-        .process_vec_size(&compressed, 100100, 100100)
+        .process_vec_size(&compressed, usize::MAX, usize::MAX)
         .unwrap();
 
     assert_eq_array(&original, &recreated);

@@ -22,7 +22,7 @@ log = "0.4"
 webp = { version = "0.3", optional = true }
 crc32fast = "1.3"
 zstd = "0.13.0"
-lepton_jpeg = "0.3.0"
+lepton_jpeg = "0.5.1"
 
 [dev-dependencies]
 env_logger = "0.11"

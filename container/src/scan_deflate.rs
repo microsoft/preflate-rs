@@ -213,42 +213,34 @@ pub fn find_deflate_stream(
                 }
             }
             Signature::JPEG => {
-                // find end of JPEG marker
-                let mut end_index = index + 2;
-
-                let mut found_end = false;
-
-                // find 0xff 0xd9 marker which indicates the end of the JPEG stream
-                while end_index < src.len() - 1 {
-                    if src[end_index] == 0xFF && src[end_index + 1] == 0xD9 {
-                        end_index += 2; // include the end marker
-                        found_end = true;
-                        break;
-                    }
-                    end_index += 1;
-                }
-
-                if !found_end && !input_complete {
-                    // we don't have the whole JPEG stream yet, so tell the caller they need to extend the buffer
-                    return FindStreamResult::ShortRead;
-                }
-
                 let mut output = Vec::new();
-                let mut input = Cursor::new(&src[index..end_index]);
-                if let Ok(_m) = lepton_jpeg::encode_lepton(
+                let features = EnabledFeatures {
+                    stop_reading_at_eoi: true,
+                    ..EnabledFeatures::compat_lepton_vector_read()
+                };
+
+                let mut input = Cursor::new(&src[index..]);
+                match lepton_jpeg::encode_lepton(
                     &mut input,
                     &mut Cursor::new(&mut output),
-                    8,
-                    &EnabledFeatures::default(),
+                    &features,
                 ) {
-                    // successfully encoded the JPEG stream, return the found stream
-                    return FindStreamResult::Found(
-                        index..index + input.position() as usize,
-                        FoundStream {
-                            chunk_type: FoundStreamType::JPEGLepton(output),
-                            corrections: Vec::new(),
-                        },
-                    );
+                    Ok(_m) => {
+                        // successfully encoded the JPEG stream, return the found stream
+                        return FindStreamResult::Found(
+                            index..index + input.position() as usize,
+                            FoundStream {
+                                chunk_type: FoundStreamType::JPEGLepton(output),
+                                corrections: Vec::new(),
+                            },
+                        );
+                    }
+                    Err(e) => {
+                        if e.exit_code() == lepton_jpeg::ExitCode::ShortRead && !input_complete {
+                            // we don't have the whole JPEG stream yet, so tell the caller they need to extend the buffer
+                            return FindStreamResult::ShortRead;
+                        }
+                    }
                 }
             }
         }
@@ -420,6 +412,37 @@ fn parse_docx() {
                 println!(
                     "Deflate stream at {:?}",
                     offset + loc.start..offset + loc.end
+                );
+            }
+            _ => panic!("Expected DeflateStream"),
+        }
+        offset += loc.end;
+    }
+
+    //assert_eq!(locations_found.len(), 1);
+}
+
+#[test]
+fn parse_pdf_with_jpeg() {
+    let f = crate::utils::read_file("embedded-images.pdf");
+
+    let mut offset = 0;
+    while let FindStreamResult::Found(loc, res) =
+        find_deflate_stream(&f[offset..], usize::MAX, &mut None, true, true)
+    {
+        match res.chunk_type {
+            FoundStreamType::DeflateStream(_, _) => {
+                println!(
+                    "Deflate stream at {:?}",
+                    offset + loc.start..offset + loc.end
+                );
+            }
+            FoundStreamType::JPEGLepton(l) => {
+                println!(
+                    "JPEG stream at {:?} (length:{}) -> lepton {} bytes",
+                    offset + loc.start,
+                    loc.end - loc.start,
+                    l.len()
                 );
             }
             _ => panic!("Expected DeflateStream"),
