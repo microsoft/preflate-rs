@@ -1,7 +1,6 @@
 use clap::{Parser, command};
 use env_logger::Builder;
 use log::LevelFilter;
-use preflate_rs::PreflateConfig;
 
 use std::{
     fs,
@@ -74,11 +73,8 @@ fn main() {
     Builder::new().filter_level(cli.loglevel).init();
 
     let config = PreflateContainerConfig {
-        preflate_config: PreflateConfig {
-            verify_compression: cli.verify,
-            max_chain_length: cli.max_chain,
-            ..PreflateConfig::default()
-        },
+        validate_compression: cli.verify,
+        max_chain_length: cli.max_chain,
         ..PreflateContainerConfig::default()
     };
 

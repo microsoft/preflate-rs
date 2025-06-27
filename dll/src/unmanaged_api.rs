@@ -8,7 +8,7 @@ use preflate_container::{
     PreflateContainerConfig, PreflateContainerProcessor, ProcessBuffer, RecreateContainerProcessor,
     ZstdCompressContext, ZstdDecompressContext,
 };
-use preflate_rs::{ExitCode, PreflateConfig, PreflateError};
+use preflate_rs::{ExitCode, PreflateError};
 
 /// Helper function to catch panics and convert them into the appropriate LeptonError
 fn catch_unwind_result<R>(
@@ -87,11 +87,8 @@ pub unsafe extern "C" fn create_compression_context(flags: u32) -> *mut std::ffi
             12345678u32,
             CompressionContext::new(
                 PreflateContainerProcessor::new(&PreflateContainerConfig {
-                    preflate_config: PreflateConfig {
-                        verify_compression: verify,
-                        max_chain_length: 1024, // lower max chain to avoid excessive CPU usage
-                        ..PreflateConfig::default()
-                    },
+                    validate_compression: verify,
+                    max_chain_length: 1024, // lower max chain to avoid excessive CPU usage
                     ..PreflateContainerConfig::default()
                 }),
                 compression_level,

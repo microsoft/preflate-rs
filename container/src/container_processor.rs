@@ -39,11 +39,22 @@ pub struct PreflateContainerConfig {
     /// out the rest of the data as literal blocks.
     pub total_plain_text_limit: u64,
 
-    /// Configuration for the preflate stream processor
-    pub preflate_config: PreflateConfig,
+    /// The maximum size of a plain text chunk that we will decompress at a time. This limits
+    /// the memory usage of the decompression process.
+    pub chunk_plain_text_limit: usize,
 
-    /// Configuration for JPEG Lepton compression
-    pub jpeg_config: EnabledFeatures,
+    /// true if we should verify that the decompressed data can be recompressed to the same bytes.
+    /// This is important since there may be corner cases where the data may not yield the same bytes.
+    ///
+    /// If this is false, we will not verify the decompressed data and just write it out as is and it is
+    /// up to the caller to make sure the data is valid. In no case should you just assume that you
+    /// can get the same data back without verifying it.
+    pub validate_compression: bool,
+
+    /// Maximum number of lookups we will do in the hash chain. This will limit the CPU time we spend
+    /// on deflate stream processing but also means that we won't be able to recompress deflate streams
+    /// that were compressed with a larger chain length (eg level 9 has 4096).
+    pub max_chain_length: u32,
 }
 
 impl Default for PreflateContainerConfig {
@@ -52,8 +63,19 @@ impl Default for PreflateContainerConfig {
             min_chunk_size: 1024 * 1024,
             max_chunk_size: 64 * 1024 * 1024,
             total_plain_text_limit: 512 * 1024 * 1024,
-            preflate_config: PreflateConfig::default(),
-            jpeg_config: EnabledFeatures::compat_lepton_vector_write(),
+            chunk_plain_text_limit: 128 * 1024 * 1024,
+            max_chain_length: 4096,
+            validate_compression: true,
+        }
+    }
+}
+
+impl PreflateContainerConfig {
+    pub fn preflate_config(&self) -> PreflateConfig {
+        PreflateConfig {
+            max_chain_length: self.max_chain_length,
+            plain_text_limit: self.chunk_plain_text_limit,
+            verify_compression: self.validate_compression,
         }
     }
 }
