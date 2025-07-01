@@ -48,6 +48,34 @@ pub use stream_processor::{
     preflate_whole_deflate_stream, recreate_whole_deflate_stream,
 };
 
+/// Configure the preflate stream processor
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PreflateConfig {
+    /// Maximum number of lookups we will do in the hash chain. This will limit the
+    /// amount of CPU time we spend on each chunk.
+    pub max_chain_length: u32,
+
+    /// The maximum size of the plain text that will be decompressed to memory before
+    /// being recompressed. This limits memory usage and processing time, especially
+    /// for files that are extremely compressed (eg zip bombs)
+    pub plain_text_limit: usize,
+
+    /// Decompress the data and verify that it can be recompressed to exactly the same bytes.
+    /// This will slow down processing is isn't necessary if you are already doing end-to-end
+    /// verification of the data.
+    pub verify_compression: bool,
+}
+
+impl Default for PreflateConfig {
+    fn default() -> Self {
+        Self {
+            max_chain_length: 4096,
+            plain_text_limit: 128 * 1024 * 1024,
+            verify_compression: true,
+        }
+    }
+}
+
 #[cfg(test)]
 static INIT: std::sync::Once = std::sync::Once::new();
 

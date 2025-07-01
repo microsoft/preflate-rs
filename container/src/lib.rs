@@ -30,7 +30,7 @@ pub use zstd_compression::{
     zstd_preflate_whole_deflate_stream, zstd_recreate_whole_deflate_stream,
 };
 
-pub use container_processor::{PreflateConfig, PreflateStats};
+pub use container_processor::{PreflateContainerConfig, PreflateStats};
 pub use container_processor::{
     PreflateContainerProcessor, ProcessBuffer, RecreateContainerProcessor,
     preflate_whole_into_container, recreate_whole_from_container,
