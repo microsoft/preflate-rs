@@ -5,7 +5,7 @@ use crate::{
     idat_parse::{IdatContents, PngHeader, parse_idat, parse_ihdr},
 };
 
-use lepton_jpeg::EnabledFeatures;
+use lepton_jpeg::{DEFAULT_THREAD_POOL, EnabledFeatures};
 use preflate_rs::{
     ExitCode, PlainText, PreflateConfig, PreflateStreamChunkResult, PreflateStreamProcessor,
     TokenPredictorParameters, err_exit_code,
@@ -244,6 +244,7 @@ pub fn find_compressable_stream(
                     &mut input,
                     &mut Cursor::new(&mut output),
                     &features,
+                    &DEFAULT_THREAD_POOL,
                 ) {
                     Ok(_m) => {
                         if config.validate_compression {
@@ -253,6 +254,7 @@ pub fn find_compressable_stream(
                                 &mut Cursor::new(&output),
                                 &mut validate,
                                 &EnabledFeatures::compat_lepton_vector_read(),
+                                &DEFAULT_THREAD_POOL,
                             ) {
                                 log::warn!("Failed to decode JPEG, skipping: {}", e);
                                 index += input.position() as usize;

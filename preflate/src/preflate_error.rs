@@ -56,6 +56,9 @@ pub enum ExitCode {
 
     /// Plain text memory limit exceeded
     PlainTextLimit = 27,
+
+    /// WebP decoding error
+    WebPDecodeError = 28,
 }
 
 impl Display for ExitCode {

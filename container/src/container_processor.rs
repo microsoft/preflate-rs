@@ -1,5 +1,5 @@
 use byteorder::ReadBytesExt;
-use lepton_jpeg::EnabledFeatures;
+use lepton_jpeg::{DEFAULT_THREAD_POOL, EnabledFeatures};
 
 use std::{
     collections::VecDeque,
@@ -1086,6 +1086,7 @@ impl RecreateContainerProcessor {
                         &mut Cursor::new(&lepton_data),
                         &mut self.result,
                         &EnabledFeatures::compat_lepton_vector_read(),
+                        &DEFAULT_THREAD_POOL,
                     ) {
                         Err(e) => {
                             return Err(PreflateError::new(
@@ -1144,7 +1145,27 @@ fn webp_compress(
                 png_header.height,
             );
 
-            let comp = enc.encode_lossless();
+            let mut webpconfig = webp::WebPConfig::new().unwrap();
+            webpconfig.lossless = 1;
+            webpconfig.alpha_compression = 0;
+            webpconfig.exact = 1; // undocumented option, but required to not throw away color if alpha channel is zero
+
+            // this is the default quality setting for webp lossless, we could dial it up
+            // but the quality gains are marginal for the CPU cost, although the
+            // CPU decompression cost is the same.
+            webpconfig.quality = 75.0; // 0..100 higher is slower but better compression
+            webpconfig.method = 4; // 0..6 higher is slower but better compression
+
+            let comp = match enc.encode_advanced(&webpconfig) {
+                Ok(c) => c,
+                Err(e) => {
+                    return err_exit_code(
+                        ExitCode::WebPDecodeError,
+                        format!("Webp encode failed: {:?}", e),
+                    );
+                }
+            };
+
             result.write_all(&[PNG_COMPRESSED])?;
 
             write_varint(result, corrections.len() as u32)?;
@@ -1161,6 +1182,7 @@ fn webp_compress(
 
             result.write_all(&corrections)?;
             result.write_all(comp.deref())?;
+
             return Ok(());
         }
     }
