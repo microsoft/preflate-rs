@@ -1,26 +1,4 @@
-use std::{
-    collections::VecDeque,
-    io::{BufRead, Read, Write},
-};
-
-use preflate_rs::Result;
-
-/// writes the pending output to the writer
-pub fn write_dequeue(pending_output: &mut VecDeque<u8>, writer: &mut impl Write) -> Result<usize> {
-    if pending_output.len() > 0 {
-        let slices = pending_output.as_mut_slices();
-
-        writer.write_all(slices.0)?;
-        writer.write_all(slices.1)?;
-
-        let amount_written = slices.0.len() + slices.1.len();
-        pending_output.drain(..);
-
-        Ok(amount_written)
-    } else {
-        Ok(0)
-    }
-}
+use std::io::{BufRead, Read};
 
 /// A BufRead implementation that reads at most `limit` bytes from the underlying reader.
 pub struct TakeReader<T> {

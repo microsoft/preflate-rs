@@ -322,9 +322,9 @@ fn process_limited_buffer(
         output_buffer,
         extra_queue: output_extra,
     };
-    let done = process.process_buffer(input, input_complete, &mut w)?;
+    process.process_buffer(input, input_complete, &mut w)?;
 
-    Ok((done && w.extra_queue.len() == 0, w.amount_written))
+    Ok((w.extra_queue.len() == 0, w.amount_written))
 }
 
 /// Allocates new decompression context, must be freed with free_decompression_context

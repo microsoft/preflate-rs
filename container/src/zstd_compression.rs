@@ -3,14 +3,11 @@
 //! the other ProcessBuffer implementations to create a full compression or
 //! decompression pipeline.
 
-use std::{
-    collections::VecDeque,
-    io::{BufRead, Write},
-};
+use std::io::{BufRead, Write};
 
 use crate::{
     PreflateContainerProcessor, PreflateStats, ProcessBuffer, RecreateContainerProcessor,
-    container_processor::PreflateContainerConfig, utils::write_dequeue,
+    container_processor::PreflateContainerConfig,
 };
 
 use preflate_rs::{AddContext, ExitCode, PreflateError, Result};
@@ -19,7 +16,7 @@ use preflate_rs::{AddContext, ExitCode, PreflateError, Result};
 ///
 /// Designed to wrap around the PreflateChunkProcessor.
 pub struct ZstdCompressContext<D: ProcessBuffer> {
-    zstd_compress: zstd::stream::write::Encoder<'static, VecDeque<u8>>,
+    zstd_compress: zstd::stream::write::Encoder<'static, Vec<u8>>,
     input_complete: bool,
     internal: D,
 
@@ -33,17 +30,14 @@ pub struct ZstdCompressContext<D: ProcessBuffer> {
 
     zstd_baseline_size: u64,
     zstd_compressed_size: u64,
-
-    done_write: bool,
 }
 
 impl<D: ProcessBuffer> ZstdCompressContext<D> {
     pub fn new(internal: D, compression_level: i32, test_baseline: bool) -> Self {
         ZstdCompressContext {
-            zstd_compress: zstd::stream::write::Encoder::new(VecDeque::new(), compression_level)
+            zstd_compress: zstd::stream::write::Encoder::new(Vec::new(), compression_level)
                 .unwrap(),
             input_complete: false,
-            done_write: false,
             internal,
             zstd_baseline_size: 0,
             zstd_compressed_size: 0,
@@ -68,7 +62,7 @@ impl<D: ProcessBuffer> ProcessBuffer for ZstdCompressContext<D> {
         input: &[u8],
         input_complete: bool,
         writer: &mut impl Write,
-    ) -> Result<bool> {
+    ) -> Result<()> {
         if self.input_complete && (input.len() > 0 || !input_complete) {
             return Err(PreflateError::new(
                 ExitCode::InvalidParameter,
@@ -82,22 +76,13 @@ impl<D: ProcessBuffer> ProcessBuffer for ZstdCompressContext<D> {
             }
         }
 
-        if input_complete && !self.input_complete {
-            self.input_complete = true;
-        }
-
-        let done_write = self
-            .internal
+        self.internal
             .process_buffer(input, input_complete, &mut self.zstd_compress)
             .context()?;
 
-        if done_write && !self.done_write {
-            debug_assert!(
-                input_complete,
-                "can't be done writing if the input is not complete"
-            );
+        if input_complete && !self.input_complete {
+            self.input_complete = true;
 
-            self.done_write = true;
             self.zstd_compress.flush().context()?;
 
             if let Some(encoder) = &mut self.test_baseline {
@@ -107,11 +92,12 @@ impl<D: ProcessBuffer> ProcessBuffer for ZstdCompressContext<D> {
             }
         }
 
-        let output = self.zstd_compress.get_mut();
-        let amount_written = write_dequeue(output, writer).context()?;
-        self.zstd_compressed_size += amount_written as u64;
+        let compressed = self.zstd_compress.get_mut();
+        writer.write_all(compressed).context()?;
+        self.zstd_compressed_size += compressed.len() as u64;
+        compressed.drain(..);
 
-        Ok(done_write && output.len() == 0)
+        Ok(())
     }
 
     fn stats(&self) -> PreflateStats {
@@ -143,7 +129,7 @@ impl Write for MeasureWriteSink {
 ///
 /// Designed to wrap around the RecreateContainerProcessor.
 pub struct ZstdDecompressContext<D: ProcessBuffer> {
-    zstd_decompress: zstd::stream::write::Decoder<'static, AcceptWrite<D, VecDeque<u8>>>,
+    zstd_decompress: zstd::stream::write::Decoder<'static, AcceptWrite<D, Vec<u8>>>,
 }
 
 /// used to accept the output from the Zstandard decoder and write it to the output buffer.
@@ -153,14 +139,12 @@ struct AcceptWrite<D: ProcessBuffer, O: Write> {
     internal: D,
     output: O,
     input_complete: bool,
-    output_complete: bool,
 }
 
 impl<P: ProcessBuffer, O: Write> Write for AcceptWrite<P, O> {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.output_complete =
-            self.internal
-                .process_buffer(buf, self.input_complete, &mut self.output)?;
+        self.internal
+            .process_buffer(buf, self.input_complete, &mut self.output)?;
         Ok(buf.len())
     }
 
@@ -174,9 +158,8 @@ impl<D: ProcessBuffer> ZstdDecompressContext<D> {
         ZstdDecompressContext {
             zstd_decompress: zstd::stream::write::Decoder::new(AcceptWrite {
                 internal: internal,
-                output: VecDeque::new(),
+                output: Vec::new(),
                 input_complete: false,
-                output_complete: false,
             })
             .unwrap(),
         }
@@ -189,7 +172,7 @@ impl<D: ProcessBuffer> ProcessBuffer for ZstdDecompressContext<D> {
         input: &[u8],
         input_complete: bool,
         writer: &mut impl Write,
-    ) -> Result<bool> {
+    ) -> Result<()> {
         if self.zstd_decompress.get_mut().input_complete && (input.len() > 0 || !input_complete) {
             return Err(PreflateError::new(
                 ExitCode::InvalidParameter,
@@ -203,19 +186,14 @@ impl<D: ProcessBuffer> ProcessBuffer for ZstdDecompressContext<D> {
 
         if input_complete && !self.zstd_decompress.get_mut().input_complete {
             self.zstd_decompress.flush().context()?;
-
             self.zstd_decompress.get_mut().input_complete = true;
         }
 
         let a = self.zstd_decompress.get_mut();
+        writer.write_all(&a.output).context()?;
+        a.output.clear();
 
-        write_dequeue(&mut a.output, writer).context()?;
-
-        if input_complete && !a.output_complete && a.output.len() == 0 {
-            a.output_complete = a.internal.process_buffer(&[], true, writer)?;
-        }
-
-        Ok(a.output_complete && a.output.len() == 0)
+        Ok(())
     }
 }
 

@@ -418,7 +418,7 @@ pub trait ProcessBuffer {
         input: &[u8],
         input_complete: bool,
         writer: &mut impl Write,
-    ) -> Result<bool>;
+    ) -> Result<()>;
 
     #[cfg(test)]
     fn process_vec(&mut self, input: &[u8]) -> Result<Vec<u8>> {
@@ -471,25 +471,20 @@ pub trait ProcessBuffer {
             };
 
             if input_complete {
-                if self.process_buffer(&[], true, output).context()? {
-                    break;
-                }
+                self.process_buffer(&[], true, output).context()?;
+                break;
             } else {
                 // process buffer a piece at a time to avoid overflowing memory
                 let mut amount_read = 0;
                 while amount_read < buffer.len() {
                     let chunk_size = (buffer.len() - amount_read).min(read_chunk_size);
 
-                    assert!(
-                        !self
-                            .process_buffer(
-                                &buffer[amount_read..amount_read + chunk_size],
-                                false,
-                                output,
-                            )
-                            .context()?,
-                        "process_buffer should not return done until input is done"
-                    );
+                    self.process_buffer(
+                        &buffer[amount_read..amount_read + chunk_size],
+                        false,
+                        output,
+                    )
+                    .context()?;
 
                     amount_read += chunk_size;
                 }
@@ -560,7 +555,7 @@ impl ProcessBuffer for PreflateContainerProcessor {
         input: &[u8],
         input_complete: bool,
         writer: &mut impl Write,
-    ) -> Result<bool> {
+    ) -> Result<()> {
         if self.input_complete && (input.len() > 0 || !input_complete) {
             return Err(PreflateError::new(
                 ExitCode::InvalidParameter,
@@ -709,7 +704,7 @@ impl ProcessBuffer for PreflateContainerProcessor {
             self.content.clear();
         }
 
-        Ok(self.input_complete)
+        Ok(())
     }
 
     fn stats(&self) -> PreflateStats {
@@ -725,12 +720,12 @@ impl ProcessBuffer for NopProcessBuffer {
     fn process_buffer(
         &mut self,
         input: &[u8],
-        input_complete: bool,
+        _input_complete: bool,
         writer: &mut impl Write,
-    ) -> Result<bool> {
+    ) -> Result<()> {
         writer.write_all(input).context()?;
 
-        Ok(input_complete)
+        Ok(())
     }
 }
 
@@ -791,7 +786,7 @@ impl ProcessBuffer for RecreateContainerProcessor {
         input: &[u8],
         input_complete: bool,
         writer: &mut impl Write,
-    ) -> Result<bool> {
+    ) -> Result<()> {
         if self.input_complete && (input.len() > 0 || !input_complete) {
             return Err(PreflateError::new(
                 ExitCode::InvalidParameter,
@@ -821,7 +816,7 @@ impl ProcessBuffer for RecreateContainerProcessor {
             }
         }
 
-        Ok(self.input_complete)
+        Ok(())
     }
 }
 
