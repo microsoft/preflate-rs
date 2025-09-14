@@ -1,5 +1,6 @@
 use std::{
-    io::Cursor,
+    collections::VecDeque,
+    io::{Read, Write},
     panic::{AssertUnwindSafe, catch_unwind},
     ptr::{null, null_mut},
 };
@@ -83,18 +84,12 @@ pub unsafe extern "C" fn create_compression_context(flags: u32) -> *mut std::ffi
         let test_baseline = (flags & 0x10) != 0;
         let verify = (flags & 0x20) != 0;
 
-        let context = Box::new((
-            12345678u32,
-            CompressionContext::new(
-                PreflateContainerProcessor::new(&PreflateContainerConfig {
-                    validate_compression: verify,
-                    max_chain_length: 1024, // lower max chain to avoid excessive CPU usage
-                    ..PreflateContainerConfig::default()
-                }),
-                compression_level,
-                test_baseline,
-            ),
+        let context = Box::new(CompressionContext::new(
+            verify,
+            compression_level,
+            test_baseline,
         ));
+
         Ok(Box::into_raw(context) as *mut std::ffi::c_void)
     }) {
         Ok(context) => context,
@@ -109,8 +104,11 @@ pub unsafe extern "C" fn create_compression_context(flags: u32) -> *mut std::ffi
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn free_compression_context(context: *mut std::ffi::c_void) {
     unsafe {
-        let x = Box::from_raw(context as *mut (u32, CompressionContext));
-        assert_eq!(x.0, 12345678, "invalid context passed in");
+        let x = Box::from_raw(context as *mut CompressionContext);
+        assert_eq!(
+            x.magic, MAGIC_COMPRESSION_CONTEXT,
+            "invalid context passed in"
+        );
         // let Box destroy the object. If this asserts, we have some kind of memory corruption so better to just kill the process.
     }
 }
@@ -133,9 +131,7 @@ pub unsafe extern "C" fn compress_buffer(
 ) -> i32 {
     unsafe {
         match catch_unwind_result(|| {
-            let context = context as *mut (u32, CompressionContext);
-            let (magic, context) = &mut *context;
-            assert_eq!(*magic, 12345678, "invalid context passed in");
+            let context = CompressionContext::from_pointer(context);
 
             let input = if input_buffer == null() {
                 &[]
@@ -148,15 +144,15 @@ pub unsafe extern "C" fn compress_buffer(
                 std::slice::from_raw_parts_mut(output_buffer, output_buffer_size as usize)
             };
 
-            let mut writer = Cursor::new(output);
-            let done = context.process_buffer(
+            let (done, buffer_written) = process_limited_buffer(
+                &mut context.internal,
                 input,
                 input_complete,
-                &mut writer,
-                output_buffer_size as usize,
+                output,
+                &mut context.output_extra,
             )?;
 
-            *result_size = writer.position().into();
+            *result_size = buffer_written as u64;
             Ok(done)
         }) {
             Ok(done) => done as i32,
@@ -188,11 +184,9 @@ pub unsafe extern "C" fn get_compression_stats(
     hash_algorithm: *mut u32,
 ) {
     unsafe {
-        let context = context as *mut (u32, CompressionContext);
-        let (magic, context) = &*context;
-        assert_eq!(*magic, 12345678, "invalid context passed in");
+        let context = CompressionContext::from_pointer(context);
 
-        let stats = context.stats();
+        let stats = context.internal.stats();
 
         *deflate_compressed_size = stats.deflate_compressed_size;
         *zstd_compressed_size = stats.zstd_compressed_size;
@@ -203,8 +197,135 @@ pub unsafe extern "C" fn get_compression_stats(
     }
 }
 
-type DecompressionContext = ZstdDecompressContext<RecreateContainerProcessor>;
-type CompressionContext = ZstdCompressContext<PreflateContainerProcessor>;
+struct CompressionContext {
+    magic: u32,
+    internal: ZstdCompressContext<PreflateContainerProcessor>,
+    output_extra: VecDeque<u8>,
+}
+
+struct LimitedOutputWriter<'a> {
+    amount_written: usize,
+    output_buffer: &'a mut [u8],
+    extra_queue: &'a mut VecDeque<u8>,
+}
+
+impl Write for LimitedOutputWriter<'_> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let amount_for_output = buf
+            .len()
+            .min(self.output_buffer.len() - self.amount_written);
+
+        self.output_buffer[self.amount_written..self.amount_written + amount_for_output]
+            .copy_from_slice(&buf[..amount_for_output]);
+        self.amount_written += amount_for_output;
+
+        if amount_for_output < buf.len() {
+            self.extra_queue.extend(&buf[amount_for_output..]);
+        }
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        // nothing to do since we don't buffer anything
+        Ok(())
+    }
+}
+
+const MAGIC_DECOMRESSION_CONTEXT: u32 = 87654321;
+const MAGIC_COMPRESSION_CONTEXT: u32 = 12345678;
+
+impl CompressionContext {
+    fn from_pointer(ptr: *mut std::ffi::c_void) -> &'static mut Self {
+        unsafe {
+            let context = ptr as *mut CompressionContext;
+            assert_eq!(
+                (*context).magic,
+                MAGIC_COMPRESSION_CONTEXT,
+                "invalid context passed in"
+            );
+            &mut *context
+        }
+    }
+
+    fn new(verify: bool, compression_level: i32, test_baseline: bool) -> Self {
+        CompressionContext {
+            magic: MAGIC_COMPRESSION_CONTEXT,
+            internal: ZstdCompressContext::new(
+                PreflateContainerProcessor::new(&PreflateContainerConfig {
+                    validate_compression: verify,
+                    max_chain_length: 1024, // lower max chain to avoid excessive CPU usage
+                    ..PreflateContainerConfig::default()
+                }),
+                compression_level,
+                test_baseline,
+            ),
+            output_extra: VecDeque::new(),
+        }
+    }
+}
+
+struct DecompressionContext {
+    magic: u32,
+    internal: ZstdDecompressContext<RecreateContainerProcessor>,
+    output_extra: VecDeque<u8>,
+}
+
+impl DecompressionContext {
+    fn from_pointer(ptr: *mut std::ffi::c_void) -> &'static mut Self {
+        unsafe {
+            let context = ptr as *mut DecompressionContext;
+            assert_eq!(
+                (*context).magic,
+                MAGIC_DECOMRESSION_CONTEXT,
+                "invalid context passed in"
+            );
+            &mut *context
+        }
+    }
+
+    fn new(capacity: usize) -> Self {
+        let internal = ZstdDecompressContext::new(RecreateContainerProcessor::new(capacity));
+
+        DecompressionContext {
+            magic: MAGIC_DECOMRESSION_CONTEXT,
+            internal,
+            output_extra: VecDeque::new(),
+        }
+    }
+}
+
+/// Processes input data, writing output to the output buffer and any extra to the output_extra queue.
+///
+/// This is necessary because in the unmanaged wrapper we cannot expand the buffer that was given to us,
+/// so we have to write as much as we can to the output buffer and then queue up any extra data for next time.
+///
+/// This avoids adding complexity to every ProcessBuffer implementation to handle the case where there is too
+/// much output to fit in the output buffer.
+fn process_limited_buffer(
+    process: &mut impl ProcessBuffer,
+    input: &[u8],
+    input_complete: bool,
+    output_buffer: &mut [u8],
+    output_extra: &mut VecDeque<u8>,
+) -> Result<(bool, usize), PreflateError> {
+    // first write any extra data we have pending from last time
+    let mut amount_written = 0;
+    while amount_written < output_buffer.len() && output_extra.len() > 0 {
+        amount_written += output_extra
+            .read(&mut output_buffer[amount_written..])
+            .unwrap();
+    }
+
+    // now call process buffer with the remaining space
+    let mut w = LimitedOutputWriter {
+        amount_written,
+        output_buffer,
+        extra_queue: output_extra,
+    };
+    let done = process.process_buffer(input, input_complete, &mut w)?;
+
+    Ok((done && w.extra_queue.len() == 0, w.amount_written))
+}
 
 /// Allocates new decompression context, must be freed with free_decompression_context
 #[unsafe(no_mangle)]
@@ -213,10 +334,7 @@ pub unsafe extern "C" fn create_decompression_context(
     capacity: u64,
 ) -> *mut std::ffi::c_void {
     match catch_unwind_result(|| {
-        let context = Box::new((
-            87654321u32,
-            DecompressionContext::new(RecreateContainerProcessor::new(capacity as usize)),
-        ));
+        let context = Box::new(DecompressionContext::new(capacity as usize));
         Ok(Box::into_raw(context) as *mut std::ffi::c_void)
     }) {
         Ok(context) => context,
@@ -231,8 +349,11 @@ pub unsafe extern "C" fn create_decompression_context(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn free_decompression_context(context: *mut std::ffi::c_void) {
     unsafe {
-        let x = Box::from_raw(context as *mut (u32, DecompressionContext));
-        assert_eq!(x.0, 87654321, "invalid context passed in");
+        let x = Box::from_raw(context as *mut DecompressionContext);
+        assert_eq!(
+            x.magic, MAGIC_DECOMRESSION_CONTEXT,
+            "invalid context passed in"
+        );
         // let Box destroy the object
     }
 }
@@ -255,9 +376,7 @@ pub unsafe extern "C" fn decompress_buffer(
 ) -> i32 {
     unsafe {
         match catch_unwind_result(|| {
-            let context = context as *mut (u32, DecompressionContext);
-            let (magic, context) = &mut *context;
-            assert_eq!(*magic, 87654321, "invalid context passed in");
+            let context = DecompressionContext::from_pointer(context);
 
             let input = if input_buffer == null() {
                 &[]
@@ -270,15 +389,15 @@ pub unsafe extern "C" fn decompress_buffer(
                 std::slice::from_raw_parts_mut(output_buffer, output_buffer_size as usize)
             };
 
-            let mut writer = Cursor::new(output);
-            let done = context.process_buffer(
+            let (done, buffer_written) = process_limited_buffer(
+                &mut context.internal,
                 input,
                 input_complete,
-                &mut writer,
-                output_buffer_size as usize,
+                output,
+                &mut context.output_extra,
             )?;
 
-            *result_size = writer.position().into();
+            *result_size = buffer_written as u64;
             Ok(done)
         }) {
             Ok(done) => done as i32,
@@ -317,6 +436,7 @@ fn extern_interface() {
     let original = read_file("samplezip.zip");
 
     let mut compressed = Vec::new();
+    let error_string = &mut [0u8; 1024];
 
     unsafe {
         let compression_context = create_compression_context(1);
@@ -335,10 +455,15 @@ fn extern_interface() {
                 compressed_chunk.as_mut_ptr(),
                 compressed_chunk.len() as u64,
                 (&mut result_size) as *mut u64,
-                std::ptr::null_mut(),
-                0,
+                error_string.as_mut_ptr(),
+                error_string.len() as u64,
             );
-            assert_eq!(retval, 0);
+            assert!(
+                retval == 0,
+                "expecting no error {} {:?}",
+                retval,
+                get_cstring(&error_string)
+            );
 
             compressed.extend_from_slice(&compressed_chunk[..(result_size as usize)]);
         });
@@ -354,10 +479,15 @@ fn extern_interface() {
                 compressed_chunk.as_mut_ptr(),
                 compressed_chunk.len() as u64,
                 (&mut result_size) as *mut u64,
-                std::ptr::null_mut(),
-                0,
+                error_string.as_mut_ptr(),
+                error_string.len() as u64,
             );
-            assert!(retval >= 0, "not expecting an error");
+            assert!(
+                retval >= 0,
+                "expecting no error {} {:?}",
+                retval,
+                get_cstring(&error_string)
+            );
 
             compressed.extend_from_slice(&compressed_chunk[..(result_size as usize)]);
 
@@ -409,10 +539,15 @@ fn extern_interface() {
                 decompressed_chunk.as_mut_ptr(),
                 decompressed_chunk.len() as u64,
                 (&mut result_size) as *mut u64,
-                std::ptr::null_mut(),
-                0,
+                error_string.as_mut_ptr(),
+                error_string.len() as u64,
             );
-            assert_eq!(retval, 0);
+            assert!(
+                retval == 0,
+                "expecting no error {} {:?}",
+                retval,
+                get_cstring(&error_string)
+            );
 
             recreated.extend_from_slice(&decompressed_chunk[..(result_size as usize)]);
         });
@@ -428,10 +563,16 @@ fn extern_interface() {
                 decompressed_chunk.as_mut_ptr(),
                 decompressed_chunk.len() as u64,
                 (&mut result_size) as *mut u64,
-                std::ptr::null_mut(),
-                0,
+                error_string.as_mut_ptr(),
+                error_string.len() as u64,
             );
-            assert!(retval >= 0, "not expecting an error");
+
+            assert!(
+                retval >= 0,
+                "expecting no error {} {:?}",
+                retval,
+                get_cstring(&error_string)
+            );
 
             recreated.extend_from_slice(&decompressed_chunk[..(result_size as usize)]);
 
@@ -469,7 +610,12 @@ fn test_error_translation() {
             error_string.len() as u64,
         );
 
-        assert!(retval == 0, "expecting no error");
+        assert!(
+            retval == 0,
+            "expecting no error {} {:?}",
+            retval,
+            get_cstring(&error_string)
+        );
 
         let retval = compress_buffer(
             compression_context,
@@ -485,9 +631,7 @@ fn test_error_translation() {
 
         assert_eq!(retval, -(ExitCode::InvalidParameter as i32));
 
-        let len = error_string.iter().position(|&x| x == 0).unwrap();
-
-        let error_string = std::ffi::CStr::from_bytes_with_nul(&error_string[0..len + 1]).unwrap();
+        let error_string = get_cstring(&error_string);
 
         assert!(
             error_string
@@ -496,4 +640,13 @@ fn test_error_translation() {
                 .starts_with("more data provided after input_complete signaled"),
         );
     }
+}
+
+/// helper to get a cstring from a fixed size array for testing (finds zero terminator)
+#[cfg(test)]
+fn get_cstring<'a, const N: usize>(error_string: &'a [u8; N]) -> &'a std::ffi::CStr {
+    let len = error_string.iter().position(|&x| x == 0).unwrap();
+
+    let error_string = std::ffi::CStr::from_bytes_with_nul(&error_string[0..len + 1]).unwrap();
+    error_string
 }

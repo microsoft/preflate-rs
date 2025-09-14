@@ -6,26 +6,16 @@ use std::{
 use preflate_rs::Result;
 
 /// writes the pending output to the writer
-pub fn write_dequeue(
-    pending_output: &mut VecDeque<u8>,
-    writer: &mut impl Write,
-    max_output_write: usize,
-) -> Result<usize> {
+pub fn write_dequeue(pending_output: &mut VecDeque<u8>, writer: &mut impl Write) -> Result<usize> {
     if pending_output.len() > 0 {
         let slices = pending_output.as_mut_slices();
 
-        let mut amount_written = 0;
-        let len = slices.0.len().min(max_output_write);
-        writer.write_all(&slices.0[..len])?;
-        amount_written += len;
+        writer.write_all(slices.0)?;
+        writer.write_all(slices.1)?;
 
-        if amount_written < max_output_write {
-            let len = slices.1.len().min(max_output_write - amount_written);
-            writer.write_all(&slices.1[..len])?;
-            amount_written += len;
-        }
+        let amount_written = slices.0.len() + slices.1.len();
+        pending_output.drain(..);
 
-        pending_output.drain(..amount_written);
         Ok(amount_written)
     } else {
         Ok(0)

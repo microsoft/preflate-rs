@@ -112,7 +112,6 @@ fn main() {
             &mut Cursor::new(&original),
             &mut preflate_compressed,
             usize::MAX,
-            usize::MAX,
         ) {
             println!("Skipping due to error: {:?}", e);
             continue;
@@ -148,7 +147,6 @@ fn main() {
             if let Err(e) = decomp.copy_to_end_size(
                 &mut Cursor::new(&preflate_compressed),
                 &mut recreated,
-                usize::MAX,
                 usize::MAX,
             ) {
                 println!("Verification error: {:?}", e);

@@ -68,7 +68,6 @@ impl<D: ProcessBuffer> ProcessBuffer for ZstdCompressContext<D> {
         input: &[u8],
         input_complete: bool,
         writer: &mut impl Write,
-        max_output_write: usize,
     ) -> Result<bool> {
         if self.input_complete && (input.len() > 0 || !input_complete) {
             return Err(PreflateError::new(
@@ -89,7 +88,7 @@ impl<D: ProcessBuffer> ProcessBuffer for ZstdCompressContext<D> {
 
         let done_write = self
             .internal
-            .process_buffer(input, input_complete, &mut self.zstd_compress, usize::MAX)
+            .process_buffer(input, input_complete, &mut self.zstd_compress)
             .context()?;
 
         if done_write && !self.done_write {
@@ -109,7 +108,7 @@ impl<D: ProcessBuffer> ProcessBuffer for ZstdCompressContext<D> {
         }
 
         let output = self.zstd_compress.get_mut();
-        let amount_written = write_dequeue(output, writer, max_output_write).context()?;
+        let amount_written = write_dequeue(output, writer).context()?;
         self.zstd_compressed_size += amount_written as u64;
 
         Ok(done_write && output.len() == 0)
@@ -161,7 +160,7 @@ impl<P: ProcessBuffer, O: Write> Write for AcceptWrite<P, O> {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         self.output_complete =
             self.internal
-                .process_buffer(buf, self.input_complete, &mut self.output, usize::MAX)?;
+                .process_buffer(buf, self.input_complete, &mut self.output)?;
         Ok(buf.len())
     }
 
@@ -190,7 +189,6 @@ impl<D: ProcessBuffer> ProcessBuffer for ZstdDecompressContext<D> {
         input: &[u8],
         input_complete: bool,
         writer: &mut impl Write,
-        max_output_write: usize,
     ) -> Result<bool> {
         if self.zstd_decompress.get_mut().input_complete && (input.len() > 0 || !input_complete) {
             return Err(PreflateError::new(
@@ -211,16 +209,10 @@ impl<D: ProcessBuffer> ProcessBuffer for ZstdDecompressContext<D> {
 
         let a = self.zstd_decompress.get_mut();
 
-        let amount_written = write_dequeue(&mut a.output, writer, max_output_write).context()?;
+        write_dequeue(&mut a.output, writer).context()?;
 
-        if input_complete
-            && !a.output_complete
-            && a.output.len() == 0
-            && amount_written < max_output_write
-        {
-            a.output_complete =
-                a.internal
-                    .process_buffer(&[], true, writer, max_output_write - amount_written)?;
+        if input_complete && !a.output_complete && a.output.len() == 0 {
+            a.output_complete = a.internal.process_buffer(&[], true, writer)?;
         }
 
         Ok(a.output_complete && a.output.len() == 0)
@@ -297,11 +289,11 @@ fn roundtrip_zstd_only_contexts() {
 
     let original = read_file("samplezip.zip");
 
-    let mut context = ZstdCompressContext::new(NopProcessBuffer::new(), 9, false);
-    let compressed = context.process_vec_size(&original, 997, 997).unwrap();
+    let mut context = ZstdCompressContext::new(NopProcessBuffer {}, 9, false);
+    let compressed = context.process_vec_size(&original, 997).unwrap();
 
-    let mut context = ZstdDecompressContext::new(NopProcessBuffer::new());
-    let recreated = context.process_vec_size(&compressed, 997, 997).unwrap();
+    let mut context = ZstdDecompressContext::new(NopProcessBuffer {});
+    let recreated = context.process_vec_size(&compressed, 997).unwrap();
 
     assert_eq_array(&original, &recreated);
 }
