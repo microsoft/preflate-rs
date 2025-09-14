@@ -1,15 +1,17 @@
 use clap::{Parser, command};
+use cpu_time::ProcessTime;
 use env_logger::Builder;
 use log::LevelFilter;
 
 use std::{
     fs,
-    io::BufReader,
+    io::Cursor,
     path::{Path, PathBuf},
 };
 
 use preflate_container::{
-    PreflateContainerConfig, PreflateContainerProcessor, ProcessBuffer, ZstdCompressContext,
+    PreflateContainerConfig, PreflateContainerProcessor, ProcessBuffer, RecreateContainerProcessor,
+    ZstdCompressContext, ZstdDecompressContext,
 };
 
 #[derive(Parser)]
@@ -33,9 +35,13 @@ struct Cli {
     #[arg(value_enum)]
     loglevel: LevelFilter,
 
-    /// Whether to verify the compression
-    #[arg(long, default_value = "false")]
+    /// Whether to verify the compression by decompressing and comparing to original
+    #[arg(long, default_value = "true")]
     verify: bool,
+
+    /// Whether to output baseline zstd compression size
+    #[arg(long, default_value = "false")]
+    baseline: bool,
 }
 
 fn enumerate_directory_recursively(path: &Path) -> Result<Vec<PathBuf>, std::io::Error> {
@@ -73,7 +79,7 @@ fn main() {
     Builder::new().filter_level(cli.loglevel).init();
 
     let config = PreflateContainerConfig {
-        validate_compression: cli.verify,
+        validate_compression: false,
         max_chain_length: cli.max_chain,
         ..PreflateContainerConfig::default()
     };
@@ -91,26 +97,34 @@ fn main() {
         println!("Processing file: {:?}", entry);
 
         // open file for reading
-        let mut filehandle = BufReader::new(fs::File::open(&entry).unwrap());
+        let original = fs::read(&entry).unwrap();
 
         let mut ctx = ZstdCompressContext::new(
             PreflateContainerProcessor::new(&config),
             cli.level as i32,
-            true,
+            cli.baseline,
         );
 
-        let mut preflatecompressed = Vec::new();
-        if let Err(e) = ctx.copy_to_end(&mut filehandle, &mut preflatecompressed) {
+        let compress_start = ProcessTime::now();
+
+        let mut preflate_compressed = Vec::new();
+        if let Err(e) = ctx.copy_to_end_size(
+            &mut Cursor::new(&original),
+            &mut preflate_compressed,
+            usize::MAX,
+            usize::MAX,
+        ) {
             println!("Skipping due to error: {:?}", e);
             continue;
-        }
+        };
 
         let stats = ctx.stats();
 
         println!(
-            "compressed ratio: {:.1}",
+            "compressed ratio: {:.1} cpu={:?}",
             (1f64 - (stats.zstd_compressed_size as f64 / stats.deflate_compressed_size as f64))
-                * 100f64
+                * 100f64,
+            compress_start.elapsed()
         );
 
         totalseen += stats.deflate_compressed_size as u64;
@@ -121,5 +135,63 @@ fn main() {
             "total seen ratio {totalzstd}:{totalbaseline}:{totalseen} {:.1}",
             (1f64 - totalzstd as f64 / totalbaseline as f64) * 100f64
         );
+
+        // test expanding back to original and verifying
+        if cli.verify {
+            let start = ProcessTime::now();
+
+            let mut recreated = Vec::new();
+            let mut decomp = ZstdDecompressContext::new(RecreateContainerProcessor::new(
+                config.chunk_plain_text_limit,
+            ));
+
+            if let Err(e) = decomp.copy_to_end_size(
+                &mut Cursor::new(&preflate_compressed),
+                &mut recreated,
+                usize::MAX,
+                usize::MAX,
+            ) {
+                println!("Verification error: {:?}", e);
+                continue;
+            };
+
+            println!("decompression cpu time: {:?}", start.elapsed());
+
+            assert_eq_array(&original, &recreated);
+        }
+    }
+}
+
+/// handy function to compare two arrays, and print the first mismatch. Useful for debugging.
+#[track_caller]
+pub fn assert_eq_array<T: PartialEq + std::fmt::Debug>(a: &[T], b: &[T]) {
+    use core::panic;
+
+    if a.len() != b.len() {
+        for i in 0..std::cmp::min(a.len(), b.len()) {
+            assert_eq!(
+                a[i],
+                b[i],
+                "length mismatch {},{} and first mismatch at offset {}",
+                a.len(),
+                b.len(),
+                i
+            );
+        }
+        panic!(
+            "length mismatch {} and {}, but common prefix identical",
+            a.len(),
+            b.len()
+        );
+    } else {
+        for i in 0..a.len() {
+            assert_eq!(
+                a[i],
+                b[i],
+                "length identical {}, but first mismatch at offset {}",
+                a.len(),
+                i
+            );
+        }
     }
 }
