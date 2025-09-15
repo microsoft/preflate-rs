@@ -11,7 +11,7 @@ use crate::{
     idat_parse::{IdatContents, PngHeader, recreate_idat},
     scan_deflate::{FindStreamResult, FoundStream, FoundStreamType, find_compressable_stream},
     scoped_read::ScopedRead,
-    utils::{TakeReader, write_dequeue},
+    utils::TakeReader,
 };
 
 use preflate_rs::{
@@ -252,7 +252,7 @@ fn read_chunk_block_slow(
     destination: &mut impl Write,
 ) -> std::result::Result<(), PreflateError> {
     let mut p = RecreateContainerProcessor::new_single_chunk(usize::MAX);
-    p.copy_to_end_size(source, destination, 1, 1).context()
+    p.copy_to_end_size(source, destination, 1).context()
 }
 
 #[test]
@@ -418,8 +418,7 @@ pub trait ProcessBuffer {
         input: &[u8],
         input_complete: bool,
         writer: &mut impl Write,
-        max_output_write: usize,
-    ) -> Result<bool>;
+    ) -> Result<()>;
 
     #[cfg(test)]
     fn process_vec(&mut self, input: &[u8]) -> Result<Vec<u8>> {
@@ -432,19 +431,13 @@ pub trait ProcessBuffer {
     }
 
     #[cfg(test)]
-    fn process_vec_size(
-        &mut self,
-        input: &[u8],
-        read_chunk_size: usize,
-        write_chunk_size: usize,
-    ) -> Result<Vec<u8>> {
+    fn process_vec_size(&mut self, input: &[u8], read_chunk_size: usize) -> Result<Vec<u8>> {
         let mut writer = Vec::new();
 
         self.copy_to_end_size(
             &mut std::io::Cursor::new(&input),
             &mut writer,
             read_chunk_size,
-            write_chunk_size,
         )
         .context()?;
 
@@ -454,7 +447,7 @@ pub trait ProcessBuffer {
     /// Reads everything from input and writes it to the output.
     /// Wraps calls to process buffer
     fn copy_to_end(&mut self, input: &mut impl BufRead, output: &mut impl Write) -> Result<()> {
-        self.copy_to_end_size(input, output, 1024 * 1024, 1024 * 1024)
+        self.copy_to_end_size(input, output, 1024 * 1024)
     }
 
     /// Reads everything from input and writes it to the output.
@@ -464,7 +457,6 @@ pub trait ProcessBuffer {
         input: &mut impl BufRead,
         output: &mut impl Write,
         read_chunk_size: usize,
-        write_chunk_size: usize,
     ) -> Result<()> {
         let mut input_complete = false;
         loop {
@@ -479,29 +471,20 @@ pub trait ProcessBuffer {
             };
 
             if input_complete {
-                if self
-                    .process_buffer(&[], true, output, usize::MAX)
-                    .context()?
-                {
-                    break;
-                }
+                self.process_buffer(&[], true, output).context()?;
+                break;
             } else {
                 // process buffer a piece at a time to avoid overflowing memory
                 let mut amount_read = 0;
                 while amount_read < buffer.len() {
                     let chunk_size = (buffer.len() - amount_read).min(read_chunk_size);
 
-                    assert!(
-                        !self
-                            .process_buffer(
-                                &buffer[amount_read..amount_read + chunk_size],
-                                false,
-                                output,
-                                write_chunk_size,
-                            )
-                            .context()?,
-                        "process_buffer should not return done until input is done"
-                    );
+                    self.process_buffer(
+                        &buffer[amount_read..amount_read + chunk_size],
+                        false,
+                        output,
+                    )
+                    .context()?;
 
                     amount_read += chunk_size;
                 }
@@ -539,7 +522,6 @@ enum ChunkParseState {
 /// deflate stream directlyh.
 pub struct PreflateContainerProcessor {
     content: Vec<u8>,
-    result: VecDeque<u8>,
     compression_stats: PreflateStats,
     input_complete: bool,
     total_plain_text_seen: u64,
@@ -558,7 +540,6 @@ impl PreflateContainerProcessor {
         PreflateContainerProcessor {
             content: Vec::new(),
             compression_stats: PreflateStats::default(),
-            result: VecDeque::new(),
             input_complete: false,
             state: ChunkParseState::Start,
             total_plain_text_seen: 0,
@@ -574,8 +555,7 @@ impl ProcessBuffer for PreflateContainerProcessor {
         input: &[u8],
         input_complete: bool,
         writer: &mut impl Write,
-        max_output_write: usize,
-    ) -> Result<bool> {
+    ) -> Result<()> {
         if self.input_complete && (input.len() > 0 || !input_complete) {
             return Err(PreflateError::new(
                 ExitCode::InvalidParameter,
@@ -603,7 +583,7 @@ impl ProcessBuffer for PreflateContainerProcessor {
 
             match &mut self.state {
                 ChunkParseState::Start => {
-                    self.result.write_all(&[COMPRESSED_WRAPPER_VERSION_1])?;
+                    writer.write_all(&[COMPRESSED_WRAPPER_VERSION_1])?;
                     self.state = ChunkParseState::Searching(None);
                 }
                 ChunkParseState::Searching(prev_ihdr) => {
@@ -611,7 +591,7 @@ impl ProcessBuffer for PreflateContainerProcessor {
                         // once we've exceeded our limit, we don't do any more compression
                         // this is to ensure we don't suck the CPU time for too long on
                         // a single file
-                        write_literal_block(&self.content, &mut self.result)?;
+                        write_literal_block(&self.content, writer)?;
 
                         self.last_attempt_chunk_size = 0;
                         self.content.clear();
@@ -629,15 +609,12 @@ impl ProcessBuffer for PreflateContainerProcessor {
                             // the gap between the start and the beginning of the deflate stream
                             // is written out as a literal block
                             if next.start != 0 {
-                                write_literal_block(&self.content[..next.start], &mut self.result)?;
+                                write_literal_block(&self.content[..next.start], writer)?;
                             }
 
-                            if let Some(mut state) = write_chunk_block(
-                                &mut self.result,
-                                chunk,
-                                &mut self.compression_stats,
-                            )
-                            .context()?
+                            if let Some(mut state) =
+                                write_chunk_block(writer, chunk, &mut self.compression_stats)
+                                    .context()?
                             {
                                 self.total_plain_text_seen += state.plain_text().len() as u64;
                                 state.shrink_to_dictionary();
@@ -652,7 +629,7 @@ impl ProcessBuffer for PreflateContainerProcessor {
                             if input_complete || self.content.len() > self.config.max_chunk_size {
                                 // if we have too much data or have no more data,
                                 // we just write it out as a literal block with everything we have
-                                write_literal_block(&self.content, &mut self.result)?;
+                                write_literal_block(&self.content, writer)?;
 
                                 self.content.clear();
                                 self.last_attempt_chunk_size = 0;
@@ -664,7 +641,7 @@ impl ProcessBuffer for PreflateContainerProcessor {
                         }
                         FindStreamResult::None => {
                             // couldn't find anything, just write the rest as a literal block
-                            write_literal_block(&self.content, &mut self.result)?;
+                            write_literal_block(&self.content, writer)?;
 
                             self.content.clear();
                             self.last_attempt_chunk_size = 0;
@@ -691,13 +668,13 @@ impl ProcessBuffer for PreflateContainerProcessor {
                                 res.compressed_size
                             );
 
-                            self.result.write_all(&[DEFLATE_STREAM_CONTINUE])?;
+                            writer.write_all(&[DEFLATE_STREAM_CONTINUE])?;
 
-                            write_varint(&mut self.result, res.corrections.len() as u32)?;
-                            write_varint(&mut self.result, state.plain_text().len() as u32)?;
+                            write_varint(writer, res.corrections.len() as u32)?;
+                            write_varint(writer, state.plain_text().len() as u32)?;
 
-                            self.result.write_all(&res.corrections)?;
-                            self.result.write_all(&state.plain_text().text())?;
+                            writer.write_all(&res.corrections)?;
+                            writer.write_all(&state.plain_text().text())?;
 
                             self.total_plain_text_seen += state.plain_text().len() as u64;
                             self.compression_stats.overhead_bytes += res.corrections.len() as u64;
@@ -722,15 +699,12 @@ impl ProcessBuffer for PreflateContainerProcessor {
             self.input_complete = true;
 
             if self.content.len() > 0 {
-                write_literal_block(&self.content, &mut self.result)?;
+                write_literal_block(&self.content, writer)?;
             }
             self.content.clear();
         }
 
-        // write any output we have pending in the queue into the output buffer
-        write_dequeue(&mut self.result, writer, max_output_write).context()?;
-
-        Ok(self.input_complete && self.result.len() == 0)
+        Ok(())
     }
 
     fn stats(&self) -> PreflateStats {
@@ -739,33 +713,19 @@ impl ProcessBuffer for PreflateContainerProcessor {
 }
 
 #[cfg(test)]
-pub struct NopProcessBuffer {
-    result: VecDeque<u8>,
-}
-
-#[cfg(test)]
-impl NopProcessBuffer {
-    pub fn new() -> Self {
-        NopProcessBuffer {
-            result: VecDeque::new(),
-        }
-    }
-}
+pub struct NopProcessBuffer {}
 
 #[cfg(test)]
 impl ProcessBuffer for NopProcessBuffer {
     fn process_buffer(
         &mut self,
         input: &[u8],
-        input_complete: bool,
+        _input_complete: bool,
         writer: &mut impl Write,
-        max_output_write: usize,
-    ) -> Result<bool> {
-        self.result.extend(input);
+    ) -> Result<()> {
+        writer.write_all(input).context()?;
 
-        write_dequeue(&mut self.result, writer, max_output_write).context()?;
-
-        Ok(input_complete && self.result.len() == 0)
+        Ok(())
     }
 }
 
@@ -789,7 +749,6 @@ enum DecompressionState {
 pub struct RecreateContainerProcessor {
     capacity: usize,
     input: VecDeque<u8>,
-    result: VecDeque<u8>,
     input_complete: bool,
     state: DecompressionState,
 
@@ -802,7 +761,6 @@ impl RecreateContainerProcessor {
     pub fn new(capacity: usize) -> Self {
         RecreateContainerProcessor {
             input: VecDeque::new(),
-            result: VecDeque::new(),
             capacity,
             input_complete: false,
             state: DecompressionState::Start,
@@ -814,7 +772,6 @@ impl RecreateContainerProcessor {
     pub fn new_single_chunk(capacity: usize) -> Self {
         RecreateContainerProcessor {
             input: VecDeque::new(),
-            result: VecDeque::new(),
             capacity,
             input_complete: false,
             state: DecompressionState::StartSegment,
@@ -829,8 +786,7 @@ impl ProcessBuffer for RecreateContainerProcessor {
         input: &[u8],
         input_complete: bool,
         writer: &mut impl Write,
-        mut max_output_write: usize,
-    ) -> Result<bool> {
+    ) -> Result<()> {
         if self.input_complete && (input.len() > 0 || !input_complete) {
             return Err(PreflateError::new(
                 ExitCode::InvalidParameter,
@@ -853,22 +809,19 @@ impl ProcessBuffer for RecreateContainerProcessor {
 
             amount_read += amount_to_read;
 
-            self.process_buffer_internal()?;
-            let amount_written =
-                write_dequeue(&mut self.result, writer, max_output_write).context()?;
+            self.process_buffer_internal(writer)?;
 
-            max_output_write -= amount_written;
             if amount_read == input.len() {
                 break;
             }
         }
 
-        Ok(self.input_complete && self.result.len() == 0)
+        Ok(())
     }
 }
 
 impl RecreateContainerProcessor {
-    fn process_buffer_internal(&mut self) -> Result<()> {
+    fn process_buffer_internal(&mut self, writer: &mut impl Write) -> Result<()> {
         loop {
             match &mut self.state {
                 DecompressionState::Start => {
@@ -978,12 +931,13 @@ impl RecreateContainerProcessor {
                                 "unexpected end of input",
                             ));
                         }
-                        self.result.extend(self.input.drain(..));
+
+                        std::io::copy(&mut self.input, writer).context()?;
                         *length -= source_size;
                         break;
                     }
 
-                    self.result.extend(self.input.drain(0..*length));
+                    std::io::copy(&mut (&mut self.input).take(*length as u64), writer).context()?;
                     self.state = DecompressionState::StartSegment;
                 }
 
@@ -1011,7 +965,7 @@ impl RecreateContainerProcessor {
                             )
                             .context()?;
 
-                        self.result.extend(&comp);
+                        writer.write_all(&comp)?;
                     } else {
                         let mut reconstruct = RecreateStreamProcessor::new();
                         let (comp, _) = reconstruct
@@ -1021,7 +975,7 @@ impl RecreateContainerProcessor {
                             )
                             .context()?;
 
-                        self.result.extend(&comp);
+                        writer.write_all(&comp)?;
 
                         self.deflate_continue_state = Some(reconstruct);
                     }
@@ -1064,7 +1018,7 @@ impl RecreateContainerProcessor {
                     let recompressed =
                         recreate_whole_deflate_stream(&plain_text, &corrections).context()?;
 
-                    recreate_idat(&idat, &recompressed[..], &mut self.result).context()?;
+                    recreate_idat(&idat, &recompressed[..], writer).context()?;
 
                     self.state = DecompressionState::StartSegment;
                 }
@@ -1084,7 +1038,7 @@ impl RecreateContainerProcessor {
 
                     match lepton_jpeg::decode_lepton(
                         &mut Cursor::new(&lepton_data),
-                        &mut self.result,
+                        writer,
                         &EnabledFeatures::compat_lepton_vector_read(),
                         &DEFAULT_THREAD_POOL,
                     ) {
@@ -1259,10 +1213,10 @@ fn roundtrip_small_chunk() {
         ..Default::default()
     });
 
-    let compressed = context.process_vec_size(&original, 20001, 997).unwrap();
+    let compressed = context.process_vec_size(&original, 20001).unwrap();
 
     let mut context = RecreateContainerProcessor::new(usize::MAX);
-    let recreated = context.process_vec_size(&compressed, 20001, 997).unwrap();
+    let recreated = context.process_vec_size(&compressed, 20001).unwrap();
 
     assert_eq_array(&original, &recreated);
 }
@@ -1280,10 +1234,10 @@ fn roundtrip_small_plain_text() {
         ..Default::default()
     });
 
-    let compressed = context.process_vec_size(&original, 2001, 20001).unwrap();
+    let compressed = context.process_vec_size(&original, 2001).unwrap();
 
     let mut context = RecreateContainerProcessor::new(usize::MAX);
-    let recreated = context.process_vec_size(&compressed, 2001, 20001).unwrap();
+    let recreated = context.process_vec_size(&compressed, 2001).unwrap();
 
     assert_eq_array(&original, &recreated);
 }
@@ -1304,14 +1258,12 @@ fn roundtrip_png_e2e() {
         ..Default::default()
     });
 
-    let compressed = context.process_vec_size(&original, 100100, 100100).unwrap();
+    let compressed = context.process_vec_size(&original, 100100).unwrap();
 
     println!("Recreating file");
 
     let mut context = RecreateContainerProcessor::new(usize::MAX);
-    let recreated = context
-        .process_vec_size(&compressed, 100100, 100100)
-        .unwrap();
+    let recreated = context.process_vec_size(&compressed, 100100).unwrap();
 
     assert_eq_array(&original, &recreated);
 }
@@ -1332,9 +1284,7 @@ fn roundtrip_jpg() {
         ..Default::default()
     });
 
-    let compressed = context
-        .process_vec_size(&original, usize::MAX, usize::MAX)
-        .unwrap();
+    let compressed = context.process_vec_size(&original, usize::MAX).unwrap();
 
     println!(
         "Compressed size: {} vs {}",
@@ -1345,9 +1295,7 @@ fn roundtrip_jpg() {
     println!("Recreating file");
 
     let mut context = RecreateContainerProcessor::new(usize::MAX);
-    let recreated = context
-        .process_vec_size(&compressed, usize::MAX, usize::MAX)
-        .unwrap();
+    let recreated = context.process_vec_size(&compressed, usize::MAX).unwrap();
 
     assert_eq_array(&original, &recreated);
 }

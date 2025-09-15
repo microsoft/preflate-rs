@@ -38,6 +38,8 @@ pub use container_processor::{
 
 pub use zstd_compression::{ZstdCompressContext, ZstdDecompressContext};
 
+pub use utils::process_limited_buffer;
+
 #[cfg(test)]
 static INIT: std::sync::Once = std::sync::Once::new();
 

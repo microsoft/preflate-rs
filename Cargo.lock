@@ -527,7 +527,7 @@ dependencies = [
 
 [[package]]
 name = "preflate-container"
-version = "0.7.3"
+version = "0.7.4"
 dependencies = [
  "adler32",
  "byteorder",
@@ -568,7 +568,7 @@ dependencies = [
 
 [[package]]
 name = "preflate_rs_0_7"
-version = "0.7.3"
+version = "0.7.4"
 dependencies = [
  "preflate-container",
  "preflate-rs",
