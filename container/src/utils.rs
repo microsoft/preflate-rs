@@ -144,6 +144,8 @@ impl Write for LimitedOutputWriter<'_> {
 ///
 /// This avoids adding complexity to every ProcessBuffer implementation to handle the case where there is too
 /// much output to fit in the output buffer.
+///
+/// Returns a tuple (complete, amount_written) where complete is true if all output was written.
 pub fn process_limited_buffer(
     process: &mut impl ProcessBuffer,
     input: &[u8],
@@ -167,7 +169,7 @@ pub fn process_limited_buffer(
     };
     process.process_buffer(input, input_complete, &mut w)?;
 
-    Ok((w.extra_queue.len() == 0, w.amount_written))
+    Ok((input_complete && w.extra_queue.len() == 0, w.amount_written))
 }
 
 #[test]
