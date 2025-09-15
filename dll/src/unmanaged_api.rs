@@ -1,13 +1,12 @@
 use std::{
     collections::VecDeque,
-    io::{Read, Write},
     panic::{AssertUnwindSafe, catch_unwind},
     ptr::{null, null_mut},
 };
 
 use preflate_container::{
     PreflateContainerConfig, PreflateContainerProcessor, ProcessBuffer, RecreateContainerProcessor,
-    ZstdCompressContext, ZstdDecompressContext,
+    ZstdCompressContext, ZstdDecompressContext, process_limited_buffer,
 };
 use preflate_rs::{ExitCode, PreflateError};
 
@@ -203,34 +202,6 @@ struct CompressionContext {
     output_extra: VecDeque<u8>,
 }
 
-struct LimitedOutputWriter<'a> {
-    amount_written: usize,
-    output_buffer: &'a mut [u8],
-    extra_queue: &'a mut VecDeque<u8>,
-}
-
-impl Write for LimitedOutputWriter<'_> {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        let amount_for_output = buf
-            .len()
-            .min(self.output_buffer.len() - self.amount_written);
-
-        self.output_buffer[self.amount_written..self.amount_written + amount_for_output]
-            .copy_from_slice(&buf[..amount_for_output]);
-        self.amount_written += amount_for_output;
-
-        if amount_for_output < buf.len() {
-            self.extra_queue.extend(&buf[amount_for_output..]);
-        }
-        Ok(buf.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        // nothing to do since we don't buffer anything
-        Ok(())
-    }
-}
-
 const MAGIC_DECOMRESSION_CONTEXT: u32 = 87654321;
 const MAGIC_COMPRESSION_CONTEXT: u32 = 12345678;
 
@@ -292,39 +263,6 @@ impl DecompressionContext {
             output_extra: VecDeque::new(),
         }
     }
-}
-
-/// Processes input data, writing output to the output buffer and any extra to the output_extra queue.
-///
-/// This is necessary because in the unmanaged wrapper we cannot expand the buffer that was given to us,
-/// so we have to write as much as we can to the output buffer and then queue up any extra data for next time.
-///
-/// This avoids adding complexity to every ProcessBuffer implementation to handle the case where there is too
-/// much output to fit in the output buffer.
-fn process_limited_buffer(
-    process: &mut impl ProcessBuffer,
-    input: &[u8],
-    input_complete: bool,
-    output_buffer: &mut [u8],
-    output_extra: &mut VecDeque<u8>,
-) -> Result<(bool, usize), PreflateError> {
-    // first write any extra data we have pending from last time
-    let mut amount_written = 0;
-    while amount_written < output_buffer.len() && output_extra.len() > 0 {
-        amount_written += output_extra
-            .read(&mut output_buffer[amount_written..])
-            .unwrap();
-    }
-
-    // now call process buffer with the remaining space
-    let mut w = LimitedOutputWriter {
-        amount_written,
-        output_buffer,
-        extra_queue: output_extra,
-    };
-    process.process_buffer(input, input_complete, &mut w)?;
-
-    Ok((w.extra_queue.len() == 0, w.amount_written))
 }
 
 /// Allocates new decompression context, must be freed with free_decompression_context
