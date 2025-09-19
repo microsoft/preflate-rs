@@ -1,12 +1,16 @@
+#![cfg(target_os = "linux")]
+
 #![no_main]
 
-use std::io::Cursor;
-
-use preflate_rs::decompress_deflate_stream;
+use preflate_rs::{preflate_whole_deflate_stream, recreate_whole_deflate_stream, PreflateConfig}; 
 
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {
 
-    let _ = decompress_deflate_stream(data, true, 0);
+    let config = PreflateConfig::default(); 
+    if let Ok((r,pt)) = preflate_whole_deflate_stream(data, &config)
+    {
+        recreate_whole_deflate_stream(pt.text(), &r.corrections).unwrap();
+    }
 });
