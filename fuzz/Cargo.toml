@@ -11,17 +11,14 @@ cargo-fuzz = true
 libfuzzer-sys = "0.4"
 
 [dependencies.preflate-rs]
-path = ".."
-
-# Prevent this from interfering with workspaces
-[workspace]
-members = ["."]
-
-[profile.release]
-debug = 1
+path = "../preflate"
 
 [[bin]]
 name = "fuzz_target_1"
 path = "fuzz_target_1.rs"
 test = false
 doc = false
+required-features = ["fuzzing"]
+
+[features]
+fuzzing = []
