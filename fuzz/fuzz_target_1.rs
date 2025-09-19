@@ -1,5 +1,3 @@
-#![cfg(target_os = "linux")]
-
 #![no_main]
 
 use preflate_rs::{preflate_whole_deflate_stream, recreate_whole_deflate_stream, PreflateConfig}; 
