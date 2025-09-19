@@ -22,7 +22,7 @@ byteorder = "1.4"
 cabac = "0.15.0"
 default-boxed = "0.2"
 bitcode = "0.6.3"
-deranged = "0.4"
+deranged = "0.5"
 
 [dev-dependencies]
 env_logger = "0.11"
