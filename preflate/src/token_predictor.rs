@@ -79,7 +79,6 @@ impl TokenPredictor {
         }
     }
 
-
     #[inline(never)] // don't inline so we get better call stacks
     pub fn predict_block<D: PredictionEncoder>(
         &mut self,
@@ -399,10 +398,7 @@ impl TokenPredictor {
                     }
 
                     predicted_ref = self.repredict_reference(None, input).with_context(|| {
-                        format!(
-                            "repredict_reference token_count={:?}",
-                            tokens.len()
-                        )
+                        format!("repredict_reference token_count={:?}", tokens.len())
                     })?;
                 }
                 DeflateToken::Reference(r) => {
@@ -439,9 +435,7 @@ impl TokenPredictor {
                     let new_dist = self
                         .state
                         .hop_match(predicted_ref.len(), hops, input)
-                        .with_context(|| {
-                            format!("recalculate_distance token {}", tokens.len())
-                        })?;
+                        .with_context(|| format!("recalculate_distance token {}", tokens.len()))?;
                     predicted_ref = DeflateTokenReference::new(new_len, new_dist);
                 }
             }
