@@ -39,6 +39,8 @@ pub enum DictionaryAddPolicy {
     AddFirstWith32KBoundary,
 }
 
+/// Check if we are crossing the 4k boundary. MiniZ in fast mode
+/// doesn't process the last 3 bytes before the 4k boundary for optimization reasons.
 pub fn cross_4k_boundary(pos: u32) -> bool {
     (pos & 4095) >= 4093
 }
