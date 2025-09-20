@@ -13,9 +13,19 @@ libfuzzer-sys = "0.4"
 [dependencies.preflate-rs]
 path = "../preflate"
 
+[dependencies.preflate-container]
+path = "../container"
+
 [[bin]]
 name = "fuzz_target_1"
 path = "fuzz_target_1.rs"
+test = false
+doc = false
+required-features = ["fuzzing"]
+
+[[bin]]
+name = "fuzz_container"
+path = "fuzz_container.rs"
 test = false
 doc = false
 required-features = ["fuzzing"]

@@ -267,7 +267,7 @@ pub fn parse_idat(
 
     log::debug!("IDAT boundaries: {:?}", idat_chunk_sizes);
 
-    if deflate_stream.len() < 3 {
+    if deflate_stream.len() < 6 {
         return err_exit_code(ExitCode::InvalidIDat, "No IDAT data found");
     }
 
