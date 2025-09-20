@@ -12,7 +12,7 @@ use preflate_rs::{
 };
 
 use byteorder::{LittleEndian, ReadBytesExt};
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{Read, Seek};
 
 use preflate_rs::Result;
 
@@ -388,9 +388,8 @@ fn parse_zip_stream(
     //let _path = String::from_utf8(file_name_buf).map_err( PreflateError)?;
 
     // Skip Extra field
-    binary_reader.seek(SeekFrom::Current(
-        zip_local_file_header.extra_field_length as i64,
-    ))?;
+    let mut extra_field_buf = vec![0; zip_local_file_header.extra_field_length.into()];
+    binary_reader.read_exact(&mut extra_field_buf)?;
 
     // Handle the compressed DATA. Currently only Deflate (8) and uncompressed (0) are supported.
     if zip_local_file_header.compression_method == 8 {

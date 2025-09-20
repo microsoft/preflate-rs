@@ -15,6 +15,7 @@ use crate::{
         huffman_calc::HufftreeBitCalc,
     },
     estimator::{
+        add_policy_estimator::{DictionaryAddPolicy, cross_4k_boundary},
         preflate_parameter_estimator::{BlockTypeStrategy, TokenPredictorParameters},
         preflate_parse_config::MatchingType,
     },
@@ -31,7 +32,6 @@ pub struct TokenPredictor {
     state: Box<dyn HashChainHolder>,
     params: TokenPredictorParameters,
     pending_reference: Option<DeflateTokenReference>,
-    current_token_count: u32,
     max_token_count: u32,
 }
 
@@ -40,7 +40,6 @@ impl std::fmt::Debug for TokenPredictor {
         f.debug_struct("TokenPredictor")
             .field("params", &self.params)
             .field("pending_reference", &self.pending_reference)
-            .field("current_token_count", &self.current_token_count)
             .field("max_token_count", &self.max_token_count)
             .finish()
     }
@@ -54,7 +53,6 @@ impl TokenPredictor {
             state: predictor_state,
             params: *params,
             pending_reference: None,
-            current_token_count: 0,
             max_token_count: params.max_token_count.into(),
         }
     }
@@ -82,6 +80,7 @@ impl TokenPredictor {
         }
     }
 
+    #[inline(never)] // don't inline so we get better call stacks
     pub fn predict_block<D: PredictionEncoder>(
         &mut self,
         block: &DeflateTokenBlock,
@@ -89,7 +88,6 @@ impl TokenPredictor {
         input: &mut PreflateInput,
         final_block_in_chunk: bool,
     ) -> Result<()> {
-        self.current_token_count = 0;
         self.pending_reference = None;
 
         codec.encode_verify_state("blocktypestart", 0);
@@ -312,12 +310,12 @@ impl TokenPredictor {
         Ok(())
     }
 
+    #[inline(never)] // don't inline so we get better call stacks
     pub fn recreate_block<D: PredictionDecoder>(
         &mut self,
         codec: &mut D,
         input: &mut PreflateInput,
     ) -> Result<DeflateTokenBlock> {
-        self.current_token_count = 0;
         self.pending_reference = None;
 
         codec.decode_verify_state("blocktypestart", 0);
@@ -331,6 +329,11 @@ impl TokenPredictor {
             BT_STORED => {
                 let uncompressed_len = codec
                     .decode_correction_diff(CodecCorrection::UncompressBlockLenCorrection, 65535);
+
+                if uncompressed_len > 65535 || uncompressed_len > input.remaining() {
+                    return err_exit_code(ExitCode::InvalidDeflate, "Invalid stored block len");
+                }
+
                 let mut uncompressed = Vec::with_capacity(uncompressed_len as usize);
 
                 for _i in 0..uncompressed_len {
@@ -362,18 +365,23 @@ impl TokenPredictor {
             blocksize -= 1;
         }
 
-        let mut tokens = Vec::with_capacity(blocksize as usize);
+        // rust aborts on OOM, so check before we allocate to avoid crashing the process
+        let mut tokens = Vec::new();
+        if tokens.try_reserve_exact(blocksize as usize).is_err() {
+            return err_exit_code(ExitCode::OutOfMemory, "Out of memory");
+        }
+
         let mut freq = TokenFrequency::default();
 
         codec.decode_verify_state("start", if VERIFY { self.checksum().hash() } else { 0 });
 
-        while input.remaining() != 0 && self.current_token_count < blocksize {
+        while input.remaining() != 0 && tokens.len() < blocksize as usize {
             codec.decode_verify_state(
                 "token",
                 if VERIFY {
                     self.checksum().hash()
                 } else {
-                    self.current_token_count as u64
+                    tokens.len() as u64
                 },
             );
 
@@ -391,10 +399,7 @@ impl TokenPredictor {
                     }
 
                     predicted_ref = self.repredict_reference(None, input).with_context(|| {
-                        format!(
-                            "repredict_reference token_count={:?}",
-                            self.current_token_count
-                        )
+                        format!("repredict_reference token_count={:?}", tokens.len())
                     })?;
                 }
                 DeflateToken::Reference(r) => {
@@ -431,9 +436,7 @@ impl TokenPredictor {
                     let new_dist = self
                         .state
                         .hop_match(predicted_ref.len(), hops, input)
-                        .with_context(|| {
-                            format!("recalculate_distance token {}", self.current_token_count)
-                        })?;
+                        .with_context(|| format!("recalculate_distance token {}", tokens.len()))?;
                     predicted_ref = DeflateTokenReference::new(new_len, new_dist);
                 }
             }
@@ -468,7 +471,11 @@ impl TokenPredictor {
 
     #[inline(always)]
     fn predict_token(&mut self, input: &PreflateInput) -> DeflateToken {
-        if input.pos() == 0 || input.remaining() < MIN_MATCH {
+        if input.pos() == 0
+            || input.remaining() < MIN_MATCH
+            || (self.params.add_policy == DictionaryAddPolicy::AddFirstExcept4kBoundary
+                && cross_4k_boundary(input.pos()))
+        {
             return DeflateToken::Literal(input.cur_char(0));
         }
 
@@ -590,8 +597,6 @@ impl TokenPredictor {
                 input.advance(t.len());
             }
         }
-
-        self.current_token_count += 1;
     }
 }
 

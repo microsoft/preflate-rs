@@ -59,6 +59,9 @@ pub enum ExitCode {
 
     /// WebP decoding error
     WebPDecodeError = 28,
+
+    /// Out of memory
+    OutOfMemory = 29,
 }
 
 impl Display for ExitCode {

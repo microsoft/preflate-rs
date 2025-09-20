@@ -24,6 +24,8 @@ pub enum DictionaryAddPolicy {
 
     /// This policy is used by MiniZ in fastest mode. It adds all substrings of a match to the dictionary except
     /// literals that are 4 bytes away from the end of the block.
+    ///
+    /// In addition, we don't attempt to look for matches if we are within 3 bytes of the 4k boundary.
     AddFirstExcept4kBoundary,
 
     /// This policy is used by fast mode in zlibng, it is the same
@@ -35,6 +37,12 @@ pub enum DictionaryAddPolicy {
     /// last character to the dictionary which ends up being the
     /// last chacacter of the previous match.
     AddFirstWith32KBoundary,
+}
+
+/// Check if we are crossing the 4k boundary. MiniZ in fast mode
+/// doesn't process the last 3 bytes before the 4k boundary for optimization reasons.
+pub fn cross_4k_boundary(pos: u32) -> bool {
+    (pos & 4095) >= 4093
 }
 
 impl DictionaryAddPolicy {
@@ -50,7 +58,7 @@ impl DictionaryAddPolicy {
         if length == 1 {
             match self {
                 DictionaryAddPolicy::AddFirstExcept4kBoundary => {
-                    if (pos & 4095) < 4093 {
+                    if !cross_4k_boundary(pos) {
                         update_fn(input, pos, 1);
                     }
                 }
@@ -77,7 +85,7 @@ impl DictionaryAddPolicy {
                     }
                 }
                 DictionaryAddPolicy::AddFirstExcept4kBoundary => {
-                    if (pos & 4095) < 4093 {
+                    if !cross_4k_boundary(pos) {
                         update_fn(input, pos, 1);
                     }
                 }
@@ -150,8 +158,15 @@ pub(super) fn estimate_add_policy(token_blocks: &[DeflateTokenBlock]) -> Diction
                             current_offset += 1;
                         }
                         DeflateToken::Reference(r) => {
-                            // track if we saw something  on the of the 4k boundary
-                            if (current_offset & 4095) >= 4093 {
+                            // Track if we saw something crossing the 4k boundary
+                            // MiniZ in fast mode doesn't process the last 3 bytes
+                            // before the 4k boundary for optimization reasons.
+                            //
+                            // These bytes are neither added to the dictionary
+                            // nor are matches looked for in this region.
+                            if cross_4k_boundary(current_offset)
+                                || cross_4k_boundary(current_offset - r.dist())
+                            {
                                 block_4k = false;
                             }
 
