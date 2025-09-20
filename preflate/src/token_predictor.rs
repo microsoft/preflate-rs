@@ -15,6 +15,7 @@ use crate::{
         huffman_calc::HufftreeBitCalc,
     },
     estimator::{
+        add_policy_estimator::{DictionaryAddPolicy, cross_4k_boundary},
         preflate_parameter_estimator::{BlockTypeStrategy, TokenPredictorParameters},
         preflate_parse_config::MatchingType,
     },
@@ -470,7 +471,11 @@ impl TokenPredictor {
 
     #[inline(always)]
     fn predict_token(&mut self, input: &PreflateInput) -> DeflateToken {
-        if input.pos() == 0 || input.remaining() < MIN_MATCH {
+        if input.pos() == 0
+            || input.remaining() < MIN_MATCH
+            || (self.params.add_policy == DictionaryAddPolicy::AddFirstExcept4kBoundary
+                && cross_4k_boundary(input.pos()))
+        {
             return DeflateToken::Literal(input.cur_char(0));
         }
 
