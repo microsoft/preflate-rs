@@ -16,7 +16,7 @@ fuzz_target!(|data: &[u8]| {
 
     let mut output = Vec::new();
 
-    if let Ok(r) = preflate_whole_into_container(&config, &mut Cursor::new(data), &mut output) {
+    if let Ok(_r) = preflate_whole_into_container(&config, &mut Cursor::new(data), &mut output) {
         //println!("Compressed {} bytes into {} bytes", data.len(), output.len());
         let mut original = Vec::new();
         recreate_whole_from_container(&mut Cursor::new(&output), &mut original).unwrap();
