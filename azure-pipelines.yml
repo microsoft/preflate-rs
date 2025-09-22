@@ -53,7 +53,6 @@ extends:
                   failOnAlert: true
               postBuildSteps:
                 - script: |
-                    set RUSTFLAGS=-Ccontrol-flow-guard -Ctarget-feature=+crt-static,+avx2,+lzcnt -Clink-args=/DYNAMICBASE/CETCOMPAT
                     cargo build --workspace --locked 2>&1
                     cargo test --no-run --workspace --locked 2>&1
 
@@ -71,7 +70,6 @@ extends:
                     mergeTestResults: true
 
                 - script: |
-                    set RUSTFLAGS=-Ccontrol-flow-guard -Ctarget-feature=+crt-static,+avx2,+lzcnt -Clink-args=/DYNAMICBASE/CETCOMPAT
                     cargo build --workspace --locked --release 2>&1
 
                   displayName: 'Build Release'

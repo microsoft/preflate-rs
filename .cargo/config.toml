@@ -1,1 +1,5 @@
+
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-Ccontrol-flow-guard", "-Clink-args=/DYNAMICBASE /CETCOMPAT"]
+
 [registries]
