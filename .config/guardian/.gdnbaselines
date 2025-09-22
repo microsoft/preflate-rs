@@ -1,0 +1,165 @@
+{
+  "properties": {
+    "helpUri": "https://eng.ms/docs/microsoft-security/security/azure-security/cloudai-security-fundamentals-engineering/security-integration/guardian-wiki/microsoft-guardian/general/baselines"
+  },
+  "version": "1.0.0",
+  "baselines": {
+    "default": {
+      "name": "default",
+      "createdDate": "2025-09-19 05:07:35Z",
+      "lastUpdatedDate": "2025-09-19 05:07:35Z"
+    }
+  },
+  "results": {
+    "d8de150684170db30c69f13e88cf2388021c59435d98254dffe24047cada8587": {
+      "signature": "d8de150684170db30c69f13e88cf2388021c59435d98254dffe24047cada8587",
+      "alternativeSignatures": [
+        "36010cee97501032ecf99195f3bf57eac7ddbcccc041ba0209f605b2d77a3d4f"
+      ],
+      "target": "target/debug/preflate_rs_0_7.dll",
+      "memberOf": [
+        "default"
+      ],
+      "tool": "binskim",
+      "ruleId": "BA2007",
+      "createdDate": "2025-09-19 05:07:35Z",
+      "expirationDate": "2026-03-08 05:09:27Z",
+      "justification": "This error is baselined with an expiration date of 180 days from 2025-09-19 05:09:27Z"
+    },
+    "e37327bb254c773385c3ab2cfd0dd9afd697bdf4f9b5d35686d2999a34bbacde": {
+      "signature": "e37327bb254c773385c3ab2cfd0dd9afd697bdf4f9b5d35686d2999a34bbacde",
+      "alternativeSignatures": [
+        "c378a1ce5eabe0f20b8617bc102c9d70b6fb21a82a3c7a391f6269750fc373c4"
+      ],
+      "target": "target/debug/preflate_util.exe",
+      "memberOf": [
+        "default"
+      ],
+      "tool": "binskim",
+      "ruleId": "BA2007",
+      "createdDate": "2025-09-19 05:07:35Z",
+      "expirationDate": "2026-03-08 05:09:27Z",
+      "justification": "This error is baselined with an expiration date of 180 days from 2025-09-19 05:09:27Z"
+    },
+    "c86704d8d4a5889abf7cb6cc77a1d523747a10fdfadbe13369ea5309b7c8fd6e": {
+      "signature": "c86704d8d4a5889abf7cb6cc77a1d523747a10fdfadbe13369ea5309b7c8fd6e",
+      "alternativeSignatures": [
+        "e2b68157fb0aeb8231b7c8190b5d3260f4492bdab28b70e446b352d997758aa2"
+      ],
+      "target": "target/release/preflate_rs_0_7.dll",
+      "memberOf": [
+        "default"
+      ],
+      "tool": "binskim",
+      "ruleId": "BA2007",
+      "createdDate": "2025-09-19 05:07:35Z",
+      "expirationDate": "2026-03-08 05:09:27Z",
+      "justification": "This error is baselined with an expiration date of 180 days from 2025-09-19 05:09:27Z"
+    },
+    "a5b6c2434caddf5875131b34811271cc342c380516497cd3753a9716f1c4f7c4": {
+      "signature": "a5b6c2434caddf5875131b34811271cc342c380516497cd3753a9716f1c4f7c4",
+      "alternativeSignatures": [
+        "ee1506b41853613a0ac8e9feceb8ee527d6ecf74eabbe4055aa65cc084b5d1e2"
+      ],
+      "target": "target/release/preflate_util.exe",
+      "memberOf": [
+        "default"
+      ],
+      "tool": "binskim",
+      "ruleId": "BA2007",
+      "createdDate": "2025-09-19 05:07:35Z",
+      "expirationDate": "2026-03-08 05:09:27Z",
+      "justification": "This error is baselined with an expiration date of 180 days from 2025-09-19 05:09:27Z"
+    },
+    "99c72301216588efb881a53718348a4b57824c3981dbf4252c3a028ec4033063": {
+      "signature": "99c72301216588efb881a53718348a4b57824c3981dbf4252c3a028ec4033063",
+      "alternativeSignatures": [
+        "301caa3756e471dbaf4996e99d06201ddb17107b12fd2dc286a9016c957e839e"
+      ],
+      "target": "target/debug/deps/end_to_end-133a6406b4a364e3.exe",
+      "memberOf": [
+        "default"
+      ],
+      "tool": "binskim",
+      "ruleId": "BA2007",
+      "createdDate": "2025-09-19 05:07:35Z",
+      "expirationDate": "2026-03-08 05:09:27Z",
+      "justification": "This error is baselined with an expiration date of 180 days from 2025-09-19 05:09:27Z"
+    },
+    "c1d622bdced5eb4f0aa814be02230e22ca9d658e396b9563a6641c5f9112d1b2": {
+      "signature": "c1d622bdced5eb4f0aa814be02230e22ca9d658e396b9563a6641c5f9112d1b2",
+      "alternativeSignatures": [
+        "23e814fbd1d5e7edbf0591b2f06bb9d9850445ddb379c0b4abd26c65b621d1c8"
+      ],
+      "target": "target/debug/deps/preflate_rs_0_7.dll",
+      "memberOf": [
+        "default"
+      ],
+      "tool": "binskim",
+      "ruleId": "BA2007",
+      "createdDate": "2025-09-19 05:07:35Z",
+      "expirationDate": "2026-03-08 05:09:27Z",
+      "justification": "This error is baselined with an expiration date of 180 days from 2025-09-19 05:09:27Z"
+    },
+    "f3388126f6e5e0ce4dae42247f29ac5a57fa34bf56bab47113c5c83951db48b4": {
+      "signature": "f3388126f6e5e0ce4dae42247f29ac5a57fa34bf56bab47113c5c83951db48b4",
+      "alternativeSignatures": [
+        "dd064837f7e9316a5eb4d16e7dfde534cf8b8c3b88861b825105e791b3872aa0"
+      ],
+      "target": "target/debug/deps/preflate_util.exe",
+      "memberOf": [
+        "default"
+      ],
+      "tool": "binskim",
+      "ruleId": "BA2007",
+      "createdDate": "2025-09-19 05:07:35Z",
+      "expirationDate": "2026-03-08 05:09:27Z",
+      "justification": "This error is baselined with an expiration date of 180 days from 2025-09-19 05:09:27Z"
+    },
+    "4e3679f18ba2bfc117f680a68782179291d81093ca4711eeee498cf55af8cdca": {
+      "signature": "4e3679f18ba2bfc117f680a68782179291d81093ca4711eeee498cf55af8cdca",
+      "alternativeSignatures": [
+        "f98bbfd35434746ee48299245bd1557b82a291412a9f3c48eb3cb5d70fec4f09"
+      ],
+      "target": "target/release/deps/preflate_rs_0_7.dll",
+      "memberOf": [
+        "default"
+      ],
+      "tool": "binskim",
+      "ruleId": "BA2007",
+      "createdDate": "2025-09-19 05:07:35Z",
+      "expirationDate": "2026-03-08 05:09:27Z",
+      "justification": "This error is baselined with an expiration date of 180 days from 2025-09-19 05:09:27Z"
+    },
+    "ba0196422fff62c41e31e2fbfd5763e68c166cb28a7de01b0f750293149cb968": {
+      "signature": "ba0196422fff62c41e31e2fbfd5763e68c166cb28a7de01b0f750293149cb968",
+      "alternativeSignatures": [
+        "4a304af3ba6940d94b8e16e7f71a1119b3e5c7c8b84635ae61a1e9e2e81159ac"
+      ],
+      "target": "target/release/deps/preflate_util.exe",
+      "memberOf": [
+        "default"
+      ],
+      "tool": "binskim",
+      "ruleId": "BA2007",
+      "createdDate": "2025-09-19 05:07:35Z",
+      "expirationDate": "2026-03-08 05:09:27Z",
+      "justification": "This error is baselined with an expiration date of 180 days from 2025-09-19 05:09:27Z"
+    },
+    "d60efca5b751656c898940a9551e59391dbc37bd5b8769b3b7e962bacd6cbace": {
+      "signature": "d60efca5b751656c898940a9551e59391dbc37bd5b8769b3b7e962bacd6cbace",
+      "alternativeSignatures": [
+        "cabafd05b1dcea5dc1f7eda84033c893c03b9eee8d47c5cd0292ab56a2acdee9"
+      ],
+      "target": "target/debug/build/libz-ng-sys-8e0002349cc5ec69/out/build/CMakeFiles/3.31.6/CompilerIdC/CompilerIdC.exe",
+      "memberOf": [
+        "default"
+      ],
+      "tool": "binskim",
+      "ruleId": "BA2008",
+      "createdDate": "2025-09-19 05:07:35Z",
+      "expirationDate": "2026-03-08 05:09:27Z",
+      "justification": "This error is baselined with an expiration date of 180 days from 2025-09-19 05:09:27Z"
+    }
+  }
+}
