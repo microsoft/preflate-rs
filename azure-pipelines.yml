@@ -51,6 +51,9 @@ extends:
                 componentgovernance:
                   enabled: true
                   failOnAlert: true
+                binskim:
+                  enabled: false
+                  justificationForDisabling: 'Binskim is flaky and creating warnings on random output files'
               postBuildSteps:
                 - script: |
                     cargo build --workspace --locked 2>&1
