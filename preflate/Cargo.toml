@@ -1,6 +1,6 @@
 [package]
 name = "preflate-rs"
-version = "0.7.4"
+version = "0.7.5"
 edition = "2024"
 authors = ["Kristof Roomp <kristofr@microsoft.com>"]
 license = "Apache-2.0"
@@ -22,7 +22,7 @@ byteorder = "1.4"
 cabac = "0.15.0"
 default-boxed = "0.2"
 bitcode = "0.6.3"
-deranged = "0.4"
+deranged = "0.5"
 
 [dev-dependencies]
 env_logger = "0.11"
@@ -31,4 +31,3 @@ crc32fast = "1.3"
 [lib]
 name = "preflate_rs"
 crate-type = ["lib"]
-

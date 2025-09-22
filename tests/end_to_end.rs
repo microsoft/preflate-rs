@@ -452,7 +452,7 @@ fn compression_benchmark_overhead_size() {
             compress_fn: miniz_oxide,
             overhead: [
                 Ok(47),
-                Ok(260),
+                Ok(203),
                 Ok(11315),
                 Ok(7454),
                 Ok(2224),

@@ -8,10 +8,10 @@ edition = "2024"
 rust-version = "1.85"
 
 [profile.release]
-debug=true
+debug = true
 
 [workspace]
-members = ["preflate", "container","dll","util"]
+members = ["preflate", "container", "dll", "util", "fuzz"]
 resolver = "2"
 
 [dev-dependencies]
@@ -19,5 +19,5 @@ preflate-rs = { path = "preflate" }
 preflate-container = { path = "container" }
 libz-sys = "1.1"
 libdeflate-sys = "1.19"
-libz-ng-sys="1.1.12"
-miniz_oxide="0.8"
+libz-ng-sys = "1.1.12"
+miniz_oxide = "0.8"
