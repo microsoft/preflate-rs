@@ -51,12 +51,11 @@ extends:
                 componentgovernance:
                   enabled: true
                   failOnAlert: true
-                binskim:
-                  enabled: false
-                  justificationForDisabling: 'Binskim is flaky and creating warnings on random output files'
               postBuildSteps:
                 - script: |
+                    set RUSTFLAGS=-Ccontrol-flow-guard -Ctarget-feature=+crt-static,+avx2,+lzcnt -Clink-args=/DYNAMICBASE/CETCOMPAT
                     cargo build --workspace --locked 2>&1
+                    cargo test --no-run --workspace --locked 2>&1
 
                   displayName: "Build debug"
 
@@ -72,6 +71,7 @@ extends:
                     mergeTestResults: true
 
                 - script: |
+                    set RUSTFLAGS=-Ccontrol-flow-guard -Ctarget-feature=+crt-static,+avx2,+lzcnt -Clink-args=/DYNAMICBASE/CETCOMPAT
                     cargo build --workspace --locked --release 2>&1
 
                   displayName: 'Build Release'
