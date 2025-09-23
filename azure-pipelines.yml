@@ -54,6 +54,7 @@ extends:
               postBuildSteps:
                 - script: |
                     cargo build --workspace --locked 2>&1
+                    cargo test --no-run --workspace --locked 2>&1
 
                   displayName: "Build debug"
 
