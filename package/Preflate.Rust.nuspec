@@ -11,9 +11,6 @@
     <tags>lepton</tags>
   </metadata>
   <files>
-    <file src="..\target\debug\preflate_rs_0_7.dll" target="lib\debug\x64" />
-    <file src="..\target\debug\preflate_rs_0_7.pdb" target="lib\debug\x64" />
-
     <file src="..\target\release\preflate_rs_0_7.dll" target="lib\release\x64" />
     <file src="..\target\release\preflate_rs_0_7.pdb" target="lib\release\x64" />
   </files>
