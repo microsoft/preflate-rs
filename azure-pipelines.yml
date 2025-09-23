@@ -62,6 +62,7 @@ extends:
                     cargo install junit-test
                     junit-test
                     copy junit.xml $(System.DefaultWorkingDirectory)\TEST-rust.xml
+                    rd /s /q target\debug
                   displayName: 'Test debug'
 
                 - task: PublishTestResults@2
@@ -70,6 +71,7 @@ extends:
                     mergeTestResults: true
 
                 - script: |
+                    set CL=/Qspectre /sdl /Zi /W3
                     cargo build --workspace --locked --release 2>&1
 
                   displayName: 'Build Release'
