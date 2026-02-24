@@ -11,7 +11,6 @@ use std::{
 
 use preflate_container::{
     PreflateContainerConfig, PreflateContainerProcessor, ProcessBuffer, RecreateContainerProcessor,
-    ZstdCompressContext, ZstdDecompressContext,
 };
 
 #[derive(Parser)]
@@ -99,8 +98,8 @@ fn main() {
         // open file for reading
         let original = fs::read(&entry).unwrap();
 
-        let mut ctx = ZstdCompressContext::new(
-            PreflateContainerProcessor::new(&config),
+        let mut ctx = PreflateContainerProcessor::new(
+            &config,
             cli.level as i32,
             cli.baseline,
         );
@@ -140,9 +139,7 @@ fn main() {
             let start = ProcessTime::now();
 
             let mut recreated = Vec::new();
-            let mut decomp = ZstdDecompressContext::new(RecreateContainerProcessor::new(
-                config.chunk_plain_text_limit,
-            ));
+            let mut decomp = RecreateContainerProcessor::new(config.chunk_plain_text_limit);
 
             if let Err(e) = decomp.copy_to_end_size(
                 &mut Cursor::new(&preflate_compressed),

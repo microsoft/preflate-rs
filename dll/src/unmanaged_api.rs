@@ -6,7 +6,7 @@ use std::{
 
 use preflate_container::{
     PreflateContainerConfig, PreflateContainerProcessor, ProcessBuffer, RecreateContainerProcessor,
-    ZstdCompressContext, ZstdDecompressContext, process_limited_buffer,
+    process_limited_buffer,
 };
 use preflate_rs::{ExitCode, PreflateError};
 
@@ -198,7 +198,7 @@ pub unsafe extern "C" fn get_compression_stats(
 
 struct CompressionContext {
     magic: u32,
-    internal: ZstdCompressContext<PreflateContainerProcessor>,
+    internal: PreflateContainerProcessor,
     output_extra: VecDeque<u8>,
 }
 
@@ -221,12 +221,12 @@ impl CompressionContext {
     fn new(verify: bool, compression_level: i32, test_baseline: bool) -> Self {
         CompressionContext {
             magic: MAGIC_COMPRESSION_CONTEXT,
-            internal: ZstdCompressContext::new(
-                PreflateContainerProcessor::new(&PreflateContainerConfig {
+            internal: PreflateContainerProcessor::new(
+                &PreflateContainerConfig {
                     validate_compression: verify,
                     max_chain_length: 1024, // lower max chain to avoid excessive CPU usage
                     ..PreflateContainerConfig::default()
-                }),
+                },
                 compression_level,
                 test_baseline,
             ),
@@ -237,7 +237,7 @@ impl CompressionContext {
 
 struct DecompressionContext {
     magic: u32,
-    internal: ZstdDecompressContext<RecreateContainerProcessor>,
+    internal: RecreateContainerProcessor,
     output_extra: VecDeque<u8>,
 }
 
@@ -255,11 +255,9 @@ impl DecompressionContext {
     }
 
     fn new(capacity: usize) -> Self {
-        let internal = ZstdDecompressContext::new(RecreateContainerProcessor::new(capacity));
-
         DecompressionContext {
             magic: MAGIC_DECOMRESSION_CONTEXT,
-            internal,
+            internal: RecreateContainerProcessor::new(capacity),
             output_extra: VecDeque::new(),
         }
     }
