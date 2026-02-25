@@ -1727,4 +1727,356 @@ pub(crate) mod test {
         let recreated = dec.process_vec(&compressed).unwrap();
         assert_eq_array(&original, &recreated);
     }
+
+    // ── Multi-scheme fixture tests ───────────────────────────────────────────────
+
+    /// Helper: compress `data` in one shot and return `(compressed, blocks)`.
+    fn compress_default(data: &[u8]) -> (Vec<u8>, Vec<(u8, u8)>) {
+        let mut enc =
+            PreflateContainerProcessor::new(&PreflateContainerConfig::default(), 1, false);
+        let compressed = enc.process_vec(data).unwrap();
+        let blocks = parse_wire_block_types(&compressed);
+        (compressed, blocks)
+    }
+
+    /// Helper: full roundtrip assertion — compress then decompress, check byte equality.
+    fn assert_roundtrip(original: &[u8]) {
+        let (compressed, _) = compress_default(original);
+        let mut dec = RecreateContainerProcessor::new(usize::MAX);
+        let recreated = dec.process_vec(&compressed).unwrap();
+        crate::utils::assert_eq_array(original, &recreated);
+    }
+
+    /// Count how many blocks have a given block-type kind.
+    fn count_block_type(blocks: &[(u8, u8)], kind: u8) -> usize {
+        blocks.iter().filter(|&&(_, t)| t == kind).count()
+    }
+
+    /// Two concatenated gzip streams — each contains plaintext well above
+    /// MIN_BLOCKSIZE=1024, so the scanner must emit exactly two DEFLATE blocks.
+    ///
+    /// Fixture: `test_two_gzip_streams.bin`
+    /// Expected wire sequence: literal, deflate, literal, deflate, literal, EOS
+    #[test]
+    fn test_two_gzip_streams_produce_two_deflate_blocks_and_roundtrip() {
+        use crate::utils::read_file;
+        let original = read_file("test_two_gzip_streams.bin");
+        let (compressed, blocks) = compress_default(&original);
+
+        assert_eq!(
+            count_block_type(&blocks, BLOCK_TYPE_DEFLATE),
+            2,
+            "two consecutive gzip streams should each produce one DEFLATE block; blocks={blocks:?}"
+        );
+
+        let mut dec = RecreateContainerProcessor::new(usize::MAX);
+        let recreated = dec.process_vec(&compressed).unwrap();
+        crate::utils::assert_eq_array(&original, &recreated);
+    }
+
+    /// A gzip stream whose plaintext is below MIN_BLOCKSIZE (500 < 1024) must NOT
+    /// be promoted to a DEFLATE block — the whole file becomes a single literal chunk.
+    ///
+    /// Fixture: `test_tiny_gzip.bin`
+    /// Expected wire sequence: literal, EOS (no DEFLATE blocks)
+    #[test]
+    fn test_tiny_gzip_below_min_blocksize_becomes_literal_and_roundtrip() {
+        use crate::utils::read_file;
+        let original = read_file("test_tiny_gzip.bin");
+        let (compressed, blocks) = compress_default(&original);
+
+        assert_eq!(
+            count_block_type(&blocks, BLOCK_TYPE_DEFLATE),
+            0,
+            "gzip with 500-byte plaintext (<MIN_BLOCKSIZE) must not become a DEFLATE block; \
+             blocks={blocks:?}"
+        );
+
+        let mut dec = RecreateContainerProcessor::new(usize::MAX);
+        let recreated = dec.process_vec(&compressed).unwrap();
+        crate::utils::assert_eq_array(&original, &recreated);
+    }
+
+    /// File contains a large gzip (plaintext > MIN_BLOCKSIZE) immediately followed by
+    /// a tiny gzip (plaintext < MIN_BLOCKSIZE).  Only the large stream must become a
+    /// DEFLATE block; the small one stays literal.
+    ///
+    /// Fixture: `test_big_then_small_gzip.bin`
+    /// Expected wire sequence: literal, deflate, literal, EOS (exactly 1 DEFLATE block)
+    #[test]
+    fn test_big_gzip_deflate_small_gzip_literal_and_roundtrip() {
+        use crate::utils::read_file;
+        let original = read_file("test_big_then_small_gzip.bin");
+        let (compressed, blocks) = compress_default(&original);
+
+        assert_eq!(
+            count_block_type(&blocks, BLOCK_TYPE_DEFLATE),
+            1,
+            "only the large gzip stream should become a DEFLATE block; blocks={blocks:?}"
+        );
+
+        let mut dec = RecreateContainerProcessor::new(usize::MAX);
+        let recreated = dec.process_vec(&compressed).unwrap();
+        crate::utils::assert_eq_array(&original, &recreated);
+    }
+
+    /// A file with a valid gzip header but a deliberately corrupted DEFLATE body
+    /// (0xFF leading byte) must not crash.  The scanner must gracefully abandon the
+    /// stream and encode the entire file as a literal block.
+    ///
+    /// Fixture: `test_corrupted_deflate.bin`
+    /// Expected wire sequence: literal, EOS (0 DEFLATE blocks)
+    #[test]
+    fn test_corrupted_deflate_body_falls_back_to_literal_and_roundtrip() {
+        use crate::utils::read_file;
+        let original = read_file("test_corrupted_deflate.bin");
+        let (compressed, blocks) = compress_default(&original);
+
+        assert_eq!(
+            count_block_type(&blocks, BLOCK_TYPE_DEFLATE),
+            0,
+            "corrupted DEFLATE body must not produce a DEFLATE block; blocks={blocks:?}"
+        );
+
+        let mut dec = RecreateContainerProcessor::new(usize::MAX);
+        let recreated = dec.process_vec(&compressed).unwrap();
+        crate::utils::assert_eq_array(&original, &recreated);
+    }
+
+    /// A file containing padding bytes, then two zlib streams (each with plaintext
+    /// > MIN_BLOCKSIZE), then more padding.  The scanner must find both zlib headers
+    /// and emit exactly two DEFLATE blocks.
+    ///
+    /// Fixture: `test_two_zlib_streams.bin`
+    ///   layout: 100 × `\xDE\xAD` | zlib(EEEE×6000) | 100 × `\xDE\xAD` | zlib(FFFF×6000) | 100 × `\xDE\xAD`
+    /// Expected wire sequence: literal, deflate, literal, deflate, literal, EOS
+    #[test]
+    fn test_two_zlib_streams_produce_two_deflate_blocks_and_roundtrip() {
+        use crate::utils::read_file;
+        let original = read_file("test_two_zlib_streams.bin");
+        let (compressed, blocks) = compress_default(&original);
+
+        assert_eq!(
+            count_block_type(&blocks, BLOCK_TYPE_DEFLATE),
+            2,
+            "two zlib streams surrounded by literal bytes should each produce a DEFLATE block; \
+             blocks={blocks:?}"
+        );
+
+        let mut dec = RecreateContainerProcessor::new(usize::MAX);
+        let recreated = dec.process_vec(&compressed).unwrap();
+        crate::utils::assert_eq_array(&original, &recreated);
+    }
+
+    /// A ZIP file containing three DEFLATE-compressed entries must produce exactly three
+    /// DEFLATE blocks — one per entry — and round-trip correctly.
+    ///
+    /// Fixture: `test_zip_3entries.zip`  (entries G×20000, H×20000, I×20000 bytes)
+    /// Expected wire sequence: literal, deflate, literal, deflate, literal, deflate, literal, EOS
+    #[test]
+    fn test_zip_three_deflated_entries_produce_three_deflate_blocks_and_roundtrip() {
+        use crate::utils::read_file;
+        let original = read_file("test_zip_3entries.zip");
+        let (compressed, blocks) = compress_default(&original);
+
+        assert_eq!(
+            count_block_type(&blocks, BLOCK_TYPE_DEFLATE),
+            3,
+            "ZIP with 3 DEFLATED entries should produce 3 DEFLATE blocks; blocks={blocks:?}"
+        );
+
+        let mut dec = RecreateContainerProcessor::new(usize::MAX);
+        let recreated = dec.process_vec(&compressed).unwrap();
+        crate::utils::assert_eq_array(&original, &recreated);
+    }
+
+    /// A ZIP file with a STORED entry (method=0) followed by a DEFLATED entry (method=8).
+    /// `parse_zip_stream` returns `Err` for STORED entries so they become literal blocks;
+    /// only the DEFLATED entry is analysed and emitted as a DEFLATE block.
+    ///
+    /// Fixture: `test_zip_stored_then_deflated.zip`  (J×8000 STORED, K×20000 DEFLATED)
+    /// Expected wire sequence: literal, deflate, literal, EOS (exactly 1 DEFLATE block)
+    #[test]
+    fn test_zip_stored_entry_stays_literal_deflated_entry_becomes_deflate_and_roundtrip() {
+        use crate::utils::read_file;
+        let original = read_file("test_zip_stored_then_deflated.zip");
+        let (compressed, blocks) = compress_default(&original);
+
+        assert_eq!(
+            count_block_type(&blocks, BLOCK_TYPE_DEFLATE),
+            1,
+            "only the DEFLATED entry should become a DEFLATE block; STORED stays literal; \
+             blocks={blocks:?}"
+        );
+
+        let mut dec = RecreateContainerProcessor::new(usize::MAX);
+        let recreated = dec.process_vec(&compressed).unwrap();
+        crate::utils::assert_eq_array(&original, &recreated);
+    }
+
+    /// A buffer filled with pseudo-random bytes contains no recognisable DEFLATE/zlib/gzip
+    /// signatures.  The entire file must be emitted as a single literal block with no
+    /// DEFLATE analysis.
+    ///
+    /// Fixture: `test_random_bytes.bin`  (32 KiB pseudo-random)
+    /// Expected wire sequence: literal, EOS
+    #[test]
+    fn test_random_bytes_produce_no_deflate_blocks_and_roundtrip() {
+        use crate::utils::read_file;
+        let original = read_file("test_random_bytes.bin");
+        let (compressed, blocks) = compress_default(&original);
+
+        assert_eq!(
+            count_block_type(&blocks, BLOCK_TYPE_DEFLATE),
+            0,
+            "random bytes contain no DEFLATE streams; blocks={blocks:?}"
+        );
+
+        // The literal block must survive the round-trip.
+        let mut dec = RecreateContainerProcessor::new(usize::MAX);
+        let recreated = dec.process_vec(&compressed).unwrap();
+        crate::utils::assert_eq_array(&original, &recreated);
+    }
+
+    /// Two gzip streams separated by a 1000-byte null gap.  Both streams have
+    /// plaintext > MIN_BLOCKSIZE, so both must produce DEFLATE blocks, and the gap
+    /// must appear as a literal block between them.
+    ///
+    /// Fixture: `test_gzip_with_gap.bin`
+    /// Expected wire sequence: literal, deflate, literal, deflate, literal, EOS
+    #[test]
+    fn test_two_gzip_streams_with_null_gap_produce_two_deflate_blocks_and_roundtrip() {
+        use crate::utils::read_file;
+        let original = read_file("test_gzip_with_gap.bin");
+        let (compressed, blocks) = compress_default(&original);
+
+        assert_eq!(
+            count_block_type(&blocks, BLOCK_TYPE_DEFLATE),
+            2,
+            "both gzip streams should become DEFLATE blocks; null gap stays literal; \
+             blocks={blocks:?}"
+        );
+        // There should be at least one literal block (the gap between the two streams).
+        assert!(
+            count_block_type(&blocks, BLOCK_TYPE_LITERAL) >= 1,
+            "null gap between gzip streams should produce at least one literal block; \
+             blocks={blocks:?}"
+        );
+
+        let mut dec = RecreateContainerProcessor::new(usize::MAX);
+        let recreated = dec.process_vec(&compressed).unwrap();
+        crate::utils::assert_eq_array(&original, &recreated);
+    }
+
+    /// Feed a fixture containing two gzip streams in very small chunks (64 bytes at a
+    /// time) via the incremental `process_buffer` API to exercise boundary handling.
+    /// The round-trip result must be byte-exact regardless of where chunk boundaries fall.
+    #[test]
+    fn test_two_gzip_streams_incremental_small_chunks_roundtrip() {
+        use crate::utils::{assert_eq_array, read_file};
+        let original = read_file("test_two_gzip_streams.bin");
+
+        let mut enc = PreflateContainerProcessor::new(
+            &PreflateContainerConfig {
+                min_chunk_size: 0,
+                ..PreflateContainerConfig::default()
+            },
+            1,
+            false,
+        );
+        let mut compressed = Vec::new();
+        let chunk_size = 64;
+        let mut pos = 0;
+        while pos < original.len() {
+            let end = (pos + chunk_size).min(original.len());
+            enc.process_buffer(&original[pos..end], false, &mut compressed)
+                .unwrap();
+            pos = end;
+        }
+        enc.process_buffer(&[], true, &mut compressed).unwrap();
+
+        let mut dec = RecreateContainerProcessor::new(usize::MAX);
+        let recreated = dec.process_vec(&compressed).unwrap();
+        assert_eq_array(&original, &recreated);
+    }
+
+    /// Feed `test_two_zlib_streams.bin` in small chunks (128 bytes) to confirm that
+    /// the incremental path handles mixed literal padding + zlib streams correctly.
+    #[test]
+    fn test_two_zlib_streams_incremental_small_chunks_roundtrip() {
+        use crate::utils::{assert_eq_array, read_file};
+        let original = read_file("test_two_zlib_streams.bin");
+
+        let mut enc = PreflateContainerProcessor::new(
+            &PreflateContainerConfig {
+                min_chunk_size: 0,
+                ..PreflateContainerConfig::default()
+            },
+            1,
+            false,
+        );
+        let mut compressed = Vec::new();
+        let chunk_size = 128;
+        let mut pos = 0;
+        while pos < original.len() {
+            let end = (pos + chunk_size).min(original.len());
+            enc.process_buffer(&original[pos..end], false, &mut compressed)
+                .unwrap();
+            pos = end;
+        }
+        enc.process_buffer(&[], true, &mut compressed).unwrap();
+
+        let mut dec = RecreateContainerProcessor::new(usize::MAX);
+        let recreated = dec.process_vec(&compressed).unwrap();
+        assert_eq_array(&original, &recreated);
+    }
+
+    /// Feed a ZIP fixture in small chunks (256 bytes) to check that chunk boundaries
+    /// inside the ZIP local-file headers and DEFLATE bodies are handled gracefully.
+    #[test]
+    fn test_zip_three_entries_incremental_small_chunks_roundtrip() {
+        use crate::utils::{assert_eq_array, read_file};
+        let original = read_file("test_zip_3entries.zip");
+
+        let mut enc = PreflateContainerProcessor::new(
+            &PreflateContainerConfig {
+                min_chunk_size: 0,
+                ..PreflateContainerConfig::default()
+            },
+            1,
+            false,
+        );
+        let mut compressed = Vec::new();
+        let chunk_size = 256;
+        let mut pos = 0;
+        while pos < original.len() {
+            let end = (pos + chunk_size).min(original.len());
+            enc.process_buffer(&original[pos..end], false, &mut compressed)
+                .unwrap();
+            pos = end;
+        }
+        enc.process_buffer(&[], true, &mut compressed).unwrap();
+
+        let mut dec = RecreateContainerProcessor::new(usize::MAX);
+        let recreated = dec.process_vec(&compressed).unwrap();
+        assert_eq_array(&original, &recreated);
+    }
+
+    /// Verify that the decoder also handles the recreated stream correctly when fed in
+    /// small chunks, not just when given the entire buffer at once.
+    /// Uses `test_zip_stored_then_deflated.zip` (mixed STORED + DEFLATED entries).
+    #[test]
+    fn test_zip_stored_then_deflated_decoder_small_chunks_roundtrip() {
+        use crate::utils::{assert_eq_array, read_file};
+        let original = read_file("test_zip_stored_then_deflated.zip");
+
+        let mut enc =
+            PreflateContainerProcessor::new(&PreflateContainerConfig::default(), 1, false);
+        let compressed = enc.process_vec(&original).unwrap();
+
+        // Decompress in 512-byte chunks to exercise the incremental decoder.
+        let mut dec = RecreateContainerProcessor::new(usize::MAX);
+        let recreated = dec.process_vec_size(&compressed, 512).unwrap();
+        assert_eq_array(&original, &recreated);
+    }
 }
