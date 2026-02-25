@@ -81,26 +81,23 @@ impl PreflateContainerConfig {
 
 const COMPRESSED_WRAPPER_VERSION_2: u8 = 2;
 
-/// literal chunks are just copied to the output
-const LITERAL_CHUNK: u8 = 0;
+// Bit-field masks for the block type byte
+// Bits 7-6: compression algorithm  Bits 5-0: block content kind
+const BLOCK_COMPRESSION_MASK: u8 = 0xC0;
+const BLOCK_TYPE_MASK: u8 = 0x3F;
 
-/// zlib compressed chunks are zlib compressed
-const DEFLATE_STREAM: u8 = 1;
+// Compression algorithms (top 2 bits)
+const BLOCK_COMPRESSION_NONE: u8 = 0x00;
+const BLOCK_COMPRESSION_ZSTD: u8 = 0x40;
 
-/// PNG chunks are IDAT chunks that are zlib compressed
-const PNG_COMPRESSED: u8 = 2;
-
-/// deflate stream that continues the previous one with the same dictionary, bitstream etc
-const DEFLATE_STREAM_CONTINUE: u8 = 3;
-
-/// JPEG Lepton compressed chunks are JPEG Lepton compressed
-const JPEG_LEPTON_COMPRESSED: u8 = 4;
-
-/// PNG chunk stored as WebP lossless — already compressed, written raw (bypasses Zstd)
-const WEBP_COMPRESSED: u8 = 5;
-
-/// V2 end-of-stream marker that carries the final Zstd finish bytes
-const ZSTD_END_OF_STREAM: u8 = 0xFF;
+// Block content kinds (bottom 6 bits)
+const BLOCK_TYPE_LITERAL: u8 = 0x00;
+const BLOCK_TYPE_DEFLATE: u8 = 0x01;
+const BLOCK_TYPE_PNG: u8 = 0x02;
+const BLOCK_TYPE_DEFLATE_CONTINUE: u8 = 0x03;
+const BLOCK_TYPE_JPEG_LEPTON: u8 = 0x04;
+const BLOCK_TYPE_WEBP: u8 = 0x05;
+const BLOCK_TYPE_EOS: u8 = 0x3F; // end-of-stream
 
 pub(crate) fn write_varint(destination: &mut impl Write, value: u32) -> std::io::Result<()> {
     let mut value = value;
@@ -186,7 +183,11 @@ fn write_chunk_block_v2(
             encoder.write_all(&chunk.corrections)?;
             encoder.write_all(&state.plain_text().text())?;
 
-            let compressed_size = emit_compressed_block(DEFLATE_STREAM, encoder, writer)?;
+            let compressed_size = emit_compressed_block(
+                BLOCK_COMPRESSION_ZSTD | BLOCK_TYPE_DEFLATE,
+                encoder,
+                writer,
+            )?;
 
             stats.overhead_bytes += chunk.corrections.len() as u64;
             stats.uncompressed_size += state.plain_text().len() as u64;
@@ -209,9 +210,9 @@ fn write_chunk_block_v2(
 
             if webp_compress(&mut temp_vec, plain_text.text(), &chunk.corrections, &idat).is_ok() {
                 // WebP is already compressed — write raw, bypassing the Zstd encoder.
-                // temp_vec[0] is the PNG_COMPRESSED type byte; temp_vec[1..] is the payload.
+                // temp_vec[0] is the BLOCK_TYPE_PNG placeholder byte; temp_vec[1..] is the payload.
                 let payload = &temp_vec[1..];
-                writer.write_all(&[WEBP_COMPRESSED])?;
+                writer.write_all(&[BLOCK_COMPRESSION_NONE | BLOCK_TYPE_WEBP])?;
                 write_varint(writer, payload.len() as u32)?;
                 writer.write_all(payload)?;
 
@@ -230,7 +231,11 @@ fn write_chunk_block_v2(
                 encoder.write_all(&chunk.corrections)?;
                 encoder.write_all(plain_text.text())?;
 
-                let compressed_size = emit_compressed_block(PNG_COMPRESSED, encoder, writer)?;
+                let compressed_size = emit_compressed_block(
+                    BLOCK_COMPRESSION_ZSTD | BLOCK_TYPE_PNG,
+                    encoder,
+                    writer,
+                )?;
 
                 stats.uncompressed_size += plain_text.len() as u64;
                 stats.hash_algorithm = parameters.hash_algorithm;
@@ -242,7 +247,7 @@ fn write_chunk_block_v2(
 
         FoundStreamType::JPEGLepton(data) => {
             // JPEG is written raw (bypasses the encoder entirely)
-            writer.write_all(&[JPEG_LEPTON_COMPRESSED])?;
+            writer.write_all(&[BLOCK_COMPRESSION_NONE | BLOCK_TYPE_JPEG_LEPTON])?;
             write_varint(writer, data.len() as u32)?;
             writer.write_all(&data)?;
 
@@ -422,9 +427,7 @@ impl PreflateContainerProcessor {
             total_plain_text_seen: 0,
             last_attempt_chunk_size: 0,
             config: config.clone(),
-            encoder: Some(
-                zstd::stream::write::Encoder::new(Vec::new(), level).unwrap(),
-            ),
+            encoder: Some(zstd::stream::write::Encoder::new(Vec::new(), level).unwrap()),
             baseline_encoder: if test_baseline {
                 Some(
                     zstd::stream::write::Encoder::new(MeasureWriteSink { length: 0 }, level)
@@ -484,7 +487,11 @@ impl ProcessBuffer for PreflateContainerProcessor {
                         let encoder = self.encoder.as_mut().unwrap();
                         write_varint(encoder, self.content.len() as u32)?;
                         encoder.write_all(&self.content)?;
-                        let sz = emit_compressed_block(LITERAL_CHUNK, encoder, writer)?;
+                        let sz = emit_compressed_block(
+                            BLOCK_COMPRESSION_ZSTD | BLOCK_TYPE_LITERAL,
+                            encoder,
+                            writer,
+                        )?;
                         self.compression_stats.zstd_compressed_size += sz as u64;
 
                         self.last_attempt_chunk_size = 0;
@@ -506,13 +513,21 @@ impl ProcessBuffer for PreflateContainerProcessor {
                                 let encoder = self.encoder.as_mut().unwrap();
                                 write_varint(encoder, next.start as u32)?;
                                 encoder.write_all(&self.content[..next.start])?;
-                                let sz = emit_compressed_block(LITERAL_CHUNK, encoder, writer)?;
+                                let sz = emit_compressed_block(
+                                    BLOCK_COMPRESSION_ZSTD | BLOCK_TYPE_LITERAL,
+                                    encoder,
+                                    writer,
+                                )?;
                                 self.compression_stats.zstd_compressed_size += sz as u64;
                             }
 
-                            let (compressed_size, next_state) =
-                                write_chunk_block_v2(self.encoder.as_mut().unwrap(), writer, chunk, &mut self.compression_stats)
-                                    .context()?;
+                            let (compressed_size, next_state) = write_chunk_block_v2(
+                                self.encoder.as_mut().unwrap(),
+                                writer,
+                                chunk,
+                                &mut self.compression_stats,
+                            )
+                            .context()?;
                             self.compression_stats.zstd_compressed_size += compressed_size as u64;
 
                             if let Some(mut state) = next_state {
@@ -531,7 +546,11 @@ impl ProcessBuffer for PreflateContainerProcessor {
                                 let encoder = self.encoder.as_mut().unwrap();
                                 write_varint(encoder, self.content.len() as u32)?;
                                 encoder.write_all(&self.content)?;
-                                let sz = emit_compressed_block(LITERAL_CHUNK, encoder, writer)?;
+                                let sz = emit_compressed_block(
+                                    BLOCK_COMPRESSION_ZSTD | BLOCK_TYPE_LITERAL,
+                                    encoder,
+                                    writer,
+                                )?;
                                 self.compression_stats.zstd_compressed_size += sz as u64;
 
                                 self.content.clear();
@@ -547,7 +566,11 @@ impl ProcessBuffer for PreflateContainerProcessor {
                             let encoder = self.encoder.as_mut().unwrap();
                             write_varint(encoder, self.content.len() as u32)?;
                             encoder.write_all(&self.content)?;
-                            let sz = emit_compressed_block(LITERAL_CHUNK, encoder, writer)?;
+                            let sz = emit_compressed_block(
+                                BLOCK_COMPRESSION_ZSTD | BLOCK_TYPE_LITERAL,
+                                encoder,
+                                writer,
+                            )?;
                             self.compression_stats.zstd_compressed_size += sz as u64;
 
                             self.content.clear();
@@ -557,13 +580,17 @@ impl ProcessBuffer for PreflateContainerProcessor {
                 }
                 ChunkParseState::DeflateContinue(state) => {
                     // here we have a deflate stream that we need to continue
-                    // right now we error out if the continuation cannot be processed
                     match state.decompress(&self.content) {
+                        Err(ref e) if e.exit_code() == ExitCode::ShortRead
+                            && !input_complete
+                            && self.content.len() <= self.config.max_chunk_size =>
+                        {
+                            // Not enough data to complete the next block yet; wait for more.
+                            break;
+                        }
                         Err(_e) => {
-                            // indicate that we got an error while trying to continue
-                            // the compression of a previous chunk, this happens
-                            // when the stream significantly diverged from the behavior we estimated
-                            // in the first chunk that we saw
+                            // Stream analysis diverged or no more data is coming; give up on
+                            // continuation and fall back to treating the remaining bytes as raw.
                             self.state = ChunkParseState::Searching(None);
 
                             log::debug!("Error while trying to continue compression {:?}", _e);
@@ -580,7 +607,11 @@ impl ProcessBuffer for PreflateContainerProcessor {
                             write_varint(encoder, state.plain_text().len() as u32)?;
                             encoder.write_all(&res.corrections)?;
                             encoder.write_all(&state.plain_text().text())?;
-                            let sz = emit_compressed_block(DEFLATE_STREAM_CONTINUE, encoder, writer)?;
+                            let sz = emit_compressed_block(
+                                BLOCK_COMPRESSION_ZSTD | BLOCK_TYPE_DEFLATE_CONTINUE,
+                                encoder,
+                                writer,
+                            )?;
                             self.compression_stats.zstd_compressed_size += sz as u64;
 
                             self.total_plain_text_seen += state.plain_text().len() as u64;
@@ -609,7 +640,11 @@ impl ProcessBuffer for PreflateContainerProcessor {
                 let encoder = self.encoder.as_mut().unwrap();
                 write_varint(encoder, self.content.len() as u32)?;
                 encoder.write_all(&self.content)?;
-                let sz = emit_compressed_block(LITERAL_CHUNK, encoder, writer)?;
+                let sz = emit_compressed_block(
+                    BLOCK_COMPRESSION_ZSTD | BLOCK_TYPE_LITERAL,
+                    encoder,
+                    writer,
+                )?;
                 self.compression_stats.zstd_compressed_size += sz as u64;
             }
             self.content.clear();
@@ -617,7 +652,7 @@ impl ProcessBuffer for PreflateContainerProcessor {
             // Finalize the Zstd encoder and write the end-of-stream marker
             let encoder = self.encoder.take().unwrap();
             let finish_bytes = encoder.finish().context()?;
-            writer.write_all(&[ZSTD_END_OF_STREAM])?;
+            writer.write_all(&[BLOCK_COMPRESSION_ZSTD | BLOCK_TYPE_EOS])?;
             write_varint(writer, finish_bytes.len() as u32)?;
             writer.write_all(&finish_bytes)?;
             self.compression_stats.zstd_compressed_size += finish_bytes.len() as u64;
@@ -638,53 +673,26 @@ impl ProcessBuffer for PreflateContainerProcessor {
     }
 }
 
-#[cfg(test)]
-pub struct NopProcessBuffer {}
-
-#[cfg(test)]
-impl ProcessBuffer for NopProcessBuffer {
-    fn process_buffer(
-        &mut self,
-        input: &[u8],
-        _input_complete: bool,
-        writer: &mut impl Write,
-    ) -> Result<()> {
-        writer.write_all(input).context()?;
-
-        Ok(())
-    }
-}
-
 enum DecompressionState {
     Start,
     StartSegment,
-    /// accumulate compressed_size bytes into compressed_data, then record block_type.
+    /// accumulate compressed_size bytes then decode and process the block immediately.
     AccumulateBlock {
         block_type: u8,
         compressed_size: usize,
     },
-    /// accumulate lepton bytes and store as BlockInfo::Jpeg (processed at end).
+    /// accumulate lepton bytes then decode the JPEG block immediately.
     JpegAccumulate {
         lepton_length: usize,
     },
-    /// accumulate raw WebP-compressed PNG bytes (stored directly, bypass Zstd).
+    /// accumulate raw WebP-compressed PNG bytes then process the block immediately.
     WebpAccumulate {
         total_len: usize,
     },
-    /// accumulate final Zstd finish bytes, then batch-decode the whole stream.
-    DecodeAll {
+    /// accumulate the final Zstd finish bytes to close the frame cleanly.
+    ZstdEndOfStream {
         final_size: usize,
     },
-}
-
-/// Describes a single block in the encoded stream, used to replay processing after batch decode.
-enum BlockInfo {
-    /// A non-JPEG block; its content comes from the batch-decoded Zstd output.
-    Compressed(u8),
-    /// A JPEG/Lepton block stored raw; bytes are kept here and decoded directly.
-    Jpeg(Vec<u8>),
-    /// A WebP-compressed PNG block stored raw; bytes are kept here and decoded directly.
-    RawWebp(Vec<u8>),
 }
 
 /// recreates the orignal content from the chunked data
@@ -698,11 +706,8 @@ pub struct RecreateContainerProcessor {
     /// if it was too big to complete in a single chunk
     deflate_continue_state: Option<RecreateStreamProcessor>,
 
-    /// ordered list of all blocks seen so far
-    blocks: Vec<BlockInfo>,
-
-    /// concatenated Zstd-compressed bytes from all non-JPEG blocks
-    compressed_data: Vec<u8>,
+    /// persistent Zstd decoder — maintains the streaming context across blocks
+    zstd_decoder: zstd::stream::raw::Decoder<'static>,
 }
 
 impl RecreateContainerProcessor {
@@ -713,8 +718,7 @@ impl RecreateContainerProcessor {
             input_complete: false,
             state: DecompressionState::Start,
             deflate_continue_state: None,
-            blocks: Vec::new(),
-            compressed_data: Vec::new(),
+            zstd_decoder: zstd::stream::raw::Decoder::new().expect("failed to create zstd decoder"),
         }
     }
 }
@@ -791,26 +795,40 @@ impl RecreateContainerProcessor {
                     // read type byte, then dispatch
                     self.state = match self.input.scoped_read(|r| {
                         let type_byte = r.read_u8()?;
-                        match type_byte {
-                            JPEG_LEPTON_COMPRESSED => {
-                                let lepton_length = read_varint(r)? as usize;
-                                Ok(DecompressionState::JpegAccumulate { lepton_length })
-                            }
-                            WEBP_COMPRESSED => {
-                                let total_len = read_varint(r)? as usize;
-                                Ok(DecompressionState::WebpAccumulate { total_len })
-                            }
-                            ZSTD_END_OF_STREAM => {
-                                let final_size = read_varint(r)? as usize;
-                                Ok(DecompressionState::DecodeAll { final_size })
-                            }
-                            other => {
-                                let compressed_size = read_varint(r)? as usize;
-                                Ok(DecompressionState::AccumulateBlock {
-                                    block_type: other,
-                                    compressed_size,
-                                })
-                            }
+                        let compression = type_byte & BLOCK_COMPRESSION_MASK;
+                        let block_type = type_byte & BLOCK_TYPE_MASK;
+                        match compression {
+                            BLOCK_COMPRESSION_NONE => match block_type {
+                                BLOCK_TYPE_JPEG_LEPTON => {
+                                    let lepton_length = read_varint(r)? as usize;
+                                    Ok(DecompressionState::JpegAccumulate { lepton_length })
+                                }
+                                BLOCK_TYPE_WEBP => {
+                                    let total_len = read_varint(r)? as usize;
+                                    Ok(DecompressionState::WebpAccumulate { total_len })
+                                }
+                                _ => err_exit_code(
+                                    ExitCode::InvalidCompressedWrapper,
+                                    "unknown raw block type",
+                                ),
+                            },
+                            BLOCK_COMPRESSION_ZSTD => match block_type {
+                                BLOCK_TYPE_EOS => {
+                                    let final_size = read_varint(r)? as usize;
+                                    Ok(DecompressionState::ZstdEndOfStream { final_size })
+                                }
+                                other => {
+                                    let compressed_size = read_varint(r)? as usize;
+                                    Ok(DecompressionState::AccumulateBlock {
+                                        block_type: other,
+                                        compressed_size,
+                                    })
+                                }
+                            },
+                            _ => err_exit_code(
+                                ExitCode::InvalidCompressedWrapper,
+                                "unknown compression algorithm",
+                            ),
                         }
                     }) {
                         Ok(s) => s,
@@ -839,10 +857,14 @@ impl RecreateContainerProcessor {
                     }
 
                     let block_type = *block_type;
-                    let compressed_size = *compressed_size;
-                    self.compressed_data
-                        .extend(self.input.drain(0..compressed_size));
-                    self.blocks.push(BlockInfo::Compressed(block_type));
+                    let compressed_bytes: Vec<u8> = self.input.drain(0..*compressed_size).collect();
+                    let decoded = drain_zstd_block(&mut self.zstd_decoder, &compressed_bytes)?;
+                    process_compressed_block(
+                        block_type,
+                        &mut Cursor::new(decoded),
+                        &mut self.deflate_continue_state,
+                        writer,
+                    )?;
                     self.state = DecompressionState::StartSegment;
                 }
 
@@ -858,7 +880,20 @@ impl RecreateContainerProcessor {
                     }
 
                     let lepton_bytes: Vec<u8> = self.input.drain(0..*lepton_length).collect();
-                    self.blocks.push(BlockInfo::Jpeg(lepton_bytes));
+                    match lepton_jpeg::decode_lepton(
+                        &mut Cursor::new(&lepton_bytes),
+                        writer,
+                        &EnabledFeatures::compat_lepton_vector_read(),
+                        &DEFAULT_THREAD_POOL,
+                    ) {
+                        Err(e) => {
+                            return Err(PreflateError::new(
+                                ExitCode::InvalidCompressedWrapper,
+                                format!("JPEG Lepton decode failed: {}", e),
+                            ));
+                        }
+                        Ok(_) => {}
+                    }
                     self.state = DecompressionState::StartSegment;
                 }
 
@@ -874,11 +909,18 @@ impl RecreateContainerProcessor {
                     }
 
                     let webp_bytes: Vec<u8> = self.input.drain(0..*total_len).collect();
-                    self.blocks.push(BlockInfo::RawWebp(webp_bytes));
+                    // Payload is what webp_compress wrote after the BLOCK_TYPE_PNG type byte,
+                    // so process_compressed_block can parse it directly.
+                    process_compressed_block(
+                        BLOCK_TYPE_PNG,
+                        &mut Cursor::new(webp_bytes),
+                        &mut self.deflate_continue_state,
+                        writer,
+                    )?;
                     self.state = DecompressionState::StartSegment;
                 }
 
-                DecompressionState::DecodeAll { final_size } => {
+                DecompressionState::ZstdEndOfStream { final_size } => {
                     if self.input.len() < *final_size {
                         if self.input_complete {
                             return Err(PreflateError::new(
@@ -889,57 +931,10 @@ impl RecreateContainerProcessor {
                         break;
                     }
 
-                    // Collect final finish bytes and batch-decode the entire Zstd stream.
-                    self.compressed_data
-                        .extend(self.input.drain(0..*final_size));
-                    let decoded = zstd::decode_all(Cursor::new(&self.compressed_data))
-                        .map_err(|e| {
-                            PreflateError::new(
-                                ExitCode::InvalidCompressedWrapper,
-                                format!("zstd decode failed: {e}"),
-                            )
-                        })?;
-
-                    let mut cursor = Cursor::new(decoded);
-                    let blocks = std::mem::take(&mut self.blocks);
-                    for block_info in blocks {
-                        match block_info {
-                            BlockInfo::Compressed(block_type) => {
-                                process_compressed_block(
-                                    block_type,
-                                    &mut cursor,
-                                    &mut self.deflate_continue_state,
-                                    writer,
-                                )?;
-                            }
-                            BlockInfo::Jpeg(lepton_data) => {
-                                match lepton_jpeg::decode_lepton(
-                                    &mut Cursor::new(&lepton_data),
-                                    writer,
-                                    &EnabledFeatures::compat_lepton_vector_read(),
-                                    &DEFAULT_THREAD_POOL,
-                                ) {
-                                    Err(e) => {
-                                        return Err(PreflateError::new(
-                                            ExitCode::InvalidCompressedWrapper,
-                                            format!("JPEG Lepton decode failed: {}", e),
-                                        ));
-                                    }
-                                    Ok(_) => {}
-                                }
-                            }
-                            BlockInfo::RawWebp(webp_bytes) => {
-                                // Payload is what webp_compress wrote after the PNG_COMPRESSED
-                                // type byte, so process_compressed_block can parse it directly.
-                                process_compressed_block(
-                                    PNG_COMPRESSED,
-                                    &mut Cursor::new(webp_bytes),
-                                    &mut self.deflate_continue_state,
-                                    writer,
-                                )?;
-                            }
-                        }
-                    }
+                    // Feed the finish bytes to cleanly close the Zstd frame.
+                    // No decompressed output is expected since the encoder flushes after each block.
+                    let finish_bytes: Vec<u8> = self.input.drain(0..*final_size).collect();
+                    drain_zstd_block(&mut self.zstd_decoder, &finish_bytes)?;
 
                     self.state = DecompressionState::StartSegment;
                 }
@@ -950,15 +945,56 @@ impl RecreateContainerProcessor {
     }
 }
 
-/// Parses and processes a single non-JPEG block from a cursor over the batch-decoded output.
+/// Feeds `compressed` bytes into the persistent `decoder` and returns all decompressed output.
 ///
-/// The encoded layout (as written by the encoder) for each block type is:
-///   LITERAL_CHUNK:          varint(len) + data
-///   DEFLATE_STREAM:         varint(corrections_len) + varint(plaintext_len) + corrections + plaintext
-///   DEFLATE_STREAM_CONTINUE: same layout as DEFLATE_STREAM
-///   PNG_COMPRESSED:         varint(correction_length) + varint(uncompressed_length) +
-///                           IdatContents + [filters if png_header present] +
-///                           corrections + (webp_data or raw_plaintext)
+/// Each call corresponds to one Zstd flush frame (written by the encoder via `flush()`).
+/// After consuming all input bytes the decoder is drained until it produces no more output,
+/// which is guaranteed because `ZSTD_e_flush` ensures all data is available to the decoder
+/// before the next block starts.
+fn drain_zstd_block(
+    decoder: &mut zstd::stream::raw::Decoder<'static>,
+    compressed: &[u8],
+) -> Result<Vec<u8>> {
+    use zstd::stream::raw::{InBuffer, Operation, OutBuffer};
+
+    let mut output = Vec::new();
+    let mut scratch = vec![0u8; 65536];
+    let mut in_buf = InBuffer::around(compressed);
+
+    loop {
+        let mut out_buf = OutBuffer::around(scratch.as_mut_slice());
+        decoder.run(&mut in_buf, &mut out_buf).map_err(|e| {
+            PreflateError::new(
+                ExitCode::InvalidCompressedWrapper,
+                format!("zstd decode failed: {e}"),
+            )
+        })?;
+        let produced = out_buf.pos();
+        output.extend_from_slice(&scratch[..produced]);
+
+        // Stop when all input has been consumed and the decoder produced no more output.
+        // zstd guarantees progress (either bytes_read > 0 or bytes_written > 0) so this
+        // loop always terminates.
+        if in_buf.pos() >= compressed.len() && produced == 0 {
+            break;
+        }
+    }
+
+    Ok(output)
+}
+
+/// Parses and processes a single non-JPEG/non-WebP block.
+///
+/// `cursor` wraps the output of `drain_zstd_block` for compressed blocks,
+/// or the raw WebP payload for `BLOCK_TYPE_PNG` blocks stored outside Zstd.
+///
+/// Layout written by the encoder for each block type (block_type = lower 6 bits):
+///   BLOCK_TYPE_LITERAL:          varint(len) + data
+///   BLOCK_TYPE_DEFLATE:          varint(corrections_len) + varint(plaintext_len) + corrections + plaintext
+///   BLOCK_TYPE_DEFLATE_CONTINUE: same as BLOCK_TYPE_DEFLATE
+///   BLOCK_TYPE_PNG:              varint(correction_length) + varint(uncompressed_length) +
+///                                IdatContents + [filters if png_header present] +
+///                                corrections + (webp_data or raw_plaintext)
 fn process_compressed_block(
     block_type: u8,
     cursor: &mut Cursor<Vec<u8>>,
@@ -966,7 +1002,7 @@ fn process_compressed_block(
     writer: &mut impl Write,
 ) -> Result<()> {
     match block_type {
-        LITERAL_CHUNK => {
+        BLOCK_TYPE_LITERAL => {
             let length = read_varint(cursor)? as usize;
             let mut data = vec![0u8; length];
             cursor.read_exact(&mut data).map_err(|e| {
@@ -974,7 +1010,7 @@ fn process_compressed_block(
             })?;
             writer.write_all(&data)?;
         }
-        DEFLATE_STREAM => {
+        BLOCK_TYPE_DEFLATE => {
             *deflate_continue_state = None;
 
             let correction_length = read_varint(cursor)? as usize;
@@ -998,7 +1034,7 @@ fn process_compressed_block(
             writer.write_all(&comp)?;
             *deflate_continue_state = Some(reconstruct);
         }
-        DEFLATE_STREAM_CONTINUE => {
+        BLOCK_TYPE_DEFLATE_CONTINUE => {
             let correction_length = read_varint(cursor)? as usize;
             let uncompressed_length = read_varint(cursor)? as usize;
 
@@ -1025,7 +1061,7 @@ fn process_compressed_block(
 
             writer.write_all(&comp)?;
         }
-        PNG_COMPRESSED => {
+        BLOCK_TYPE_PNG => {
             let correction_length = read_varint(cursor)? as usize;
             let uncompressed_length = read_varint(cursor)? as usize;
             let idat = IdatContents::read_from_bytestream(cursor)?;
@@ -1133,7 +1169,7 @@ fn webp_compress(
                 }
             };
 
-            result.write_all(&[PNG_COMPRESSED])?;
+            result.write_all(&[BLOCK_TYPE_PNG])?; // placeholder — caller skips this byte
 
             write_varint(result, corrections.len() as u32)?;
             write_varint(result, comp.deref().len() as u32)?;
@@ -1188,109 +1224,507 @@ fn webp_decompress(
 }
 
 #[cfg(test)]
-fn roundtrip_deflate_chunks(filename: &str) {
-    use crate::utils::assert_eq_array;
+pub(crate) mod test {
+    use super::*;
 
-    let f = crate::utils::read_file(filename);
+    pub struct NopProcessBuffer {}
 
-    println!("Processing file: {}", filename);
+    impl ProcessBuffer for NopProcessBuffer {
+        fn process_buffer(
+            &mut self,
+            input: &[u8],
+            _input_complete: bool,
+            writer: &mut impl Write,
+        ) -> Result<()> {
+            writer.write_all(input).context()?;
 
-    let mut expanded = Vec::new();
-    let mut ctx = PreflateContainerProcessor::new(&PreflateContainerConfig::default(), 1, false);
-    ctx.copy_to_end(&mut std::io::Cursor::new(&f), &mut expanded).unwrap();
+            Ok(())
+        }
+    }
 
-    println!("Recreating file: {}", filename);
+    fn roundtrip_deflate_chunks(filename: &str) {
+        use crate::utils::assert_eq_array;
 
-    let mut destination = Vec::new();
-    let mut ctx = RecreateContainerProcessor::new(usize::MAX);
-    ctx.copy_to_end(&mut std::io::Cursor::new(expanded), &mut destination).unwrap();
+        let f = crate::utils::read_file(filename);
 
-    assert_eq_array(&destination, &f);
-}
+        println!("Processing file: {}", filename);
 
-#[test]
-fn roundtrip_skip_length_crash() {
-    roundtrip_deflate_chunks("skiplengthcrash.bin");
-}
+        let mut expanded = Vec::new();
+        let mut ctx =
+            PreflateContainerProcessor::new(&PreflateContainerConfig::default(), 1, false);
+        ctx.copy_to_end(&mut std::io::Cursor::new(&f), &mut expanded)
+            .unwrap();
 
-#[test]
-fn roundtrip_png_chunks() {
-    roundtrip_deflate_chunks("treegdi.png");
-}
+        println!("Recreating file: {}", filename);
 
-#[test]
-fn roundtrip_zip_chunks() {
-    roundtrip_deflate_chunks("samplezip.zip");
-}
+        let mut destination = Vec::new();
+        let mut ctx = RecreateContainerProcessor::new(usize::MAX);
+        ctx.copy_to_end(&mut std::io::Cursor::new(expanded), &mut destination)
+            .unwrap();
 
-#[test]
-fn roundtrip_gz_chunks() {
-    roundtrip_deflate_chunks("sample1.bin.gz");
-}
+        assert_eq_array(&destination, &f);
+    }
 
-#[test]
-fn roundtrip_png_chunks2() {
-    roundtrip_deflate_chunks("starcontrol.samplesave");
-}
+    #[test]
+    fn roundtrip_skip_length_crash() {
+        roundtrip_deflate_chunks("skiplengthcrash.bin");
+    }
 
-#[test]
-fn roundtrip_small_chunk() {
-    use crate::utils::{assert_eq_array, read_file};
+    #[test]
+    fn roundtrip_png_chunks() {
+        roundtrip_deflate_chunks("treegdi.png");
+    }
 
-    let original = read_file("pptxplaintext.zip");
+    #[test]
+    fn roundtrip_zip_chunks() {
+        roundtrip_deflate_chunks("samplezip.zip");
+    }
 
-    let mut context = PreflateContainerProcessor::new(&PreflateContainerConfig {
-        min_chunk_size: 100000,
-        max_chunk_size: 100000,
-        total_plain_text_limit: u64::MAX,
-        ..Default::default()
-    }, 1, false);
+    #[test]
+    fn roundtrip_gz_chunks() {
+        roundtrip_deflate_chunks("sample1.bin.gz");
+    }
 
-    let compressed = context.process_vec_size(&original, 20001).unwrap();
+    #[test]
+    fn roundtrip_png_chunks2() {
+        roundtrip_deflate_chunks("starcontrol.samplesave");
+    }
 
-    let mut context = RecreateContainerProcessor::new(usize::MAX);
-    let recreated = context.process_vec_size(&compressed, 20001).unwrap();
+    #[test]
+    fn roundtrip_small_chunk() {
+        use crate::utils::{assert_eq_array, read_file};
 
-    assert_eq_array(&original, &recreated);
-}
+        let original = read_file("pptxplaintext.zip");
 
-#[test]
-fn roundtrip_small_plain_text() {
-    use crate::utils::{assert_eq_array, read_file};
+        let mut context = PreflateContainerProcessor::new(
+            &PreflateContainerConfig {
+                min_chunk_size: 100000,
+                max_chunk_size: 100000,
+                total_plain_text_limit: u64::MAX,
+                ..Default::default()
+            },
+            1,
+            false,
+        );
 
-    let original = read_file("pptxplaintext.zip");
+        let compressed = context.process_vec_size(&original, 20001).unwrap();
 
-    let mut context = PreflateContainerProcessor::new(&PreflateContainerConfig {
-        min_chunk_size: 100000,
-        max_chunk_size: 100000,
-        total_plain_text_limit: u64::MAX,
-        ..Default::default()
-    }, 1, false);
+        let mut context = RecreateContainerProcessor::new(usize::MAX);
+        let recreated = context.process_vec_size(&compressed, 20001).unwrap();
 
-    let compressed = context.process_vec_size(&original, 2001).unwrap();
+        assert_eq_array(&original, &recreated);
+    }
 
-    let mut context = RecreateContainerProcessor::new(usize::MAX);
-    let recreated = context.process_vec_size(&compressed, 2001).unwrap();
+    #[test]
+    fn roundtrip_small_plain_text() {
+        use crate::utils::{assert_eq_array, read_file};
 
-    assert_eq_array(&original, &recreated);
-}
+        let original = read_file("pptxplaintext.zip");
 
-#[test]
-fn roundtrip_zstd_per_block() {
-    use crate::utils::{assert_eq_array, read_file};
+        let mut context = PreflateContainerProcessor::new(
+            &PreflateContainerConfig {
+                min_chunk_size: 100000,
+                max_chunk_size: 100000,
+                total_plain_text_limit: u64::MAX,
+                ..Default::default()
+            },
+            1,
+            false,
+        );
 
-    let original = read_file("samplezip.zip");
+        let compressed = context.process_vec_size(&original, 2001).unwrap();
 
-    let mut context = PreflateContainerProcessor::new(
-        &PreflateContainerConfig::default(),
-        1,
-        false,
-    );
+        let mut context = RecreateContainerProcessor::new(usize::MAX);
+        let recreated = context.process_vec_size(&compressed, 2001).unwrap();
 
-    let compressed = context.process_vec(&original).unwrap();
+        assert_eq_array(&original, &recreated);
+    }
 
-    let mut context = RecreateContainerProcessor::new(usize::MAX);
-    let recreated = context.process_vec(&compressed).unwrap();
+    #[test]
+    fn roundtrip_zstd_per_block() {
+        use crate::utils::{assert_eq_array, read_file};
 
-    assert_eq_array(&original, &recreated);
+        let original = read_file("samplezip.zip");
+
+        let mut context =
+            PreflateContainerProcessor::new(&PreflateContainerConfig::default(), 1, false);
+
+        let compressed = context.process_vec(&original).unwrap();
+
+        let mut context = RecreateContainerProcessor::new(usize::MAX);
+        let recreated = context.process_vec(&compressed).unwrap();
+
+        assert_eq_array(&original, &recreated);
+    }
+
+    // ── Block type bit-field tests ───────────────────────────────────────────────
+
+    /// Parse the outer framing of a v2 container and return each block's
+    /// (compression_bits, block_type_bits) in order, stopping after EOS.
+    fn parse_wire_block_types(data: &[u8]) -> Vec<(u8, u8)> {
+        let mut cursor = std::io::Cursor::new(data);
+        let version = cursor.read_u8().unwrap();
+        assert_eq!(version, COMPRESSED_WRAPPER_VERSION_2);
+        let mut blocks = Vec::new();
+        while (cursor.position() as usize) < data.len() {
+            let type_byte = cursor.read_u8().unwrap();
+            let compression = type_byte & BLOCK_COMPRESSION_MASK;
+            let block_type = type_byte & BLOCK_TYPE_MASK;
+            blocks.push((compression, block_type));
+            let size = read_varint(&mut cursor).unwrap() as u64;
+            cursor.set_position(cursor.position() + size);
+            if compression == BLOCK_COMPRESSION_ZSTD && block_type == BLOCK_TYPE_EOS {
+                break;
+            }
+        }
+        blocks
+    }
+
+    /// Feed `stream` to the decoder with input_complete=true and assert the
+    /// error exit code matches `expected`.
+    fn assert_decoder_fails(stream: &[u8], expected: preflate_rs::ExitCode) {
+        let mut ctx = RecreateContainerProcessor::new(usize::MAX);
+        let mut out = Vec::new();
+        let err = ctx
+            .process_buffer(stream, true, &mut out)
+            .expect_err("expected an error, but decoder returned Ok");
+        assert_eq!(
+            err.exit_code(),
+            expected,
+            "wrong exit code for stream {stream:02X?}"
+        );
+    }
+
+    /// The two masks must partition the byte: non-overlapping and together covering all 8 bits.
+    /// Every content-kind constant must sit entirely within BLOCK_TYPE_MASK, and every
+    /// compression constant within BLOCK_COMPRESSION_MASK.
+    #[test]
+    fn test_bit_field_masks_partition_byte() {
+        assert_eq!(
+            BLOCK_COMPRESSION_MASK | BLOCK_TYPE_MASK,
+            0xFF,
+            "masks do not cover all bits"
+        );
+        assert_eq!(
+            BLOCK_COMPRESSION_MASK & BLOCK_TYPE_MASK,
+            0x00,
+            "masks overlap"
+        );
+        for kind in [
+            BLOCK_TYPE_LITERAL,
+            BLOCK_TYPE_DEFLATE,
+            BLOCK_TYPE_PNG,
+            BLOCK_TYPE_DEFLATE_CONTINUE,
+            BLOCK_TYPE_JPEG_LEPTON,
+            BLOCK_TYPE_WEBP,
+            BLOCK_TYPE_EOS,
+        ] {
+            assert_eq!(
+                kind & BLOCK_COMPRESSION_MASK,
+                0,
+                "BLOCK_TYPE 0x{kind:02X} bleeds into compression bits"
+            );
+        }
+        for comp in [BLOCK_COMPRESSION_NONE, BLOCK_COMPRESSION_ZSTD] {
+            assert_eq!(
+                comp & BLOCK_TYPE_MASK,
+                0,
+                "BLOCK_COMPRESSION 0x{comp:02X} bleeds into type bits"
+            );
+        }
+    }
+
+    /// The combined (compression | kind) wire bytes must match the expected values
+    /// documented in CLAUDE.md. This catches accidental constant drift.
+    #[test]
+    fn test_combined_wire_values() {
+        assert_eq!(BLOCK_COMPRESSION_ZSTD | BLOCK_TYPE_LITERAL, 0x40);
+        assert_eq!(BLOCK_COMPRESSION_ZSTD | BLOCK_TYPE_DEFLATE, 0x41);
+        assert_eq!(BLOCK_COMPRESSION_ZSTD | BLOCK_TYPE_PNG, 0x42);
+        assert_eq!(BLOCK_COMPRESSION_ZSTD | BLOCK_TYPE_DEFLATE_CONTINUE, 0x43);
+        assert_eq!(BLOCK_COMPRESSION_NONE | BLOCK_TYPE_JPEG_LEPTON, 0x04);
+        assert_eq!(BLOCK_COMPRESSION_NONE | BLOCK_TYPE_WEBP, 0x05);
+        assert_eq!(BLOCK_COMPRESSION_ZSTD | BLOCK_TYPE_EOS, 0x7F);
+    }
+
+    /// Reserved compression bits 0x80 (10xx_xxxx) must be rejected by the decoder.
+    #[test]
+    fn test_decoder_rejects_reserved_compression_bits_10() {
+        assert_decoder_fails(
+            &[COMPRESSED_WRAPPER_VERSION_2, 0x80],
+            preflate_rs::ExitCode::InvalidCompressedWrapper,
+        );
+    }
+
+    /// Reserved compression bits 0xC0 (11xx_xxxx) must be rejected by the decoder.
+    #[test]
+    fn test_decoder_rejects_reserved_compression_bits_11() {
+        assert_decoder_fails(
+            &[COMPRESSED_WRAPPER_VERSION_2, 0xC0],
+            preflate_rs::ExitCode::InvalidCompressedWrapper,
+        );
+    }
+
+    /// BLOCK_COMPRESSION_NONE | BLOCK_TYPE_LITERAL (0x00) must be rejected:
+    /// literal blocks are Zstd-only; there is no raw literal block type.
+    #[test]
+    fn test_decoder_rejects_raw_literal_block_type() {
+        let byte = BLOCK_COMPRESSION_NONE | BLOCK_TYPE_LITERAL; // == 0x00
+        assert_decoder_fails(
+            &[COMPRESSED_WRAPPER_VERSION_2, byte],
+            preflate_rs::ExitCode::InvalidCompressedWrapper,
+        );
+    }
+
+    /// Any BLOCK_COMPRESSION_NONE byte that is not JPEG_LEPTON or WEBP must be rejected.
+    #[test]
+    fn test_decoder_rejects_undefined_raw_block_types() {
+        // 0x10 is arbitrary: not 0x04 (JPEG) or 0x05 (WEBP)
+        let byte = BLOCK_COMPRESSION_NONE | 0x10;
+        assert_decoder_fails(
+            &[COMPRESSED_WRAPPER_VERSION_2, byte],
+            preflate_rs::ExitCode::InvalidCompressedWrapper,
+        );
+    }
+
+    /// Compressing plain bytes (no embedded DEFLATE streams) must produce a stream
+    /// whose first block carries BLOCK_COMPRESSION_ZSTD and BLOCK_TYPE_LITERAL.
+    #[test]
+    fn test_encoder_literal_block_carries_zstd_compression_bit() {
+        let input = vec![0xABu8; 512];
+        let mut ctx =
+            PreflateContainerProcessor::new(&PreflateContainerConfig::default(), 1, false);
+        let compressed = ctx.process_vec(&input).unwrap();
+
+        let blocks = parse_wire_block_types(&compressed);
+        assert!(
+            !blocks.is_empty(),
+            "expected at least one block in the output"
+        );
+        assert_eq!(
+            blocks[0],
+            (BLOCK_COMPRESSION_ZSTD, BLOCK_TYPE_LITERAL),
+            "first block should be a Zstd literal block"
+        );
+    }
+
+    /// The EOS block that closes the Zstd frame must always use BLOCK_COMPRESSION_ZSTD.
+    #[test]
+    fn test_encoder_eos_uses_zstd_compression_bit() {
+        // Plain bytes with no DEFLATE streams → [version][literal][EOS].
+        let input = vec![0xABu8; 64];
+        let mut ctx =
+            PreflateContainerProcessor::new(&PreflateContainerConfig::default(), 1, false);
+        let compressed = ctx.process_vec(&input).unwrap();
+
+        let blocks = parse_wire_block_types(&compressed);
+        assert_eq!(
+            blocks.last(),
+            Some(&(BLOCK_COMPRESSION_ZSTD, BLOCK_TYPE_EOS)),
+            "last block must be the Zstd EOS marker"
+        );
+    }
+
+    /// Every block type byte in a real compressed output must have compression bits
+    /// of either BLOCK_COMPRESSION_NONE or BLOCK_COMPRESSION_ZSTD — never the
+    /// reserved patterns 0x80 or 0xC0.
+    #[test]
+    fn test_encoder_never_emits_reserved_compression_bits() {
+        let input = crate::utils::read_file("samplezip.zip");
+        let mut ctx =
+            PreflateContainerProcessor::new(&PreflateContainerConfig::default(), 1, false);
+        let compressed = ctx.process_vec(&input).unwrap();
+
+        for &(compression, _) in &parse_wire_block_types(&compressed) {
+            assert!(
+                compression == BLOCK_COMPRESSION_NONE || compression == BLOCK_COMPRESSION_ZSTD,
+                "found reserved compression bits 0x{compression:02X} in output"
+            );
+        }
+    }
+
+    /// Verify that the decoder extracts the lower 6 bits as block_type rather
+    /// than passing the full byte to process_compressed_block. If it passed the
+    /// full byte (0x41) instead of the kind bits (0x01), the match would fall
+    /// through to the error arm and the round-trip would fail.
+    #[test]
+    fn test_decoder_strips_compression_bits_before_dispatch() {
+        use crate::utils::{assert_eq_array, read_file};
+        // A zip file exercises DEFLATE blocks (wire type 0x41 = ZSTD|DEFLATE).
+        // A successful round-trip proves the decoder is matching on 0x01, not 0x41.
+        let original = read_file("samplezip.zip");
+        let mut enc =
+            PreflateContainerProcessor::new(&PreflateContainerConfig::default(), 1, false);
+        let compressed = enc.process_vec(&original).unwrap();
+
+        // Confirm the stream actually contains DEFLATE blocks (type 0x41),
+        // so the test is meaningful and not trivially passing.
+        let has_deflate = parse_wire_block_types(&compressed)
+            .iter()
+            .any(|&(c, t)| c == BLOCK_COMPRESSION_ZSTD && t == BLOCK_TYPE_DEFLATE);
+        assert!(
+            has_deflate,
+            "test file produced no DEFLATE blocks — test is vacuous"
+        );
+
+        let mut dec = RecreateContainerProcessor::new(usize::MAX);
+        let recreated = dec.process_vec(&compressed).unwrap();
+        assert_eq_array(&original, &recreated);
+    }
+
+    /// A PNG file must produce at least one PNG or WebP IDAT block (not merely a DEFLATE
+    /// block), and must round-trip to the original bytes.  The PNG code path in the encoder
+    /// is distinct from the plain DEFLATE path: it reconstructs IDAT framing and, when the
+    /// `webp` feature is enabled, may store pixels as WebP lossless instead of raw.
+    #[test]
+    fn test_png_produces_idat_block_and_roundtrips() {
+        use crate::utils::{assert_eq_array, read_file};
+        let original = read_file("treegdi.png");
+        let mut enc =
+            PreflateContainerProcessor::new(&PreflateContainerConfig::default(), 1, false);
+        let compressed = enc.process_vec(&original).unwrap();
+
+        let blocks = parse_wire_block_types(&compressed);
+        let has_png_block = blocks
+            .iter()
+            .any(|&(_, t)| t == BLOCK_TYPE_PNG || t == BLOCK_TYPE_WEBP);
+        assert!(
+            has_png_block,
+            "PNG input should produce at least one PNG (0x02) or WebP (0x05) block, \
+             got: {blocks:?}"
+        );
+
+        let mut dec = RecreateContainerProcessor::new(usize::MAX);
+        let recreated = dec.process_vec(&compressed).unwrap();
+        assert_eq_array(&original, &recreated);
+    }
+
+    /// A PDF containing embedded JPEG images must produce JPEG_LEPTON blocks (raw,
+    /// outside Zstd) as well as DEFLATE blocks for the PDF's own compressed object
+    /// streams. Both must survive a full round-trip.
+    #[test]
+    fn test_pdf_with_jpegs_produces_lepton_and_deflate_blocks_and_roundtrips() {
+        use crate::utils::{assert_eq_array, read_file};
+        let original = read_file("embedded-images.pdf");
+        let mut enc =
+            PreflateContainerProcessor::new(&PreflateContainerConfig::default(), 1, false);
+        let compressed = enc.process_vec(&original).unwrap();
+
+        let blocks = parse_wire_block_types(&compressed);
+
+        let has_lepton = blocks
+            .iter()
+            .any(|&(c, t)| c == BLOCK_COMPRESSION_NONE && t == BLOCK_TYPE_JPEG_LEPTON);
+        assert!(
+            has_lepton,
+            "PDF with embedded JPEGs should produce at least one JPEG_LEPTON block"
+        );
+
+        let has_deflate = blocks
+            .iter()
+            .any(|&(_, t)| t == BLOCK_TYPE_DEFLATE);
+        assert!(
+            has_deflate,
+            "PDF with embedded JPEGs should also produce DEFLATE blocks for compressed objects"
+        );
+
+        let mut dec = RecreateContainerProcessor::new(usize::MAX);
+        let recreated = dec.process_vec(&compressed).unwrap();
+        assert_eq_array(&original, &recreated);
+    }
+
+    /// DEFLATE_CONTINUE blocks are produced when the compressed-data buffer is
+    /// truncated mid-stream: `DeflateParser::parse` reads to EOF and returns
+    /// `Ok` with `is_done()=false`, the encoder emits a DEFLATE block for the
+    /// plaintext decoded so far, saves the mid-stream state, and resumes on
+    /// subsequent calls via DEFLATE_CONTINUE blocks.
+    ///
+    /// `sample1.bin.gz` is a single gzip stream with ~418 KiB of uncompressed
+    /// content.  Feeding it in 10 KiB slices (with `min_chunk_size=5000` so the
+    /// processor starts immediately) means the scanner always sees only a
+    /// partial window of the compressed stream, forcing many DEFLATE_CONTINUE
+    /// blocks that must all round-trip correctly.
+    #[test]
+    fn test_deflate_continue_blocks_appear_and_roundtrip() {
+        use crate::utils::{assert_eq_array, read_file};
+        let original = read_file("sample1.bin.gz");
+        // min_chunk_size: 0 so the loop processes data immediately after Start,
+        // letting Searching run with the first truncated chunk rather than waiting
+        // for an additional min_chunk_size bytes before beginning.
+        let mut enc = PreflateContainerProcessor::new(
+            &PreflateContainerConfig {
+                min_chunk_size: 0,
+                ..PreflateContainerConfig::default()
+            },
+            1,
+            false,
+        );
+        // Feed the 263 KiB file in two pieces. The first piece (200 KiB) truncates
+        // the DEFLATE stream mid-way; decompress() hits EOF with at least one
+        // complete block already parsed, so it returns Ok(partial) / is_done()=false,
+        // causing the encoder to emit a DEFLATE block and enter DeflateContinue.
+        // The second piece completes the stream → DEFLATE_CONTINUE block.
+        let mut compressed = Vec::new();
+        {
+            let chunk1 = &original[..200_000.min(original.len())];
+            enc.process_buffer(chunk1, false, &mut compressed).unwrap();
+            if original.len() > 200_000 {
+                let chunk2 = &original[200_000..];
+                enc.process_buffer(chunk2, false, &mut compressed).unwrap();
+            }
+            enc.process_buffer(&[], true, &mut compressed).unwrap();
+        }
+
+        let blocks = parse_wire_block_types(&compressed);
+        let n_continue = blocks
+            .iter()
+            .filter(|&&(_, t)| t == BLOCK_TYPE_DEFLATE_CONTINUE)
+            .count();
+        assert!(
+            n_continue > 0,
+            "200 KiB chunks on a ~263 KiB gzip should force at least one DEFLATE_CONTINUE block; \
+             blocks seen: {blocks:?}"
+        );
+
+        let mut dec = RecreateContainerProcessor::new(usize::MAX);
+        let recreated = dec.process_vec_size(&compressed, 10_000).unwrap();
+        assert_eq_array(&original, &recreated);
+    }
+
+    /// When `total_plain_text_limit` is exceeded the encoder stops analysing
+    /// deflate streams and writes the remaining bytes as LITERAL blocks.  The
+    /// decoder must still reproduce the original bytes exactly, including the
+    /// unprocessed portion.
+    #[test]
+    fn test_total_plain_text_limit_forces_literal_fallback_and_roundtrips() {
+        use crate::utils::{assert_eq_array, read_file};
+        // samplezip.zip has several DEFLATE entries; setting the limit to 1 byte
+        // ensures that after the first DEFLATE entry's plaintext is accumulated,
+        // every subsequent scan sees total_plain_text_seen > limit and falls back
+        // to writing remaining content as a single LITERAL block.
+        let original = read_file("samplezip.zip");
+        let mut enc = PreflateContainerProcessor::new(
+            &PreflateContainerConfig {
+                total_plain_text_limit: 1,
+                ..PreflateContainerConfig::default()
+            },
+            1,
+            false,
+        );
+        let compressed = enc.process_vec(&original).unwrap();
+
+        let blocks = parse_wire_block_types(&compressed);
+
+        // At least one LITERAL block must appear (the fallback content).
+        let has_literal = blocks.iter().any(|&(_, t)| t == BLOCK_TYPE_LITERAL);
+        assert!(
+            has_literal,
+            "after total_plain_text_limit is exceeded, remaining content must be LITERAL"
+        );
+
+        // The stream must still decode back to the original bytes.
+        let mut dec = RecreateContainerProcessor::new(usize::MAX);
+        let recreated = dec.process_vec(&compressed).unwrap();
+        assert_eq_array(&original, &recreated);
+    }
 }

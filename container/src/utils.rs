@@ -174,7 +174,7 @@ pub fn process_limited_buffer(
 
 #[test]
 fn test_process_limited_buffer() {
-    let mut p = crate::container_processor::NopProcessBuffer {};
+    let mut p = crate::container_processor::test::NopProcessBuffer {};
 
     let input = b"Hello, world!";
     let mut output = [0u8; 5];

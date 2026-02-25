@@ -98,11 +98,7 @@ fn main() {
         // open file for reading
         let original = fs::read(&entry).unwrap();
 
-        let mut ctx = PreflateContainerProcessor::new(
-            &config,
-            cli.level as i32,
-            cli.baseline,
-        );
+        let mut ctx = PreflateContainerProcessor::new(&config, cli.level as i32, cli.baseline);
 
         let compress_start = ProcessTime::now();
 

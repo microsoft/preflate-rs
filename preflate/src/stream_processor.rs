@@ -876,3 +876,115 @@ fn verify_partial_blocks() {
         );
     }
 }
+
+/// Replicates exactly what `scan_deflate::find_compressable_stream` does when it
+/// encounters a gzip stream in a truncated 200 KiB content buffer:
+///
+/// 1. strip the 10-byte gzip header (and 8-byte footer) to obtain the raw DEFLATE body
+/// 2. call `decompress` with only the first ~190 KB of that body (what fits in the
+///    200 KiB content window after the header)
+/// 3. assert the call returns `Ok` and `is_done() == false`  ← DeflateContinue requires this
+/// 4. call `decompress` again with the remainder of the body, assert `is_done() == true`
+/// 5. reconstruct the original DEFLATE bytes and assert roundtrip identity
+#[test]
+fn verify_decompress_partial_gzip_deflate_body_roundtrip() {
+    crate::init_logging();
+
+    // sample1.bin.gz: 263 972 bytes total; gzip header = 10 bytes, footer = 8 bytes
+    // → raw DEFLATE body = 263 954 bytes
+    let gzip = crate::utils::read_file("sample1.bin.gz");
+    assert!(gzip.len() > 18, "gzip file too short");
+
+    // Gzip header for this file has no extra flags, so it is exactly 10 bytes.
+    let deflate_start: usize = 10;
+    let deflate_end: usize = gzip.len() - 8;
+    let deflate_body = &gzip[deflate_start..deflate_end];
+
+    // Mimic what find_compressable_stream does: content buffer contains the first
+    // 200 000 bytes of the gzip file, and the DEFLATE body starts at offset 10,
+    // so the slice passed to decompress() is bytes [10..200000] = 199 990 bytes.
+    let content_window: usize = 200_000 - deflate_start; // 199 990
+    assert!(
+        content_window < deflate_body.len(),
+        "content window must truncate the DEFLATE body (window={content_window}, body={})",
+        deflate_body.len()
+    );
+
+    let mut state = PreflateStreamProcessor::new(&PreflateConfig::default());
+
+    // ── First call: truncated slice ──────────────────────────────────────────
+    let r1 = state.decompress(&deflate_body[..content_window]);
+    let r1 = match r1 {
+        Ok(r) => r,
+        Err(e) => panic!(
+            "decompress on truncated DEFLATE body ({content_window} B of {} B) returned \
+             Err({e:?}); expected Ok(partial) with is_done()=false",
+            deflate_body.len()
+        ),
+    };
+    assert!(
+        !state.is_done(),
+        "is_done() must be false after truncated first call; compressed_size={}",
+        r1.compressed_size
+    );
+    assert!(
+        r1.compressed_size > 0,
+        "at least one block must have been consumed"
+    );
+    assert!(
+        r1.compressed_size <= content_window,
+        "compressed_size ({}) must not exceed the slice length ({content_window})",
+        r1.compressed_size
+    );
+    println!(
+        "first call: compressed_size={} / {content_window}  blocks={}",
+        r1.compressed_size,
+        r1.blocks.len()
+    );
+
+    let first_corrections = r1.corrections.clone();
+    let first_plain_text = state.plain_text().text().to_vec();
+    state.shrink_to_dictionary();
+
+    // ── Second call: remainder ────────────────────────────────────────────────
+    let offset = r1.compressed_size;
+    let r2 = state.decompress(&deflate_body[offset..]);
+    let r2 = match r2 {
+        Ok(r) => r,
+        Err(e) => panic!(
+            "decompress on remainder ({} B) returned Err({e:?})",
+            deflate_body.len() - offset
+        ),
+    };
+    assert!(
+        state.is_done(),
+        "is_done() must be true after consuming the full body"
+    );
+    println!(
+        "second call: compressed_size={}  blocks={}",
+        r2.compressed_size,
+        r2.blocks.len()
+    );
+
+    let second_corrections = r2.corrections.clone();
+    let second_plain_text = state.plain_text().text().to_vec();
+
+    // ── Roundtrip: reconstruct the original bytes ─────────────────────────────
+    let mut reconstruct = RecreateStreamProcessor::new();
+    let (mut recompressed, _) = reconstruct
+        .recompress(
+            &mut std::io::Cursor::new(&first_plain_text),
+            &first_corrections,
+        )
+        .expect("recompress chunk 1 failed");
+
+    let (mut rest, _) = reconstruct
+        .recompress(
+            &mut std::io::Cursor::new(&second_plain_text),
+            &second_corrections,
+        )
+        .expect("recompress chunk 2 failed");
+
+    recompressed.append(&mut rest);
+    crate::utils::assert_eq_array(deflate_body, &recompressed);
+}

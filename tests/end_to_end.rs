@@ -80,12 +80,14 @@ fn test_container(filename: &str) {
 
     let mut c = Vec::new();
     let mut ctx = PreflateContainerProcessor::new(&PreflateContainerConfig::default(), 4, false);
-    ctx.copy_to_end(&mut std::io::Cursor::new(&v), &mut c).unwrap();
+    ctx.copy_to_end(&mut std::io::Cursor::new(&v), &mut c)
+        .unwrap();
     let stats = ctx.stats();
 
     let mut r = Vec::new();
     let mut ctx = RecreateContainerProcessor::new(128 * 1024 * 1024);
-    ctx.copy_to_end(&mut std::io::Cursor::new(&c), &mut r).unwrap();
+    ctx.copy_to_end(&mut std::io::Cursor::new(&c), &mut r)
+        .unwrap();
     assert!(v == r);
 
     println!(
