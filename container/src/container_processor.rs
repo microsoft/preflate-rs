@@ -581,9 +581,10 @@ impl ProcessBuffer for PreflateContainerProcessor {
                 ChunkParseState::DeflateContinue(state) => {
                     // here we have a deflate stream that we need to continue
                     match state.decompress(&self.content) {
-                        Err(ref e) if e.exit_code() == ExitCode::ShortRead
-                            && !input_complete
-                            && self.content.len() <= self.config.max_chunk_size =>
+                        Err(ref e)
+                            if e.exit_code() == ExitCode::ShortRead
+                                && !input_complete
+                                && self.content.len() <= self.config.max_chunk_size =>
                         {
                             // Not enough data to complete the next block yet; wait for more.
                             break;
@@ -1620,9 +1621,7 @@ pub(crate) mod test {
             "PDF with embedded JPEGs should produce at least one JPEG_LEPTON block"
         );
 
-        let has_deflate = blocks
-            .iter()
-            .any(|&(_, t)| t == BLOCK_TYPE_DEFLATE);
+        let has_deflate = blocks.iter().any(|&(_, t)| t == BLOCK_TYPE_DEFLATE);
         assert!(
             has_deflate,
             "PDF with embedded JPEGs should also produce DEFLATE blocks for compressed objects"
