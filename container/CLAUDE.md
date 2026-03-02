@@ -1,6 +1,6 @@
 # container (preflate-container)
 
-Scans binary files (ZIP, PNG, PDF, JPEG) for DEFLATE streams, orchestrates the
+Scans binary files (ZIP, PNG, JPEG) for DEFLATE streams, orchestrates the
 preflate + Zstd pipeline, and reassembles the output. Only format version 2 exists
 (v1 was removed).
 
@@ -8,25 +8,33 @@ preflate + Zstd pipeline, and reassembles the output. Only format version 2 exis
 
 ```rust
 // Compress a file/buffer containing embedded DEFLATE streams
-PreflateContainerProcessor::new(config, level, test_baseline) -> Self
-impl ProcessBuffer for PreflateContainerProcessor {
-    fn process_buffer(&mut self, input: &[u8], input_complete: bool) -> Result<Vec<u8>>;
-}
+PreflateContainerProcessor::new(config: &PreflateContainerConfig, level: i32, test_baseline: bool) -> Self
+impl ProcessBuffer for PreflateContainerProcessor { ... }
 
 // Decompress a preflate container back to the original file
-RecreateContainerProcessor::new(capacity) -> Self
-impl ProcessBuffer for RecreateContainerProcessor {
-    fn process_buffer(&mut self, input: &[u8], input_complete: bool) -> Result<Vec<u8>>;
+RecreateContainerProcessor::new(capacity: usize) -> Self
+impl ProcessBuffer for RecreateContainerProcessor { ... }
+
+// Core trait — both processors implement this
+pub trait ProcessBuffer {
+    fn process_buffer(&mut self, input: &[u8], input_complete: bool, writer: &mut impl Write) -> Result<()>;
+    fn stats(&self) -> PreflateStats { PreflateStats::default() }  // default no-op; overridden by Compress
+    fn copy_to_end(&mut self, input: &mut impl BufRead, output: &mut impl Write) -> Result<()>;
+    fn copy_to_end_size(&mut self, input: &mut impl BufRead, output: &mut impl Write, chunk: usize) -> Result<()>;
 }
 
-// DLL helper: wraps process_buffer to respect a max output size per call
-fn process_limited_buffer(processor, input, input_complete, max_output) -> Result<(Vec<u8>, bool)>;
-
-// Stats after compression
-PreflateContainerProcessor::get_stats() -> &PreflateStats
+// DLL helper: writes to a fixed output buffer, spills overflow into a VecDeque
+fn process_limited_buffer(
+    process: &mut impl ProcessBuffer,
+    input: &[u8],
+    input_complete: bool,
+    output_buffer: &mut [u8],
+    output_extra: &mut VecDeque<u8>,
+) -> Result<(bool, usize)>;  // (all_output_drained, bytes_written_to_output_buffer)
 ```
 
-`PreflateContainerConfig` holds knobs like `max_chain_length`, `verify_compression`, etc.
+`PreflateContainerConfig` holds knobs: `min_chunk_size`, `max_chunk_size`,
+`total_plain_text_limit`, `chunk_plain_text_limit`, `validate_compression`, `max_chain_length`.
 
 ## Wire Format (v2 only)
 
@@ -161,23 +169,23 @@ if input_complete && !self.input_complete {   // NOT just `if input_complete`
 src/
   lib.rs                  ← public types and re-exports
   container_processor.rs  ← PreflateContainerProcessor, RecreateContainerProcessor,
-                            V2BlockInfo enum, process_v2_compressed_block()
+                            ProcessBuffer trait, MeasureWriteSink,
+                            block-type constants, emit_compressed_block(),
+                            write_chunk_block_v2(), write_varint(), read_varint()
   scan_deflate.rs         ← locates DEFLATE stream boundaries in raw bytes
-                            identifies: raw deflate, zlib-wrapped, PNG IDAT, ZIP, JPEG, PDF
+                            identifies: raw deflate, zlib-wrapped, PNG IDAT, ZIP, JPEG
   idat_parse.rs           ← extracts / reassembles PNG IDAT chunks; parses IHDR
-  pdf_parse.rs            ← detects PDF FlateDecode compressed object streams
-  zstd_compression.rs     ← ZstdCompressContext / ZstdDecompressContext (internal)
   scoped_read.rs          ← bounded reader adapter
-  utils.rs                ← process_limited_buffer() and other helpers
+  utils.rs                ← process_limited_buffer(), TakeReader, test helpers
 ```
 
 ## Key Internal Types
 
 | Type | Purpose |
 |---|---|
-| `V2BlockInfo` | `Compressed(u8)` or `Jpeg(Vec<u8>)` — one entry per scanned block |
-| `MeasureWriteSink` | `pub(crate)` sink that counts bytes; used for baseline measurement |
-| `PreflateStats` | `deflate_compressed_size`, `zstd_compressed_size`, `zstd_baseline_size`, … |
+| `MeasureWriteSink` | `pub(crate)` sink that counts bytes; used for baseline Zstd measurement |
+| `PreflateStats` | pub struct: `deflate_compressed_size`, `zstd_compressed_size`, `uncompressed_size`, `overhead_bytes`, `hash_algorithm`, `zstd_baseline_size` |
+| `TakeReader<T>` | `pub` BufRead wrapper that reads at most N bytes (used in utils.rs) |
 
 ## Features
 
@@ -186,9 +194,10 @@ src/
 
 ## Dependencies of Note
 
-- `lepton_jpeg` (0.5.1) — JPEG blocks are recompressed with Lepton, not Zstd.
-- `zstd` (0.13) — single persistent encoder across all non-JPEG blocks.
+- `lepton_jpeg` (0.5.1) — JPEG blocks are recompressed with Lepton, bypassing Zstd entirely.
+- `zstd` (0.13) — single persistent encoder across all non-JPEG/WebP blocks.
 - `preflate-rs` — core analysis/reconstruction (path dependency).
+- `webp` (0.3, optional, default-enabled) — PNG images can be stored as WebP lossless.
 
 ## Constraints
 

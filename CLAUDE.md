@@ -38,7 +38,7 @@ The release build uses Spectre mitigations (`/Qspectre /sdl`) and produces `pref
 | Crate | Output | Role |
 |---|---|---|
 | `preflate/` | library | Core DEFLATE analysis and reconstruction |
-| `container/` | library | Scans binary files (ZIP, PNG, PDF) for DEFLATE streams |
+| `container/` | library | Scans binary files (ZIP, PNG, JPEG) for DEFLATE streams |
 | `util/` | `preflate_util.exe` | CLI for testing on files/directories |
 | `dll/` | `preflate_rs_0_7.dll` | C FFI wrapper for .NET interop |
 | `fuzz/` | fuzz harnesses | libfuzzer targets |
@@ -58,13 +58,13 @@ Parameters are serialized via `bitcode`; corrections via CABAC. The format is ch
 
 ### container crate
 
-- **`scan_deflate.rs`** — Scans raw bytes to locate DEFLATE stream boundaries, identifying stream type (raw deflate, zlib-wrapped, PNG IDAT, etc.).
+- **`scan_deflate.rs`** — Scans raw bytes to locate DEFLATE stream boundaries, identifying stream type (raw deflate, zlib-wrapped, PNG IDAT, ZIP, JPEG, etc.).
 - **`idat_parse.rs`** — Extracts and reassembles PNG IDAT chunks.
-- **`pdf_parse.rs`** — Detects PDF compressed object streams.
-- **`zstd_compression.rs`** — Pipelines preflate output through Zstd for final storage.
-- **`container_processor.rs`** — Orchestrates scanning → preflate → Zstd (compress) and Zstd → recreate → reassembly (decompress).
+- **`container_processor.rs`** — Orchestrates scanning → preflate → Zstd (compress) and Zstd → recreate → reassembly (decompress). Zstd encode/decode is handled inline using a single persistent encoder.
+- **`utils.rs`** — `process_limited_buffer()` and test helpers.
+- **`scoped_read.rs`** — Bounded reader adapter.
 
-The optional `webp` feature (enabled by default) allows PNG images to be stored as WEBP instead of losslessly.
+The optional `webp` feature (enabled by default) allows PNG images to be stored as WebP instead of losslessly. PDF streams are not scanned (pdf_parse was removed).
 
 ### Code constraints
 
