@@ -12,7 +12,7 @@ PreflateStreamProcessor::new(config) -> Self
 PreflateStreamProcessor::decompress(input: &[u8]) -> Result<PreflateStreamChunkResult>
 
 // Recreate: given plaintext + correction data, reproduce the original DEFLATE stream
-RecreateStreamProcessor::new(capacity) -> Self
+RecreateStreamProcessor::new() -> Self
 RecreateStreamProcessor::recreate(chunk: PreflateStreamChunkResult) -> Result<Vec<u8>>
 
 // One-shot helpers
