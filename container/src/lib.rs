@@ -20,23 +20,17 @@
 #![forbid(macro_use_extern_crate)]
 #![forbid(missing_unsafe_on_extern)]
 
-mod container_processor;
+mod container_common;
+mod container_read;
+mod container_write;
 mod idat_parse;
 mod scan_deflate;
 mod scoped_read;
 mod utils;
-mod zstd_compression;
-pub use zstd_compression::{
-    zstd_preflate_whole_deflate_stream, zstd_recreate_whole_deflate_stream,
-};
 
-pub use container_processor::{PreflateContainerConfig, PreflateStats};
-pub use container_processor::{
-    PreflateContainerProcessor, ProcessBuffer, RecreateContainerProcessor,
-    preflate_whole_into_container, recreate_whole_from_container,
-};
-
-pub use zstd_compression::{ZstdCompressContext, ZstdDecompressContext};
+pub use container_common::{PreflateContainerConfig, PreflateStats, ProcessBuffer};
+pub use container_read::RecreateContainerProcessor;
+pub use container_write::PreflateContainerProcessor;
 
 pub use utils::process_limited_buffer;
 

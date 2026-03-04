@@ -1,47 +1,11 @@
 use std::{
     collections::VecDeque,
-    io::{BufRead, Read, Write},
+    io::{Read, Write},
 };
 
 use preflate_rs::Result;
 
 use crate::ProcessBuffer;
-
-/// A BufRead implementation that reads at most `limit` bytes from the underlying reader.
-pub struct TakeReader<T> {
-    inner: T,
-    amount_left: usize,
-}
-
-impl<T> TakeReader<T> {
-    pub fn new(inner: T, limit: usize) -> Self {
-        TakeReader {
-            inner,
-            amount_left: limit,
-        }
-    }
-}
-
-impl<T: BufRead + Read> BufRead for TakeReader<T> {
-    fn fill_buf(&mut self) -> std::io::Result<&[u8]> {
-        let buf = self.inner.fill_buf()?;
-        Ok(&buf[..buf.len().min(self.amount_left)])
-    }
-
-    fn consume(&mut self, amt: usize) {
-        self.amount_left -= amt;
-        self.inner.consume(amt);
-    }
-}
-
-impl<T: Read> Read for TakeReader<T> {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        let len = buf.len().min(self.amount_left);
-        let read = self.inner.read(&mut buf[..len])?;
-        self.amount_left -= read;
-        Ok(read)
-    }
-}
 
 #[allow(dead_code)]
 #[cfg(test)]
@@ -174,7 +138,7 @@ pub fn process_limited_buffer(
 
 #[test]
 fn test_process_limited_buffer() {
-    let mut p = crate::container_processor::NopProcessBuffer {};
+    let mut p = crate::container_common::test::NopProcessBuffer {};
 
     let input = b"Hello, world!";
     let mut output = [0u8; 5];

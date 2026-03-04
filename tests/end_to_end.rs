@@ -10,7 +10,9 @@ use std::path::Path;
 use std::{mem, ptr};
 
 use libdeflate_sys::{libdeflate_alloc_compressor, libdeflate_deflate_compress};
-use preflate_container::{zstd_preflate_whole_deflate_stream, zstd_recreate_whole_deflate_stream};
+use preflate_container::{
+    PreflateContainerConfig, PreflateContainerProcessor, ProcessBuffer, RecreateContainerProcessor,
+};
 use preflate_rs::{PreflateConfig, preflate_whole_deflate_stream, recreate_whole_deflate_stream};
 
 #[cfg(test)]
@@ -77,18 +79,15 @@ fn test_container(filename: &str) {
     let v = read_file(filename);
 
     let mut c = Vec::new();
-
-    let stats = zstd_preflate_whole_deflate_stream(
-        &preflate_container::PreflateContainerConfig::default(),
-        &mut std::io::Cursor::new(&v),
-        &mut c,
-        4, // use lower level to save CPU on testing
-    )
-    .unwrap();
+    let mut ctx = PreflateContainerProcessor::new(&PreflateContainerConfig::default(), 4, false);
+    ctx.copy_to_end(&mut std::io::Cursor::new(&v), &mut c)
+        .unwrap();
+    let stats = ctx.stats();
 
     let mut r = Vec::new();
-
-    zstd_recreate_whole_deflate_stream(&mut std::io::Cursor::new(&c), &mut r).unwrap();
+    let mut ctx = RecreateContainerProcessor::new(128 * 1024 * 1024);
+    ctx.copy_to_end(&mut std::io::Cursor::new(&c), &mut r)
+        .unwrap();
     assert!(v == r);
 
     println!(
