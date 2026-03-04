@@ -80,7 +80,6 @@ Mask constants (defined in `container_processor.rs`):
 | `BLOCK_TYPE_DEFLATE_CONTINUE` | `0x03` | `0x43` | Continuation of a DEFLATE stream that spanned a chunk boundary |
 | `BLOCK_TYPE_JPEG_LEPTON` | `0x04` | `0x04` | JPEG re-compressed with Lepton; bypasses Zstd entirely |
 | `BLOCK_TYPE_WEBP` | `0x05` | `0x05` | PNG image stored as WebP lossless; bypasses Zstd entirely |
-| `BLOCK_TYPE_EOS` | `0x3F` | `0x7F` | The `encoder.finish()` bytes that close the Zstd stream |
 
 ### Zstd encoder/decoder lifecycle
 
@@ -92,8 +91,7 @@ Mask constants (defined in `container_processor.rs`):
 - Each flush segment is decodable in sequence: the decoder is a persistent
   `zstd::stream::raw::Decoder` that maintains cross-block history, so compression
   quality benefits from all previously seen blocks.
-- The `BLOCK_TYPE_EOS` (`0x7F`) end-of-stream block carries the `encoder.finish()` output
-  that closes the Zstd frame cleanly. No decompressed bytes are expected from it.
+- The stream is terminated by EOF — there is no explicit end-of-stream block.
 
 ### Inner payload layout (inside Zstd, after decompression)
 

@@ -1,11 +1,11 @@
 # root project only exists to refer to the packages
-# and run the end-to-end tests in the tests directory 
+# and run the end-to-end tests in the tests directory
 
 [package]
 name = "preflate-rs-root"
-version = "0.0.0"
-edition = "2024"
-rust-version = "1.85"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
 
 [profile.release]
 debug = true
@@ -13,6 +13,14 @@ debug = true
 [workspace]
 members = ["preflate", "container", "dll", "util", "fuzz"]
 resolver = "2"
+
+[workspace.package]
+version = "0.7.6"
+edition = "2024"
+authors = ["Kristof Roomp <kristofr@microsoft.com>"]
+license = "Apache-2.0"
+rust-version = "1.85"
+repository = "https://github.com/microsoft/preflate-rs"
 
 [dev-dependencies]
 preflate-rs = { path = "preflate" }

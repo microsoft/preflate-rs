@@ -20,16 +20,17 @@
 #![forbid(macro_use_extern_crate)]
 #![forbid(missing_unsafe_on_extern)]
 
-mod container_processor;
+mod container_common;
+mod container_read;
+mod container_write;
 mod idat_parse;
 mod scan_deflate;
 mod scoped_read;
 mod utils;
 
-pub use container_processor::{PreflateContainerConfig, PreflateStats};
-pub use container_processor::{
-    PreflateContainerProcessor, ProcessBuffer, RecreateContainerProcessor,
-};
+pub use container_common::{PreflateContainerConfig, PreflateStats, ProcessBuffer};
+pub use container_read::RecreateContainerProcessor;
+pub use container_write::PreflateContainerProcessor;
 
 pub use utils::process_limited_buffer;
 

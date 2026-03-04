@@ -4,7 +4,7 @@ use byteorder::{ReadBytesExt, WriteBytesExt};
 
 use preflate_rs::{ExitCode, Result, err_exit_code};
 
-use crate::container_processor::{read_varint, write_varint};
+use crate::container_common::{read_varint, write_varint};
 
 /// The contents of a PNG IDat stream. These are treated specially since they
 /// contain a Zlib stream that is split into multiple chunks and would be
