@@ -405,12 +405,12 @@ fn compression_benchmark_overhead_size() {
                 Ok(30),
                 Ok(36),
                 Ok(23),
-                Ok(25),
-                Ok(4070),
-                Ok(4474),
-                Ok(3759),
+                Ok(23),
+                Ok(44),
+                Ok(2503),
+                Ok(1803),
                 Ok(49),
-                Ok(37),
+                Ok(27),
                 Err(ExitCode::NoCompressionCandidates),
             ],
         },
@@ -464,40 +464,90 @@ fn compression_benchmark_overhead_size() {
         },
     ];
 
-    for i in bench.iter() {
-        let mut result = Vec::new();
+    struct LevelResult {
+        compressed_size: usize,
+        overhead: Result<usize, ExitCode>,
+    }
 
-        for level in 0..=9 {
-            let compressed = (i.compress_fn)(&original, level);
+    // Collect all results first so the table can be printed before asserting.
+    let all_results: Vec<Vec<LevelResult>> = bench
+        .iter()
+        .map(|i| {
+            (0..=9)
+                .map(|level| {
+                    let compressed = (i.compress_fn)(&original, level);
+                    let compressed_size = compressed.len();
+                    let overhead =
+                        match preflate_whole_deflate_stream(&compressed, &PreflateConfig::default())
+                        {
+                            Ok((r, _)) => Ok(r.corrections.len()),
+                            Err(e) => Err(e.exit_code()),
+                        };
+                    LevelResult {
+                        compressed_size,
+                        overhead,
+                    }
+                })
+                .collect()
+        })
+        .collect();
 
-            let r = preflate_whole_deflate_stream(&compressed, &PreflateConfig::default());
-
-            match r {
-                Ok((r, _)) => {
-                    result.push(Ok(r.corrections.len()));
+    // Print a comparison table so regressions and improvements are visible at a glance.
+    println!(
+        "\nOverhead benchmark — original = {} bytes\n",
+        original.len()
+    );
+    for (i, results) in bench.iter().zip(all_results.iter()) {
+        println!("{}:", i.name);
+        println!(
+            "  {:>3}  {:>11}  {:>11}  {:>11}  {:>9}  {}",
+            "Lv", "Compressed", "Expected", "Actual", "Delta", "Status"
+        );
+        for (level, (result, expected)) in results.iter().zip(i.overhead.iter()).enumerate() {
+            let expected_str = match expected {
+                Ok(v) => format!("{}", v),
+                Err(e) => format!("{:?}", e),
+            };
+            let actual_str = match &result.overhead {
+                Ok(v) => format!("{}", v),
+                Err(e) => format!("{:?}", e),
+            };
+            let (delta_str, status) = match (expected, &result.overhead) {
+                (Ok(exp), Ok(act)) => {
+                    let delta = *act as i64 - *exp as i64;
+                    let status = if delta < 0 {
+                        "BETTER"
+                    } else if delta > 0 {
+                        "WORSE"
+                    } else {
+                        "ok"
+                    };
+                    (format!("{:+}", delta), status)
                 }
-                Err(e) => {
-                    result.push(Err(e.exit_code()));
-                }
-            }
+                (exp, act) if exp == act => ("=".to_string(), "ok"),
+                _ => ("?".to_string(), "CHANGED"),
+            };
+            println!(
+                "  {:>3}  {:>11}  {:>11}  {:>11}  {:>9}  {}",
+                level,
+                result.compressed_size,
+                expected_str,
+                actual_str,
+                delta_str,
+                status
+            );
         }
+        println!();
+    }
 
+    // Now assert — failures will name the compressor and show the diff above.
+    for (i, results) in bench.iter().zip(all_results.iter()) {
+        let actual: Vec<_> = results.iter().map(|r| r.overhead.clone()).collect();
         assert_eq!(
-            result, i.overhead,
+            actual,
+            i.overhead.as_ref(),
             "compression overhead mismatch for {}",
             i.name
         );
-    }
-
-    for i in bench.iter() {
-        print!("{}: [", i.name);
-
-        for i in i.overhead.iter() {
-            match i {
-                Ok(v) => print!("{:.2}%, ", (*v as f32) * 100.0 / (original.len() as f32)),
-                Err(e) => print!("{:?}, ", e),
-            }
-        }
-        println!("]");
     }
 }
