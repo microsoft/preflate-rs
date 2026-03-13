@@ -477,12 +477,13 @@ fn compression_benchmark_overhead_size() {
                 .map(|level| {
                     let compressed = (i.compress_fn)(&original, level);
                     let compressed_size = compressed.len();
-                    let overhead =
-                        match preflate_whole_deflate_stream(&compressed, &PreflateConfig::default())
-                        {
-                            Ok((r, _)) => Ok(r.corrections.len()),
-                            Err(e) => Err(e.exit_code()),
-                        };
+                    let overhead = match preflate_whole_deflate_stream(
+                        &compressed,
+                        &PreflateConfig::default(),
+                    ) {
+                        Ok((r, _)) => Ok(r.corrections.len()),
+                        Err(e) => Err(e.exit_code()),
+                    };
                     LevelResult {
                         compressed_size,
                         overhead,
@@ -529,12 +530,7 @@ fn compression_benchmark_overhead_size() {
             };
             println!(
                 "  {:>3}  {:>11}  {:>11}  {:>11}  {:>9}  {}",
-                level,
-                result.compressed_size,
-                expected_str,
-                actual_str,
-                delta_str,
-                status
+                level, result.compressed_size, expected_str, actual_str, delta_str, status
             );
         }
         println!();
