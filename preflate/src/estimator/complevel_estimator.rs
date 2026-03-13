@@ -44,93 +44,87 @@ pub fn estimate_preflate_comp_level(
     let mem_hash_mask = ((1u32 << hash_bits) - 1) as u16;
     let wsize = 1 << wbits;
 
-    let mut candidates: Vec<Box<dyn HashTableDepthEstimator>> = Vec::new();
-
+    // Build the candidate list in priority order (most common first).
+    // MiniZFast is last because it never self-eliminates during run_depth_candidates
+    // and must be treated as a final fallback rather than an early winner.
+    // Candidates are tried one at a time so we only allocate what we need.
+    let mut algorithms: Vec<HashAlgorithm> = Vec::new();
     if min_len == 3 {
-        candidates.push(new_depth_estimator(HashAlgorithm::MiniZFast));
-
-        for (hash_shift, hash_mask) in [(5, 32767), (4, 2047), (mem_hash_shift, mem_hash_mask)] {
-            candidates.push(new_depth_estimator(HashAlgorithm::Zlib {
-                hash_mask,
-                hash_shift,
-            }));
+        algorithms.push(HashAlgorithm::Zlib {
+            hash_mask: 32767,
+            hash_shift: 5,
+        });
+        algorithms.push(HashAlgorithm::Zlib {
+            hash_mask: 2047,
+            hash_shift: 4,
+        });
+        // mem-level-derived variant; skip if identical to an already-queued algorithm
+        let mem_algo = HashAlgorithm::Zlib {
+            hash_mask: mem_hash_mask,
+            hash_shift: mem_hash_shift,
+        };
+        if !algorithms.contains(&mem_algo) {
+            algorithms.push(mem_algo);
         }
-
-        // LibFlate4 candidate
-        candidates.push(new_depth_estimator(HashAlgorithm::Libdeflate4));
-
-        // RandomVector candidate
-        candidates.push(new_depth_estimator(HashAlgorithm::RandomVector));
+        algorithms.push(HashAlgorithm::Libdeflate4);
+        algorithms.push(HashAlgorithm::RandomVector);
+        algorithms.push(HashAlgorithm::MiniZFast);
     } else {
-        // Libflate4 fast (only 4 bytes or more)
-        candidates.push(new_depth_estimator(HashAlgorithm::Libdeflate4Fast));
-
-        // ZlibNG candidate
-        candidates.push(new_depth_estimator(HashAlgorithm::ZlibNG));
-
-        // Crc32c candidate
-        candidates.push(new_depth_estimator(HashAlgorithm::Crc32cHash));
+        algorithms.push(HashAlgorithm::Libdeflate4Fast);
+        algorithms.push(HashAlgorithm::ZlibNG);
+        algorithms.push(HashAlgorithm::Crc32cHash);
     }
 
-    run_depth_candidates(add_policy, deflate_contents, plain_text, &mut candidates);
+    // Try each algorithm in turn, allocating only one estimator at a time.
+    // On success the estimator is consumed immediately; on failure it is dropped
+    // before the next one is allocated, keeping peak memory to one candidate.
+    for algo in algorithms {
+        let mut candidates: Vec<Box<dyn HashTableDepthEstimator>> =
+            vec![new_depth_estimator(algo)];
 
-    if candidates.is_empty() {
-        return err_exit_code(ExitCode::NoCompressionCandidates, "no candidates found");
-    }
+        run_depth_candidates(add_policy, deflate_contents, plain_text, &mut candidates);
 
-    let candidate = candidates
-        .iter()
-        .min_by(|&a, &b| a.max_chain_found().cmp(&b.max_chain_found()))
-        .unwrap();
+        let candidate = match candidates.into_iter().next() {
+            Some(c) if c.max_chain_found() <= 4096 => c,
+            _ => continue,
+        };
 
-    if candidate.max_chain_found() > 4096 {
-        return err_exit_code(
-            ExitCode::NoCompressionCandidates,
-            "no candidate found with reasonable chain length",
-        );
-    }
+        let mut match_type = MatchingType::Greedy;
+        let mut nice_length = 258;
+        let max_chain = candidate.max_chain_found() + 1;
 
-    let mut match_type = MatchingType::Greedy;
-    let mut nice_length = 258;
-
-    let max_chain = candidate.max_chain_found() + 1;
-
-    match add_policy {
-        DictionaryAddPolicy::AddFirst(_)
-        | DictionaryAddPolicy::AddFirstAndLast(_)
-        | DictionaryAddPolicy::AddFirstWith32KBoundary
-        | DictionaryAddPolicy::AddFirstExcept4kBoundary => {
-            for config in &ZLIB_PREFLATE_PARSER_SETTINGS {
-                if candidate.max_chain_found() < config.max_chain {
-                    match_type = config.match_type;
-                    nice_length = config.nice_length;
-                    break;
+        match add_policy {
+            DictionaryAddPolicy::AddFirst(_)
+            | DictionaryAddPolicy::AddFirstAndLast(_)
+            | DictionaryAddPolicy::AddFirstWith32KBoundary
+            | DictionaryAddPolicy::AddFirstExcept4kBoundary => {
+                for config in &ZLIB_PREFLATE_PARSER_SETTINGS {
+                    if candidate.max_chain_found() < config.max_chain {
+                        match_type = config.match_type;
+                        nice_length = config.nice_length;
+                        break;
+                    }
+                }
+            }
+            DictionaryAddPolicy::AddAll => {
+                for config in &SLOW_PREFLATE_PARSER_SETTINGS {
+                    if candidate.max_chain_found() < config.max_chain {
+                        match_type = config.match_type;
+                        nice_length = config.nice_length;
+                        break;
+                    }
                 }
             }
         }
-        DictionaryAddPolicy::AddAll => {
-            for config in &SLOW_PREFLATE_PARSER_SETTINGS {
-                if candidate.max_chain_found() < config.max_chain {
-                    match_type = config.match_type;
-                    nice_length = config.nice_length;
-                    break;
-                }
-            }
-        }
+
+        return Ok(CompLevelInfo {
+            very_far_matches_detected: candidate.very_far_matches_detected(wsize),
+            match_type,
+            nice_length,
+            max_chain,
+            hash_algorithm: candidate.hash_algorithm(),
+        });
     }
 
-    if candidate.max_chain_found() >= 4096 {
-        return err_exit_code(
-            ExitCode::NoCompressionCandidates,
-            format!("max_chain_found too large: {}", candidate.max_chain_found()),
-        );
-    }
-
-    Ok(CompLevelInfo {
-        very_far_matches_detected: candidate.very_far_matches_detected(wsize),
-        match_type,
-        nice_length,
-        max_chain,
-        hash_algorithm: candidate.hash_algorithm(),
-    })
+    err_exit_code(ExitCode::NoCompressionCandidates, "no candidates found")
 }

@@ -66,7 +66,12 @@ impl HashTableDepthEstimator for MinizDepthEstimator {
             self.nonzero_chain_found += 1;
         }
 
-        true
+        // MiniZFast has no chaining: every match must be at the hash table head
+        // (distance3 == token.dist()). nonzero_chain_found is monotonically
+        // increasing, so once the running ratio already fails the final threshold
+        // it can only get worse — self-eliminate immediately rather than waiting
+        // until all tokens have been processed.
+        self.nonzero_chain_found <= self.zero_chain_found / 256 + 1
     }
 
     /// The maximum chain length found, in this case if non-zero chains
@@ -107,7 +112,8 @@ struct HashTableDepthEstimatorImpl<H: HashImplementation> {
 
     /// the hash at this particular position. This is verified to make sure that it
     /// is part of the same hash chain, if not, we know that this was not the correct
-    /// hash function to use.
+    /// hash function to use. Only kept in debug builds; the field is dead in release.
+    #[cfg(debug_assertions)]
     chain_depth_hash_verify: [u16; 65536],
 
     /// hash function used to calculate the hash
@@ -128,10 +134,11 @@ impl<H: HashImplementation> HashTableDepthEstimatorImpl<H> {
     /// depth is the number of matches we need to walk to reach the match_pos. This
     /// is only valid if this was part of the same hash chain
     #[inline]
-    fn get_node_depth(&self, node: u16, expected_hash: u16) -> i32 {
-        debug_assert_eq!(
+    fn get_node_depth(&self, node: u16, _expected_hash: u16) -> i32 {
+        #[cfg(debug_assertions)]
+        assert_eq!(
             self.chain_depth_hash_verify[node as usize],
-            expected_hash,
+            _expected_hash,
             "hash chain imcomplete {:?} {:?}",
             self.hash.algorithm(),
             self.add_policy
@@ -159,7 +166,10 @@ impl<H: HashImplementation> HashTableDepthEstimatorImpl<H> {
 
             self.chain_depth[usize::from(pos)] =
                 self.chain_depth[self.head[h as usize] as usize] + 1;
-            self.chain_depth_hash_verify[usize::from(pos)] = h;
+            #[cfg(debug_assertions)]
+            {
+                self.chain_depth_hash_verify[usize::from(pos)] = h;
+            }
 
             self.head[h as usize] = pos;
 
