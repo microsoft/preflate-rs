@@ -19,7 +19,7 @@ version = "0.7.6"
 edition = "2024"
 authors = ["Kristof Roomp <kristofr@microsoft.com>"]
 license = "Apache-2.0"
-rust-version = "1.85"
+rust-version = "1.89"
 repository = "https://github.com/microsoft/preflate-rs"
 
 [dev-dependencies]
