@@ -11,7 +11,7 @@ rust-version.workspace = true
 debug = true
 
 [workspace]
-members = ["preflate", "container", "dll", "util", "fuzz"]
+members = ["preflate", "container", "dll", "util"]
 resolver = "2"
 
 [workspace.package]

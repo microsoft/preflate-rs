@@ -74,12 +74,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "arbitrary"
-version = "1.4.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c3d036a3c4ab069c7b410a2ce876bd74808d2d0888a82667669f8e783a898bf1"
-
-[[package]]
 name = "arrayvec"
 version = "0.7.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -441,16 +435,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "libfuzzer-sys"
-version = "0.4.12"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f12a681b7dd8ce12bff52488013ba614b869148d54dd79836ab85aafdd53f08d"
-dependencies = [
- "arbitrary",
- "cc",
-]
-
-[[package]]
 name = "libwebp-sys"
 version = "0.9.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -586,15 +570,6 @@ dependencies = [
  "default-boxed",
  "deranged",
  "env_logger",
-]
-
-[[package]]
-name = "preflate-rs-fuzz"
-version = "0.0.0"
-dependencies = [
- "libfuzzer-sys",
- "preflate-container",
- "preflate-rs",
 ]
 
 [[package]]
