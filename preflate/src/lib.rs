@@ -9,16 +9,15 @@
 #![forbid(trivial_casts)]
 #![forbid(trivial_numeric_casts)]
 #![forbid(non_ascii_idents)]
-#![forbid(unused_extern_crates)]
-#![forbid(unused_import_braces)]
 #![forbid(redundant_lifetimes)]
 #![forbid(single_use_lifetimes)]
-#![forbid(unused_crate_dependencies)]
-#![forbid(unused_extern_crates)]
-#![forbid(unused_lifetimes)]
-#![forbid(unused_macro_rules)]
 #![forbid(macro_use_extern_crate)]
 #![forbid(missing_unsafe_on_extern)]
+#![forbid(unused_import_braces)]
+#![warn(unused_crate_dependencies)]
+#![warn(unused_extern_crates)]
+#![warn(unused_lifetimes)]
+#![warn(unused_macro_rules)]
 
 mod bit_helper;
 mod cabac_codec;
@@ -43,6 +42,7 @@ pub use preflate_error::ExitCode;
 pub use preflate_error::{AddContext, PreflateError, Result, err_exit_code};
 pub use preflate_input::{PlainText, PreflateInput};
 
+pub use statistical_codec::{CodecCorrection, CountNonDefaultActions};
 pub use stream_processor::{
     PreflateStreamChunkResult, PreflateStreamProcessor, RecreateStreamProcessor,
     preflate_whole_deflate_stream, recreate_whole_deflate_stream,

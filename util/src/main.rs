@@ -1,4 +1,4 @@
-use clap::{Parser, command};
+use clap::Parser;
 use cpu_time::ProcessTime;
 use env_logger::Builder;
 use log::LevelFilter;

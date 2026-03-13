@@ -26,7 +26,7 @@ lepton_jpeg = "0.5.1"
 
 [dev-dependencies]
 env_logger = "0.11"
-miniz_oxide = "0.8"
+miniz_oxide = "0.9"
 adler32 = "1.2.0"
 
 [lib]
