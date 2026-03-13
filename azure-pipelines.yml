@@ -1,5 +1,10 @@
 trigger:
-- main
+  branches:
+    include:
+    - main
+  tags:
+    include:
+    - v*.*.*
 
 resources:
   repositories:
@@ -147,7 +152,7 @@ extends:
 
                 - task: 1ES.PublishNuGet@1
                   displayName: 'NuGet push'
-                  condition: and(succeeded(), in(variables['Build.Reason'], 'Manual'), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+                  condition: and(succeeded(), startsWith(variables['Build.SourceBranch'], 'refs/tags/v'))
                   inputs:
                     packageParentPath: '$(Pipeline.Workspace)'
                     packagesToPush: '$(Build.ArtifactStagingDirectory)\*.nupkg'

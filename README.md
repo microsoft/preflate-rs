@@ -1,93 +1,140 @@
 # preflate-rs
-Preflate-rs is a library initally based on a port of the C++ [preflate library](https://github.com/deus-libri/preflate/) with the purpose of splitting deflate streams into uncompressed data and reconstruction information, or reconstruct the original deflate stream from those two.
 
-Other similar libraries include precomp, reflate, grittibanzli, although this libary is probably the most feature rich and supports a lower overhead from more libraries.
+**preflate-rs** is a Rust library for lossless re-compression of DEFLATE-compressed data. It analyzes an existing DEFLATE bitstream, extracts the uncompressed plaintext along with a compact set of reconstruction parameters, and later recreates the **bit-exact** original DEFLATE stream from those two pieces. This makes it possible to re-compress the plaintext with a more modern algorithm (Zstd, Brotli, LZMA) while preserving perfect binary round-trip fidelity.
 
-IMPORTANT: This library is still in initial development, so there are probably breaking changes being done fairly frequently.
-
-The resulting uncompressed content can then be recompressed by a more modern compression technique such as Zstd, lzma, etc. This library is designed to be used as part of a cloud
-storage system that requires exact binary storage of content, so the libary needs to make
-sure that the DEFLATE content is recreated exactly as it was written. This is not trivial, since
-DEFLATE has a large degree of freedom in choosing both how the distance/length pairs are chose
-and how the Huffman trees are created.
-
-The library tries to detect the following compressors to try to do a reasonable job:
-- [Zlib](https://github.com/madler/zlib): Zlib is more or less perfectly compressed.
-- [MiniZ](https://github.com/richgel999/miniz): The fastest mode uses a different hash function.
-- [Libdeflate](https://github.com/ebiggers/libdeflate): This library uses 4 byte hash-tables, which we try to detect.
-- [Libzng](https://github.com/zlib-ng/zlib-ng): Works well except level 9
-- Windows zlib implementation (used by the built-in PNG codec and shell ZIP compression) 
-
-The general approach is as follows:
-1. Decompress stream into plaintext and a list of blocks containing tokens that are either literals (bytes) or distance, length pairs.
-2. Estimate the dictionary update strategy by looking at which strings are referenced by the compressed data. For example, zlib will only add the beginning of each compressed token for low compression levels.
-3. Estimate the maximum number times we execute the loop to look for matches (also called chains, as in walking the chain of the hash table). We also test with different hash functions to figure out which hash funciton was likely used. Given the chain length, we estimate the other parameters that were likely used.
-4. Rerun compression using the zlib algorithm using the parameters gathered above. A difference encoder is used to record each instance where the token predicted by our implementation of DEFLATE differs from what we found in the file. 
-
-The following differences are corrected:
-- Type of block (uncompressed, static huffman, dynamic huffman)
-- Number of tokens in block (normally 16385)
-- Dynamic huffman encoding (estimated using the zlib algorithm, but there are multiple ways to construct more or less optimal length limited Huffman codes)
-- Literal vs (distance, length) pair (corrected by a single bit)
-- Length or distance is incorrect (corrected by encoding the number of hops backwards until the correct one)
-
-Note that the data formats of the recompression information are different and incompatible to the original preflate implementation, as this library uses a different arithmetic encoder (shared from the Lepton JPEG compression library).
+The library is used in production cloud storage systems where content must be stored with bit-exact fidelity while still benefiting from better compression ratios.
 
 [![unsafe forbidden](https://img.shields.io/badge/unsafe-forbidden-success.svg)](https://github.com/rust-secure-code/safety-dance/)
 
-### Overhead
+---
 
-In order to faithfully recreate the exact deflate stream, the library stores
-a stream of corrections to its predictive model. Depending on how good the
-predictive model is, the corrections can take up more or less space. If you
-want to improve the library, it's probably worth targetting the lower compression
-levels that currently have significant overhead.
+## Why preflate-rs?
 
-The amount of overhead vs uncompressed data is approximately the following,
-depending on the compression level. If you want to benefit from using this
-library, whatever better compression algorithm you use needs to be at least
-that much better to make it worthwhile to recompress. 
+DEFLATE streams are not uniquely determined by their plaintext. The same input can compress to many different valid bitstreams depending on the compressor, its version, and the parameters used. Simply decompressing and recompressing will produce a *different* bitstream — which is a problem for systems that need to verify or reproduce file hashes exactly.
 
-| Library            | 0      | 1      | 2      | 3      | 4      | 5      | 6      | 7      | 8      | 9     |
-|--------------------|--------|--------|--------|--------|--------|--------|--------|--------|--------|--------|
+preflate-rs solves this by treating the original DEFLATE stream as the ground truth and recording only the *differences* from what a reference model would predict. Since well-tuned compressors are highly predictable, these corrections are very small — typically well under 1% of the uncompressed data size.
+
+---
+
+## How It Works
+
+### Analysis (compress direction)
+
+1. **Parse** — The DEFLATE bitstream is decoded into a sequence of tokens: literals (raw bytes) and length/distance back-references.
+2. **Estimate** — The token sequence is analyzed to fingerprint the original compressor: hash algorithm, chain depth, nice-length cutoff, window size, and block-splitting strategy.
+3. **Predict** — Compression is re-run using the estimated parameters. For each token, the model predicts what the original compressor would have chosen.
+4. **Encode differences** — Wherever the prediction differs from the actual token, a correction is recorded using CABAC (Context Adaptive Binary Arithmetic Coding, the same codec used in Lepton JPEG compression).
+
+The result is the uncompressed plaintext plus a small corrections blob. Both can be stored or re-compressed with any modern algorithm.
+
+### Reconstruction (decompress direction)
+
+The plaintext and corrections are fed back into the predictor, which replays the original compression decisions step by step to recreate the exact original DEFLATE bitstream.
+
+---
+
+## Supported Compressors
+
+The library detects and models the following DEFLATE implementations:
+
+| Compressor | Notes |
+|---|---|
+| [zlib](https://github.com/madler/zlib) | All levels; near-zero overhead |
+| [zlib-ng](https://github.com/zlib-ng/zlib-ng) | All levels except level 9 |
+| [libdeflate](https://github.com/ebiggers/libdeflate) | 4-byte hash table variant detected |
+| [miniz / miniz_oxide](https://github.com/richgel999/miniz) | Fastest mode uses distinct hash function |
+| Windows zlib | Built-in PNG codec and shell ZIP compression |
+
+Unrecognized compressors still round-trip correctly — the corrections overhead is simply higher.
+
+---
+
+## Reconstruction Overhead
+
+The table below shows overhead (corrections size as a percentage of uncompressed data) for each supported compressor at each compression level. To benefit from re-compression, your target algorithm needs to beat the original by at least this margin.
+
+| Compressor         | 0      | 1      | 2      | 3      | 4      | 5      | 6      | 7      | 8      | 9     |
+|--------------------|--------|--------|--------|--------|--------|--------|--------|--------|--------|-------|
 | **zlib**           | 0.01%  | 0.01%  | 0.01%  | 0.01%  | 0.01%  | 0.01%  | 0.01%  | 0.08%  | 0.03%  | 0.01%  |
-| **libngz**      | 0.01%  | 0.01%  | 0.01%  | 0.01%  | 0.97%  | 1.07%  | 0.90%  | 0.01%  | 0.01%  | NoCompressionCandidates |
+| **zlib-ng**        | 0.01%  | 0.01%  | 0.01%  | 0.01%  | 0.97%  | 1.07%  | 0.90%  | 0.01%  | 0.01%  | N/A    |
 | **libdeflate**     | 0.01%  | 0.25%  | 1.04%  | 0.91%  | 1.51%  | 1.04%  | 0.96%  | 0.87%  | 1.04%  | 1.03%  |
 | **miniz_oxide**    | 0.01%  | 0.06%  | 2.70%  | 1.78%  | 0.53%  | 0.30%  | 0.09%  | 0.06%  | 0.08%  | 0.07%  |
 
-## How to Use This Library
+---
 
-#### Building From Source
+## Workspace Layout
 
-- [Rust 1.70 or Above](https://www.rust-lang.org/tools/install)
+| Crate | Output | Description |
+|---|---|---|
+| [`preflate/`](preflate/) | library | Core DEFLATE analysis and reconstruction engine |
+| [`container/`](container/) | library | Scans binary files (ZIP, PNG, JPEG) for DEFLATE streams and orchestrates the Zstd pipeline |
+| [`util/`](util/) | `preflate_util.exe` | CLI tool for testing and benchmarking |
+| [`dll/`](dll/) | `preflate_rs_0_7.dll` | C FFI wrapper for .NET interop |
+| [`fuzz/`](fuzz/) | fuzz harnesses | libfuzzer targets for the core and container APIs |
 
-```Shell
+---
+
+## Getting Started
+
+### Requirements
+
+- [Rust 1.89 or above](https://www.rust-lang.org/tools/install)
+
+### Build from Source
+
+```shell
 git clone https://github.com/microsoft/preflate-rs
 cd preflate-rs
-cargo build
-cargo test
-cargo build --release
+cargo build --all
+cargo test --all
+cargo build --release --all
 ```
 
-#### Running
+### Using the CLI
 
-There is an `preflate_util.exe` wrapper that is built as part of the project that can be used to
-test out the library against Deflate compressed content. 
+The `preflate_util` binary lets you test the library against any file or directory of files:
+
+```shell
+preflate_util [OPTIONS] <PATH>
+
+Options:
+  --max-chain <N>    Hash chain depth limit (default: 4096)
+  -c, --level <N>    Zstd compression level 0–14 (default: 9)
+  --loglevel <L>     Log verbosity (default: Error)
+  --verify <bool>    Round-trip verify after compression (default: true)
+  --baseline <bool>  Also measure raw Zstd-only size for comparison (default: false)
+```
+
+### Library Usage
+
+For direct use of the core DEFLATE analysis API, see the [`preflate` crate](preflate/). For processing full binary files containing embedded DEFLATE streams (ZIP, PNG, JPEG), see the [`container` crate](container/).
+
+---
+
+## Design Notes
+
+- **No unsafe code** — `#![forbid(unsafe_code)]` is enforced in every crate.
+- **Chunked processing** — memory use is bounded regardless of input size.
+- **Format versioning** — the DLL name encodes the format version (`preflate_rs_0_7.dll`) so old decoders can coexist with new ones during upgrades.
+- **CABAC coding** — the corrections codec is shared with the [Lepton](https://github.com/microsoft/lepton_jpeg_rust) JPEG re-compression library.
+- Parameters are serialized via [`bitcode`](https://crates.io/crates/bitcode); corrections via CABAC.
+
+---
 
 ## Contributing
 
-There are many ways in which you can participate in this project, for example:
+* [Submit bugs and feature requests](https://github.com/microsoft/preflate-rs/issues)
+* [Review or submit pull requests](https://github.com/microsoft/preflate-rs/pulls)
+* The library uses only **stable Rust features**.
 
-* [Submit bugs and feature requests](https://github.com/microsoft/preflate-rs/issues), and help us verify as they are checked in
-* Review [source code changes](https://github.com/microsoft/preflate-rs/pulls) or submit your own features as pull requests.
-* The library uses only **stable features**. 
+---
 
 ## Code of Conduct
 
-This project has adopted the [Microsoft Open Source Code of Conduct](https://opensource.microsoft.com/codeofconduct/). For more information see the [Code of Conduct FAQ](https://opensource.microsoft.com/codeofconduct/faq/) or contact [opencode@microsoft.com](mailto:opencode@microsoft.com) with any additional questions or comments.
+This project has adopted the [Microsoft Open Source Code of Conduct](https://opensource.microsoft.com/codeofconduct/). See the [FAQ](https://opensource.microsoft.com/codeofconduct/faq/) or contact [opencode@microsoft.com](mailto:opencode@microsoft.com) with questions.
 
 ## License
 
 Copyright (c) Microsoft Corporation. All rights reserved.
 
-Licensed under the Apache 2.0 license.
+Licensed under the [Apache 2.0](LICENSE) license.
