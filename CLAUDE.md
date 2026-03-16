@@ -69,5 +69,5 @@ The optional `webp` feature (enabled by default) allows PNG images to be stored 
 ### Code constraints
 
 - **No unsafe code** — enforced via `#![forbid(unsafe_code)]` in each crate.
-- Minimum Rust version: **1.85**, Edition **2024**.
+- Minimum Rust version: **1.89**, Edition **2024**.
 - `.cargo/config.toml` sets Windows MSVC linker flags (`/DYNAMICBASE`, `/CETCOMPAT`, `/guard:cf`).
