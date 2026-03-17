@@ -6,6 +6,11 @@ trigger:
     include:
     - v*.*.*
 
+pr:
+  branches:
+    include:
+    - main
+
 resources:
   repositories:
   - repository: 1ESPipelineTemplates
