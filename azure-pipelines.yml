@@ -12,11 +12,10 @@ pr:
     - main
 
 resources:
-  repositories:
-  - repository: M365GPT
+  - repository: 1ESPipelineTemplates
     type: git
-    name: 1ESPipelineTemplates/M365GPT
-    ref: refs/tags/release
+    name: 1ESPipelineTemplates/1ESPipelineTemplates
+    ref: refs/heads/main
 
 variables:
 - name: toolchainFeed
@@ -25,7 +24,7 @@ variables:
   value: sparse+https://onedrive.pkgs.visualstudio.com/b52099a6-3b13-4b08-9270-a07884a10e3d/_packaging/RustCratesIO/Cargo/index/
 
 extends:
-  template: v1/M365.Official.PipelineTemplate.yml@M365GPT
+  template: v1/1ES.Official.PipelineTemplate.yml@1ESPipelineTemplates
   parameters:
     sdl:
       clippy: 
