@@ -12,10 +12,11 @@ pr:
     - main
 
 resources:
+  repositories:
   - repository: 1ESPipelineTemplates
     type: git
     name: 1ESPipelineTemplates/1ESPipelineTemplates
-    ref: refs/heads/main
+    ref: refs/tags/release
 
 variables:
 - name: toolchainFeed
