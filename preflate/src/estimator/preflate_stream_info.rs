@@ -30,8 +30,8 @@ fn process_tokens(tokens: &[DeflateToken], result: &mut PreflateStreamInfo, posi
     let mut block_max_dist = 0;
     let mut block_min_len = u32::MAX;
 
-    for j in 0..tokens.len() {
-        match &tokens[j] {
+    for token in tokens {
+        match token {
             DeflateToken::Literal(_) => {
                 result.literal_count += 1;
                 *position += 1;
@@ -80,8 +80,8 @@ pub(crate) fn extract_preflate_info(blocks: &[DeflateTokenBlock]) -> PreflateStr
     };
 
     let mut position = 0;
-    for i in 0..blocks.len() {
-        match &blocks[i].block_type {
+    for block in blocks {
+        match &block.block_type {
             DeflateTokenBlockType::Stored { uncompressed, .. } => {
                 result.count_stored_blocks += 1;
                 position += uncompressed.len() as u32;
@@ -91,10 +91,10 @@ pub(crate) fn extract_preflate_info(blocks: &[DeflateTokenBlock]) -> PreflateStr
                 huffman_type,
                 ..
             } => {
-                if let DeflateHuffmanType::Static { .. } = huffman_type {
+                if let DeflateHuffmanType::Static = huffman_type {
                     result.count_static_huff_tree_blocks += 1;
                 }
-                process_tokens(&tokens, &mut result, &mut position);
+                process_tokens(tokens, &mut result, &mut position);
             }
         }
     }

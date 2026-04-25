@@ -86,7 +86,7 @@ impl HashTable {
     ) {
         debug_assert!(length as usize <= chars.len());
 
-        if length as usize + H::NUM_HASH_BYTES - 1 >= chars.len() {
+        if length as usize + H::NUM_HASH_BYTES > chars.len() {
             // if we reached the end of the buffer, hash only while we have characters left
             length = chars.len().saturating_sub(H::NUM_HASH_BYTES - 1) as u32;
         }
@@ -115,7 +115,7 @@ impl HashTable {
             *x = x.reshift(DELTA as u16);
         }
 
-        assert!((DELTA % 16) == 0, "assuming we can do blocks of 16");
+        assert!(DELTA.is_multiple_of(16), "assuming we can do blocks of 16");
 
         for i in DELTA / 16..65536 / 16 {
             let (a, b) = self.prev.split_at_mut(i * 16);
@@ -163,7 +163,7 @@ impl<H: HashImplementation> HashChainDefault<H> {
         HashChainDefault {
             total_shift: -8,
             hash_table: HashTable::default_boxed(),
-            hash: hash,
+            hash,
         }
     }
 
@@ -216,12 +216,11 @@ impl<H: HashImplementation> HashChain for HashChainDefault<H> {
         let mut cur_pos = self.hash_table.get_head(curr_hash);
 
         std::iter::from_fn(move || {
-            if OFFSET != 0 {
-                if let Some(d) = first_match {
+            if OFFSET != 0
+                && let Some(d) = first_match {
                     first_match = None;
                     return Some(d);
                 }
-            }
             if cur_pos.is_valid() {
                 let d = ref_pos.dist(cur_pos);
                 cur_pos = self.hash_table.prev[cur_pos.to_index()];

@@ -40,10 +40,10 @@ mod calc_minzoxide {
         let mut symbols0 = Vec::new();
         let mut max_used = 0;
 
-        for i in 0..sym_count.len() {
-            if sym_count[i] != 0 {
+        for (i, &count) in sym_count.iter().enumerate() {
+            if count != 0 {
                 symbols0.push(SymFreq {
-                    key: sym_count[i],
+                    key: count,
                     sym_index: i as u16,
                 });
                 max_used = i + 1;
@@ -279,7 +279,7 @@ mod calc_zlib {
     /// Restore the heap property by moving down the tree starting at node k.
     /// Exchange a node with the smallest of its two sons if necessary.
     /// Stop when the heap property is re-established (each father smaller than its two sons).
-    fn pqdownheap(heap: &mut Vec<HuffTreeNode>, mut root: usize) {
+    fn pqdownheap(heap: &mut [HuffTreeNode], mut root: usize) {
         /// Compares two subtrees using the tree depth as a tie-breaker when frequencies are equal.
         fn smaller(n: &HuffTreeNode, m: &HuffTreeNode) -> bool {
             n.freq < m.freq || (n.freq == m.freq && n.depth <= m.depth)

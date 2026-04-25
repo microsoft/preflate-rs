@@ -147,7 +147,7 @@ impl<H: HashImplementation> HashTableDepthEstimatorImpl<H> {
 
     fn internal_update_hash(&mut self, chars: &[u8], pos: u32, length: u32) {
         debug_assert!(length as usize <= chars.len());
-        if length as usize + H::NUM_HASH_BYTES - 1 >= chars.len() {
+        if length as usize + H::NUM_HASH_BYTES > chars.len() {
             // reached on of the stream so there will be no more matches
             return;
         }
@@ -247,7 +247,7 @@ const LIB_DEFLATE3_HASH: LibdeflateHash3Secondary = LibdeflateHash3Secondary {};
 impl HashTableDepthEstimatorLibdeflate {
     fn internal_update_hash3(&mut self, chars: &[u8], pos: u32, length: u32) {
         debug_assert!(length as usize <= chars.len());
-        if length as usize + 3 - 1 >= chars.len() {
+        if length as usize + 3 > chars.len() {
             // reached on of the stream so there will be no more matches
             return;
         }
@@ -348,7 +348,7 @@ fn update_candidate_hashes(
     input: &mut PreflateInput,
 ) {
     for i in candidates {
-        i.update_hash(add_policy, &input, length);
+        i.update_hash(add_policy, input, length);
     }
 
     input.advance(length);
@@ -363,9 +363,9 @@ pub fn run_depth_candidates(
     plain_text: &PlainText,
     candidates: &mut Vec<Box<dyn HashTableDepthEstimator>>,
 ) {
-    let mut input = PreflateInput::new(&plain_text);
+    let mut input = PreflateInput::new(plain_text);
 
-    for (_i, b) in deflate.blocks.iter().enumerate() {
+    for b in deflate.blocks.iter() {
         match &b.block_type {
             DeflateTokenBlockType::Stored { uncompressed, .. } => {
                 for _i in 0..uncompressed.len() {
@@ -373,7 +373,7 @@ pub fn run_depth_candidates(
                 }
             }
             DeflateTokenBlockType::Huffman { tokens, .. } => {
-                for (_j, t) in tokens.iter().enumerate() {
+                for t in tokens.iter() {
                     match t {
                         DeflateToken::Literal(_) => {
                             update_candidate_hashes(1, candidates, add_policy, &mut input);

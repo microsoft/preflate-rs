@@ -76,7 +76,7 @@ impl BitReader {
             self.read_ahead -= 1;
         }
 
-        self.bits = self.bits & ((1 << self.bits_left) - 1);
+        self.bits &= (1 << self.bits_left) - 1;
 
         if self.read_ahead > 0 {
             reader.consume(self.read_ahead as usize);

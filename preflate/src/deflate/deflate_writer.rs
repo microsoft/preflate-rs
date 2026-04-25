@@ -65,7 +65,7 @@ impl DeflateWriter {
                 self.output
                     .extend_from_slice(&(!uncompressed.len() as u16).to_le_bytes());
 
-                self.output.extend_from_slice(&uncompressed);
+                self.output.extend_from_slice(uncompressed);
             }
             DeflateTokenBlockType::Huffman {
                 tokens,
@@ -86,7 +86,7 @@ impl DeflateWriter {
 
                         let huffman_writer = HuffmanWriter::start_dynamic_huffman_table(
                             &mut self.bitwriter,
-                            &huffman_encoding,
+                            huffman_encoding,
                             &mut self.output,
                         )?;
 

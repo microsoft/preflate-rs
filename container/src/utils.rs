@@ -119,7 +119,7 @@ pub fn process_limited_buffer(
 ) -> Result<(bool, usize)> {
     // first write any extra data we have pending from last time
     let mut amount_written = 0;
-    while amount_written < output_buffer.len() && output_extra.len() > 0 {
+    while amount_written < output_buffer.len() && !output_extra.is_empty() {
         amount_written += output_extra
             .read(&mut output_buffer[amount_written..])
             .unwrap();
@@ -133,7 +133,7 @@ pub fn process_limited_buffer(
     };
     process.process_buffer(input, input_complete, &mut w)?;
 
-    Ok((input_complete && w.extra_queue.len() == 0, w.amount_written))
+    Ok((input_complete && w.extra_queue.is_empty(), w.amount_written))
 }
 
 #[test]

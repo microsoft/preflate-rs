@@ -139,7 +139,7 @@ impl PreflateError {
 pub fn err_exit_code<T>(error_code: ExitCode, message: impl AsRef<str>) -> Result<T> {
     let mut e = PreflateError::new(error_code, message.as_ref());
     e.add_context();
-    return Err(e);
+    Err(e)
 }
 
 pub trait AddContext<T> {
@@ -200,7 +200,7 @@ impl From<std::io::Error> for PreflateError {
     fn from(e: std::io::Error) -> Self {
         match e.downcast::<PreflateError>() {
             Ok(le) => {
-                return le;
+                le
             }
             Err(e) => {
                 let mut e = PreflateError::new(get_io_error_exit_code(&e), e.to_string().as_str());
@@ -214,7 +214,7 @@ impl From<std::io::Error> for PreflateError {
 /// translates PreflateError into std::io::Error, which involves putting into a Box and using Other
 impl From<PreflateError> for std::io::Error {
     fn from(e: PreflateError) -> Self {
-        return std::io::Error::new(std::io::ErrorKind::Other, e);
+        std::io::Error::other(e)
     }
 }
 

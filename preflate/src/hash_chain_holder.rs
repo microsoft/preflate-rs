@@ -395,6 +395,7 @@ impl<H: HashChain> HashChainHolderImpl<H> {
 
 /// searches for a match that is at least 3 bytes long
 #[inline]
+#[allow(clippy::too_many_arguments)]
 fn match_less3<const OFFSET: u32>(
     input: &PreflateInput<'_>,
     max_len: u32,
@@ -462,6 +463,7 @@ fn match_less3<const OFFSET: u32>(
 
 /// Once we know that we have a least a 3 byte match, we can be faster by comparing 4 bytes at a time
 #[inline]
+#[allow(clippy::too_many_arguments)]
 fn match_4<const OFFSET: u32>(
     input: &PreflateInput<'_>,
     max_len: u32,
@@ -469,7 +471,7 @@ fn match_4<const OFFSET: u32>(
     nice_length: u32,
     mut max_chain: u32,
     mut best_len: u32,
-    mut iter: impl Iterator<Item = u32>,
+    iter: impl Iterator<Item = u32>,
     best: &mut MatchResult,
 ) {
     let input_chars = input.cur_chars(OFFSET as i32);
@@ -477,7 +479,7 @@ fn match_4<const OFFSET: u32>(
     // look at last 3 characters of best length so far + 1 because we want to improve the match
     let mut c0 = read_u32_le(input_chars, (best_len - 3) as usize);
 
-    while let Some(dist) = iter.next() {
+    for dist in iter {
         if dist > max_dist {
             break;
         }
@@ -535,7 +537,7 @@ fn prefix_compare_fast(s1: &[u8], s2: &[u8]) -> u32 {
     if s1[257] != s2[257] {
         return 257;
     }
-    return 258;
+    258
 }
 
 #[inline(never)]
@@ -574,5 +576,5 @@ fn calc_diff(diff: u64) -> u32 {
     if diff != 0 {
         return diff.trailing_zeros() / 8;
     }
-    return 8;
+    8
 }

@@ -139,9 +139,7 @@ pub(super) fn estimate_add_policy(token_blocks: &[DeflateTokenBlock]) -> Diction
 
     let mut min_len = u32::MAX;
 
-    for i in 0..token_blocks.len() {
-        let token_block = &token_blocks[i];
-
+    for token_block in token_blocks {
         match &token_block.block_type {
             DeflateTokenBlockType::Stored { uncompressed, .. } => {
                 // we assume for stored blocks everything was added to the dictionary

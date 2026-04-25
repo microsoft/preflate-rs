@@ -103,7 +103,7 @@ fn test_idat_header_roundtrip() {
         png_header: Some(PngHeader {
             width: 5,
             height: 5,
-            color_type: PngColorType::RGB,
+            color_type: PngColorType::Rgb,
         }),
     };
 
@@ -127,19 +127,19 @@ pub struct PngHeader {
 #[derive(Debug, PartialEq, Copy, Clone)]
 pub enum PngColorType {
     // Grayscale = 0,
-    RGB = 2,
+    Rgb = 2,
     // 3 = Pallete not supported
     //GrayscaleAlpha = 4,
-    RGBA = 6,
+    Rgba = 6,
 }
 
 impl PngColorType {
     fn parse(byte: u8) -> Option<Self> {
         match byte {
             //0 => Some(PngColorType::Grayscale),
-            2 => Some(PngColorType::RGB),
+            2 => Some(PngColorType::Rgb),
             //4 => Some(PngColorType::GrayscaleAlpha),
-            6 => Some(PngColorType::RGBA),
+            6 => Some(PngColorType::Rgba),
             _ => None,
         }
     }
@@ -148,9 +148,9 @@ impl PngColorType {
     pub fn bytes_per_pixel(&self) -> usize {
         match self {
             //PngColorType::Grayscale => 1,
-            PngColorType::RGB => 3,
+            PngColorType::Rgb => 3,
             //PngColorType::GrayscaleAlpha => 2,
-            PngColorType::RGBA => 4,
+            PngColorType::Rgba => 4,
         }
     }
 }
@@ -184,7 +184,7 @@ pub fn parse_ihdr(ihdr_chunk: &[u8]) -> Result<PngHeader> {
         })
     } else {
         log::debug!("IHDR unsupported color type {}", ihdr_data[9]);
-        return err_exit_code(ExitCode::InvalidIDat, "IHDR unsupported color type");
+        err_exit_code(ExitCode::InvalidIDat, "IHDR unsupported color type")
     }
 }
 
@@ -412,8 +412,7 @@ pub fn apply_png_filters_with_types(
     let mut rgba = vec![0u8; target_stride];
     let mut encoded = vec![0u8; target_stride];
 
-    for row in 0..height {
-        let filter_type = filter_types[row];
+    for (row, &filter_type) in filter_types.iter().enumerate().take(height) {
         let offset = row * source_stride;
 
         let scanline = if source_bbp == 3 && target_bpp == 4 {

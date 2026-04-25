@@ -44,6 +44,12 @@ impl Clone for PlainText {
     }
 }
 
+impl Default for PlainText {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PlainText {
     pub fn new() -> Self {
         Self {
@@ -75,6 +81,10 @@ impl PlainText {
 
     pub fn len(&self) -> usize {
         self.data.len() - (self.prefix_length as usize)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 
     /// the total length of the data from the beginning
