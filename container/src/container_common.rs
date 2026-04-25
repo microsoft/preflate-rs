@@ -198,7 +198,7 @@ pub trait ProcessBuffer {
                 buffer = &[];
             } else {
                 buffer = input.fill_buf().context()?;
-                if buffer.len() == 0 {
+                if buffer.is_empty() {
                     input_complete = true
                 }
             };

@@ -221,8 +221,8 @@ impl<R: CabacReader<CTX>, CTX: Default> PredictionDecoderCabac<R, CTX> {
     pub fn new(mut reader: R) -> Self {
         let mut actions_seen = [false; CodecCorrection::MAX as usize];
         let mut actions_seen_ctx = CTX::default();
-        for i in 0..actions_seen.len() {
-            actions_seen[i] = reader.get(&mut actions_seen_ctx).unwrap();
+        for item in &mut actions_seen {
+            *item = reader.get(&mut actions_seen_ctx).unwrap();
         }
 
         Self {
@@ -247,7 +247,7 @@ impl<R: CabacReader<CTX>, CTX: Default> PredictionDecoderCabac<R, CTX> {
             ) + 1;
 
             self.default_actions[c] = value - 1;
-            return Err(0);
+            Err(0)
         } else {
             let value = PredictionCabacContext::read_exp_value(
                 &mut self.context.correction_ctx[c],
@@ -255,7 +255,7 @@ impl<R: CabacReader<CTX>, CTX: Default> PredictionDecoderCabac<R, CTX> {
                 &mut self.reader,
             ) + 1;
 
-            return Err(value);
+            Err(value)
         }
     }
 }
@@ -279,7 +279,7 @@ impl<R: CabacReader<CTX>, CTX: Default> PredictionDecoder for PredictionDecoderC
 
         match self.decode_correction_slow(c) {
             Ok(value) => value,
-            Err(value) => return value,
+            Err(value) => value,
         }
     }
 }

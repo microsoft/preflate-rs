@@ -225,7 +225,7 @@ impl PredictionDecoder for VerifyPredictionDecoder {
         match x {
             CodecAction::Correction(c, value) => {
                 assert_eq!(correction, c);
-                return value;
+                value
             }
             CodecAction::VerifyState(s, _h) => {
                 panic!("found VerifyState {}, expected {:?}", s, correction);

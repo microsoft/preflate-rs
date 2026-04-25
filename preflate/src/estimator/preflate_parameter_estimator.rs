@@ -120,7 +120,7 @@ pub fn estimate_preflate_parameters(
         matches_to_start_detected: info.matches_to_start_detected,
         strategy: estimate_preflate_strategy(&info),
         nice_length: cl.nice_length,
-        add_policy: add_policy,
+        add_policy,
         max_token_count,
         zlib_compatible,
         max_dist_3_matches: info.max_dist_3_matches,
@@ -148,7 +148,7 @@ fn estimate_preflate_mem_level(max_block_size_: u32) -> u32 {
         mbits += 1;
         max_block_size >>= 1;
     }
-    mbits = std::cmp::min(std::cmp::max(mbits, 7), 15);
+    mbits = mbits.clamp(7, 15);
     mbits - 6
 }
 
@@ -156,7 +156,7 @@ fn estimate_preflate_window_bits(max_dist_: u32) -> u32 {
     let mut max_dist = max_dist_;
     max_dist += deflate_constants::MIN_LOOKAHEAD;
     let wbits = bit_length(max_dist - 1);
-    std::cmp::min(std::cmp::max(wbits, 9), 15)
+    wbits.clamp(9, 15)
 }
 
 fn estimate_preflate_strategy(info: &PreflateStreamInfo) -> PreflateStrategy {

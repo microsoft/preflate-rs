@@ -26,7 +26,7 @@ pub struct FoundStream {
 
 pub enum FoundStreamType {
     /// Deflate stream
-    DeflateStream(TokenPredictorParameters, PreflateStreamProcessor),
+    DeflateStream(TokenPredictorParameters, Box<PreflateStreamProcessor>),
 
     /// PNG IDAT, which is a concatenated Zlib stream of IDAT chunks. This
     /// is special since the Deflate stream is split into IDAT chunks.
@@ -43,11 +43,11 @@ enum Signature {
     Gzip,
     /// PNG IHDR chunk which contains the width, height of the image and color format of the image.
     /// We keep the parsed data around so that we know the dimensions etc of the IDAT when we find it.
-    IHDR,
+    Ihdr,
     /// PNG IDAT, which is a concatenated Zlib stream of IDAT chunks, each of the size given in the Vec.
-    IDAT,
+    Idat,
     /// JPEG start marker
-    JPEG,
+    Jpeg,
 }
 
 fn next_signature(src: &[u8], index: &mut usize) -> Option<Signature> {
@@ -72,7 +72,7 @@ fn next_signature(src: &[u8], index: &mut usize) -> Option<Signature> {
 
         if sig & 0x8f20 == 0x0800 {
             // possible zlib signature, check to see if it is % 31
-            if sig % 31 == 0 {
+            if sig.is_multiple_of(31) {
                 *index = i;
                 return Some(Signature::Zlib(0));
             }
@@ -81,9 +81,9 @@ fn next_signature(src: &[u8], index: &mut usize) -> Option<Signature> {
         let s = match sig {
             0x504B => Signature::ZipLocalFileHeader,
             0x1F8B => Signature::Gzip,
-            0x4944 => Signature::IDAT,
-            0x4948 => Signature::IHDR,
-            0xFFD8 => Signature::JPEG,
+            0x4944 => Signature::Idat,
+            0x4948 => Signature::Ihdr,
+            0xFFD8 => Signature::Jpeg,
             _ => continue,
         };
 
@@ -95,7 +95,7 @@ fn next_signature(src: &[u8], index: &mut usize) -> Option<Signature> {
 
 pub enum FindStreamResult {
     None,
-    Found(Range<usize>, FoundStream),
+    Found(Range<usize>, Box<FoundStream>),
     ShortRead,
 }
 
@@ -113,21 +113,20 @@ pub fn find_compressable_stream(
             Signature::Zlib(_) => {
                 let mut state = PreflateStreamProcessor::new(&config.preflate_config());
 
-                if let Ok(res) = state.decompress(&src[index + 2..]) {
-                    if state.plain_text().len() > MIN_BLOCKSIZE {
+                if let Ok(res) = state.decompress(&src[index + 2..])
+                    && state.plain_text().len() > MIN_BLOCKSIZE {
                         index += 2;
                         return FindStreamResult::Found(
                             index..index + res.compressed_size,
-                            FoundStream {
+                            Box::new(FoundStream {
                                 chunk_type: FoundStreamType::DeflateStream(
                                     res.parameters.unwrap(),
-                                    state,
+                                    Box::new(state),
                                 ),
                                 corrections: res.corrections,
-                            },
+                            }),
                         );
                     }
-                }
             }
 
             Signature::Gzip => {
@@ -136,43 +135,40 @@ pub fn find_compressable_stream(
                     let start = index + cursor.position() as usize;
 
                     let mut state = PreflateStreamProcessor::new(&config.preflate_config());
-                    if let Ok(res) = state.decompress(&src[start..]) {
-                        if state.plain_text().len() > MIN_BLOCKSIZE {
+                    if let Ok(res) = state.decompress(&src[start..])
+                        && state.plain_text().len() > MIN_BLOCKSIZE {
                             return FindStreamResult::Found(
                                 start..start + res.compressed_size,
-                                FoundStream {
+                                Box::new(FoundStream {
                                     chunk_type: FoundStreamType::DeflateStream(
                                         res.parameters.unwrap(),
-                                        state,
+                                        Box::new(state),
                                     ),
                                     corrections: res.corrections,
-                                },
+                                }),
                             );
                         }
-                    }
                 }
             }
 
             Signature::ZipLocalFileHeader => {
                 if let Ok((header_size, res, state)) =
                     parse_zip_stream(&src[index..], &config.preflate_config())
-                {
-                    if state.plain_text().len() > MIN_BLOCKSIZE {
+                    && state.plain_text().len() > MIN_BLOCKSIZE {
                         return FindStreamResult::Found(
                             index + header_size..index + header_size + res.compressed_size,
-                            FoundStream {
+                            Box::new(FoundStream {
                                 chunk_type: FoundStreamType::DeflateStream(
                                     res.parameters.unwrap(),
-                                    state,
+                                    Box::new(state),
                                 ),
                                 corrections: res.corrections,
-                            },
+                            }),
                         );
                     }
-                }
             }
 
-            Signature::IHDR => {
+            Signature::Ihdr => {
                 if index >= 4 {
                     match parse_ihdr(&src[index - 4..]) {
                         Ok(ihdr) => {
@@ -189,7 +185,7 @@ pub fn find_compressable_stream(
                 }
             }
 
-            Signature::IDAT => {
+            Signature::Idat => {
                 if index >= 4 {
                     // idat has the length first, then the "IDAT", so we need to look back 4 bytes
                     // if we find and IDAT
@@ -204,14 +200,14 @@ pub fn find_compressable_stream(
                                 if length > MIN_BLOCKSIZE {
                                     return FindStreamResult::Found(
                                         real_start..real_start + idat_contents.total_chunk_length,
-                                        FoundStream {
+                                        Box::new(FoundStream {
                                             chunk_type: FoundStreamType::IDATDeflate(
                                                 res.parameters.unwrap(),
                                                 idat_contents,
                                                 state.detach_plain_text(),
                                             ),
                                             corrections: res.corrections,
-                                        },
+                                        }),
                                     );
                                 } else {
                                     // if we couldn't successfully decompress the IDAT, skip the IDAT
@@ -230,7 +226,7 @@ pub fn find_compressable_stream(
                     }
                 }
             }
-            Signature::JPEG => {
+            Signature::Jpeg => {
                 let mut output = Vec::new();
 
                 // only required feature is that we can stop reading at the EOI marker
@@ -271,10 +267,10 @@ pub fn find_compressable_stream(
                         // successfully encoded the JPEG stream, return the found stream
                         return FindStreamResult::Found(
                             index..index + input.position() as usize,
-                            FoundStream {
+                            Box::new(FoundStream {
                                 chunk_type: FoundStreamType::JPEGLepton(output),
                                 corrections: Vec::new(),
-                            },
+                            }),
                         );
                     }
                     Err(e) => {
@@ -419,13 +415,14 @@ fn find_streams(f: &[u8], chunk_size_limit: usize) -> Vec<(Range<usize>, ChunkTy
     let mut offset: usize = 0;
     let maxlen = f.len();
     let mut locations_found = Vec::new();
-    while let FindStreamResult::Found(loc, res) = find_compressable_stream(
+    while let FindStreamResult::Found(loc, res_box) = find_compressable_stream(
         &f[offset..maxlen.min(offset.saturating_add(chunk_size_limit))],
         &mut None,
         true,
         &PreflateContainerConfig::default(),
     ) {
         let r = offset + loc.start..offset + loc.end;
+        let res = *res_box;
 
         match res.chunk_type {
             FoundStreamType::DeflateStream(_, mut state) => {

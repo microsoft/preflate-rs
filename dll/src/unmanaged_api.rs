@@ -1,8 +1,10 @@
 use std::{
     collections::VecDeque,
     panic::{AssertUnwindSafe, catch_unwind},
-    ptr::{null, null_mut},
+    ptr::null_mut,
 };
+#[cfg(test)]
+use std::ptr::null;
 
 use preflate_container::{
     PreflateContainerConfig, PreflateContainerProcessor, ProcessBuffer, RecreateContainerProcessor,
@@ -15,7 +17,7 @@ fn catch_unwind_result<R>(
     f: impl FnOnce() -> Result<R, PreflateError>,
 ) -> Result<R, PreflateError> {
     match catch_unwind(AssertUnwindSafe(f)) {
-        Ok(r) => r.map_err(|e| e.into()),
+        Ok(r) => r,
         Err(err) => {
             if let Some(message) = err.downcast_ref::<&str>() {
                 Err(PreflateError::new(ExitCode::AssertionFailure, *message))
@@ -36,7 +38,7 @@ fn catch_unwind_result<R>(
 
 /// copies a string into a limited length zero terminated utf8 buffer
 fn copy_cstring_utf8_to_buffer(str: &str, target_error_string: &mut [u8]) {
-    if target_error_string.len() == 0 {
+    if target_error_string.is_empty() {
         return;
     }
 
@@ -76,6 +78,9 @@ fn test_copy_cstring_utf8_to_buffer() {
 ///     can compare the preflate compression + zstd to just plain zstd compression)
 ///  bit 6: if 1, skip verify after compress. This is useful if caller does a separate verify step after to save CPU time.
 ///     *If this is set, the caller must verify the data after decompressing it as in some cases it may be not decompress successfully.*
+///
+/// # Safety
+/// Returns a raw pointer that must be freed with `free_compression_context`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn create_compression_context(flags: u32) -> *mut std::ffi::c_void {
     match catch_unwind_result(|| {
@@ -100,6 +105,9 @@ pub unsafe extern "C" fn create_compression_context(flags: u32) -> *mut std::ffi
 }
 
 /// Frees the compression context
+///
+/// # Safety
+/// `context` must be a valid pointer returned by `create_compression_context`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn free_compression_context(context: *mut std::ffi::c_void) {
     unsafe {
@@ -116,6 +124,10 @@ pub unsafe extern "C" fn free_compression_context(context: *mut std::ffi::c_void
 ///
 /// Returns 0 if more data is needed or if there is more data available, or 1 if done successfully.
 /// Returns < 0 if there is an error (negative value is the error code)
+///
+/// # Safety
+/// All pointer arguments must be valid for their specified lengths. `context` must be a valid
+/// pointer returned by `create_compression_context`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn compress_buffer(
     context: *mut std::ffi::c_void,
@@ -132,12 +144,12 @@ pub unsafe extern "C" fn compress_buffer(
         match catch_unwind_result(|| {
             let context = CompressionContext::from_pointer(context);
 
-            let input = if input_buffer == null() {
+            let input = if input_buffer.is_null() {
                 &[]
             } else {
                 std::slice::from_raw_parts(input_buffer, input_buffer_size as usize)
             };
-            let output = if output_buffer == null_mut() {
+            let output = if output_buffer.is_null() {
                 &mut []
             } else {
                 std::slice::from_raw_parts_mut(output_buffer, output_buffer_size as usize)
@@ -156,7 +168,7 @@ pub unsafe extern "C" fn compress_buffer(
         }) {
             Ok(done) => done as i32,
             Err(e) => {
-                if error_string != null_mut() {
+                if !error_string.is_null() {
                     copy_cstring_utf8_to_buffer(
                         e.message(),
                         std::slice::from_raw_parts_mut(
@@ -172,6 +184,10 @@ pub unsafe extern "C" fn compress_buffer(
 }
 
 /// returns the compression statistics associated with the compression context
+///
+/// # Safety
+/// `context` must be a valid pointer returned by `create_compression_context`. All output
+/// pointer arguments must be valid writable locations.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn get_compression_stats(
     context: *mut std::ffi::c_void,
@@ -264,6 +280,9 @@ impl DecompressionContext {
 }
 
 /// Allocates new decompression context, must be freed with free_decompression_context
+///
+/// # Safety
+/// Returns a raw pointer that must be freed with `free_decompression_context`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn create_decompression_context(
     _flags: u32,
@@ -282,6 +301,9 @@ pub unsafe extern "C" fn create_decompression_context(
 }
 
 /// Frees the decompression context
+///
+/// # Safety
+/// `context` must be a valid pointer returned by `create_decompression_context`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn free_decompression_context(context: *mut std::ffi::c_void) {
     unsafe {
@@ -298,6 +320,10 @@ pub unsafe extern "C" fn free_decompression_context(context: *mut std::ffi::c_vo
 ///
 /// Returns 0 if more data is needed or if there is more data available, or 1 if done successfully.
 /// Returns < 0 if there is an error (negative value is the error code)
+///
+/// # Safety
+/// All pointer arguments must be valid for their specified lengths. `context` must be a valid
+/// pointer returned by `create_decompression_context`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn decompress_buffer(
     context: *mut std::ffi::c_void,
@@ -314,12 +340,12 @@ pub unsafe extern "C" fn decompress_buffer(
         match catch_unwind_result(|| {
             let context = DecompressionContext::from_pointer(context);
 
-            let input = if input_buffer == null() {
+            let input = if input_buffer.is_null() {
                 &[]
             } else {
                 std::slice::from_raw_parts(input_buffer, input_buffer_size as usize)
             };
-            let output = if output_buffer == null_mut() {
+            let output = if output_buffer.is_null() {
                 &mut []
             } else {
                 std::slice::from_raw_parts_mut(output_buffer, output_buffer_size as usize)

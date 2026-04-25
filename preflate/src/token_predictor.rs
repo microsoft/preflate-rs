@@ -58,7 +58,10 @@ impl TokenPredictor {
     }
 
     pub fn checksum(&self) -> DebugHash {
-        assert!(VERIFY);
+        #[allow(clippy::assertions_on_constants)]
+        {
+            assert!(VERIFY);
+        }
         let mut c = DebugHash::default();
         self.state.checksum(&mut c);
         c
@@ -92,10 +95,10 @@ impl TokenPredictor {
 
         codec.encode_verify_state("blocktypestart", 0);
 
-        let tokens;
+        
         let huffman_encoding;
 
-        match &block.block_type {
+        let tokens = match &block.block_type {
             DeflateTokenBlockType::Stored { uncompressed } => {
                 codec.encode_correction_diff(
                     CodecCorrection::BlockTypeCorrection,
@@ -110,7 +113,7 @@ impl TokenPredictor {
                 );
 
                 for _i in 0..uncompressed.len() {
-                    self.state.update_hash(1, &input);
+                    self.state.update_hash(1, input);
                     input.advance(1);
                 }
 
@@ -131,7 +134,7 @@ impl TokenPredictor {
                 ..
             } => {
                 match huffman_type {
-                    DeflateHuffmanType::Static { .. } => {
+                    DeflateHuffmanType::Static => {
                         codec.encode_correction_diff(
                             CodecCorrection::BlockTypeCorrection,
                             BT_STATICHUFF,
@@ -152,9 +155,9 @@ impl TokenPredictor {
                     }
                 }
 
-                tokens = t
+                t
             }
-        }
+        };
 
         // if the block ends at an unexpected point, or it contains more tokens
         // than expected, we will need to encode the block size
@@ -173,9 +176,7 @@ impl TokenPredictor {
 
         let mut freq = TokenFrequency::default();
 
-        for i in 0..tokens.len() {
-            let target_token = &tokens[i];
-
+        for (i, target_token) in tokens.iter().enumerate() {
             codec.encode_verify_state(
                 "token",
                 if VERIFY {
@@ -338,7 +339,7 @@ impl TokenPredictor {
 
                 for _i in 0..uncompressed_len {
                     uncompressed.push(input.cur_char(0));
-                    self.state.update_hash(1, &input);
+                    self.state.update_hash(1, input);
                     input.advance(1);
                 }
 
@@ -494,7 +495,7 @@ impl TokenPredictor {
 
             // match is too small and far way to be worth encoding as a distance/length pair.
             if match_token.len() == 3
-                && match_token.dist() > u32::from(self.params.max_dist_3_matches)
+                && match_token.dist() > self.params.max_dist_3_matches
             {
                 return DeflateToken::Literal(input.cur_char(0));
             }
@@ -505,8 +506,7 @@ impl TokenPredictor {
                 good_length,
                 max_lazy,
             } = self.params.matching_type
-            {
-                if match_token.len() < u32::from(max_lazy)
+                && match_token.len() < u32::from(max_lazy)
                     && input.remaining() >= match_token.len() + 2
                 {
                     let mut max_depth = self.params.max_chain;
@@ -520,8 +520,8 @@ impl TokenPredictor {
                         .state
                         .match_token_1(match_token.len(), max_depth, input);
 
-                    if let MatchResult::Success(m) = match_next {
-                        if m.len() > match_token.len() {
+                    if let MatchResult::Success(m) = match_next
+                        && m.len() > match_token.len() {
                             self.pending_reference = Some(m);
 
                             if !self.params.zlib_compatible {
@@ -529,9 +529,7 @@ impl TokenPredictor {
                             }
                             return DeflateToken::Literal(input.cur_char(0));
                         }
-                    }
                 }
-            }
 
             DeflateToken::Reference(match_token)
         } else {
@@ -565,20 +563,18 @@ impl TokenPredictor {
 
         self.pending_reference = None;
 
-        if let MatchResult::Success(m) = match_token {
-            if m.len() >= MIN_MATCH {
+        if let MatchResult::Success(m) = match_token
+            && m.len() >= MIN_MATCH {
                 return Ok(m);
             }
-        }
 
         // If we didn't find a match, try again with a larger chain
         let match_token = self.state.match_token_0(0, 4096, input);
 
-        if let MatchResult::Success(m) = match_token {
-            if m.len() >= MIN_MATCH {
+        if let MatchResult::Success(m) = match_token
+            && m.len() >= MIN_MATCH {
                 return Ok(m);
             }
-        }
 
         err_exit_code(
             ExitCode::PredictionFailure,

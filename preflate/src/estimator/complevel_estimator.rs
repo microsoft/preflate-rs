@@ -40,7 +40,7 @@ pub fn estimate_preflate_comp_level(
     add_policy: DictionaryAddPolicy,
 ) -> Result<CompLevelInfo> {
     let hash_bits = mem_level + 7;
-    let mem_hash_shift = (hash_bits + 2) / 3;
+    let mem_hash_shift = hash_bits.div_ceil(3);
     let mem_hash_mask = ((1u32 << hash_bits) - 1) as u16;
     let wsize = 1 << wbits;
 

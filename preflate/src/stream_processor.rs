@@ -93,7 +93,7 @@ impl PreflateStreamProcessor {
     }
 
     pub fn plain_text(&self) -> &PlainText {
-        &self.parser.plain_text()
+        self.parser.plain_text()
     }
 
     pub fn shrink_to_dictionary(&mut self) {
@@ -114,7 +114,7 @@ impl PreflateStreamProcessor {
             PredictionEncoderCabac::new(VP8Writer::new(&mut cabac_encoded).unwrap());
 
         if let Some(predictor) = &mut self.predictor {
-            let mut input = PreflateInput::new(&self.parser.plain_text());
+            let mut input = PreflateInput::new(self.parser.plain_text());
 
             // we are missing the last couple hashes in the dictionary since we didn't
             // have the full plaintext yet.
@@ -158,7 +158,7 @@ impl PreflateStreamProcessor {
             })
         } else {
             let params =
-                estimate_preflate_parameters(&contents, &self.parser.plain_text()).context()?;
+                estimate_preflate_parameters(&contents, self.parser.plain_text()).context()?;
 
             if params.max_chain > self.max_chain_length {
                 return Err(PreflateError::new(
@@ -170,7 +170,7 @@ impl PreflateStreamProcessor {
                 ));
             }
 
-            let mut input = PreflateInput::new(&self.parser.plain_text());
+            let mut input = PreflateInput::new(self.parser.plain_text());
 
             let mut token_predictor = TokenPredictor::new(&params);
 
@@ -246,6 +246,12 @@ pub struct RecreateStreamProcessor {
     plain_text: PlainText,
 }
 
+impl Default for RecreateStreamProcessor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl RecreateStreamProcessor {
     pub fn new() -> Self {
         Self {
@@ -267,7 +273,7 @@ impl RecreateStreamProcessor {
                 break;
             }
 
-            self.plain_text.append(&buf);
+            self.plain_text.append(buf);
 
             plain_text.consume(buf_len);
         }
