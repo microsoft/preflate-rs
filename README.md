@@ -69,7 +69,7 @@ The table below shows overhead (corrections size as a percentage of uncompressed
 | [`preflate/`](preflate/) | library | Core DEFLATE analysis and reconstruction engine |
 | [`container/`](container/) | library | Scans binary files (ZIP, PNG, JPEG) for DEFLATE streams and orchestrates the Zstd pipeline |
 | [`util/`](util/) | `preflate_util.exe` | CLI tool for testing and benchmarking |
-| [`dll/`](dll/) | `preflate_rs_0_7.dll` | C FFI wrapper for .NET interop |
+| [`dll/`](dll/) | `preflate_rs_0_8.dll` | C FFI wrapper for .NET interop |
 | [`fuzz/`](fuzz/) | fuzz harnesses | libfuzzer targets for the core and container APIs |
 
 ---
@@ -115,7 +115,7 @@ For direct use of the core DEFLATE analysis API, see the [`preflate` crate](pref
 
 - **No unsafe code** — `#![forbid(unsafe_code)]` is enforced in every crate.
 - **Chunked processing** — memory use is bounded regardless of input size.
-- **Format versioning** — the DLL name encodes the format version (`preflate_rs_0_7.dll`) so old decoders can coexist with new ones during upgrades.
+- **Format versioning** — the DLL name encodes the format version (`preflate_rs_0_8.dll`) so old decoders can coexist with new ones during upgrades.
 - **CABAC coding** — the corrections codec is shared with the [Lepton](https://github.com/microsoft/lepton_jpeg_rust) JPEG re-compression library.
 - Parameters are serialized via [`bitcode`](https://crates.io/crates/bitcode); corrections via CABAC.
 

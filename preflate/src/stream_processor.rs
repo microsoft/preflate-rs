@@ -507,6 +507,24 @@ fn verify_roundtrip_libdeflate() {
     }
 }
 
+/// Adobe PDF Library 25/26 emits libdeflate-style streams whose final token is a
+/// length 3 match covering the last 3 bytes of the plaintext. preflate's libdeflate
+/// model hashes 4 bytes, so it can't find (or hop to) anything there, and the stream
+/// only round-trips thanks to the explicit distance escape.
+#[test]
+fn verify_roundtrip_adobe_tail3() {
+    crate::init_logging();
+
+    use crate::utils::read_file;
+    let v = read_file("compressed_adobe_tail3.deflate");
+
+    let (r, plain_text) = preflate_whole_deflate_stream(&v, &PreflateConfig::default()).unwrap();
+    let recompressed = recreate_whole_deflate_stream(plain_text.text(), &r.corrections).unwrap();
+
+    assert_eq!(r.compressed_size, v.len());
+    assert!(v == recompressed);
+}
+
 #[cfg(test)]
 fn verify_file(filename: &str) {
     use crate::utils::read_file;
