@@ -218,7 +218,7 @@ impl<H: HashChain + 'static> HashChainHolder for HashChainHolderImpl<H> {
         let best_len = target_reference.len();
         let mut hops = 0;
 
-        let cur_max_dist = std::cmp::min(input.pos(), self.window_bytes);
+        let cur_max_dist = std::cmp::min(input.bytes_before(), self.window_bytes);
 
         for dist in self.hash.iterate::<0>(input) {
             if dist > cur_max_dist {
@@ -259,7 +259,7 @@ impl<H: HashChain + 'static> HashChainHolder for HashChainHolderImpl<H> {
             return err_exit_code(ExitCode::RecompressFailed, "not enough data left to match");
         }
 
-        let cur_max_dist = std::cmp::min(input.pos(), self.window_bytes);
+        let cur_max_dist = std::cmp::min(input.bytes_before(), self.window_bytes);
         let mut current_hop = 0;
 
         for dist in self.hash.iterate::<0>(input) {
@@ -345,7 +345,8 @@ impl<H: HashChain> HashChainHolderImpl<H> {
             return MatchResult::NoInput;
         }
 
-        let max_dist_to_start = start_pos
+        let hist_to_start = input.bytes_before() + OFFSET;
+        let max_dist_to_start = hist_to_start
             - if self.params.matches_to_start_detected {
                 0
             } else {
