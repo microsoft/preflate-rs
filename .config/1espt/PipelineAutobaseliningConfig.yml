@@ -5,10 +5,10 @@ pipelines:
     retail:
       source:
         eslint:
-          lastModifiedDate: 2026-03-20
+          lastModifiedDate: 2026-10-23
         psscriptanalyzer:
-          lastModifiedDate: 2026-03-20
+          lastModifiedDate: 2026-10-23
         armory:
-          lastModifiedDate: 2026-03-20
+          lastModifiedDate: 2026-10-23
         accessibilityinsights:
           lastModifiedDate: 2026-03-20
