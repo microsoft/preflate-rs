@@ -12,9 +12,7 @@ The DLL exports a streaming compress/decompress API as `extern "C"` functions.
 
 ```c
 // Create a compression context.
-// flags bits 0-4: Zstd compression level (0-14)
-// flags bit  5:   measure baseline Zstd-only size (for stats)
-// flags bit  6:   skip round-trip verification
+// See create_compression_context in src/unmanaged_api.rs for flag masks.
 void* create_compression_context(uint32_t flags);
 void  free_compression_context(void* context);
 
@@ -77,15 +75,26 @@ The DLL buffers any output that does not fit in the provided output buffer inter
 
 ## Safety
 
-- Magic numbers (`0x4K3CFF2E` for compression, `0x053D2AB1` for decompression contexts) are validated on every call to catch dangling or mismatched pointers.
-- All entry points use `catch_unwind` to prevent Rust panics from crossing the FFI boundary.
+- Context magic values are checked to detect mismatched context types.
+- The FFI error-handling wrapper uses `catch_unwind` to contain Rust panics.
 - Error messages are copied as UTF-8 into the caller-provided buffer with null termination.
 - All logic outside the FFI boundary layer is safe Rust (`#![forbid(unsafe_code)]` on all dependencies).
+
+## Implementation
+
+[`src/unmanaged_api.rs`](src/unmanaged_api.rs) defines the exported functions,
+flag decoding, context magic values, and `catch_unwind_result` error translation.
+Compression and decompression contexts retain a processor and a `VecDeque<u8>`
+for output that does not fit in the caller's buffer. Preserve that output across
+calls and keep panics from crossing the FFI boundary.
+
+The boundary uses `unsafe extern "C"` functions and `#[unsafe(no_mangle)]`
+exports. Keep unsafe operations isolated to this layer.
 
 ## Building
 
 ```shell
-cargo build --release -p preflate_rs_dll
+cargo build --release -p preflate_rs_0_7
 # Output: target/release/preflate_rs_0_7.dll (Windows)
 ```
 

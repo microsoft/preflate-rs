@@ -72,6 +72,7 @@ The table below shows overhead (corrections size as a percentage of uncompressed
 | [`util/`](util/) | `preflate_util.exe` | CLI tool for testing and benchmarking |
 | [`dll/`](dll/) | `preflate_rs_0_7.dll` | C FFI wrapper for .NET interop |
 | [`fuzz/`](fuzz/) | fuzz harnesses | libfuzzer targets for the core and container APIs |
+| [`tests/`](tests/README.md) | integration tests | Byte-exact round-trips and reconstruction overhead checks |
 
 Workspace dependency versions and local crate paths are defined once in the root
 [`Cargo.toml`](Cargo.toml) under `[workspace.dependencies]`. Member crates inherit
@@ -85,7 +86,7 @@ path dependencies on the workspace libraries.
 
 ### Requirements
 
-- [Rust 1.89 or above](https://www.rust-lang.org/tools/install)
+- [Rust 1.89 or above](https://www.rust-lang.org/tools/install), using Edition 2024
 
 ### Build from Source
 
@@ -102,15 +103,10 @@ cargo build --release --all
 The `preflate_util` binary lets you test the library against any file or directory of files:
 
 ```shell
-preflate_util [OPTIONS] <PATH>
-
-Options:
-  --max-chain <N>    Hash chain depth limit (default: 4096)
-  -c, --level <N>    Zstd compression level 0–14 (default: 9)
-  --loglevel <L>     Log verbosity (default: Error)
-  --verify <bool>    Round-trip verify after compression (default: true)
-  --baseline <bool>  Also measure raw Zstd-only size for comparison (default: false)
+preflate_util archive.zip
 ```
+
+See the [CLI guide](util/README.md) for options, output, and benchmarking examples.
 
 ### Library Usage
 
@@ -120,7 +116,8 @@ For direct use of the core DEFLATE analysis API, see the [`preflate` crate](pref
 
 ## Design Notes
 
-- **No unsafe code** — `#![forbid(unsafe_code)]` is enforced in every crate.
+- **Safe core** — the core codecs and container pipeline forbid unsafe code;
+  the C ABI boundary is isolated in the [DLL crate](dll/README.md#safety).
 - **Chunked processing** — memory use is bounded regardless of input size.
 - **Format versioning** — the DLL name encodes the format version (`preflate_rs_0_7.dll`) so old decoders can coexist with new ones during upgrades.
 - **CABAC coding** — the corrections codec is shared with the [Lepton](https://github.com/microsoft/lepton_jpeg_rust) JPEG re-compression library.
@@ -129,6 +126,34 @@ For direct use of the core DEFLATE analysis API, see the [`preflate` crate](pref
 ---
 
 ## Contributing
+
+### Developer workflow
+
+Run these commands from the workspace root:
+
+```shell
+cargo test --all
+cargo test -p preflate-rs <test_name>
+cargo test -- --nocapture
+cargo fmt --check --all
+cargo clippy --workspace
+```
+
+Start with tests for the changed component. Use the [integration test guide](tests/README.md)
+for byte-exact end-to-end checks, the [CABAC guide](cabac/README.md) for SIMD and
+benchmark validation, and the [fuzz guide](fuzz/README.md) for the standalone harnesses.
+
+The [GitHub Rust workflow](.github/workflows/rust.yml) builds and tests on
+`windows-latest`. It installs the `wasm32-wasip1`, `aarch64-unknown-linux-musl`,
+`x86_64-pc-windows-msvc`, and `x86_64-unknown-linux-gnu` targets; its Cargo build
+steps use the host target. The [Azure release pipeline](azure-pipelines.yml)
+sets `/Qspectre /sdl` for native dependencies. Windows linker hardening is
+configured in [`.cargo/config.toml`](.cargo/config.toml).
+
+Repository-wide agent guidance lives in
+[`.github/copilot-instructions.md`](.github/copilot-instructions.md).
+Keep architecture, APIs, commands, and format details in these READMEs rather than
+duplicating them in agent instructions.
 
 * [Submit bugs and feature requests](https://github.com/microsoft/preflate-rs/issues)
 * [Review or submit pull requests](https://github.com/microsoft/preflate-rs/pulls)

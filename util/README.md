@@ -36,6 +36,12 @@ If `--baseline true` is set, a second column shows what raw Zstd (without prefla
 
 If verification fails (reconstructed output does not match original), the tool prints the first differing byte position and exits with an error.
 
+## Implementation
+
+The CLI is implemented in [`src/main.rs`](src/main.rs). Its `assert_eq_array`
+helper reports positional differences when round-trip verification fails.
+Dependency requirements are maintained in the root workspace manifest.
+
 ## Building
 
 ```shell

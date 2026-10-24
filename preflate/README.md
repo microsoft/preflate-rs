@@ -19,6 +19,8 @@ Given those two parts, the original DEFLATE stream can be reconstructed bit-for-
 3. **Predict** (`token_predictor.rs`) — Re-run compression using the estimated parameters, generating a predicted token sequence.
 4. **Encode** (`statistical_codec.rs`, `cabac_codec.rs`) — Record each position where the actual token differs from the prediction, using CABAC arithmetic coding.
 
+Huffman tree prediction is handled separately by [`tree_predictor.rs`](src/tree_predictor.rs).
+
 ### Reconstruction pipeline
 
 Feed the plaintext and corrections back into the predictor. It replays every compression decision, applying corrections where recorded, and writes the resulting tokens back to a DEFLATE bitstream using the original Huffman trees.
@@ -112,7 +114,18 @@ The following differences from the predicted stream are encoded:
 - Literal vs. length/distance choice
 - Incorrect distance or length (encoded as hop count back through the hash chain)
 
+## Source map
+
+- [`lib.rs`](src/lib.rs) defines the public re-exports and configuration.
+- [`stream_processor.rs`](src/stream_processor.rs) coordinates chunked analysis and reconstruction.
+- [`deflate/`](src/deflate/) contains token parsing, Huffman coding, and bitstream writing.
+- [`estimator/`](src/estimator/) estimates compressor parameters, matching policy, and block strategy.
+- [`hash_chain.rs`](src/hash_chain.rs), [`hash_chain_holder.rs`](src/hash_chain_holder.rs),
+  and [`hash_algorithm.rs`](src/hash_algorithm.rs) implement predictor dictionaries.
+- [`preflate_input.rs`](src/preflate_input.rs) manages plaintext and retained history.
+- [`preflate_error.rs`](src/preflate_error.rs) defines exit codes and error context.
+
 ## Constraints
 
 - **No unsafe code** — `#![forbid(unsafe_code)]`
-- Minimum Rust version: **1.89**, Edition **2024**
+- Toolchain requirements and contributor commands are in the [project README](../README.md#requirements).

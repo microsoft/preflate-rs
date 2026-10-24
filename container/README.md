@@ -41,12 +41,12 @@ Both processors implement the `ProcessBuffer` trait for incremental use:
 use preflate_container::{PreflateContainerProcessor, RecreateContainerProcessor, ProcessBuffer};
 
 // Compression
-let mut compressor = PreflateContainerProcessor::new(&config);
+let mut compressor = PreflateContainerProcessor::new(&config, 9, false);
 compressor.process_buffer(&input_chunk, input_complete, &mut output)?;
 let stats = compressor.stats();
 
 // Decompression
-let mut decompressor = RecreateContainerProcessor::new();
+let mut decompressor = RecreateContainerProcessor::new(0);
 decompressor.process_buffer(&container_chunk, input_complete, &mut output)?;
 ```
 
@@ -119,20 +119,80 @@ For each block:
   [type_byte]                    ← block kind + compression flag
   [varint: content_length]
   [content_bytes]                ← Zstd-compressed or raw, depending on type
+
+[0xFF][crc32_le: 4 bytes]         ← CRC-32 of the original input; no length field
 ```
 
-Block types:
+### Block type byte
 
-| Block | Description |
-|---|---|
-| Literal | Raw input bytes that contain no DEFLATE stream |
-| Deflate | A DEFLATE stream: corrections + plaintext (Zstd) |
-| PNG | PNG IDAT stream with chunk metadata (Zstd, or WebP if enabled) |
-| Deflate-continue | Continuation of a previous DEFLATE stream |
-| JPEG/Lepton | Lepton-recompressed JPEG (raw, bypasses Zstd) |
-| WebP | PNG stored as lossless WebP (raw, bypasses Zstd) |
+Bits 7-6 encode compression (`00` = raw, `01` = Zstd; `10` and `11` are
+reserved). Bits 5-0 identify the content kind. The constants are defined in
+[`container_common.rs`](src/container_common.rs).
 
-The Zstd encoder is flushed after each block payload so each block is independently decodable, while the persistent encoder context maintains cross-block history for better compression.
+| Block | Kind | Wire byte | Description |
+|---|---|---|---|
+| Literal | `0x00` | `0x40` | Original bytes without a detected DEFLATE stream, inside Zstd |
+| Deflate | `0x01` | `0x41` | Corrections and plaintext for a new DEFLATE stream, inside Zstd |
+| PNG | `0x02` | `0x42` | PNG IDAT metadata, corrections, and plaintext, inside Zstd |
+| Deflate-continue | `0x03` | `0x43` | Continuation using the previous stream's reconstruction state, inside Zstd |
+| JPEG/Lepton | `0x04` | `0x04` | Lepton-compressed JPEG, outside Zstd |
+| WebP | `0x05` | `0x05` | PNG metadata, corrections, and lossless WebP, outside Zstd |
+
+All framing bytes are raw, never inside Zstd. A single persistent encoder is
+flushed after each Zstd payload; the decoder must consume these flush segments
+in sequence with persistent history. They are not independent Zstd frames.
+JPEG and WebP payloads bypass that encoder. The CRC end block terminates the
+container.
+
+### Payload layouts
+
+Lengths below use the varint helpers in `container_common.rs`.
+
+```text
+Literal (after Zstd decoding):
+  varint(data_len), data[data_len]
+
+Deflate / Deflate-continue (after Zstd decoding):
+  varint(corrections_len), varint(plaintext_len)
+  corrections[corrections_len], plaintext[plaintext_len]
+
+PNG (after Zstd decoding):
+  varint(corrections_len), varint(plaintext_len)
+  IDAT metadata
+  corrections[corrections_len], plaintext[plaintext_len]
+
+JPEG/Lepton (raw):
+  lepton_bytes[content_length]
+
+WebP (raw):
+  varint(corrections_len), varint(webp_data_len)
+  IDAT metadata, filters[height]
+  corrections[corrections_len], webp_data[webp_data_len]
+```
+
+IDAT metadata records a zero-terminated list of varint chunk sizes, the two-byte
+zlib header, and the four-byte Adler-32. Non-WebP PNGs use a `0xFF` sentinel
+instead of an image header. WebP metadata records the color type and varint
+width and height. See [`idat_parse.rs`](src/idat_parse.rs) for serialization.
+Reconstruction restores the original PNG chunk boundaries and compression.
+
+### Finalization
+
+Callers draining fixed-size output buffers may call `process_buffer` repeatedly
+with `input_complete = true`. Finalization must remain idempotent: guard it with
+`input_complete && !self.input_complete`, not just `input_complete`, so the
+encoder and CRC end block are finalized only once.
+
+## Source map
+
+- [`container_common.rs`](src/container_common.rs): configuration, statistics,
+  `ProcessBuffer`, block constants, and varint helpers.
+- [`container_write.rs`](src/container_write.rs): scanning and container encoding.
+- [`container_read.rs`](src/container_read.rs): container decoding and reconstruction.
+- [`scan_deflate.rs`](src/scan_deflate.rs): stream detection.
+- [`idat_parse.rs`](src/idat_parse.rs): PNG IDAT extraction and reassembly.
+- [`scoped_read.rs`](src/scoped_read.rs): bounded reader adapter.
+- [`utils.rs`](src/utils.rs): fixed-size output buffering and test helpers.
 
 ## Stream Detection
 
@@ -145,6 +205,7 @@ The scanner (`scan_deflate.rs`) identifies DEFLATE stream boundaries by looking 
 - **JPEG markers** — SOI/APP0 structure
 
 Non-DEFLATE regions between streams are emitted as literal blocks.
+PDF-specific scanning is not implemented.
 
 ## Feature Flags
 
@@ -155,4 +216,4 @@ Non-DEFLATE regions between streams are emitted as literal blocks.
 ## Constraints
 
 - **No unsafe code** — `#![forbid(unsafe_code)]`
-- Minimum Rust version: **1.89**, Edition **2024**
+- Toolchain requirements and contributor commands are in the [project README](../README.md#requirements).
