@@ -1,8 +1,8 @@
-# dll (preflate_rs_0_7)
+# dll (preflate_rs_0_8)
 
 C-compatible DLL for .NET interop. Exposes a streaming compress/decompress API as
 `extern "C"` functions. The version number is baked into the crate name
-(`preflate_rs_0_7`) for binary compatibility.
+(`preflate_rs_0_8`) for binary compatibility.
 
 ## Exported C API (`src/unmanaged_api.rs`)
 
@@ -70,4 +70,4 @@ Magic numbers are validated on every call to catch dangling/wrong pointer bugs.
 
 ## Build Output
 
-`cdylib` — produces `preflate_rs_0_7.dll` on Windows.
+`cdylib` — produces `preflate_rs_0_8.dll` on Windows.

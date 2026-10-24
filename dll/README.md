@@ -1,8 +1,8 @@
-# preflate_rs_0_7
+# preflate_rs_0_8
 
 C-compatible DLL exposing the preflate-rs container pipeline for .NET interop.
 
-The DLL name encodes the container format version (`0_7`). This allows multiple format versions to coexist side-by-side on the same machine — old decoders remain functional while new encoders produce newer formats.
+The DLL name encodes the container format version (`0_8`). This allows multiple format versions to coexist side-by-side on the same machine — old decoders remain functional while new encoders produce newer formats.
 
 ## Exported API
 
@@ -86,7 +86,7 @@ The DLL buffers any output that does not fit in the provided output buffer inter
 
 ```shell
 cargo build --release -p preflate_rs_dll
-# Output: target/release/preflate_rs_0_7.dll (Windows)
+# Output: target/release/preflate_rs_0_8.dll (Windows)
 ```
 
 The release build applies Spectre mitigations (`/Qspectre /sdl`) and Control Flow Guard (`/guard:cf`).

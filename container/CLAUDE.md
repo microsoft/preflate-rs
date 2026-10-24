@@ -1,8 +1,8 @@
 # container (preflate-container)
 
 Scans binary files (ZIP, PNG, JPEG) for DEFLATE streams, orchestrates the
-preflate + Zstd pipeline, and reassembles the output. Only format version 2 exists
-(v1 was removed).
+preflate + Zstd pipeline, and reassembles the output. Only format version 3 is supported.
+Versions 1 and 2 are rejected; version 3 uses the incompatible 0.8 corrections format.
 
 ## Public API (`lib.rs`)
 
@@ -36,12 +36,12 @@ fn process_limited_buffer(
 `PreflateContainerConfig` holds knobs: `min_chunk_size`, `max_chunk_size`,
 `total_plain_text_limit`, `chunk_plain_text_limit`, `validate_compression`, `max_chain_length`.
 
-## Wire Format (v2 only)
+## Wire Format (v3 only)
 
 ### Outer framing (always raw / uncompressed)
 
 ```
-[0x02]                             ← COMPRESSED_WRAPPER_VERSION_2 (1 byte, raw)
+[0x03]                             ← COMPRESSED_WRAPPER_VERSION_3 (1 byte, raw)
 
 Repeat for each block:
   [type]                           ← block type byte (1 byte, raw) — see bit-field below

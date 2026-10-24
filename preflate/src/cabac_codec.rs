@@ -336,6 +336,7 @@ fn roundtree_cabac_correction() {
         Operation::Correction(0, CodecCorrection::LiteralPredictionWrong),
         Operation::Correction(100000, CodecCorrection::TokenCount),
         Operation::Correction(1, CodecCorrection::ReferencePredictionWrong),
+        Operation::Correction(32768, CodecCorrection::ExplicitDistance),
     ];
 
     let mut buffer = Vec::new();

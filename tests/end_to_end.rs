@@ -397,6 +397,8 @@ fn compression_benchmark_overhead_size() {
     // The expected overhead for each compression level.
     // The lower compression levels are more important since
     // they are better recompressed and give more bang-for-buck.
+    // Note that adding a CodecCorrection variant lengthens the "actions seen"
+    // bitset at the head of every corrections blob, which can move these by a byte.
     let bench = [
         BenchmarkResult {
             name: "libngzsys",
@@ -406,7 +408,7 @@ fn compression_benchmark_overhead_size() {
                 Ok(36),
                 Ok(23),
                 Ok(23),
-                Ok(44),
+                Ok(43),
                 Ok(2503),
                 Ok(1803),
                 Ok(49),
@@ -435,7 +437,7 @@ fn compression_benchmark_overhead_size() {
             compress_fn: libdeflate,
             overhead: [
                 Ok(30),
-                Ok(1030),
+                Ok(1031),
                 Ok(4370),
                 Ok(3817),
                 Ok(6311),
@@ -457,7 +459,7 @@ fn compression_benchmark_overhead_size() {
                 Ok(2224),
                 Ok(1265),
                 Ok(360),
-                Ok(256),
+                Ok(257),
                 Ok(337),
                 Ok(281),
             ],

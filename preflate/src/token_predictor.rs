@@ -7,7 +7,7 @@
 use crate::{
     bit_helper::DebugHash,
     deflate::{
-        deflate_constants::MIN_MATCH,
+        deflate_constants::{MAX_MATCH, MIN_MATCH},
         deflate_token::{
             BT_DYNAMICHUFF, BT_STATICHUFF, BT_STORED, DeflateHuffmanType, DeflateToken,
             DeflateTokenBlock, DeflateTokenBlockType, DeflateTokenReference, TokenFrequency,
@@ -252,33 +252,20 @@ impl TokenPredictor {
                                 CodecCorrection::ReferencePredictionWrong,
                                 false,
                             );
-                            r
+                            Some(r)
                         }
                     };
 
-                    codec.encode_correction_diff(
-                        CodecCorrection::LenCorrection,
-                        target_ref.len(),
-                        predicted_ref.len(),
-                    );
-
-                    if predicted_ref.len() != target_ref.len() {
-                        let rematch =
-                            self.state
-                                .calculate_hops(target_ref, input)
-                                .with_context(|| {
-                                    format!(
-                                        "calculate_hops p={:?}, t={:?}",
-                                        predicted_ref, target_ref
-                                    )
-                                })?;
-                        codec.encode_correction(
-                            CodecCorrection::DistAfterLenCorrection,
-                            rematch - 1,
+                    if let Some(predicted_ref) = predicted_ref {
+                        codec.encode_correction_diff(
+                            CodecCorrection::LenCorrection,
+                            target_ref.len(),
+                            predicted_ref.len(),
                         );
-                    } else if target_ref.dist() != predicted_ref.dist() {
-                        let rematch =
-                            self.state
+
+                        if predicted_ref.len() != target_ref.len() {
+                            let rematch = self
+                                .state
                                 .calculate_hops(target_ref, input)
                                 .with_context(|| {
                                     format!(
@@ -286,9 +273,38 @@ impl TokenPredictor {
                                         predicted_ref, target_ref
                                     )
                                 })?;
-                        codec.encode_correction(CodecCorrection::DistOnlyCorrection, rematch);
+                            codec.encode_correction(
+                                CodecCorrection::DistAfterLenCorrection,
+                                rematch - 1,
+                            );
+                        } else if target_ref.dist() != predicted_ref.dist() {
+                            let rematch = self
+                                .state
+                                .calculate_hops(target_ref, input)
+                                .with_context(|| {
+                                    format!(
+                                        "calculate_hops p={:?}, t={:?}",
+                                        predicted_ref, target_ref
+                                    )
+                                })?;
+                            codec.encode_correction(CodecCorrection::DistOnlyCorrection, rematch);
+                        } else {
+                            codec.encode_correction(CodecCorrection::DistOnlyCorrection, 0);
+                        }
                     } else {
-                        codec.encode_correction(CodecCorrection::DistOnlyCorrection, 0);
+                        // The model found no reference at all here, so there is nothing to
+                        // hop from. Encode the distance explicitly and code the length
+                        // against MIN_MATCH. The decoder knows to read this because
+                        // repredict_reference returns None for it as well.
+                        codec.encode_correction(
+                            CodecCorrection::ExplicitDistance,
+                            target_ref.dist(),
+                        );
+                        codec.encode_correction_diff(
+                            CodecCorrection::LenCorrection,
+                            target_ref.len(),
+                            MIN_MATCH,
+                        );
                     }
                 }
             }
@@ -398,9 +414,43 @@ impl TokenPredictor {
                         continue;
                     }
 
-                    predicted_ref = self.repredict_reference(None, input).with_context(|| {
+                    match self.repredict_reference(None, input).with_context(|| {
                         format!("repredict_reference token_count={:?}", tokens.len())
-                    })?;
+                    })? {
+                        Some(r) => predicted_ref = r,
+                        None => {
+                            // the encoder found nothing to hop from either, so the
+                            // distance was written out explicitly and the length as a
+                            // diff against MIN_MATCH.
+                            let dist = codec.decode_correction(CodecCorrection::ExplicitDistance);
+                            // Later chunks can reference beyond the first chunk's estimated window.
+                            if dist == 0 || dist > 32768 || dist > input.bytes_before() {
+                                return err_exit_code(
+                                    ExitCode::PredictionFailure,
+                                    "Invalid explicit distance",
+                                );
+                            }
+
+                            let new_len = codec
+                                .decode_correction_diff(CodecCorrection::LenCorrection, MIN_MATCH);
+                            if new_len < MIN_MATCH
+                                || new_len > MAX_MATCH
+                                || new_len > input.remaining()
+                            {
+                                return err_exit_code(
+                                    ExitCode::PredictionFailure,
+                                    "Invalid explicit length",
+                                );
+                            }
+
+                            let r = DeflateTokenReference::new(new_len, dist);
+
+                            self.commit_token(&DeflateToken::Reference(r), input);
+                            freq.commit_token(&DeflateToken::Reference(r));
+                            tokens.push(DeflateToken::Reference(r));
+                            continue;
+                        }
+                    }
                 }
                 DeflateToken::Reference(r) => {
                     let not_ok =
@@ -541,11 +591,15 @@ impl TokenPredictor {
 
     /// When the predicted token was a literal, but the actual token was a reference, try again
     /// to find a match for the reference.
+    /// Returns `Ok(None)` if the model's chain has no candidate at all at this
+    /// position. This must stay a pure function of the predictor state and the
+    /// plaintext, since both the encoder and the decoder call it and have to
+    /// reach the same Some/None outcome.
     fn repredict_reference(
         &mut self,
         _dist_match: Option<DeflateTokenReference>,
         input: &mut PreflateInput,
-    ) -> Result<DeflateTokenReference> {
+    ) -> Result<Option<DeflateTokenReference>> {
         if input.bytes_before() == 0 || input.remaining() < MIN_MATCH {
             return err_exit_code(
                 ExitCode::PredictionFailure,
@@ -567,7 +621,7 @@ impl TokenPredictor {
 
         if let MatchResult::Success(m) = match_token {
             if m.len() >= MIN_MATCH {
-                return Ok(m);
+                return Ok(Some(m));
             }
         }
 
@@ -576,14 +630,13 @@ impl TokenPredictor {
 
         if let MatchResult::Success(m) = match_token {
             if m.len() >= MIN_MATCH {
-                return Ok(m);
+                return Ok(Some(m));
             }
         }
 
-        err_exit_code(
-            ExitCode::PredictionFailure,
-            format!("Didnt find a match {:?}", match_token).as_str(),
-        )
+        // The model has nothing to hop from here. The caller falls back to
+        // coding the distance explicitly (CodecCorrection::ExplicitDistance).
+        Ok(None)
     }
 
     fn commit_token(&mut self, token: &DeflateToken, input: &mut PreflateInput) {

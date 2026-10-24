@@ -196,7 +196,7 @@ impl ProcessBuffer for PreflateContainerProcessor {
         input_complete: bool,
         writer: &mut impl Write,
     ) -> Result<()> {
-        use crate::container_common::COMPRESSED_WRAPPER_VERSION_2;
+        use crate::container_common::COMPRESSED_WRAPPER_VERSION_3;
 
         if self.input_complete && (input.len() > 0 || !input_complete) {
             return Err(PreflateError::new(
@@ -230,7 +230,7 @@ impl ProcessBuffer for PreflateContainerProcessor {
 
             match &mut self.state {
                 ChunkParseState::Start => {
-                    writer.write_all(&[COMPRESSED_WRAPPER_VERSION_2])?;
+                    writer.write_all(&[COMPRESSED_WRAPPER_VERSION_3])?;
                     self.state = ChunkParseState::Searching(None);
                 }
                 ChunkParseState::Searching(prev_ihdr) => {
