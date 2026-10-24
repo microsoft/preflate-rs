@@ -11,7 +11,8 @@ rust-version.workspace = true
 debug = true
 
 [workspace]
-members = ["preflate", "container", "dll", "util"]
+members = ["cabac", "preflate", "container", "dll", "util"]
+exclude = ["fuzz"]
 resolver = "2"
 
 [workspace.package]
@@ -22,10 +23,36 @@ license = "Apache-2.0"
 rust-version = "1.89"
 repository = "https://github.com/microsoft/preflate-rs"
 
-[dev-dependencies]
-preflate-rs = { path = "preflate" }
-preflate-container = { path = "container" }
-libz-sys = "1.1"
+[workspace.dependencies]
+adler32 = "1.2.0"
+bitcode = "0.6.3"
+bytemuck = "1.11"
+byteorder = "1.4"
+cabac = { path = "cabac" }
+clap = "4"
+cpu-time = "1"
+crc32fast = "1.3"
+criterion = "0.5"
+default-boxed = "0.2"
+deranged = "0.5"
+env_logger = "0.11"
+lepton_jpeg = "0.5.1"
 libdeflate-sys = "1.19"
 libz-ng-sys = "1.1.12"
+libz-sys = "1.1"
+log = "0.4"
 miniz_oxide = "0.9"
+preflate-container = { path = "container" }
+preflate-rs = { path = "preflate" }
+rand = "0.8"
+webp = "0.3"
+wide = "0.7"
+zstd = "0.13.0"
+
+[dev-dependencies]
+preflate-rs.workspace = true
+preflate-container.workspace = true
+libz-sys.workspace = true
+libdeflate-sys.workspace = true
+libz-ng-sys.workspace = true
+miniz_oxide.workspace = true

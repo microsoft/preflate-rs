@@ -1,6 +1,6 @@
 #![no_main]
 
-use preflate_rs::{preflate_whole_deflate_stream, recreate_whole_deflate_stream, PreflateConfig};
+use preflate_rs::{PreflateConfig, preflate_whole_deflate_stream, recreate_whole_deflate_stream};
 
 use libfuzzer_sys::fuzz_target;
 

@@ -18,15 +18,15 @@ keywords = ["gzip", "deflate", "zlib", "zip", "png"]
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-byteorder = "1.4"
-cabac = "0.15.0"
-default-boxed = "0.2"
-bitcode = "0.6.3"
-deranged = "0.5"
+byteorder.workspace = true
+cabac.workspace = true
+default-boxed.workspace = true
+bitcode.workspace = true
+deranged.workspace = true
 
 [dev-dependencies]
-env_logger = "0.11"
-crc32fast = "1.3"
+env_logger.workspace = true
+crc32fast.workspace = true
 
 [lib]
 name = "preflate_rs"

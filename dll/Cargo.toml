@@ -11,8 +11,8 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-preflate-rs = { path = "../preflate" }
-preflate-container = { path = "../container" }
+preflate-rs.workspace = true
+preflate-container.workspace = true
 
 [lib]
 crate-type = ["cdylib"]

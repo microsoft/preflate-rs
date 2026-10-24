@@ -2,13 +2,18 @@
 
 libfuzzer harnesses for the preflate-rs workspace.
 
-These targets feed arbitrary bytes into the core and container APIs to find crashes, panics, or round-trip failures. Fuzzing requires nightly Rust.
+These targets feed arbitrary bytes into the core and container APIs to find crashes, panics, or round-trip failures. Fuzzing requires nightly Rust and `cargo-fuzz`.
+
+This package uses Edition 2024 and is intentionally excluded from the main
+workspace. Its dependencies and lockfile are maintained separately; the core
+and container libraries are referenced by local paths.
 
 ## Targets
 
 ### `fuzz_target_1` — core round-trip
 
-Feeds arbitrary bytes to `preflate_whole_deflate_stream` as a raw DEFLATE stream. If analysis succeeds, the result is immediately fed to `recreate_whole_deflate_stream` and the output must match the input exactly.
+Feeds arbitrary bytes to `preflate_whole_deflate_stream` as a raw DEFLATE stream.
+If analysis succeeds, reconstruction must also succeed without a panic.
 
 ```rust
 fuzz_target!(|data: &[u8]| {
