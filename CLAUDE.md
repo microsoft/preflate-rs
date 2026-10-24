@@ -37,6 +37,7 @@ The release build uses Spectre mitigations (`/Qspectre /sdl`) and produces `pref
 
 | Crate | Output | Role |
 |---|---|---|
+| `cabac/` | library + test/benchmark tools | Local arithmetic coding library, including its integration tests |
 | `preflate/` | library | Core DEFLATE analysis and reconstruction |
 | `container/` | library | Scans binary files (ZIP, PNG, JPEG) for DEFLATE streams |
 | `util/` | `preflate_util.exe` | CLI for testing on files/directories |

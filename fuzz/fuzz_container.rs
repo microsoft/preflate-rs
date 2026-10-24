@@ -1,7 +1,7 @@
 #![no_main]
 
 use preflate_container::{
-    preflate_whole_into_container, recreate_whole_from_container, PreflateContainerConfig,
+    PreflateContainerConfig, preflate_whole_into_container, recreate_whole_from_container,
 };
 use std::io::Cursor;
 

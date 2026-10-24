@@ -1,0 +1,33 @@
+[package]
+name = "cabac"
+version = "0.16.0"
+edition.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+
+description = "Context-adaptive binary arithmetic coding library"
+readme = "README.md"
+repository.workspace = true
+license = "Apache-2.0"
+categories = ["compression", "multimedia::encoding"]
+keywords = ["cabac", "arithmetic-coding", "lossless", "compression"]
+
+[dependencies]
+byteorder.workspace = true
+bytemuck.workspace = true
+wide = { workspace = true, optional = true }
+
+[dev-dependencies]
+criterion.workspace = true
+rand.workspace = true
+
+[lib]
+
+[[bench]]
+name = "benches"
+harness = false
+
+[features]
+# simd is still slower than non-simd... work in progress
+default = []
+simd = ["dep:wide"]

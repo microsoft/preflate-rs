@@ -25,6 +25,6 @@ cargo +nightly fuzz run fuzz_container
 
 ## Notes
 
-- Edition 2021 (older than the main workspace crates which use 2024).
+- Edition 2024, matching the main workspace; kept as a standalone package outside its members.
 - `libfuzzer-sys` (0.4) provides the fuzzing harness glue.
 - Corpus and artifacts are stored under `fuzz/corpus/` and `fuzz/artifacts/` (gitignored).

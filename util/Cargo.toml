@@ -7,12 +7,12 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-preflate-rs = { path = "../preflate" }
-preflate-container = { path = "../container" }
-env_logger = "0.11"
-log = "0.4"
-clap ={ version = "4", features = ["derive"]}
-cpu-time = "1"
+preflate-rs.workspace = true
+preflate-container.workspace = true
+env_logger.workspace = true
+log.workspace = true
+clap = { workspace = true, features = ["derive"] }
+cpu-time.workspace = true
 
 [[bin]]
 name = "preflate_util"

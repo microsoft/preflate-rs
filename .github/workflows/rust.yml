@@ -27,5 +27,9 @@ jobs:
       run: cargo build --verbose --locked --all
     - name: Run tests
       run: cargo test --verbose --all
+    - name: Test CABAC SIMD feature
+      run: cargo test --locked --package cabac --all-features
+    - name: Check CABAC benchmarks
+      run: cargo check --locked --package cabac --benches --all-features
     - name: Build release
       run: cargo build --verbose --locked --release --all

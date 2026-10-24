@@ -9,6 +9,14 @@ target/
 # MSVC Windows builds of rustc generate these, which store debugging information
 *.pdb
 
+# Generated Python files
+__pycache__/
+*.pyc
+
+# Generated fuzzing data and corpus-generator environment
+/corpus/
+/fuzz/.venv-gen-corpus/
+
 # Local Claude Code settings (machine-specific)
 .claude/
 

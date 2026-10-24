@@ -66,11 +66,18 @@ The table below shows overhead (corrections size as a percentage of uncompressed
 
 | Crate | Output | Description |
 |---|---|---|
+| [`cabac/`](cabac/) | library + test/benchmark tools | Context-adaptive binary arithmetic codecs built locally with preflate |
 | [`preflate/`](preflate/) | library | Core DEFLATE analysis and reconstruction engine |
 | [`container/`](container/) | library | Scans binary files (ZIP, PNG, JPEG) for DEFLATE streams and orchestrates the Zstd pipeline |
 | [`util/`](util/) | `preflate_util.exe` | CLI tool for testing and benchmarking |
 | [`dll/`](dll/) | `preflate_rs_0_7.dll` | C FFI wrapper for .NET interop |
 | [`fuzz/`](fuzz/) | fuzz harnesses | libfuzzer targets for the core and container APIs |
+
+Workspace dependency versions and local crate paths are defined once in the root
+[`Cargo.toml`](Cargo.toml) under `[workspace.dependencies]`. Member crates inherit
+them with `workspace = true`, keeping optional dependencies and feature selections
+in their own manifests. The fuzz package remains standalone and uses explicit
+path dependencies on the workspace libraries.
 
 ---
 
