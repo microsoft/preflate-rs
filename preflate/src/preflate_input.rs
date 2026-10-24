@@ -185,6 +185,11 @@ impl<'a> PreflateInput<'a> {
     pub fn remaining(&self) -> u32 {
         (self.data.data.len() as i32 - self.pos) as u32
     }
+
+    #[inline(always)]
+    pub fn bytes_before(&self) -> u32 {
+        self.pos as u32
+    }
 }
 
 #[test]

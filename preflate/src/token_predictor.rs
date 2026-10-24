@@ -424,7 +424,7 @@ impl TokenPredictor {
                             // diff against MIN_MATCH.
                             let dist = codec.decode_correction(CodecCorrection::ExplicitDistance);
                             // Later chunks can reference beyond the first chunk's estimated window.
-                            if dist == 0 || dist > 32768 || dist > input.pos() {
+                            if dist == 0 || dist > 32768 || dist > input.bytes_before() {
                                 return err_exit_code(
                                     ExitCode::PredictionFailure,
                                     "Invalid explicit distance",
@@ -521,7 +521,7 @@ impl TokenPredictor {
 
     #[inline(always)]
     fn predict_token(&mut self, input: &PreflateInput) -> DeflateToken {
-        if input.pos() == 0
+        if input.bytes_before() == 0
             || input.remaining() < MIN_MATCH
             || (self.params.add_policy == DictionaryAddPolicy::AddFirstExcept4kBoundary
                 && cross_4k_boundary(input.pos()))
@@ -600,7 +600,7 @@ impl TokenPredictor {
         _dist_match: Option<DeflateTokenReference>,
         input: &mut PreflateInput,
     ) -> Result<Option<DeflateTokenReference>> {
-        if input.pos() == 0 || input.remaining() < MIN_MATCH {
+        if input.bytes_before() == 0 || input.remaining() < MIN_MATCH {
             return err_exit_code(
                 ExitCode::PredictionFailure,
                 "Not enough space left to find a reference",
