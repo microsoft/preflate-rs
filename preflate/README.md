@@ -40,8 +40,12 @@ let (result, plain_text) = preflate_whole_deflate_stream(&compressed_data, &conf
 // Reconstruction: plaintext + corrections → original DEFLATE
 let recreated = recreate_whole_deflate_stream(plain_text.text(), &result.corrections)?;
 
-assert_eq!(compressed_data, recreated);
+assert_eq!(&compressed_data[..result.compressed_size], recreated.as_slice());
 ```
+
+This helper performs one analysis call. Check `result.compressed_size`: the
+plaintext limit or block boundaries can leave an unconsumed suffix. Use the
+streaming processors to handle subsequent chunks.
 
 ### Streaming (chunked)
 
@@ -49,17 +53,30 @@ For large streams where memory is a concern, use the streaming processors:
 
 ```rust
 use preflate_rs::{PreflateStreamProcessor, RecreateStreamProcessor, PreflateConfig};
+use std::io::Cursor;
+
+let config = PreflateConfig::default();
+// Keep both processors alive across chunks; one successful chunk is shown.
+let mut processor = PreflateStreamProcessor::new(&config);
+let mut recreator = RecreateStreamProcessor::new();
 
 // Analysis
-let mut processor = PreflateStreamProcessor::new(&config);
 let chunk_result = processor.decompress(&compressed_chunk)?;
-// chunk_result.corrections contains the encoded corrections for this chunk
-// processor.plain_text() gives access to the decompressed data
+let plain_text = processor.plain_text().text().to_vec();
+processor.shrink_to_dictionary();
 
 // Reconstruction
-let mut recreator = RecreateStreamProcessor::new();
-let (deflate_output, _blocks) = recreator.recompress(&mut plain_text_reader, &corrections)?;
+let (deflate_output, _blocks) = recreator.recompress(
+    &mut Cursor::new(plain_text),
+    &chunk_result.corrections,
+)?;
 ```
+
+Advance the compressed input by `chunk_result.compressed_size`, not by the size
+of the supplied slice. Retain any unconsumed suffix; a `ShortRead` means more
+compressed input is needed. Copy or consume the current plaintext before
+shrinking it to dictionary history. Feed each plaintext/corrections pair to
+the same recreator in order, and use `processor.is_done()` to detect completion.
 
 ## Configuration
 
@@ -70,7 +87,7 @@ pub struct PreflateConfig {
     /// of analysis time. Default: 4096.
     pub max_chain_length: u32,
 
-    /// Maximum plaintext held in memory at once. Default: 128 MB.
+    /// Plaintext processing limit per chunk. Default: 128 MiB.
     pub plain_text_limit: usize,
 
     /// Verify round-trip correctness after analysis. Default: true.
@@ -90,7 +107,9 @@ The estimator detects the following DEFLATE implementations by their token patte
 | miniz / miniz_oxide | Fastest-mode hash function |
 | Windows zlib | Built-in PNG/ZIP codec fingerprint |
 
-Unknown compressors still round-trip correctly with higher corrections overhead.
+Unknown compressors can require more corrections or fail analysis when the
+predictor cannot model them. Successful analysis is verified by default;
+disabling verification requires an equivalent caller-side round-trip check.
 
 ## Key Types
 
@@ -104,7 +123,10 @@ Unknown compressors still round-trip correctly with higher corrections overhead.
 
 ## Encoding Format
 
-Parameters are serialized with [`bitcode`](https://crates.io/crates/bitcode). Corrections use CABAC (Context Adaptive Binary Arithmetic Coding), the same codec used in [Lepton JPEG](https://github.com/microsoft/lepton_jpeg_rust) compression. The format is chunked so memory use is bounded regardless of input size.
+Parameters are serialized with [`bitcode`](https://crates.io/crates/bitcode).
+Corrections use the local [`cabac`](../cabac/README.md) crate's VP8 arithmetic
+coder, also used in [Lepton JPEG](https://github.com/microsoft/lepton_jpeg_rust)
+compression. The format supports processing plaintext in chunks.
 
 The following differences from the predicted stream are encoded:
 

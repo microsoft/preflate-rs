@@ -17,6 +17,9 @@ cargo run --release -p cabac -- vp8
 
 The optional `simd` feature remains disabled by default.
 
+The profiling binary accepts `vp8`, `rans`, `fpaq`, or `all` to select its
+repeated encode/decode workload; it is not a file compressor.
+
 ## Licensing
 
 CABAC code authored by Kristof Roomp is licensed under Apache-2.0 as part of this
@@ -35,22 +38,25 @@ to binary form, and each bit is assigned a corresponding bin (which gets its own
 Bits that are expected to be random can use the "bypass" mode, which are very efficiently
 added to the bitstream without a context.
 
-In order to decode the bistream, the same contexts need to be used in the exact same sequence
-or you will get back garbage. This also include any bypass bits that must also be read in the
+In order to decode the bitstream, the same contexts need to be used in the exact same sequence
+or you will get back garbage. This also includes any bypass bits that must also be read in the
 same exact order.
 
 There are three encoder families included:
 - VP8 CABAC which uses a 16-bit state to track what it has seen.
 - rANS encoder (based on ryg_rans and dropbox/lepton) that uses the VP8 state to track probability
-- Fpaq0 arithmetic encoder which has some nice properties since it is fast, carryless and can be run in parallel similar to the rANS. The parallel mode allows for interleving of arbitary bitstreams as long as the bitstreams are written in the same order as the bits are encoded.
+- Fpaq0 arithmetic encoder which has some nice properties since it is fast, carryless and can be run in parallel similar to the rANS. The parallel mode allows for interleaving of arbitrary bitstreams as long as the bitstreams are written in the same order as the bits are encoded.
 
 Performance notes:
 - Criterion bench tests included
 - No unsafe code
-- rANS has not yet been significantly optimized although it outperforms the other encoders, encoding uses division although it could use an inverse multiple and decoding is done one value at a time, although it could be done in parallel.
-- Fpaq0 has a parallel SIMD version using the wide crate, but it is not yet faster than the non-SIMD version. It is feature config off by default. The Fpaq0 parallel version requires the parallel streams to be somewhat balanced, otherwise encoding performance may suffer. Decoding performance is not affected.
+- The optional `wide`-based SIMD implementation is available for parallel Fpaq0 decoding.
+- Relative throughput depends on the workload and target CPU; use the benchmarks
+  above rather than assuming that SIMD or any particular encoder is faster.
 
-Here is the relative performance (in microseconds, lower is better) for encoding, decoding as measured on Intel i9-12900K (compiled with -Ctarget-cpu=native):
+These historical upstream measurements (microseconds, lower is better) used an
+Intel i9-12900K compiled with `-Ctarget-cpu=native`; they have not been remeasured
+for this workspace:
 
 | Encoder       | Read | Read bypass | Write |
 | ------------- | ---- | ----------- | ----- |

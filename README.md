@@ -45,13 +45,16 @@ The library detects and models the following DEFLATE implementations:
 | [miniz / miniz_oxide](https://github.com/richgel999/miniz) | Fastest mode uses distinct hash function |
 | Windows zlib | Built-in PNG codec and shell ZIP compression |
 
-Unrecognized compressors still round-trip correctly — the corrections overhead is simply higher.
+Unrecognized compressors may be representable with more corrections, but some
+streams cannot be modeled and analysis returns an error. Keep round-trip
+verification enabled unless the caller performs an equivalent check.
 
 ---
 
 ## Reconstruction Overhead
 
 The table below shows overhead (corrections size as a percentage of uncompressed data) for each supported compressor at each compression level. To benefit from re-compression, your target algorithm needs to beat the original by at least this margin.
+These are fixture-specific measurements, not guarantees for arbitrary inputs.
 
 | Compressor         | 0      | 1      | 2      | 3      | 4      | 5      | 6      | 7      | 8      | 9     |
 |--------------------|--------|--------|--------|--------|--------|--------|--------|--------|--------|-------|
@@ -118,7 +121,8 @@ For direct use of the core DEFLATE analysis API, see the [`preflate` crate](pref
 
 - **Safe core** — the core codecs and container pipeline forbid unsafe code;
   the C ABI boundary is isolated in the [DLL crate](dll/README.md#safety).
-- **Chunked processing** — memory use is bounded regardless of input size.
+- **Chunked processing** — streaming processors limit working plaintext in chunks;
+  whole-file convenience APIs and caller-owned buffers may still hold an entire file.
 - **Format versioning** — the DLL name encodes the format version (`preflate_rs_0_7.dll`) so old decoders can coexist with new ones during upgrades.
 - **CABAC coding** — the corrections codec is shared with the [Lepton](https://github.com/microsoft/lepton_jpeg_rust) JPEG re-compression library.
 - Parameters are serialized via [`bitcode`](https://crates.io/crates/bitcode); corrections via CABAC.
@@ -154,6 +158,18 @@ Repository-wide agent guidance lives in
 [`.github/copilot-instructions.md`](.github/copilot-instructions.md).
 Keep architecture, APIs, commands, and format details in these READMEs rather than
 duplicating them in agent instructions.
+
+### Publishing
+
+CABAC is a local workspace dependency with an independently maintained package
+version. See its [manifest](cabac/Cargo.toml) rather than deriving its version
+from the root package version.
+
+The [publish workflow](.github/workflows/publish.yml) targets `preflate-rs`, not
+CABAC. Before publishing preflate with the imported codec, publish the intended
+CABAC version and add a matching registry version requirement alongside its path
+in `[workspace.dependencies]`. A path-only dependency is valid for local builds
+but cannot be used when publishing preflate to crates.io.
 
 * [Submit bugs and feature requests](https://github.com/microsoft/preflate-rs/issues)
 * [Review or submit pull requests](https://github.com/microsoft/preflate-rs/pulls)

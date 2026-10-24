@@ -7,10 +7,10 @@ Given a file or directory, `preflate_util` compresses each file using the prefla
 ## Usage
 
 ```shell
-preflate_util [OPTIONS] <PATH>
+preflate_util [OPTIONS] <INPUT>
 ```
 
-`PATH` can be a single file or a directory. Directories are scanned recursively.
+`INPUT` can be a single file or a directory. Directories are scanned recursively.
 
 ### Options
 
@@ -19,22 +19,28 @@ preflate_util [OPTIONS] <PATH>
 | `--max-chain <N>` | 4096 | Hash chain depth limit for the DEFLATE predictor |
 | `-c, --level <N>` | 9 | Zstd compression level (0–14) |
 | `--loglevel <L>` | Error | Log verbosity (`Error`, `Warn`, `Info`, `Debug`, `Trace`) |
-| `--verify <bool>` | true | Round-trip decompress and verify each file after compression |
-| `--baseline <bool>` | false | Also measure raw Zstd-only size for comparison |
+| `--verify` | true | Round-trip decompress and verify each file after compression |
+| `--baseline` | false | Also measure raw Zstd-only size for comparison |
+
+`--verify` and `--baseline` are flags, not options accepting `true` or `false`.
+The current parser enables verification by default and provides no disabling
+flag. Use `preflate_util --help` for the accepted syntax.
 
 ### Output
 
 For each file, a line is printed showing:
 - Input file path
-- Original size, compressed size, and ratio
-- Detected compressor (hash algorithm)
-- CPU time for compression
+- Compression ratio and CPU time
+- Running compressed, baseline, and original byte totals
+- Decompression CPU time when verification succeeds
 
-A summary line at the end shows aggregate totals across all processed files.
+The running totals are printed after each successfully compressed file.
 
-If `--baseline true` is set, a second column shows what raw Zstd (without preflate) would produce, so you can see the benefit of DEFLATE-aware re-compression.
+If `--baseline` is set, the totals include raw Zstd compression for comparison.
 
-If verification fails (reconstructed output does not match original), the tool prints the first differing byte position and exits with an error.
+A byte mismatch causes an assertion failure with positional diagnostics.
+Compression or reconstruction errors are printed and processing continues with
+the next file.
 
 ## Implementation
 
@@ -56,5 +62,5 @@ cargo build --release -p preflate_util
 preflate_util archive.zip
 
 # Benchmark a directory with verbose logging and baseline comparison
-preflate_util --loglevel Info --baseline true ./test-corpus/
+preflate_util --loglevel Info --baseline ./test-corpus/
 ```

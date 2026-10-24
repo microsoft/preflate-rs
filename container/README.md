@@ -12,7 +12,7 @@ This crate handles real-world binary files that contain embedded DEFLATE streams
 - Optionally re-encodes PNG images as lossless WebP for additional savings
 - JPEG files are re-compressed using [Lepton](https://github.com/microsoft/lepton_jpeg_rust)
 - Non-DEFLATE bytes are passed through as literal blocks
-- Streaming API with bounded memory use regardless of input size
+- Streaming API with configurable input and plaintext processing thresholds
 - Single persistent Zstd encoder for cross-block compression quality
 
 ## API
@@ -33,6 +33,9 @@ preflate_whole_into_container(&config, &mut input_reader, &mut output_writer)?;
 recreate_whole_from_container(&mut container_reader, &mut output_writer)?;
 ```
 
+These convenience helpers read their entire input into memory. Use the
+streaming processors below when the caller needs incremental input handling.
+
 ### Streaming
 
 Both processors implement the `ProcessBuffer` trait for incremental use:
@@ -46,9 +49,14 @@ compressor.process_buffer(&input_chunk, input_complete, &mut output)?;
 let stats = compressor.stats();
 
 // Decompression
-let mut decompressor = RecreateContainerProcessor::new(0);
+let mut decompressor = RecreateContainerProcessor::new(128 * 1024 * 1024);
 decompressor.process_buffer(&container_chunk, input_complete, &mut output)?;
 ```
+
+The decoder's capacity must be nonzero. It controls the maximum input bytes
+appended per processing iteration, not a total output size limit.
+Once `input_complete` is true, subsequent calls must contain no new input and
+must keep it true.
 
 ### DLL / fixed-size output buffer
 
@@ -72,17 +80,18 @@ let (done, written) = process_limited_buffer(
 
 ```rust
 pub struct PreflateContainerConfig {
-    /// Minimum input buffer size before scanning begins. Default: 1 MB.
+    /// Minimum input buffer size before scanning begins. Default: 1 MiB.
     pub min_chunk_size: usize,
 
-    /// Maximum DEFLATE stream size to process. Larger streams are passed through
-    /// as literals. Default: 64 MB.
+    /// Buffered-input threshold for waiting on incomplete candidates.
+    /// Beyond it, incomplete candidates fall back to literals. Default: 64 MiB.
     pub max_chunk_size: usize,
 
-    /// Global cap on total plaintext held in memory. Default: 512 MB.
+    /// Cumulative plaintext processing budget per container. Default: 512 MiB.
+    /// Once exceeded, further candidates are not expanded.
     pub total_plain_text_limit: u64,
 
-    /// Per-chunk plaintext memory limit. Default: 128 MB.
+    /// Per-chunk plaintext processing limit. Default: 128 MiB.
     pub chunk_plain_text_limit: usize,
 
     /// Verify round-trip correctness after each stream. Default: true.
@@ -99,14 +108,17 @@ After compression, `stats()` returns a `PreflateStats` struct:
 
 ```rust
 pub struct PreflateStats {
-    pub deflate_compressed_size: u64,  // Original DEFLATE bytes
-    pub zstd_compressed_size: u64,     // Final container size
-    pub uncompressed_size: u64,        // Total plaintext bytes
-    pub overhead_bytes: u64,           // Corrections blob size
-    pub hash_algorithm: HashAlgorithm, // Detected compressor family
+    pub deflate_compressed_size: u64,  // Total original input bytes
+    pub zstd_compressed_size: u64,     // Encoded payload bytes, excluding outer framing
+    pub uncompressed_size: u64,        // Expanded bytes counted for recognized streams
+    pub overhead_bytes: u64,           // Accumulated corrections bytes
+    pub hash_algorithm: HashAlgorithm, // Most recently recorded compressor family
     pub zstd_baseline_size: u64,       // Raw Zstd-only size (if measured)
 }
 ```
+
+Use the actual output length for the complete container size; the payload
+counter does not include all framing bytes.
 
 ## Container Format
 

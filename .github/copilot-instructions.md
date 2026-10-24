@@ -25,5 +25,7 @@ format details. Read the relevant guide before changing a component:
   use the integration tests when codec or container behavior changes.
 - Keep documentation synchronized with code. Update the appropriate README
   rather than copying reference material into these instructions.
+- Check examples against current exported signatures, CLI `--help`, manifests,
+  and feature flags; do not infer behavior from stale comments or other branches.
 - Keep committed instructions and documentation applicable to all contributors:
   no machine-specific paths, personal preferences, or local environment settings.
