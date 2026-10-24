@@ -526,6 +526,69 @@ fn verify_roundtrip_adobe_tail3() {
 }
 
 #[cfg(test)]
+#[test]
+fn verify_roundtrip_explicit_distance_after_stored_chunk() {
+    use crate::deflate::deflate_token::{
+        DeflateHuffmanType, DeflateToken, DeflateTokenBlockType, DeflateTokenReference,
+    };
+
+    for dist in [600, 32768] {
+        let mut writer = DeflateWriter::new();
+        writer
+            .encode_block(&DeflateTokenBlock {
+                last: false,
+                block_type: DeflateTokenBlockType::Stored {
+                    uncompressed: vec![b'a'; dist as usize],
+                },
+            })
+            .unwrap();
+        let first = writer.detach_output();
+        writer
+            .encode_block(&DeflateTokenBlock {
+                last: true,
+                block_type: DeflateTokenBlockType::Huffman {
+                    tokens: vec![DeflateToken::Reference(DeflateTokenReference::new(3, dist))],
+                    huffman_type: DeflateHuffmanType::Static,
+                },
+            })
+            .unwrap();
+        writer.flush();
+        let second = writer.detach_output();
+        let original = [first.as_slice(), second.as_slice()].concat();
+
+        for verify_compression in [false, true] {
+            let mut encoder = PreflateStreamProcessor::new(&PreflateConfig {
+                verify_compression,
+                ..Default::default()
+            });
+            let r1 = encoder.decompress(&first).unwrap();
+            assert_eq!(r1.compressed_size, first.len());
+            assert_eq!(r1.parameters.unwrap().window_bits, 0);
+            assert!(!encoder.is_done());
+            let p1 = encoder.plain_text().text().to_vec();
+            encoder.shrink_to_dictionary();
+
+            let r2 = encoder.decompress(&second).unwrap();
+            assert_eq!(r2.compressed_size, second.len());
+            assert!(encoder.is_done());
+
+            let mut decoder = RecreateStreamProcessor::new();
+            let (mut reconstructed, _) = decoder
+                .recompress(&mut Cursor::new(p1), &r1.corrections)
+                .unwrap();
+            let (tail, _) = decoder
+                .recompress(
+                    &mut Cursor::new(encoder.plain_text().text()),
+                    &r2.corrections,
+                )
+                .unwrap();
+            reconstructed.extend_from_slice(&tail);
+            assert_eq!(reconstructed, original);
+        }
+    }
+}
+
+#[cfg(test)]
 fn verify_file(filename: &str) {
     use crate::utils::read_file;
     let v = read_file(filename);

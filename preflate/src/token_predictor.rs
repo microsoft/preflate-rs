@@ -423,10 +423,8 @@ impl TokenPredictor {
                             // distance was written out explicitly and the length as a
                             // diff against MIN_MATCH.
                             let dist = codec.decode_correction(CodecCorrection::ExplicitDistance);
-                            if dist == 0
-                                || dist > (1 << self.params.window_bits)
-                                || dist > input.pos()
-                            {
+                            // Later chunks can reference beyond the first chunk's estimated window.
+                            if dist == 0 || dist > 32768 || dist > input.pos() {
                                 return err_exit_code(
                                     ExitCode::PredictionFailure,
                                     "Invalid explicit distance",

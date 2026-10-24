@@ -63,7 +63,7 @@ impl PreflateContainerConfig {
     }
 }
 
-pub(crate) const COMPRESSED_WRAPPER_VERSION_2: u8 = 2;
+pub(crate) const COMPRESSED_WRAPPER_VERSION_3: u8 = 3;
 
 // Bit-field masks for the block type byte
 // Bits 7-6: compression algorithm  Bits 5-0: block content kind
@@ -244,7 +244,7 @@ pub(crate) mod test {
     use crate::container_common::{
         BLOCK_COMPRESSION_MASK, BLOCK_COMPRESSION_NONE, BLOCK_COMPRESSION_ZSTD, BLOCK_TYPE_DEFLATE,
         BLOCK_TYPE_DEFLATE_CONTINUE, BLOCK_TYPE_JPEG_LEPTON, BLOCK_TYPE_LITERAL, BLOCK_TYPE_MASK,
-        BLOCK_TYPE_PNG, BLOCK_TYPE_WEBP, COMPRESSED_WRAPPER_VERSION_2, PreflateContainerConfig,
+        BLOCK_TYPE_PNG, BLOCK_TYPE_WEBP, COMPRESSED_WRAPPER_VERSION_3, PreflateContainerConfig,
         ProcessBuffer, read_varint,
     };
     use crate::container_read::RecreateContainerProcessor;
@@ -382,13 +382,13 @@ pub(crate) mod test {
 
     // ── Block type bit-field tests ───────────────────────────────────────────────
 
-    /// Parse the outer framing of a v2 container and return each block's
+    /// Parse the outer framing of a v3 container and return each block's
     /// (compression_bits, block_type_bits) in order, stopping at the 0xFF CRC end block.
     fn parse_wire_block_types(data: &[u8]) -> Vec<(u8, u8)> {
         use byteorder::ReadBytesExt;
         let mut cursor = std::io::Cursor::new(data);
         let version = cursor.read_u8().unwrap();
-        assert_eq!(version, COMPRESSED_WRAPPER_VERSION_2);
+        assert_eq!(version, COMPRESSED_WRAPPER_VERSION_3);
         let mut blocks = Vec::new();
         while (cursor.position() as usize) < data.len() {
             let type_byte = cursor.read_u8().unwrap();
@@ -469,11 +469,18 @@ pub(crate) mod test {
         assert_eq!(BLOCK_COMPRESSION_NONE | BLOCK_TYPE_WEBP, 0x05);
     }
 
+    #[test]
+    fn test_decoder_rejects_previous_format_versions() {
+        for version in [1, 2] {
+            assert_decoder_fails(&[version], preflate_rs::ExitCode::InvalidCompressedWrapper);
+        }
+    }
+
     /// Reserved compression bits 0x80 (10xx_xxxx) must be rejected by the decoder.
     #[test]
     fn test_decoder_rejects_reserved_compression_bits_10() {
         assert_decoder_fails(
-            &[COMPRESSED_WRAPPER_VERSION_2, 0x80],
+            &[COMPRESSED_WRAPPER_VERSION_3, 0x80],
             preflate_rs::ExitCode::InvalidCompressedWrapper,
         );
     }
@@ -482,7 +489,7 @@ pub(crate) mod test {
     #[test]
     fn test_decoder_rejects_reserved_compression_bits_11() {
         assert_decoder_fails(
-            &[COMPRESSED_WRAPPER_VERSION_2, 0xC0],
+            &[COMPRESSED_WRAPPER_VERSION_3, 0xC0],
             preflate_rs::ExitCode::InvalidCompressedWrapper,
         );
     }
@@ -493,7 +500,7 @@ pub(crate) mod test {
     fn test_decoder_rejects_raw_literal_block_type() {
         let byte = BLOCK_COMPRESSION_NONE | BLOCK_TYPE_LITERAL; // == 0x00
         assert_decoder_fails(
-            &[COMPRESSED_WRAPPER_VERSION_2, byte],
+            &[COMPRESSED_WRAPPER_VERSION_3, byte],
             preflate_rs::ExitCode::InvalidCompressedWrapper,
         );
     }
@@ -504,7 +511,7 @@ pub(crate) mod test {
         // 0x10 is arbitrary: not 0x04 (JPEG) or 0x05 (WEBP)
         let byte = BLOCK_COMPRESSION_NONE | 0x10;
         assert_decoder_fails(
-            &[COMPRESSED_WRAPPER_VERSION_2, byte],
+            &[COMPRESSED_WRAPPER_VERSION_3, byte],
             preflate_rs::ExitCode::InvalidCompressedWrapper,
         );
     }
@@ -517,6 +524,7 @@ pub(crate) mod test {
         let mut ctx =
             PreflateContainerProcessor::new(&PreflateContainerConfig::default(), 1, false);
         let compressed = ctx.process_vec(&input).unwrap();
+        assert_eq!(compressed[0], 3);
 
         let blocks = parse_wire_block_types(&compressed);
         assert!(

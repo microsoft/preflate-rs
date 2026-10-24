@@ -11,7 +11,7 @@ use crate::{
     container_common::{
         BLOCK_COMPRESSION_MASK, BLOCK_COMPRESSION_NONE, BLOCK_COMPRESSION_ZSTD, BLOCK_TYPE_DEFLATE,
         BLOCK_TYPE_DEFLATE_CONTINUE, BLOCK_TYPE_JPEG_LEPTON, BLOCK_TYPE_LITERAL, BLOCK_TYPE_MASK,
-        BLOCK_TYPE_PNG, BLOCK_TYPE_WEBP, COMPRESSED_WRAPPER_VERSION_2, ProcessBuffer, read_varint,
+        BLOCK_TYPE_PNG, BLOCK_TYPE_WEBP, COMPRESSED_WRAPPER_VERSION_3, ProcessBuffer, read_varint,
     },
     idat_parse::{IdatContents, recreate_idat},
     scoped_read::ScopedRead,
@@ -183,7 +183,7 @@ impl RecreateContainerProcessor {
                     let version = self.input.read_u8()?;
 
                     match version {
-                        COMPRESSED_WRAPPER_VERSION_2 => {
+                        COMPRESSED_WRAPPER_VERSION_3 => {
                             self.state = DecompressionState::StartSegment;
                         }
                         _ => {
