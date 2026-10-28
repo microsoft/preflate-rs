@@ -4,7 +4,7 @@
  *  This software incorporates material from third parties. See NOTICE.txt for details.
  *--------------------------------------------------------------------------------------------*/
 
-use cabac::{CabacReader, CabacWriter};
+use crate::cabac::{CabacReader, CabacWriter};
 
 use crate::{
     bit_helper::bit_length,
@@ -286,8 +286,8 @@ impl<R: CabacReader<CTX>, CTX: Default> PredictionDecoder for PredictionDecoderC
 
 #[test]
 fn roundtree_cabac_decoding() {
+    use crate::cabac::vp8::{VP8Reader, VP8Writer};
     use crate::statistical_codec::{CodecAction, drive_encoder, verify_decoder};
-    use cabac::vp8::{VP8Reader, VP8Writer};
     use std::io::Cursor;
 
     let mut buffer = Vec::new();
@@ -319,7 +319,7 @@ enum Operation {
 #[test]
 fn roundtree_cabac_correction() {
     // use the debug version of the cabac writer/reader to make sure that the we don't mix up contexts anywhere
-    use cabac::debug::{DebugReader, DebugWriter};
+    use crate::cabac::debug::{DebugReader, DebugWriter};
     use std::io::Cursor;
 
     // generate a random set of operations
@@ -374,7 +374,7 @@ fn roundtree_cabac_correction() {
 
 #[test]
 fn roundtrip_cabac_write_value() {
-    use cabac::vp8::{VP8Context, VP8Reader, VP8Writer};
+    use crate::cabac::vp8::{VP8Context, VP8Reader, VP8Writer};
     use std::io::Cursor;
 
     let mut buffer = Vec::new();
