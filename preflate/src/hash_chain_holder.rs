@@ -213,6 +213,10 @@ impl<H: HashChain + 'static> HashChainHolder for HashChainHolderImpl<H> {
             return err_exit_code(ExitCode::InvalidDeflate, "max_len < target_reference.len()");
         }
 
+        if max_len < H::min_lookup_bytes() as u32 {
+            return err_exit_code(ExitCode::MatchNotFound, "too few bytes left to hash");
+        }
+
         let max_chain_org = 0xffff; // max hash chain length
         let mut max_chain = max_chain_org; // max hash chain length
         let best_len = target_reference.len();
@@ -257,6 +261,10 @@ impl<H: HashChain + 'static> HashChainHolder for HashChainHolderImpl<H> {
         let max_len = std::cmp::min(input.remaining(), MAX_MATCH);
         if max_len < len {
             return err_exit_code(ExitCode::RecompressFailed, "not enough data left to match");
+        }
+
+        if max_len < H::min_lookup_bytes() as u32 {
+            return err_exit_code(ExitCode::RecompressFailed, "too few bytes left to hash");
         }
 
         let cur_max_dist = std::cmp::min(input.bytes_before(), self.window_bytes);
@@ -339,7 +347,7 @@ impl<H: HashChain> HashChainHolderImpl<H> {
         if max_len
             < std::cmp::max(
                 prev_len + 1,
-                std::cmp::max(H::get_num_hash_bytes() as u32, MIN_MATCH),
+                std::cmp::max(H::min_lookup_bytes() as u32, MIN_MATCH),
             )
         {
             return MatchResult::NoInput;

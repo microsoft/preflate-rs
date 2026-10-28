@@ -559,9 +559,9 @@ fn reconstruction_data_version() {
 }
 
 /// Adobe PDF Library 25/26 emits libdeflate-style streams whose final token is a
-/// length 3 match covering the last 3 bytes of the plaintext. preflate's libdeflate
-/// model hashes 4 bytes, so it can't find (or hop to) anything there, and the stream
-/// only round-trips thanks to the explicit distance escape.
+/// length 3 match covering the last 3 bytes of the plaintext. Stock libdeflate never
+/// matches in the last 4 bytes, but the libdeflate model's length 3 hash table can
+/// still find this match (see `HashChain::min_lookup_bytes`).
 #[test]
 fn verify_roundtrip_adobe_tail3() {
     crate::init_logging();
@@ -574,69 +574,6 @@ fn verify_roundtrip_adobe_tail3() {
 
     assert_eq!(r.compressed_size, v.len());
     assert!(v == recompressed);
-}
-
-#[cfg(test)]
-#[test]
-fn verify_roundtrip_explicit_distance_after_stored_chunk() {
-    use crate::deflate::deflate_token::{
-        DeflateHuffmanType, DeflateToken, DeflateTokenBlockType, DeflateTokenReference,
-    };
-
-    for dist in [600, 32768] {
-        let mut writer = DeflateWriter::new();
-        writer
-            .encode_block(&DeflateTokenBlock {
-                last: false,
-                block_type: DeflateTokenBlockType::Stored {
-                    uncompressed: vec![b'a'; dist as usize],
-                },
-            })
-            .unwrap();
-        let first = writer.detach_output();
-        writer
-            .encode_block(&DeflateTokenBlock {
-                last: true,
-                block_type: DeflateTokenBlockType::Huffman {
-                    tokens: vec![DeflateToken::Reference(DeflateTokenReference::new(3, dist))],
-                    huffman_type: DeflateHuffmanType::Static,
-                },
-            })
-            .unwrap();
-        writer.flush();
-        let second = writer.detach_output();
-        let original = [first.as_slice(), second.as_slice()].concat();
-
-        for verify_compression in [false, true] {
-            let mut encoder = PreflateStreamProcessor::new(&PreflateConfig {
-                verify_compression,
-                ..Default::default()
-            });
-            let r1 = encoder.decompress(&first).unwrap();
-            assert_eq!(r1.compressed_size, first.len());
-            assert_eq!(r1.parameters.unwrap().window_bits, 0);
-            assert!(!encoder.is_done());
-            let p1 = encoder.plain_text().text().to_vec();
-            encoder.shrink_to_dictionary();
-
-            let r2 = encoder.decompress(&second).unwrap();
-            assert_eq!(r2.compressed_size, second.len());
-            assert!(encoder.is_done());
-
-            let mut decoder = RecreateStreamProcessor::new();
-            let (mut reconstructed, _) = decoder
-                .recompress(&mut Cursor::new(p1), &r1.corrections)
-                .unwrap();
-            let (tail, _) = decoder
-                .recompress(
-                    &mut Cursor::new(encoder.plain_text().text()),
-                    &r2.corrections,
-                )
-                .unwrap();
-            reconstructed.extend_from_slice(&tail);
-            assert_eq!(reconstructed, original);
-        }
-    }
 }
 
 #[cfg(test)]

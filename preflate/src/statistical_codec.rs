@@ -7,12 +7,6 @@
 use crate::cabac_codec::{decode_difference, encode_difference};
 
 /// correction indictions, which are followed by a 16 bit value
-///
-/// Note that adding a variant here lengthens the "actions seen" bitset that is
-/// written at the start of every cabac corrections blob (see
-/// `PredictionEncoderCabac::finish` / `PredictionDecoderCabac::new`, which are
-/// sized by `CodecCorrection::MAX`). Corrections produced by an earlier version
-/// therefore do not decode with this one.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum CodecCorrection {
     TokenCount,
@@ -34,12 +28,6 @@ pub enum CodecCorrection {
     EndOfChunk,
     LiteralPredictionWrong,
     ReferencePredictionWrong,
-
-    /// emitted only when the model could not find any reference at a position
-    /// where the real encoder emitted one. The value is the actual distance
-    /// (always >= 1), and the length is then coded as a `LenCorrection` diff
-    /// against `MIN_MATCH`.
-    ExplicitDistance,
     MAX,
 }
 
@@ -141,7 +129,6 @@ impl CountNonDefaultActions {
             EndOfChunk,
             LiteralPredictionWrong,
             ReferencePredictionWrong,
-            ExplicitDistance,
         ];
 
         assert_eq!(

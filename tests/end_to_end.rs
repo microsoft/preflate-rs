@@ -397,8 +397,6 @@ fn compression_benchmark_overhead_size() {
     // The expected overhead for each compression level.
     // The lower compression levels are more important since
     // they are better recompressed and give more bang-for-buck.
-    // Note that adding a CodecCorrection variant lengthens the "actions seen"
-    // bitset at the head of every corrections blob, which can move these by a byte.
     // Each value includes the 1-byte RECONSTRUCTION_DATA_VERSION prefix.
     let bench = [
         BenchmarkResult {
@@ -409,7 +407,7 @@ fn compression_benchmark_overhead_size() {
                 Ok(37),
                 Ok(24),
                 Ok(24),
-                Ok(44),
+                Ok(45),
                 Ok(2504),
                 Ok(1804),
                 Ok(50),
@@ -438,7 +436,7 @@ fn compression_benchmark_overhead_size() {
             compress_fn: libdeflate,
             overhead: [
                 Ok(31),
-                Ok(1032),
+                Ok(1031),
                 Ok(4371),
                 Ok(3818),
                 Ok(6312),
@@ -460,7 +458,7 @@ fn compression_benchmark_overhead_size() {
                 Ok(2225),
                 Ok(1266),
                 Ok(361),
-                Ok(258),
+                Ok(257),
                 Ok(338),
                 Ok(282),
             ],
