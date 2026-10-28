@@ -20,6 +20,7 @@
 #![warn(unused_macro_rules)]
 
 mod bit_helper;
+mod cabac;
 mod cabac_codec;
 mod deflate;
 mod estimator;
