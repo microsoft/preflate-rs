@@ -78,6 +78,7 @@ src/
 ## Constraints
 
 - `#![forbid(unsafe_code)]` — strictly enforced.
-- Serialization: parameters via `bitcode`; correction data via CABAC (`cabac` crate).
+- Serialization: parameters via `bitcode`; correction data via CABAC (`src/cabac/`).
+- The first chunk's corrections blob starts with `RECONSTRUCTION_DATA_VERSION` (`stream_processor.rs`); bump it on any incompatible corrections format change.
 - The format is chunked to bound peak memory use.
 - `#![deny(trivial_casts, non_ascii_idents)]` also set.

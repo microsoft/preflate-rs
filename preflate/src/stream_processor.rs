@@ -27,6 +27,13 @@ use crate::{
     token_predictor::TokenPredictor,
 };
 
+/// Version byte written in front of the serialized `ReconstructionData`. Bump this whenever the
+/// corrections format changes in a way that other versions cannot decode.
+///
+/// The high bit is set because unversioned blobs from 0.7 and earlier start with a small bitcode
+/// byte (0x00 or 0x01 in practice), so they are rejected here instead of being misinterpreted.
+pub(crate) const RECONSTRUCTION_DATA_VERSION: u8 = 0x81;
+
 /// the data required to reconstruct the deflate stream exactly the way that it was
 #[derive(Encode, Decode)]
 struct ReconstructionData {
@@ -35,13 +42,34 @@ struct ReconstructionData {
 }
 
 impl ReconstructionData {
+    pub fn write(&self) -> Vec<u8> {
+        let mut data = vec![RECONSTRUCTION_DATA_VERSION];
+        data.extend_from_slice(&bitcode::encode(self));
+        data
+    }
+
     pub fn read(data: &[u8]) -> Result<Self> {
-        bitcode::decode(data).map_err(|e| {
-            PreflateError::new(
+        match data.split_first() {
+            Some((&RECONSTRUCTION_DATA_VERSION, payload)) => {
+                bitcode::decode(payload).map_err(|e| {
+                    PreflateError::new(
+                        ExitCode::InvalidCompressedWrapper,
+                        format!("{:?}", e).as_str(),
+                    )
+                })
+            }
+            Some((&version, _)) => Err(PreflateError::new(
                 ExitCode::InvalidCompressedWrapper,
-                format!("{:?}", e).as_str(),
-            )
-        })
+                format!(
+                    "unsupported corrections version {version:#04x}, expected {RECONSTRUCTION_DATA_VERSION:#04x}"
+                )
+                .as_str(),
+            )),
+            None => Err(PreflateError::new(
+                ExitCode::InvalidCompressedWrapper,
+                "empty corrections",
+            )),
+        }
     }
 }
 
@@ -183,10 +211,11 @@ impl PreflateStreamProcessor {
 
             cabac_encoder.finish();
 
-            let reconstruction_data = bitcode::encode(&ReconstructionData {
+            let reconstruction_data = ReconstructionData {
                 parameters: params,
                 corrections: cabac_encoded,
-            });
+            }
+            .write();
 
             self.predictor = Some(token_predictor);
 
@@ -432,10 +461,11 @@ fn decompress_deflate_stream_assert(
     assert_eq!(contents.compressed_size, compressed_data.len());
     cabac_encoder.finish();
 
-    let reconstruction_data = bitcode::encode(&ReconstructionData {
+    let reconstruction_data = ReconstructionData {
         parameters: params,
         corrections: cabac_encoded,
-    });
+    }
+    .write();
 
     if verify {
         let r = ReconstructionData::read(&reconstruction_data)?;
@@ -504,6 +534,27 @@ fn verify_roundtrip_libdeflate() {
 
     for i in 0..9 {
         verify_file(&format!("compressed_libdeflate_level{}.deflate", i));
+    }
+}
+
+#[test]
+fn reconstruction_data_version() {
+    use crate::utils::read_file;
+
+    let v = read_file("compressed_zlib_level1.deflate");
+    let (r, plain_text) = preflate_whole_deflate_stream(&v, &PreflateConfig::default()).unwrap();
+    assert_eq!(r.corrections[0], RECONSTRUCTION_DATA_VERSION);
+
+    let parsed = ReconstructionData::read(&r.corrections).unwrap();
+
+    // blobs written before the version byte existed are plain bitcode
+    let unversioned = bitcode::encode(&parsed);
+    let mut wrong_version = r.corrections.clone();
+    wrong_version[0] = RECONSTRUCTION_DATA_VERSION + 1;
+
+    for bad in [&unversioned[..], &wrong_version[..], &[]] {
+        let e = recreate_whole_deflate_stream(plain_text.text(), bad).unwrap_err();
+        assert_eq!(e.exit_code(), ExitCode::InvalidCompressedWrapper);
     }
 }
 

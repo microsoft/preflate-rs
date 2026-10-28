@@ -104,6 +104,8 @@ Unknown compressors still round-trip correctly with higher corrections overhead.
 
 Parameters are serialized with [`bitcode`](https://crates.io/crates/bitcode). Corrections use CABAC (Context Adaptive Binary Arithmetic Coding), the same codec used in [Lepton JPEG](https://github.com/microsoft/lepton_jpeg_rust) compression. The format is chunked so memory use is bounded regardless of input size.
 
+The first chunk's corrections blob starts with a format version byte (currently `0x81`). Blobs with a different version, including unversioned blobs from 0.7 and earlier, are rejected with `ExitCode::InvalidCompressedWrapper`.
+
 The following differences from the predicted stream are encoded:
 
 - Block type (uncompressed, static Huffman, dynamic Huffman)

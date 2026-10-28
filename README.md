@@ -115,7 +115,7 @@ For direct use of the core DEFLATE analysis API, see the [`preflate` crate](pref
 
 - **No unsafe code** — `#![forbid(unsafe_code)]` is enforced in every crate.
 - **Chunked processing** — memory use is bounded regardless of input size.
-- **Format versioning** — the DLL name encodes the format version (`preflate_rs_0_8.dll`) so old decoders can coexist with new ones during upgrades.
+- **Format versioning** — the DLL name encodes the format version (`preflate_rs_0_8.dll`) so old decoders can coexist with new ones during upgrades. Corrections blobs and containers also start with a version byte, so data from an incompatible version is rejected.
 - **CABAC coding** — the corrections codec is shared with the [Lepton](https://github.com/microsoft/lepton_jpeg_rust) JPEG re-compression library.
 - Parameters are serialized via [`bitcode`](https://crates.io/crates/bitcode); corrections via CABAC.
 
