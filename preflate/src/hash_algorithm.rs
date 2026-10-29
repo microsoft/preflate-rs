@@ -1,23 +1,39 @@
 use bitcode::{Decode, Encode};
 
+/// Dictionary hash fingerprints, not exclusive compressor identities.
+/// A shared hash can have different insertion/search rules; those are recorded separately.
+/// Compressor versions and build options can change the hash, so selection uses observed tokens.
 #[derive(Encode, Decode, Debug, Copy, Clone, Eq, PartialEq, Default)]
 pub enum HashAlgorithm {
+    /// Stored and Huffman-only streams: no back-reference dictionary is needed.
     #[default]
     None,
-    Zlib {
-        hash_mask: u16,
-        hash_shift: u32,
-    },
+    /// Zlib's three-byte rotating XOR hash, parameterized by its table size and shift.
+    /// Also used by miniz/miniz_oxide's normal chain parser (levels 2-9 in our fixtures);
+    /// the hash alone cannot distinguish zlib's lazy search from miniz's grouped probes.
+    Zlib { hash_mask: u16, hash_shift: u32 },
+    /// Miniz/miniz_oxide's special fastest parser (level 1 in our fixtures):
+    /// a three-byte, 12-bit hash whose most recent bucket entry predicts the match.
     MiniZFast,
 
-    /// Libflate 4 byte hash only
+    /// Primary-only, 16-bit libdeflate model retained as the level-1 compatibility fallback.
+    /// It can also fit a 15-bit stream, so chain depth alone cannot identify the fastest model.
     Libdeflate4Fast,
-    /// Libflate 4 byte hash with 3 byte secondary hash
+    /// Libdeflate's four-byte primary chain plus a singleton three-byte secondary table.
+    /// Used by the modeled greedy levels 2-4 and lazy/lazy2 levels 5-9.
     Libdeflate4,
 
+    /// Zlib-ng's multiplicative four-byte hash, distinct from its CRC32C hash below.
+    /// Considered when no three-byte references were observed; the build determines the hash.
     ZlibNG,
+    /// Windows built-in PNG/ZIP DEFLATE fingerprint: a three-byte, 15-bit table-XOR hash.
+    /// Considered alongside the other hashes that can explain three-byte references.
     RandomVector,
+    /// Zlib-ng's CRC32C-based four-byte hash, observed in our level 1-4 fixtures.
+    /// Replayed portably here, independent of the decoding machine's CPU capabilities.
     Crc32cHash,
+    /// Libdeflate's fastest level-1 profile: a 15-bit primary hash with two entries per bucket.
+    /// Selected only while the bounded bucket-rank fingerprint remains consistent.
     Libdeflate4Fast15,
 }
 
@@ -106,6 +122,8 @@ pub trait HashImplementation: Default + Copy + Clone {
     fn algorithm(&self) -> HashAlgorithm;
 }
 
+/// Compile-time specialization of zlib's hash for common mask/shift pairs during estimation.
+/// The replay factory also specializes the usual 15-bit, shift-five zlib/miniz combination.
 #[derive(Default, Debug, Copy, Clone, Eq, PartialEq)]
 pub struct ZlibRotatingHashFixed<const HASH_SHIFT: u32, const HASH_MASK: u32> {}
 
@@ -131,6 +149,7 @@ impl<const HASH_SHIFT: u32, const HASH_MASK: u32> HashImplementation
     }
 }
 
+/// Runtime-parameterized zlib hash for other inferred memory levels/table sizes.
 #[derive(Default, Debug, Copy, Clone, Eq, PartialEq)]
 pub struct ZlibRotatingHash {
     pub hash_mask: u16,
@@ -157,6 +176,7 @@ impl HashImplementation for ZlibRotatingHash {
     }
 }
 
+/// Miniz's fastest-only 24-bit input mix; normal miniz uses the zlib rotating hash instead.
 #[derive(Default, Copy, Clone)]
 pub struct MiniZHash {}
 
@@ -179,8 +199,8 @@ impl HashImplementation for MiniZHash {
     }
 }
 
-/// Fast version of Libflate hash that doesn't use a secondary 3
-/// byte hash. This is used by level 1 compression.
+/// Primary-only 16-bit libdeflate hash used by the legacy/fallback fastest model.
+/// Shares its multiply with LibdeflateHash4, but does not imply a secondary table.
 #[derive(Default, Copy, Clone)]
 pub struct LibdeflateHash4Fast {}
 
@@ -198,6 +218,8 @@ impl HashImplementation for LibdeflateHash4Fast {
     }
 }
 
+/// Current fastest libdeflate model: take 15 rather than 16 high bits of the same multiply.
+/// Neighboring 16-bit buckets merge, enabling the estimator to test both models in one pass.
 #[derive(Default, Copy, Clone)]
 pub struct LibdeflateHash4Fast15 {}
 
@@ -214,6 +236,7 @@ impl HashImplementation for LibdeflateHash4Fast15 {
     }
 }
 
+/// Libdeflate's 16-bit primary chain hash, paired with LibdeflateHash3Secondary by the holder.
 #[derive(Default, Copy, Clone)]
 pub struct LibdeflateHash4 {}
 
@@ -231,9 +254,9 @@ impl HashImplementation for LibdeflateHash4 {
     }
 }
 
-/// This is the 3 byte version of the libdeflate hash algorithm, which is used
-/// as a secondary hash value to find 3 byte matches within the first 4096K if
-/// we fail to find any four byte matches with the primary hash.
+/// Libdeflate's 15-bit secondary hash stores the most recent three-byte candidate.
+/// It accompanies Libdeflate4, not the primary-only fastest profiles; the modeled
+/// greedy parser limits accepted length-three matches to distances of at most 4096 bytes.
 #[derive(Default, Copy, Clone)]
 pub struct LibdeflateHash3Secondary {}
 
@@ -253,6 +276,7 @@ impl HashImplementation for LibdeflateHash3Secondary {
     }
 }
 
+/// Zlib-ng's non-CRC four-byte multiply hash; its constant differs from libdeflate's.
 #[derive(Default, Copy, Clone)]
 pub struct ZlibNGHash {}
 
@@ -270,6 +294,8 @@ impl HashImplementation for ZlibNGHash {
     }
 }
 
+/// Zlib-ng's four-byte CRC32C dictionary hash, not the stream's checksum.
+/// Match the zero-seeded CRC's low 16 bits without requiring hardware CRC instructions.
 #[derive(Default, Copy, Clone)]
 pub struct Crc32cHash {}
 
@@ -327,7 +353,8 @@ static CRC32C_TABLE: [u32; 256] = [
     0x79B737BA, 0x8BDCB4B9, 0x988C474D, 0x6AE7C44E, 0xBE2DA0A5, 0x4C4623A6, 0x5F16D052, 0xAD7D5351,
 ];
 
-/// This vector uses a lookup into a table for random values
+/// Windows DEFLATE's fixed, position-specific byte tables, XORed into a 15-bit hash.
+/// "Random" describes the precomputed constants, not runtime randomization.
 #[derive(Debug, Default, Copy, Clone, Eq, PartialEq)]
 pub struct RandomVectorHash {}
 

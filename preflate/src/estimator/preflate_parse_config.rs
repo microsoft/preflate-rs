@@ -10,22 +10,21 @@ use crate::estimator::add_policy_estimator::DictionaryAddPolicy;
 
 #[derive(Encode, Decode, Debug, Copy, Clone, PartialEq, Eq, Default)]
 pub enum MatchingType {
+    /// Immediate-match baseline: zlib's fast levels, miniz's special fastest mode,
+    /// and libdeflate's primary-only level-1 profiles.
     #[default]
     Greedy,
-    Lazy {
-        good_length: u16,
-        max_lazy: u16,
-    },
-    /// Grouped suffix probes, with an optional one-position lazy check.
-    MiniZ {
-        max_probes: u16,
-        greedy: bool,
-    },
-    /// Distance-aware lazy matching; two positions selects the lazy2 parser.
-    LibdeflateLazy {
-        two_positions: bool,
-    },
-    /// Greedy matching with a block-local, alphabet-dependent minimum length.
+    /// Zlib-style one-position lookahead, used as the default for full-insertion streams
+    /// until a compressor-specific fingerprint justifies a different matching policy.
+    Lazy { good_length: u16, max_lazy: u16 },
+    /// Miniz/miniz_oxide's normal chain parser: grouped suffix probes, optionally lazy.
+    /// Separate from MiniZFast hashing; this parser shares zlib's usual rotating hash.
+    MiniZ { max_probes: u16, greedy: bool },
+    /// Libdeflate's modeled levels 5-9: distance-aware lazy matching on Libdeflate4.
+    /// Two positions selects the lazy2 parser rather than changing the dictionary hash.
+    LibdeflateLazy { two_positions: bool },
+    /// Libdeflate's modeled levels 2-4, also using Libdeflate4:
+    /// greedy matching with a block-local, alphabet-dependent minimum length.
     LibdeflateGreedy,
 }
 

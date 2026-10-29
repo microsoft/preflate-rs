@@ -126,6 +126,8 @@ pub fn estimate_preflate_parameters(
                 hash_mask: 32767,
                 hash_shift: 5,
             } if info.max_dist_3_matches > 4096 => {
+                // This is miniz's normal chain parser, not MiniZFast. Long-distance
+                // length-three references distinguish it from zlib despite their shared hash.
                 let greedy = cl.greedy_parser_detected;
                 // Use miniz's shipped probe budgets, rounded to whole three-probe groups.
                 let profiles: &[u16] = if greedy {
@@ -144,6 +146,8 @@ pub fn estimate_preflate_parameters(
                 nice_length = 258;
             }
             HashAlgorithm::Libdeflate4 if cl.greedy_parser_detected && cl.max_chain <= 17 => {
+                // Libdeflate levels 2-4 share the lazy modes' dictionary. Repeated
+                // skipped lazy improvements identify greedy search; depth picks its cutoff.
                 matching_type = MatchingType::LibdeflateGreedy;
                 window_bits = 15;
                 max_dist_3_matches = 4096;
@@ -155,6 +159,7 @@ pub fn estimate_preflate_parameters(
                 };
             }
             HashAlgorithm::Libdeflate4 if cl.max_chain <= 601 => {
+                // Modeled levels 5-7 use lazy search; levels 8-9 compare two future positions.
                 // Observed depth is only a lower bound. Select a shipped lazy/lazy2
                 // budget, excluding the secondary probe that is restored below.
                 let (depth, nice, two_positions) = match cl.max_chain {
@@ -169,10 +174,14 @@ pub fn estimate_preflate_parameters(
                 max_chain = depth + 1;
             }
             HashAlgorithm::Libdeflate4Fast if cl.max_chain <= 2 => {
+                // Preserve the primary-only legacy fallback without imposing the newer
+                // profile's two-entry fingerprint or exact window restrictions.
                 matching_type = MatchingType::Greedy;
                 nice_length = 32;
             }
             HashAlgorithm::Libdeflate4Fast15 => {
+                // The bounded fingerprint established the two-slot level-1 profile.
+                // Its budget is structural, not a depth rounded to a generic zlib level.
                 matching_type = MatchingType::Greedy;
                 nice_length = 32;
                 max_chain = 2;

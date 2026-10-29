@@ -40,6 +40,7 @@ fn select_depth_candidate<'a>(
 ) -> Option<&'a dyn HashTableDepthEstimator> {
     // Miniz shares zlib's hash, but permits length-three distances that rule out
     // normal zlib parsing. A surviving libdeflate signature vetoes this preference.
+    // AddAll and exclusion of position zero keep the preference within that parser family.
     let prefer_miniz_hash = add_policy == DictionaryAddPolicy::AddAll
         && info.max_dist_3_matches > 4096
         && !info.matches_to_start_detected
@@ -60,6 +61,8 @@ fn select_depth_candidate<'a>(
                         }
         })
         .or_else(|| {
+            // Without a stronger fingerprint, prefer the shallowest surviving chain.
+            // Observed depth is a lower bound on search effort, not an exact level identifier.
             candidates
                 .iter()
                 .min_by(|&a, &b| a.max_chain_found().cmp(&b.max_chain_found()))
@@ -83,8 +86,12 @@ pub fn estimate_preflate_comp_level(
     let mut candidates: Vec<Box<dyn HashTableDepthEstimator>> = Vec::new();
 
     if info.min_len == 3 {
+        // A three-byte reference rules out primary-only four-byte hashes, but not
+        // libdeflate's four-byte primary plus its three-byte secondary table.
         candidates.push(new_depth_estimator(HashAlgorithm::MiniZFast));
 
+        // Include zlib/miniz's shared 15-bit shape, zlib's small-table shape, and the
+        // memLevel-derived guess; the inferred block capacity need not identify the encoder.
         for (hash_shift, hash_mask) in [(5, 32767), (4, 2047), (mem_hash_shift, mem_hash_mask)] {
             candidates.push(new_depth_estimator(HashAlgorithm::Zlib {
                 hash_mask,
@@ -92,12 +99,14 @@ pub fn estimate_preflate_comp_level(
             }));
         }
 
-        // LibFlate4 candidate
+        // Libdeflate levels 2+ can emit three-byte matches through their secondary table.
         candidates.push(new_depth_estimator(HashAlgorithm::Libdeflate4));
 
-        // RandomVector candidate
+        // Windows' built-in DEFLATE uses fixed table-XOR hashing rather than zlib's rotation.
         candidates.push(new_depth_estimator(HashAlgorithm::RandomVector));
     } else {
+        // With no three-byte references, prune to four-byte families. This is a cheap
+        // candidate heuristic, not proof that the original encoder cannot emit length three.
         // Check the two-entry 15-bit buckets while updating the legacy 16-bit candidate.
         if add_policy == DictionaryAddPolicy::AddAll {
             candidates.push(new_depth_estimator(HashAlgorithm::Libdeflate4Fast15));
@@ -105,10 +114,10 @@ pub fn estimate_preflate_comp_level(
             candidates.push(new_depth_estimator(HashAlgorithm::Libdeflate4Fast));
         }
 
-        // ZlibNG candidate
+        // Zlib-ng builds can use either a multiplicative or a CRC32C four-byte hash.
+        // Test the stream's behavior rather than choosing from this machine's CPU features.
         candidates.push(new_depth_estimator(HashAlgorithm::ZlibNG));
 
-        // Crc32c candidate
         candidates.push(new_depth_estimator(HashAlgorithm::Crc32cHash));
     }
 
@@ -135,6 +144,8 @@ pub fn estimate_preflate_comp_level(
         | DictionaryAddPolicy::AddFirstAndLast(_)
         | DictionaryAddPolicy::AddFirstWith32KBoundary
         | DictionaryAddPolicy::AddFirstExcept4kBoundary => {
+            // Partial insertion resembles zlib levels 1-3; use their greedy defaults
+            // unless the hash-specific refinement supplies stronger evidence later.
             for config in &ZLIB_PREFLATE_PARSER_SETTINGS {
                 if candidate.max_chain_found() < config.max_chain {
                     match_type = config.match_type;
@@ -144,6 +155,8 @@ pub fn estimate_preflate_comp_level(
             }
         }
         DictionaryAddPolicy::AddAll => {
+            // Full insertion gets zlib levels 4-9 as a baseline, not a compressor identity.
+            // Miniz and libdeflate refine this in estimate_preflate_parameters.
             for config in &SLOW_PREFLATE_PARSER_SETTINGS {
                 if candidate.max_chain_found() < config.max_chain {
                     match_type = config.match_type;

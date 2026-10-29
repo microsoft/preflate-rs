@@ -60,6 +60,7 @@ pub fn new_hash_chain_holder(params: &TokenPredictorParameters) -> Box<dyn HashC
         )),
 
         HashAlgorithm::Libdeflate4 => {
+            // Only this profile combines the primary chain with a three-byte secondary slot.
             Box::new(HashChainHolderImpl::new(params, HashChainLibflate4::new()))
         }
 
@@ -69,6 +70,8 @@ pub fn new_hash_chain_holder(params: &TokenPredictorParameters) -> Box<dyn HashC
         )),
         HashAlgorithm::Libdeflate4Fast15 => Box::new(HashChainHolderImpl::new(
             params,
+            // Retain full history for correction recovery even though normal level-1
+            // prediction inspects only the two newest entries in the selected bucket.
             HashChainDefault::new(LibdeflateHash4Fast15 {}),
         )),
 
