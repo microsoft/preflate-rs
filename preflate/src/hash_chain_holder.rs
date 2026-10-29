@@ -8,9 +8,10 @@ use crate::bit_helper::DebugHash;
 use crate::deflate::deflate_constants::{MAX_MATCH, MIN_LOOKAHEAD, MIN_MATCH};
 use crate::deflate::deflate_token::DeflateTokenReference;
 use crate::estimator::preflate_parameter_estimator::{PreflateStrategy, TokenPredictorParameters};
+use crate::estimator::preflate_parse_config::MatchingType;
 use crate::hash_algorithm::{
-    Crc32cHash, HashAlgorithm, LibdeflateHash4Fast, MiniZHash, RandomVectorHash, ZlibNGHash,
-    ZlibRotatingHash, ZlibRotatingHashFixed,
+    Crc32cHash, HashAlgorithm, LibdeflateHash4Fast, LibdeflateHash4Fast15, MiniZHash,
+    RandomVectorHash, ZlibNGHash, ZlibRotatingHash, ZlibRotatingHashFixed,
 };
 use crate::hash_chain::{HashChain, HashChainDefault, HashChainLibflate4, MAX_UPDATE_HASH_BATCH};
 use crate::preflate_error::{ExitCode, Result, err_exit_code};
@@ -66,6 +67,10 @@ pub fn new_hash_chain_holder(params: &TokenPredictorParameters) -> Box<dyn HashC
             params,
             HashChainDefault::new(LibdeflateHash4Fast {}),
         )),
+        HashAlgorithm::Libdeflate4Fast15 => Box::new(HashChainHolderImpl::new(
+            params,
+            HashChainDefault::new(LibdeflateHash4Fast15 {}),
+        )),
 
         HashAlgorithm::ZlibNG => Box::new(HashChainHolderImpl::new(
             params,
@@ -106,6 +111,8 @@ pub trait HashChainHolder {
     /// max_depth is the maximum number of hops we will take in the hash chain
     fn match_token_1(&self, prev_len: u32, max_depth: u32, input: &PreflateInput) -> MatchResult;
 
+    fn match_token_2(&self, prev_len: u32, max_depth: u32, input: &PreflateInput) -> MatchResult;
+
     /// Tries to find the match by continuing on the hash chain, returns how many hops we went
     /// or none if it wasn't found
     fn calculate_hops(
@@ -144,6 +151,15 @@ impl HashChainHolder for () {
     }
 
     fn match_token_1(
+        &self,
+        _prev_len: u32,
+        _max_depth: u32,
+        _input: &PreflateInput,
+    ) -> MatchResult {
+        MatchResult::NoMoreMatchesFound
+    }
+
+    fn match_token_2(
         &self,
         _prev_len: u32,
         _max_depth: u32,
@@ -198,6 +214,10 @@ impl<H: HashChain + 'static> HashChainHolder for HashChainHolderImpl<H> {
 
     fn match_token_1(&self, prev_len: u32, max_depth: u32, input: &PreflateInput) -> MatchResult {
         self.match_token_offset::<1>(prev_len, max_depth, input)
+    }
+
+    fn match_token_2(&self, prev_len: u32, max_depth: u32, input: &PreflateInput) -> MatchResult {
+        self.match_token_offset::<2>(prev_len, max_depth, input)
     }
 
     /// Tries to find the match by continuing on the hash chain, returns how many hops we went
@@ -344,6 +364,14 @@ impl<H: HashChain> HashChainHolderImpl<H> {
     ) -> MatchResult {
         let start_pos = input.pos() + OFFSET;
         let max_len = std::cmp::min(input.total_length() - start_pos, MAX_MATCH);
+        let fast_profile = self.hash.algorithm() == HashAlgorithm::Libdeflate4Fast15
+            && max_depth <= self.params.max_chain;
+        let greedy_profile = self.hash.algorithm() == HashAlgorithm::Libdeflate4
+            && self.params.matching_type == MatchingType::LibdeflateGreedy
+            && max_depth <= self.params.max_chain;
+        if (fast_profile || greedy_profile) && max_len < 5 {
+            return MatchResult::NoInput;
+        }
         if max_len
             < std::cmp::max(
                 prev_len + 1,
@@ -364,7 +392,10 @@ impl<H: HashChain> HashChainHolderImpl<H> {
         let cur_max_dist_hop0;
         let cur_max_dist_hop1_plus;
         if self.params.very_far_matches_detected {
-            cur_max_dist_hop0 = cmp::min(max_dist_to_start, self.window_bytes);
+            cur_max_dist_hop0 = cmp::min(
+                max_dist_to_start,
+                self.window_bytes - u32::from(fast_profile || greedy_profile),
+            );
             cur_max_dist_hop1_plus = cur_max_dist_hop0;
         } else {
             match self.params.strategy {
@@ -387,7 +418,32 @@ impl<H: HashChain> HashChainHolderImpl<H> {
 
         let best_len = prev_len.max(1);
 
-        let iter = self.hash.iterate::<OFFSET>(input);
+        let secondary = if OFFSET > 0 && prev_len < 3 {
+            self.hash.secondary_match(input, OFFSET)
+        } else {
+            None
+        };
+        let skip_secondary =
+            OFFSET == 0 && prev_len >= 3 && self.hash.algorithm() == HashAlgorithm::Libdeflate4;
+        let max_depth = max_depth.saturating_sub(u32::from(skip_secondary)).max(1);
+        let mut iter = secondary
+            .into_iter()
+            .chain(self.hash.iterate::<OFFSET>(input));
+        if skip_secondary {
+            iter.next();
+        }
+
+        if let MatchingType::MiniZ { max_probes, .. } = self.params.matching_type {
+            let available = (input.total_length() - start_pos).min(MAX_MATCH);
+            let window = self.window_bytes.saturating_sub(available);
+            let max_dist = max_dist_to_start.min(window);
+            let probes = if max_depth > self.params.max_chain {
+                max_depth
+            } else {
+                u32::from(max_probes)
+            };
+            return match_miniz::<OFFSET>(input, max_len, max_dist, probes, prev_len.max(2), iter);
+        }
 
         match_less3::<OFFSET>(
             input,
@@ -400,6 +456,55 @@ impl<H: HashChain> HashChainHolderImpl<H> {
             iter,
         )
     }
+}
+
+#[inline]
+fn match_miniz<const OFFSET: u32>(
+    input: &PreflateInput<'_>,
+    max_len: u32,
+    max_dist: u32,
+    max_probes: u32,
+    mut best_len: u32,
+    mut iter: impl Iterator<Item = u32>,
+) -> MatchResult {
+    let bytes = input.cur_chars(OFFSET as i32);
+    let probes = if best_len < 32 {
+        max_probes
+    } else {
+        max_probes >> 2
+    };
+    let mut groups = probes.div_ceil(3);
+    let mut best = MatchResult::NoMoreMatchesFound;
+    while groups > 0 {
+        groups -= 1;
+        let suffix = read_u16_le(bytes, (best_len - 1) as usize);
+        let mut candidate = None;
+        for _ in 0..3 {
+            let Some(dist) = iter.next() else { return best };
+            if dist > max_dist {
+                return best;
+            }
+            let source = input.cur_chars(OFFSET as i32 - dist as i32);
+            if read_u16_le(source, (best_len - 1) as usize) == suffix {
+                candidate = Some((dist, source));
+                break;
+            }
+        }
+        if let Some((dist, source)) = candidate {
+            if read_u16_le(source, 0) != read_u16_le(bytes, 0) {
+                continue;
+            }
+            let length = prefix_compare(source, bytes, max_len);
+            if length > best_len {
+                best_len = length;
+                best = MatchResult::Success(DeflateTokenReference::new(length, dist));
+                if length == max_len {
+                    return best;
+                }
+            }
+        }
+    }
+    best
 }
 
 /// searches for a match that is at least 3 bytes long
@@ -584,4 +689,114 @@ fn calc_diff(diff: u64) -> u32 {
         return diff.trailing_zeros() / 8;
     }
     return 8;
+}
+
+#[test]
+fn libdeflate_low_level_limits_preserve_correction_recovery() {
+    use crate::{
+        estimator::add_policy_estimator::DictionaryAddPolicy, preflate_input::PlainText,
+        token_predictor::zlib_level_1_params,
+    };
+    for (hash_algorithm, matching_type) in [
+        (HashAlgorithm::Libdeflate4Fast15, MatchingType::Greedy),
+        (HashAlgorithm::Libdeflate4, MatchingType::LibdeflateGreedy),
+    ] {
+        let params = TokenPredictorParameters {
+            hash_algorithm,
+            matching_type,
+            add_policy: DictionaryAddPolicy::AddAll,
+            matches_to_start_detected: true,
+            very_far_matches_detected: true,
+            max_chain: 2,
+            nice_length: 32,
+            ..zlib_level_1_params()
+        };
+        for distance in [5, 32767, 32768] {
+            let mut bytes = vec![b'.'; distance];
+            bytes[..5].copy_from_slice(b"abcdX");
+            bytes.extend_from_slice(if distance == 5 { b"abcd" } else { b"abcdY" });
+            let plain = PlainText::new_with_data(bytes);
+            let mut input = PreflateInput::new(&plain);
+            let mut holder = new_hash_chain_holder(&params);
+            while input.pos() < distance as u32 {
+                let length = (distance as u32 - input.pos()).min(MAX_UPDATE_HASH_BATCH);
+                holder.update_hash(length, &input);
+                input.advance(length);
+            }
+            let normal = holder.match_token_0(2, params.max_chain, &input);
+            if distance == 32767 {
+                assert!(
+                    matches!(normal, MatchResult::Success(reference) if reference == DeflateTokenReference::new(4, distance as u32))
+                );
+            } else {
+                assert!(!matches!(normal, MatchResult::Success(_)));
+            }
+            assert!(matches!(
+                holder.match_token_0(2, params.max_chain + 1, &input),
+                MatchResult::Success(reference) if reference == DeflateTokenReference::new(4, distance as u32)
+            ));
+        }
+    }
+}
+
+#[test]
+fn miniz_probe_groups_skip_three_failed_suffixes() {
+    use crate::preflate_input::PlainText;
+    let mut bytes = vec![b'X'; 69];
+    for pos in [40, 48, 56] {
+        bytes[pos..pos + 5].copy_from_slice(b"abZZZ");
+    }
+    bytes[32..37].copy_from_slice(b"abcdX");
+    bytes[64..].copy_from_slice(b"abcdY");
+    let plain = PlainText::new_with_data(bytes);
+    let mut input = PreflateInput::new(&plain);
+    input.advance(64);
+    assert!(matches!(
+        match_miniz::<0>(&input, 5, 64, 3, 2, [8, 16, 24, 32].into_iter()),
+        MatchResult::NoMoreMatchesFound
+    ));
+    assert!(matches!(
+        match_miniz::<0>(&input, 5, 64, 6, 2, [8, 16, 24, 32].into_iter()),
+        MatchResult::Success(reference) if reference == DeflateTokenReference::new(4, 32)
+    ));
+}
+
+#[test]
+fn miniz_successful_suffix_consumes_a_probe_group() {
+    use crate::preflate_input::PlainText;
+    for first in [b"abcXY", b"ZbcXY"] {
+        let mut bytes = vec![b'X'; 69];
+        bytes[56..61].copy_from_slice(first);
+        bytes[48..53].copy_from_slice(b"abcdX");
+        bytes[64..].copy_from_slice(b"abcdY");
+        let plain = PlainText::new_with_data(bytes);
+        let mut input = PreflateInput::new(&plain);
+        input.advance(64);
+        let result = match_miniz::<0>(&input, 5, 64, 3, 2, [8, 16].into_iter());
+        if first == b"abcXY" {
+            assert!(matches!(result, MatchResult::Success(reference) if reference.len() == 3));
+        } else {
+            assert!(matches!(result, MatchResult::NoMoreMatchesFound));
+        }
+    }
+}
+
+#[test]
+fn miniz_long_saved_match_quarters_the_probe_budget() {
+    use crate::preflate_input::PlainText;
+    let mut bytes = vec![b'A'; 290];
+    for pos in [112, 160, 208] {
+        bytes[pos + 31] = b'B';
+    }
+    let plain = PlainText::new_with_data(bytes);
+    let mut input = PreflateInput::new(&plain);
+    input.advance(256);
+    assert!(matches!(
+        match_miniz::<0>(&input, 34, 256, 12, 32, [48, 96, 144, 192].into_iter()),
+        MatchResult::NoMoreMatchesFound
+    ));
+    assert!(matches!(
+        match_miniz::<0>(&input, 34, 256, 12, 2, [48, 96, 144, 192].into_iter()),
+        MatchResult::Success(reference) if reference == DeflateTokenReference::new(34, 192)
+    ));
 }

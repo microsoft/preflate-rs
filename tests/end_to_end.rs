@@ -13,7 +13,10 @@ use libdeflate_sys::{libdeflate_alloc_compressor, libdeflate_deflate_compress};
 use preflate_container::{
     PreflateContainerConfig, PreflateContainerProcessor, ProcessBuffer, RecreateContainerProcessor,
 };
-use preflate_rs::{PreflateConfig, preflate_whole_deflate_stream, recreate_whole_deflate_stream};
+use preflate_rs::{
+    PreflateConfig, PreflateStreamProcessor, RecreateStreamProcessor,
+    preflate_whole_deflate_stream, recreate_whole_deflate_stream,
+};
 
 #[cfg(test)]
 pub fn read_file(filename: &str) -> Vec<u8> {
@@ -436,15 +439,15 @@ fn compression_benchmark_overhead_size() {
             compress_fn: libdeflate,
             overhead: [
                 Ok(31),
-                Ok(1031),
-                Ok(4371),
-                Ok(3818),
-                Ok(6312),
-                Ok(4352),
-                Ok(4022),
-                Ok(3626),
-                Ok(4365),
-                Ok(4331),
+                Ok(110),
+                Ok(287),
+                Ok(248),
+                Ok(266),
+                Ok(298),
+                Ok(236),
+                Ok(205),
+                Ok(184),
+                Ok(243),
             ],
         },
         BenchmarkResult {
@@ -453,14 +456,14 @@ fn compression_benchmark_overhead_size() {
             overhead: [
                 Ok(48),
                 Ok(204),
-                Ok(11316),
-                Ok(7455),
-                Ok(2225),
-                Ok(1266),
-                Ok(361),
-                Ok(257),
-                Ok(338),
-                Ok(282),
+                Ok(100),
+                Ok(158),
+                Ok(82),
+                Ok(92),
+                Ok(90),
+                Ok(109),
+                Ok(103),
+                Ok(106),
             ],
         },
     ];
@@ -546,5 +549,139 @@ fn compression_benchmark_overhead_size() {
             "compression overhead mismatch for {}",
             i.name
         );
+    }
+}
+
+#[test]
+#[ignore = "exports generated streams for the core prediction diagnostic harness"]
+fn export_compression_diagnostics() {
+    let directory = std::env::var_os("PREFLATE_DIAGNOSTICS")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("target")
+                .join("prediction-diagnostics")
+        });
+    std::fs::create_dir_all(&directory).unwrap();
+    let original = match std::env::var_os("PREFLATE_DIAGNOSTICS_INPUT") {
+        Some(path) => std::fs::read(path).unwrap(),
+        None => read_file("sample1.bin"),
+    };
+    for level in 0..=9 {
+        let streams = [
+            (
+                "miniz",
+                miniz_oxide::deflate::compress_to_vec(&original, level as u8),
+            ),
+            ("libdeflate", libdeflate_compress(&original, level)),
+            ("zlibng", {
+                let stream = libngzsys_compress(&original, level);
+                stream[2..stream.len() - 4].to_vec()
+            }),
+            ("zlib", {
+                let stream = libzsys_compress(&original, level, Strategy::Default);
+                stream[2..stream.len() - 4].to_vec()
+            }),
+        ];
+        for (name, stream) in streams {
+            let path = directory.join(format!("{name}_{level}.deflate"));
+            println!("Exporting {} ({} bytes)", path.display(), stream.len());
+            std::fs::write(path, stream).unwrap();
+        }
+    }
+}
+
+#[test]
+fn compressor_models_roundtrip_across_chunks() {
+    let original = read_file("sample1.bin");
+    let config = PreflateConfig {
+        plain_text_limit: 256 * 1024,
+        ..PreflateConfig::default()
+    };
+    for (name, level) in (2..=9)
+        .map(|level| ("miniz", level))
+        .chain([("libdeflate", 1)])
+    {
+        let compressed = if name == "miniz" {
+            miniz_oxide::deflate::compress_to_vec(&original, level as u8)
+        } else {
+            libdeflate_compress(&original, level)
+        };
+        println!("Chunk roundtrip: {name} level {level}");
+        let mut processor = PreflateStreamProcessor::new(&config);
+        let mut recreate = RecreateStreamProcessor::new();
+        let mut offset = 0;
+        let mut chunks = 0;
+        let mut recreated = Vec::new();
+        while !processor.is_done() {
+            let chunk = processor
+                .decompress(&compressed[offset..])
+                .unwrap_or_else(|error| panic!("{name} level {level} chunk {chunks}: {error:?}"));
+            assert!(chunk.compressed_size > 0);
+            assert_eq!(chunk.parameters.is_some(), chunks == 0);
+            if let Some(params) = chunk.parameters {
+                assert!(params.max_chain <= config.max_chain_length);
+            }
+            let (bytes, _) = recreate
+                .recompress(
+                    &mut std::io::Cursor::new(processor.plain_text().text()),
+                    &chunk.corrections,
+                )
+                .unwrap();
+            recreated.extend_from_slice(&bytes);
+            offset += chunk.compressed_size;
+            chunks += 1;
+            processor.shrink_to_dictionary();
+        }
+        assert!(
+            chunks > 1,
+            "{name} level {level} did not exercise continuation"
+        );
+        assert_eq!(offset, compressed.len());
+        assert_eq!(compressed, recreated, "{name} level {level}");
+    }
+}
+
+#[test]
+fn compressor_models_roundtrip_varied_inputs() {
+    let mut inputs: Vec<(String, Vec<u8>)> = ["sample2.bin", "sample3.bin", "pptxplaintext.bin"]
+        .into_iter()
+        .map(|name| (name.to_owned(), read_file(name)))
+        .collect();
+    for length in [0, 1, 3, 4, 5, 511, 512, 32767, 32768, 32769, 65537, 98304] {
+        let data = (0..length)
+            .map(|i| i as u8 ^ ((i / 257) % 17) as u8)
+            .collect();
+        inputs.push((format!("structured_{length}"), data));
+    }
+    let config = PreflateConfig {
+        verify_compression: false,
+        ..PreflateConfig::default()
+    };
+    for (name, original) in inputs {
+        for level in 1..=9 {
+            for (compressor, compressed) in [
+                (
+                    "miniz",
+                    miniz_oxide::deflate::compress_to_vec(&original, level as u8),
+                ),
+                ("libdeflate", libdeflate_compress(&original, level)),
+            ] {
+                let context = format!("{name}, {compressor} level {level}");
+                let (result, plain) = preflate_whole_deflate_stream(&compressed, &config)
+                    .unwrap_or_else(|error| panic!("{context}: {error:?}"));
+                if name == "pptxplaintext.bin" && compressor == "libdeflate" && level <= 4 {
+                    assert!(
+                        result.corrections.len() < 1000,
+                        "{context}: low-level corrections exceeded 1000 bytes: {}",
+                        result.corrections.len()
+                    );
+                }
+                assert_eq!(original, plain.text(), "{context}");
+                let recreated = recreate_whole_deflate_stream(plain.text(), &result.corrections)
+                    .unwrap_or_else(|error| panic!("{context}: {error:?}"));
+                assert_eq!(compressed, recreated, "{context}");
+            }
+        }
     }
 }

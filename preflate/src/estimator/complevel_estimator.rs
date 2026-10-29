@@ -29,6 +29,7 @@ pub struct CompLevelInfo {
     pub match_type: MatchingType,
     pub nice_length: u32,
     pub max_chain: u32,
+    pub greedy_parser_detected: bool,
 }
 
 pub fn estimate_preflate_comp_level(
@@ -38,6 +39,7 @@ pub fn estimate_preflate_comp_level(
     deflate_contents: &DeflateContents,
     plain_text: &PlainText,
     add_policy: DictionaryAddPolicy,
+    miniz_hint: bool,
 ) -> Result<CompLevelInfo> {
     let hash_bits = mem_level + 7;
     let mem_hash_shift = (hash_bits + 2) / 3;
@@ -62,8 +64,12 @@ pub fn estimate_preflate_comp_level(
         // RandomVector candidate
         candidates.push(new_depth_estimator(HashAlgorithm::RandomVector));
     } else {
-        // Libflate4 fast (only 4 bytes or more)
-        candidates.push(new_depth_estimator(HashAlgorithm::Libdeflate4Fast));
+        // Check the two-entry 15-bit buckets while updating the legacy 16-bit candidate.
+        if add_policy == DictionaryAddPolicy::AddAll {
+            candidates.push(new_depth_estimator(HashAlgorithm::Libdeflate4Fast15));
+        } else {
+            candidates.push(new_depth_estimator(HashAlgorithm::Libdeflate4Fast));
+        }
 
         // ZlibNG candidate
         candidates.push(new_depth_estimator(HashAlgorithm::ZlibNG));
@@ -78,9 +84,26 @@ pub fn estimate_preflate_comp_level(
         return err_exit_code(ExitCode::NoCompressionCandidates, "no candidates found");
     }
 
+    let miniz_hint = miniz_hint
+        && !candidates
+            .iter()
+            .any(|candidate| candidate.hash_algorithm() == HashAlgorithm::Libdeflate4);
     let candidate = candidates
         .iter()
-        .min_by(|&a, &b| a.max_chain_found().cmp(&b.max_chain_found()))
+        .find(|candidate| {
+            candidate.hash_algorithm() == HashAlgorithm::Libdeflate4Fast15
+                || miniz_hint
+                    && candidate.hash_algorithm()
+                        == HashAlgorithm::Zlib {
+                            hash_mask: 32767,
+                            hash_shift: 5,
+                        }
+        })
+        .or_else(|| {
+            candidates
+                .iter()
+                .min_by(|&a, &b| a.max_chain_found().cmp(&b.max_chain_found()))
+        })
         .unwrap();
 
     if candidate.max_chain_found() > 4096 {
@@ -132,5 +155,6 @@ pub fn estimate_preflate_comp_level(
         nice_length,
         max_chain,
         hash_algorithm: candidate.hash_algorithm(),
+        greedy_parser_detected: candidate.greedy_parser_detected(),
     })
 }

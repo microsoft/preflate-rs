@@ -41,8 +41,8 @@ The library detects and models the following DEFLATE implementations:
 |---|---|
 | [zlib](https://github.com/madler/zlib) | All levels; near-zero overhead |
 | [zlib-ng](https://github.com/zlib-ng/zlib-ng) | All levels except level 9 |
-| [libdeflate](https://github.com/ebiggers/libdeflate) | 4-byte hash table variant detected |
-| [miniz / miniz_oxide](https://github.com/richgel999/miniz) | Fastest mode uses distinct hash function |
+| [libdeflate](https://github.com/ebiggers/libdeflate) | 15-bit fastest buckets, adaptive greedy minimum lengths, distance-aware lazy and lazy2 profiles |
+| [miniz / miniz_oxide](https://github.com/richgel999/miniz) | Distinct fastest hash and grouped-probe greedy/lazy profiles |
 | Windows zlib | Built-in PNG codec and shell ZIP compression |
 
 Unrecognized compressors still round-trip correctly — the corrections overhead is simply higher.
@@ -51,16 +51,108 @@ Unrecognized compressors still round-trip correctly — the corrections overhead
 
 ## Reconstruction Overhead
 
-The table below shows overhead (corrections size as a percentage of uncompressed data) for each supported compressor at each compression level. To benefit from re-compression, your target algorithm needs to beat the original by at least this margin.
+The table below shows overhead (corrections size as a percentage of uncompressed data) on [`samples/sample1.bin`](samples/sample1.bin), not a bound for all inputs. To benefit from re-compression, your target algorithm needs to beat the original by at least this margin.
 
 | Compressor         | 0      | 1      | 2      | 3      | 4      | 5      | 6      | 7      | 8      | 9     |
 |--------------------|--------|--------|--------|--------|--------|--------|--------|--------|--------|-------|
 | **zlib**           | 0.01%  | 0.01%  | 0.01%  | 0.01%  | 0.01%  | 0.01%  | 0.01%  | 0.08%  | 0.03%  | 0.01%  |
-| **zlib-ng**        | 0.01%  | 0.01%  | 0.01%  | 0.01%  | 0.97%  | 1.07%  | 0.90%  | 0.01%  | 0.01%  | N/A    |
-| **libdeflate**     | 0.01%  | 0.25%  | 1.04%  | 0.91%  | 1.51%  | 1.04%  | 0.96%  | 0.87%  | 1.04%  | 1.03%  |
-| **miniz_oxide**    | 0.01%  | 0.06%  | 2.70%  | 1.78%  | 0.53%  | 0.30%  | 0.09%  | 0.06%  | 0.08%  | 0.07%  |
+| **zlib-ng**        | 0.01%  | 0.01%  | 0.01%  | 0.01%  | 0.01%  | 0.60%  | 0.43%  | 0.01%  | 0.01%  | N/A    |
+| **libdeflate**     | 0.01%  | 0.03%  | 0.07%  | 0.06%  | 0.06%  | 0.07%  | 0.06%  | 0.05%  | 0.04%  | 0.06%  |
+| **miniz_oxide**    | 0.01%  | 0.05%  | 0.02%  | 0.04%  | 0.02%  | 0.02%  | 0.02%  | 0.03%  | 0.02%  | 0.03%  |
+
+Greedy/lazy recognition does not add another pass or trial compression. During
+the existing hash-depth estimation pass, at most 256 length-three references per
+candidate are sampled using one next-position hash-head lookup and a four-byte
+comparison. Repeatedly skipping a longer, no-farther match identifies greedy
+parsing in supported non-zlib streams. Surviving hash signatures and known search
+budgets select implementation-specific profiles; ambiguous cases retain the
+generic model. Miniz matching reproduces three-node probe groups, reduced lazy
+budgets, and its window exclusions. Libdeflate lazy matching compares length and
+distance cost, with bounded one- or two-position lookahead. Reconstruction uses the
+serialized profile rather than repeating the fingerprint.
+
+Libdeflate's fastest fingerprint shares the existing 16-bit hash calculations and
+depth table, with at most 256 references checking the merged 15-bit, two-entry
+buckets. The legacy 16-bit candidate remains available if that fingerprint fails.
+Greedy levels inspect at most the first 4096 bytes of each block to reproduce the
+minimum match length, stopping as soon as 80 distinct bytes establish length three.
+These are bounded observations, not additional full-stream passes or trial encodes.
+
+On [`samples/pptxplaintext.bin`](samples/pptxplaintext.bin), the low-level profiles
+reduce correction bytes as follows:
+
+| Libdeflate level | Previous model | Current model | Token mismatches |
+|------------------|----------------|---------------|------------------|
+| 1 | 1,061 | 645 | 0 |
+| 2 | 5,114 | 762 | 2 |
+| 3 | 5,299 | 707 | 0 |
+| 4 | 4,930 | 836 | 0 |
+
+Three alternating same-compiler release A/B rounds measured level 1 encoding
+throughput at -2.3% on the binary fixture and -0.5% on the document fixture.
+Document levels 2-4 gained 2.7-4.3%. Timings are workload-dependent; use the
+throughput test below to check other inputs.
+
+The new hash and matching modes require corrections format **0x83**. Older
+**0x81**, **0x82**, and unversioned correction blobs are rejected; there is no
+automatic conversion.
+
+Remaining gaps include zlib-ng levels 5/6 (match-end lookahead and backward match
+adjustment), libdeflate's adaptive minimum lengths in lazy modes, and Huffman-tree details.
+The medium-parser investigation did not justify coercing unrelated hash profiles
+or adding trial encodes. Some valid short streams with incomplete Huffman trees
+also hit an existing reader limitation before fingerprinting.
 
 ---
+
+### Isolating prediction overhead
+
+The ignored diagnostic tests separate token prediction errors from Huffman-tree
+corrections without changing production parameters or the reconstruction format.
+Generate raw streams for every compressor at levels 0-9, then analyze them:
+
+```shell
+cargo test --test end_to_end export_compression_diagnostics -- --ignored --nocapture
+cargo test -p preflate-rs diagnose_compression -- --ignored --nocapture
+```
+
+Fixtures default to `target/prediction-diagnostics`. Set `PREFLATE_DIAGNOSTICS`
+to use another directory (or an existing directory of raw `.deflate` streams).
+Set `PREFLATE_DIAGNOSTICS_INPUT` when exporting to use plaintext other than
+`samples/sample1.bin`. Use a separate fixture directory for each input.
+
+The report ranks reconstruction overhead relative to the original DEFLATE size,
+prints estimated parameters and nonzero correction counts, and shows the first
+eight token mismatches with plaintext offsets and actual/predicted tokens.
+Reported token mismatches precede reference re-prediction; correction counts
+reflect the subsequent recovery and encoding. Every baseline is verified against
+the original bytes. Unsupported parameter estimates are reported separately.
+
+For a focused experiment in PowerShell:
+
+```powershell
+$env:PREFLATE_DIAGNOSTICS_FILTER = "miniz_2"
+$env:PREFLATE_DIAGNOSTICS_SWEEP = "1"
+cargo test -p preflate-rs diagnose_compression -- --ignored --nocapture
+Remove-Item Env:PREFLATE_DIAGNOSTICS_FILTER, Env:PREFLATE_DIAGNOSTICS_SWEEP
+```
+
+The filter is a filename substring. Sweeps first change one parameter at a time,
+then combine matching mode, nice length, and chain-budget candidates while holding
+the dictionary policy and hash algorithm fixed. Isolated variants and improving
+combined candidates are verified byte-for-byte; rejected candidates are printed
+explicitly. "Best tested" is not an exhaustive optimum. The normal overhead
+benchmark remains `cargo test --test end_to_end compression_benchmark_overhead_size`.
+
+To measure encoding throughput separately from fixture generation and verification:
+
+```shell
+cargo test --release -p preflate-rs benchmark_prediction_throughput -- --ignored --nocapture
+```
+
+This uses exported raw streams, reports plaintext MiB/s and correction sizes, and
+disables the optional encode-time round-trip validator. Run timing comparisons
+without other builds or tests running concurrently.
 
 ## Workspace Layout
 

@@ -92,7 +92,7 @@ pub fn estimate_preflate_parameters(
         });
     }
 
-    let window_bits = estimate_preflate_window_bits(info.max_dist);
+    let mut window_bits = estimate_preflate_window_bits(info.max_dist);
     let mem_level = estimate_preflate_mem_level(info.max_tokens_per_block);
     let add_policy = estimate_add_policy(&deflate_contents.blocks);
 
@@ -108,24 +108,92 @@ pub fn estimate_preflate_parameters(
         deflate_contents,
         plain_text,
         add_policy,
+        add_policy == DictionaryAddPolicy::AddAll
+            && info.max_dist_3_matches > 4096
+            && !info.matches_to_start_detected,
     )?;
 
     let zlib_compatible = !info.matches_to_start_detected
         && !cl.very_far_matches_detected
         && (info.max_dist_3_matches < 4096 || add_policy != DictionaryAddPolicy::AddAll);
 
+    let mut matching_type = cl.match_type;
+    let mut nice_length = cl.nice_length;
+    let mut max_chain = cl.max_chain;
+    let mut max_dist_3_matches = info.max_dist_3_matches;
+    // Sharing a dictionary does not imply sharing zlib's greedy/lazy level mapping.
+    // These observations come from the existing depth pass, not another replay.
+    if add_policy == DictionaryAddPolicy::AddAll && !zlib_compatible {
+        match cl.hash_algorithm {
+            HashAlgorithm::Zlib {
+                hash_mask: 32767,
+                hash_shift: 5,
+            } if info.max_dist_3_matches > 4096 => {
+                let greedy = cl.greedy_parser_detected;
+                let profiles: &[u16] = if greedy {
+                    &[6, 32]
+                } else {
+                    &[16, 32, 128, 256, 512, 768, 1500]
+                };
+                if let Some(&max_probes) = profiles
+                    .iter()
+                    .find(|&&probes| u32::from(probes).div_ceil(3) * 3 >= cl.max_chain)
+                {
+                    matching_type = MatchingType::MiniZ { max_probes, greedy };
+                    max_chain = u32::from(max_probes).div_ceil(3) * 3;
+                    window_bits = 15;
+                }
+                nice_length = 258;
+            }
+            HashAlgorithm::Libdeflate4 if cl.greedy_parser_detected && cl.max_chain <= 17 => {
+                matching_type = MatchingType::LibdeflateGreedy;
+                window_bits = 15;
+                max_dist_3_matches = 4096;
+                nice_length = match cl.max_chain {
+                    // max_chain includes the secondary three-byte hash probe.
+                    0..=7 => 10,
+                    8..=13 => 14,
+                    _ => 30,
+                };
+            }
+            HashAlgorithm::Libdeflate4 if cl.max_chain <= 601 => {
+                let (depth, nice, two_positions) = match cl.max_chain {
+                    0..=17 => (16, 30, false),
+                    18..=36 => (35, 65, false),
+                    37..=101 => (100, 130, false),
+                    102..=301 => (300, 258, true),
+                    _ => (600, 258, true),
+                };
+                matching_type = MatchingType::LibdeflateLazy { two_positions };
+                nice_length = nice;
+                max_chain = depth + 1;
+            }
+            HashAlgorithm::Libdeflate4Fast if cl.max_chain <= 2 => {
+                matching_type = MatchingType::Greedy;
+                nice_length = 32;
+            }
+            HashAlgorithm::Libdeflate4Fast15 => {
+                matching_type = MatchingType::Greedy;
+                nice_length = 32;
+                max_chain = 2;
+                window_bits = 15;
+            }
+            _ => {}
+        }
+    }
+
     Ok(TokenPredictorParameters {
         window_bits,
         very_far_matches_detected: cl.very_far_matches_detected,
         matches_to_start_detected: info.matches_to_start_detected,
         strategy: estimate_preflate_strategy(&info),
-        nice_length: cl.nice_length,
+        nice_length,
         add_policy: add_policy,
         max_token_count,
         zlib_compatible,
-        max_dist_3_matches: info.max_dist_3_matches,
-        matching_type: cl.match_type,
-        max_chain: cl.max_chain,
+        max_dist_3_matches,
+        matching_type,
+        max_chain,
         min_len: info.min_len,
         hash_algorithm: cl.hash_algorithm,
         block_type_strategy: estimate_preflate_huff_strategy(&info),
@@ -245,12 +313,42 @@ fn verify_miniz_recognition() {
 
         if i == 0 {
             assert_eq!(params.strategy, PreflateStrategy::Store);
-        } else if i == 1 {
-            println!("{:?}", params);
-        } else {
-            println!("{:?}", params);
+        } else if i >= 2 {
+            let probes = [6, 32, 16, 32, 128, 256, 512, 768][i as usize - 2];
+            assert_eq!(
+                params.matching_type,
+                MatchingType::MiniZ {
+                    max_probes: probes,
+                    greedy: i <= 3
+                }
+            );
+            assert_eq!(params.window_bits, 15);
+            assert_eq!(params.max_chain, u32::from(probes).div_ceil(3) * 3);
         }
     }
+}
+
+#[test]
+fn verify_libdeflate_greedy_recognition() {
+    use crate::{deflate::deflate_reader::parse_deflate_whole, utils::read_file};
+
+    for (level, nice_length) in [(2, 10), (3, 14), (4, 30)] {
+        let compressed = read_file(&format!("compressed_libdeflate_level{level}.deflate"));
+        let (contents, plain_text) = parse_deflate_whole(&compressed).unwrap();
+        let params = estimate_preflate_parameters(&contents, &plain_text).unwrap();
+        assert_eq!(params.hash_algorithm, HashAlgorithm::Libdeflate4);
+        assert_eq!(params.matching_type, MatchingType::LibdeflateGreedy);
+        assert_eq!(params.nice_length, nice_length);
+    }
+    let compressed = read_file("compressed_libdeflate_level5.deflate");
+    let (contents, plain_text) = parse_deflate_whole(&compressed).unwrap();
+    let params = estimate_preflate_parameters(&contents, &plain_text).unwrap();
+    assert_eq!(
+        params.matching_type,
+        MatchingType::LibdeflateLazy {
+            two_positions: false
+        }
+    );
 }
 
 #[test]

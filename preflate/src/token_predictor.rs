@@ -28,11 +28,23 @@ use crate::{
 
 const VERIFY: bool = false;
 
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct TokenPredictionTrace {
+    pub token_count: usize,
+    pub mismatch_count: usize,
+    pub first_mismatches: Vec<(u32, DeflateToken, DeflateToken)>,
+}
+
 pub struct TokenPredictor {
     state: Box<dyn HashChainHolder>,
     params: TokenPredictorParameters,
     pending_reference: Option<DeflateTokenReference>,
+    pending_literals: u8,
+    min_match_length: u32,
     max_token_count: u32,
+    #[cfg(test)]
+    pub(crate) trace: Option<TokenPredictionTrace>,
 }
 
 impl std::fmt::Debug for TokenPredictor {
@@ -53,7 +65,11 @@ impl TokenPredictor {
             state: predictor_state,
             params: *params,
             pending_reference: None,
+            pending_literals: 0,
+            min_match_length: MIN_MATCH,
             max_token_count: params.max_token_count.into(),
+            #[cfg(test)]
+            trace: None,
         }
     }
 
@@ -80,6 +96,16 @@ impl TokenPredictor {
         }
     }
 
+    fn start_block(&mut self, input: &PreflateInput) {
+        self.pending_reference = None;
+        self.pending_literals = 0;
+        self.min_match_length = if self.params.matching_type == MatchingType::LibdeflateGreedy {
+            libdeflate_min_match_length(input.cur_chars(0), self.params.max_chain.saturating_sub(1))
+        } else {
+            MIN_MATCH
+        };
+    }
+
     #[inline(never)] // don't inline so we get better call stacks
     pub fn predict_block<D: PredictionEncoder>(
         &mut self,
@@ -88,7 +114,7 @@ impl TokenPredictor {
         input: &mut PreflateInput,
         final_block_in_chunk: bool,
     ) -> Result<()> {
-        self.pending_reference = None;
+        self.start_block(input);
 
         codec.encode_verify_state("blocktypestart", 0);
 
@@ -194,6 +220,19 @@ impl TokenPredictor {
             }*/
 
             let predicted_token = self.predict_token(input);
+
+            #[cfg(test)]
+            if let Some(trace) = &mut self.trace {
+                trace.token_count += 1;
+                if *target_token != predicted_token {
+                    trace.mismatch_count += 1;
+                    if trace.first_mismatches.len() < 8 {
+                        trace
+                            .first_mismatches
+                            .push((input.pos(), *target_token, predicted_token));
+                    }
+                }
+            }
 
             /*
             let hash = self.state.calculate_hash();
@@ -316,7 +355,7 @@ impl TokenPredictor {
         codec: &mut D,
         input: &mut PreflateInput,
     ) -> Result<DeflateTokenBlock> {
-        self.pending_reference = None;
+        self.start_block(input);
 
         codec.decode_verify_state("blocktypestart", 0);
 
@@ -471,6 +510,10 @@ impl TokenPredictor {
 
     #[inline(always)]
     fn predict_token(&mut self, input: &PreflateInput) -> DeflateToken {
+        if self.pending_literals > 0 {
+            self.pending_literals -= 1;
+            return DeflateToken::Literal(input.cur_char(0));
+        }
         if input.bytes_before() == 0
             || input.remaining() < MIN_MATCH
             || (self.params.add_policy == DictionaryAddPolicy::AddFirstExcept4kBoundary
@@ -482,13 +525,19 @@ impl TokenPredictor {
         let m = if let Some(pending) = self.pending_reference {
             MatchResult::Success(pending)
         } else {
-            self.state.match_token_0(0, self.params.max_chain, input)
+            let previous = if self.params.matching_type == MatchingType::LibdeflateGreedy {
+                self.min_match_length - 1
+            } else {
+                0
+            };
+            self.state
+                .match_token_0(previous, self.params.max_chain, input)
         };
 
         self.pending_reference = None;
 
         if let MatchResult::Success(match_token) = m {
-            if match_token.len() < MIN_MATCH {
+            if match_token.len() < self.min_match_length {
                 return DeflateToken::Literal(input.cur_char(0));
             }
 
@@ -497,6 +546,58 @@ impl TokenPredictor {
                 && match_token.dist() > u32::from(self.params.max_dist_3_matches)
             {
                 return DeflateToken::Literal(input.cur_char(0));
+            }
+
+            if let MatchingType::MiniZ { greedy, .. } = self.params.matching_type {
+                if match_token.dist() == input.pos() & 32767 {
+                    return DeflateToken::Literal(input.cur_char(0));
+                }
+                if !greedy && match_token.len() < 128 && input.remaining() > match_token.len() {
+                    if let MatchResult::Success(next) =
+                        self.state
+                            .match_token_1(match_token.len(), self.params.max_chain, input)
+                    {
+                        if next.len() > match_token.len()
+                            && !(next.len() == 3 && next.dist() >= 8192)
+                            && next.dist() != (input.pos() + 1) & 32767
+                        {
+                            self.pending_reference = Some(next);
+                            return DeflateToken::Literal(input.cur_char(0));
+                        }
+                    }
+                }
+                return DeflateToken::Reference(match_token);
+            }
+
+            if let MatchingType::LibdeflateLazy { two_positions } = self.params.matching_type {
+                if match_token.len() < self.params.nice_length
+                    && input.remaining() > match_token.len()
+                {
+                    let depth = self.params.max_chain.saturating_sub(1);
+                    if let MatchResult::Success(next) =
+                        self.state
+                            .match_token_1(match_token.len() - 1, (depth >> 1).max(1), input)
+                    {
+                        if prefer_libdeflate_match(match_token, next, 2) {
+                            self.pending_reference = Some(next);
+                            return DeflateToken::Literal(input.cur_char(0));
+                        }
+                    }
+                    if two_positions && input.remaining() > match_token.len() + 1 {
+                        if let MatchResult::Success(next) = self.state.match_token_2(
+                            match_token.len() - 1,
+                            (depth >> 2).max(1),
+                            input,
+                        ) {
+                            if prefer_libdeflate_match(match_token, next, 6) {
+                                self.pending_reference = Some(next);
+                                self.pending_literals = 1;
+                                return DeflateToken::Literal(input.cur_char(0));
+                            }
+                        }
+                    }
+                }
+                return DeflateToken::Reference(match_token);
             }
 
             // Check for a longer match that starts at the next byte, in which case we should
@@ -564,6 +665,7 @@ impl TokenPredictor {
         let match_token = self.state.match_token_0(0, self.params.max_chain, input);
 
         self.pending_reference = None;
+        self.pending_literals = 0;
 
         if let MatchResult::Success(m) = match_token {
             if m.len() >= MIN_MATCH {
@@ -600,8 +702,184 @@ impl TokenPredictor {
     }
 }
 
+fn libdeflate_min_match_length(bytes: &[u8], depth: u32) -> u32 {
+    if bytes.len() < 512 {
+        return MIN_MATCH;
+    }
+    let mut seen = [false; 256];
+    let mut distinct = 0;
+    for &byte in bytes.iter().take(4096) {
+        if !seen[usize::from(byte)] {
+            seen[usize::from(byte)] = true;
+            distinct += 1;
+            if distinct >= 80 {
+                return MIN_MATCH;
+            }
+        }
+    }
+    let length = match distinct {
+        0..=5 => 9,
+        6..=7 => 8,
+        8..=9 => 7,
+        10..=15 => 6,
+        16..=44 => 5,
+        _ => 4,
+    };
+    let cap = match depth {
+        0..=4 => 4,
+        5..=9 => 5,
+        10..=15 => 7,
+        _ => 9,
+    };
+    length.min(cap)
+}
+
+#[test]
+fn libdeflate_minimum_match_length_is_bounded_and_depth_aware() {
+    for (distinct, expected) in [
+        (1, 9),
+        (5, 9),
+        (6, 8),
+        (7, 8),
+        (8, 7),
+        (9, 7),
+        (10, 6),
+        (15, 6),
+        (16, 5),
+        (44, 5),
+        (45, 4),
+        (79, 4),
+        (80, 3),
+        (256, 3),
+    ] {
+        let bytes: Vec<_> = (0..4096).map(|i| (i % distinct) as u8).collect();
+        assert_eq!(libdeflate_min_match_length(&bytes, 16), expected);
+        assert_eq!(libdeflate_min_match_length(&bytes, 12), expected.min(7));
+        assert_eq!(libdeflate_min_match_length(&bytes, 6), expected.min(5));
+        assert_eq!(libdeflate_min_match_length(&bytes, 4), expected.min(4));
+        assert_eq!(libdeflate_min_match_length(&bytes[..511], 16), 3);
+    }
+    let mut bytes = vec![b'a'; 4096];
+    bytes.extend(0..=255);
+    assert_eq!(libdeflate_min_match_length(&bytes, 16), 9);
+}
+
+#[test]
+fn libdeflate_greedy_recomputes_minimum_at_block_boundaries() {
+    use crate::preflate_input::PlainText;
+    let mut bytes: Vec<_> = (0..4096).map(|i| i as u8).collect();
+    bytes.extend([b'a'; 512]);
+    let plain = PlainText::new_with_data(bytes);
+    let mut input = PreflateInput::new(&plain);
+    let params = TokenPredictorParameters {
+        matching_type: MatchingType::LibdeflateGreedy,
+        max_chain: 17,
+        ..zlib_level_1_params()
+    };
+    let mut predictor = TokenPredictor::new(&params);
+    predictor.start_block(&input);
+    assert_eq!(predictor.min_match_length, 3);
+    input.advance(4096);
+    predictor.start_block(&input);
+    assert_eq!(predictor.min_match_length, 9);
+    input.advance(1);
+    predictor.start_block(&input);
+    assert_eq!(predictor.min_match_length, 3);
+}
+
+fn prefer_libdeflate_match(
+    current: DeflateTokenReference,
+    next: DeflateTokenReference,
+    literal_cost: i32,
+) -> bool {
+    next.len() >= current.len()
+        && 4 * (next.len() as i32 - current.len() as i32) + current.dist().ilog2() as i32
+            - next.dist().ilog2() as i32
+            > literal_cost
+}
+
+#[test]
+fn libdeflate_lazy_prefers_a_nearer_equal_length_match() {
+    let current = DeflateTokenReference::new(3, 136);
+    assert!(prefer_libdeflate_match(
+        current,
+        DeflateTokenReference::new(3, 5),
+        2
+    ));
+    assert!(!prefer_libdeflate_match(
+        current,
+        DeflateTokenReference::new(3, 32),
+        2
+    ));
+    assert!(!prefer_libdeflate_match(
+        current,
+        DeflateTokenReference::new(3, 5),
+        6
+    ));
+    assert!(!prefer_libdeflate_match(
+        DeflateTokenReference::new(4, 136),
+        DeflateTokenReference::new(3, 1),
+        2
+    ));
+}
+
+#[test]
+fn libdeflate_lazy_models_saved_matches_and_two_literals() {
+    use crate::{hash_algorithm::HashAlgorithm, preflate_input::PlainText};
+    for two_positions in [false, true] {
+        let mut bytes = b"@abcX".to_vec();
+        bytes.extend([b'Z'; 128]);
+        bytes.extend_from_slice(if two_positions { b"cdEFGY" } else { b"bcdY" });
+        let position = bytes.len() as u32;
+        bytes.extend_from_slice(if two_positions { b"abcdEFGQ" } else { b"abcdQ" });
+        let plain = PlainText::new_with_data(bytes);
+        let mut input = PreflateInput::new(&plain);
+        let params = TokenPredictorParameters {
+            matching_type: MatchingType::LibdeflateLazy { two_positions },
+            hash_algorithm: HashAlgorithm::Libdeflate4,
+            add_policy: DictionaryAddPolicy::AddAll,
+            nice_length: 258,
+            max_chain: 301,
+            zlib_compatible: false,
+            ..zlib_level_1_params()
+        };
+        let mut predictor = TokenPredictor::new(&params);
+        while input.pos() < position {
+            predictor.commit_token(&DeflateToken::Literal(input.cur_char(0)), &mut input);
+        }
+        let first = predictor.predict_token(&input);
+        assert_eq!(first, DeflateToken::Literal(b'a'));
+        if two_positions {
+            assert_eq!(predictor.pending_literals, 1);
+            assert_eq!(
+                predictor
+                    .repredict_reference(None, &mut input)
+                    .unwrap()
+                    .len(),
+                3
+            );
+            assert_eq!(predictor.pending_literals, 0);
+            assert_eq!(predictor.pending_reference, None);
+            assert_eq!(predictor.predict_token(&input), first);
+        }
+        predictor.commit_token(&first, &mut input);
+        if two_positions {
+            let second = predictor.predict_token(&input);
+            assert_eq!(second, DeflateToken::Literal(b'b'));
+            predictor.commit_token(&second, &mut input);
+        }
+        let expected = if two_positions {
+            DeflateToken::new_ref(5, 8)
+        } else {
+            DeflateToken::new_ref(3, 5)
+        };
+        assert_eq!(predictor.predict_token(&input), expected);
+        assert_eq!(predictor.pending_literals, 0);
+    }
+}
+
 #[cfg(test)]
-fn zlib_level_1_params() -> TokenPredictorParameters {
+pub(crate) fn zlib_level_1_params() -> TokenPredictorParameters {
     use crate::estimator::add_policy_estimator::DictionaryAddPolicy;
     use crate::estimator::preflate_parameter_estimator::{BlockTypeStrategy, PreflateStrategy};
     use crate::hash_algorithm::HashAlgorithm;

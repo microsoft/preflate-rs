@@ -18,6 +18,7 @@ pub enum HashAlgorithm {
     ZlibNG,
     RandomVector,
     Crc32cHash,
+    Libdeflate4Fast15,
 }
 
 const HASH_ALGORITHM_NONE: u16 = 0;
@@ -28,6 +29,7 @@ const HASH_ALGORITHM_LIBDEFLATE4_FAST: u16 = 4;
 const HASH_ALGORITHM_ZLIBNG: u16 = 5;
 const HASH_ALGORITHM_RANDOMVECTOR: u16 = 6;
 const HASH_ALGORITHM_CRC32C: u16 = 7;
+const HASH_ALGORITHM_LIBDEFLATE4_FAST15: u16 = 8;
 
 impl HashAlgorithm {
     pub fn to_u16(self) -> u16 {
@@ -47,6 +49,7 @@ impl HashAlgorithm {
             HashAlgorithm::ZlibNG => HASH_ALGORITHM_ZLIBNG,
             HashAlgorithm::RandomVector => HASH_ALGORITHM_RANDOMVECTOR,
             HashAlgorithm::Crc32cHash => HASH_ALGORITHM_CRC32C,
+            HashAlgorithm::Libdeflate4Fast15 => HASH_ALGORITHM_LIBDEFLATE4_FAST15,
         }
     }
 
@@ -67,6 +70,7 @@ impl HashAlgorithm {
             HASH_ALGORITHM_ZLIBNG => Some(HashAlgorithm::ZlibNG),
             HASH_ALGORITHM_RANDOMVECTOR => Some(HashAlgorithm::RandomVector),
             HASH_ALGORITHM_CRC32C => Some(HashAlgorithm::Crc32cHash),
+            HASH_ALGORITHM_LIBDEFLATE4_FAST15 => Some(HashAlgorithm::Libdeflate4Fast15),
             _ => None,
         }
     }
@@ -85,6 +89,7 @@ fn roundtrip_hash_algorithm_to_int() {
         HashAlgorithm::ZlibNG,
         HashAlgorithm::RandomVector,
         HashAlgorithm::Crc32cHash,
+        HashAlgorithm::Libdeflate4Fast15,
     ];
 
     for &hash in test_hashes.iter() {
@@ -190,6 +195,21 @@ impl HashImplementation for LibdeflateHash4Fast {
 
     fn algorithm(&self) -> HashAlgorithm {
         HashAlgorithm::Libdeflate4Fast
+    }
+}
+
+#[derive(Default, Copy, Clone)]
+pub struct LibdeflateHash4Fast15 {}
+
+impl HashImplementation for LibdeflateHash4Fast15 {
+    const NUM_HASH_BYTES: usize = 4;
+
+    fn get_hash(&self, b: &[u8]) -> u16 {
+        LibdeflateHash4Fast {}.get_hash(b) >> 1
+    }
+
+    fn algorithm(&self) -> HashAlgorithm {
+        HashAlgorithm::Libdeflate4Fast15
     }
 }
 

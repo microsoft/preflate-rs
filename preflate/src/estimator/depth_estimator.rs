@@ -25,6 +25,43 @@ pub trait HashTableDepthEstimator {
     fn very_far_matches_detected(&self, wsize: u32) -> bool;
 
     fn hash_algorithm(&self) -> HashAlgorithm;
+
+    fn greedy_parser_detected(&self) -> bool {
+        false
+    }
+}
+
+#[derive(Default)]
+struct GreedyParserObservations {
+    samples: u16,
+    skipped_better_matches: u16,
+}
+
+impl GreedyParserObservations {
+    fn needs_sample(&self, token: DeflateTokenReference, input: &PreflateInput) -> bool {
+        self.samples < 256 && token.len() == 3 && input.remaining() >= 5
+    }
+
+    fn observe(&mut self, token: DeflateTokenReference, input: &PreflateInput, next_head: u16) {
+        debug_assert!(self.needs_sample(token, input));
+        self.samples += 1;
+        if next_head == 0 {
+            return;
+        }
+        let next_distance = (input.pos() as u16).wrapping_add(1).wrapping_sub(next_head) as u32;
+        // A lazy parser would prefer this longer, no-more-expensive match.
+        // Restricting the distance also keeps the probe inside the original window.
+        if next_distance == 0 || next_distance > token.dist() {
+            return;
+        }
+        if input.cur_chars(1)[..4] == input.cur_chars(1 - next_distance as i32)[..4] {
+            self.skipped_better_matches += 1;
+        }
+    }
+
+    fn detected(&self) -> bool {
+        self.skipped_better_matches >= 4
+    }
 }
 
 #[derive(DefaultBoxed)]
@@ -33,6 +70,86 @@ struct MinizDepthEstimator {
 
     zero_chain_found: u32,
     nonzero_chain_found: u32,
+}
+
+#[derive(DefaultBoxed)]
+struct LibdeflateFastDepthEstimator {
+    legacy: HashTableDepthEstimatorImpl<LibdeflateHash4Fast>,
+    previous_heads: [u16; 65536],
+    invalid15: bool,
+    samples: u16,
+    max_chain_found: u32,
+}
+
+impl HashTableDepthEstimator for LibdeflateFastDepthEstimator {
+    fn update_hash(&mut self, add_policy: DictionaryAddPolicy, input: &PreflateInput, length: u32) {
+        self.legacy.add_policy = add_policy;
+        let legacy = &mut self.legacy;
+        let previous_heads = &mut self.previous_heads;
+        let valid15 = !self.invalid15 && self.samples < 256;
+        add_policy.update_hash(
+            input.cur_chars(0),
+            input.pos(),
+            length,
+            |chars, pos, len| {
+                if valid15 {
+                    legacy.internal_update_hash_observe(chars, pos, len, |hash, previous| {
+                        previous_heads[usize::from(hash)] = previous;
+                    });
+                } else {
+                    legacy.internal_update_hash(chars, pos, len);
+                }
+            },
+        );
+    }
+
+    fn match_depth(&mut self, token: DeflateTokenReference, input: &PreflateInput) -> bool {
+        let depth16 = self.legacy.match_depth_internal(token, input);
+        if depth16 > 1 || token.dist() >= 32768 {
+            self.invalid15 = true;
+        }
+        if !self.invalid15 && self.samples < 256 {
+            self.samples += 1;
+            let other = LibdeflateHash4Fast {}.get_hash(input.cur_chars(0)) ^ 1;
+            let head = self.legacy.head[usize::from(other)];
+            let previous = self.previous_heads[usize::from(other)];
+            let newer = |position: u16| {
+                let age = u32::from((input.pos() as u16).wrapping_sub(position));
+                self.legacy.chain_depth_hash_verify[usize::from(position)] == other
+                    && self.legacy.chain_depth[usize::from(position)] > 0
+                    && age > 0
+                    && age < token.dist()
+            };
+            let depth15 =
+                depth16 + u32::from(newer(head)) + u32::from(previous != head && newer(previous));
+            if depth15 <= 1 {
+                self.max_chain_found = self.max_chain_found.max(depth15);
+            } else {
+                self.invalid15 = true;
+            }
+        }
+        self.legacy.record_depth(token, depth16)
+    }
+
+    fn max_chain_found(&self) -> u32 {
+        if self.invalid15 {
+            self.legacy.max_chain_found()
+        } else {
+            self.max_chain_found
+        }
+    }
+
+    fn very_far_matches_detected(&self, wsize: u32) -> bool {
+        !self.invalid15 || self.legacy.very_far_matches_detected(wsize)
+    }
+
+    fn hash_algorithm(&self) -> HashAlgorithm {
+        if self.invalid15 {
+            HashAlgorithm::Libdeflate4Fast
+        } else {
+            HashAlgorithm::Libdeflate4Fast15
+        }
+    }
 }
 
 impl HashTableDepthEstimator for MinizDepthEstimator {
@@ -122,6 +239,8 @@ struct HashTableDepthEstimatorImpl<H: HashImplementation> {
     longest_dist_at_hop_0: u32,
 
     longest_dist_at_hop_1_plus: u32,
+
+    parser_observations: GreedyParserObservations,
 }
 
 impl<H: HashImplementation> HashTableDepthEstimatorImpl<H> {
@@ -146,6 +265,16 @@ impl<H: HashImplementation> HashTableDepthEstimatorImpl<H> {
     }
 
     fn internal_update_hash(&mut self, chars: &[u8], pos: u32, length: u32) {
+        self.internal_update_hash_observe(chars, pos, length, |_, _| {});
+    }
+
+    fn internal_update_hash_observe(
+        &mut self,
+        chars: &[u8],
+        pos: u32,
+        length: u32,
+        mut observe: impl FnMut(u16, u16),
+    ) {
         debug_assert!(length as usize <= chars.len());
         if length as usize + H::NUM_HASH_BYTES - 1 >= chars.len() {
             // reached on of the stream so there will be no more matches
@@ -156,6 +285,7 @@ impl<H: HashImplementation> HashTableDepthEstimatorImpl<H> {
 
         for i in 0..length {
             let h = self.hash.get_hash(&chars[i as usize..]);
+            observe(h, self.head[usize::from(h)]);
 
             self.chain_depth[usize::from(pos)] =
                 self.chain_depth[self.head[h as usize] as usize] + 1;
@@ -165,6 +295,16 @@ impl<H: HashImplementation> HashTableDepthEstimatorImpl<H> {
 
             pos = pos.wrapping_add(1);
         }
+    }
+
+    fn record_depth(&mut self, token: DeflateTokenReference, depth: u32) -> bool {
+        self.max_chain_found = self.max_chain_found.max(depth);
+        if depth == 0 {
+            self.longest_dist_at_hop_0 = self.longest_dist_at_hop_0.max(token.dist());
+        } else {
+            self.longest_dist_at_hop_1_plus = self.longest_dist_at_hop_1_plus.max(token.dist());
+        }
+        depth < 4096
     }
 
     fn match_depth_internal(&self, token: DeflateTokenReference, input: &PreflateInput<'_>) -> u32 {
@@ -204,18 +344,15 @@ impl<H: HashImplementation> HashTableDepthEstimator for HashTableDepthEstimatorI
     /// do by subtracting the depth of the current node from the depth of the
     /// match node.
     fn match_depth(&mut self, token: DeflateTokenReference, input: &PreflateInput) -> bool {
-        let mdepth = self.match_depth_internal(token, input);
-
-        self.max_chain_found = std::cmp::max(self.max_chain_found, mdepth);
-
-        if mdepth == 0 {
-            self.longest_dist_at_hop_0 = std::cmp::max(self.longest_dist_at_hop_0, token.dist());
-        } else {
-            self.longest_dist_at_hop_1_plus =
-                std::cmp::max(self.longest_dist_at_hop_1_plus, token.dist());
+        if self.add_policy == DictionaryAddPolicy::AddAll
+            && self.parser_observations.needs_sample(token, input)
+        {
+            let next_hash = self.hash.get_hash(input.cur_chars(1));
+            self.parser_observations
+                .observe(token, input, self.head[next_hash as usize]);
         }
-
-        mdepth < 4096
+        let mdepth = self.match_depth_internal(token, input);
+        self.record_depth(token, mdepth)
     }
 
     fn hash_algorithm(&self) -> HashAlgorithm {
@@ -230,6 +367,10 @@ impl<H: HashImplementation> HashTableDepthEstimator for HashTableDepthEstimatorI
         self.longest_dist_at_hop_0 > wsize - deflate_constants::MIN_LOOKAHEAD
             || self.longest_dist_at_hop_1_plus >= wsize - deflate_constants::MIN_LOOKAHEAD
     }
+
+    fn greedy_parser_detected(&self) -> bool {
+        self.parser_observations.detected()
+    }
 }
 
 /// Libdeflate is a bit special because it uses the first candidate of the 3 byte match,
@@ -240,6 +381,8 @@ struct HashTableDepthEstimatorLibdeflate {
     head3: [u32; 65536],
 
     max_chain_found: u32,
+
+    parser_observations: GreedyParserObservations,
 }
 
 const LIB_DEFLATE3_HASH: LibdeflateHash3Secondary = LibdeflateHash3Secondary {};
@@ -277,6 +420,11 @@ impl HashTableDepthEstimator for HashTableDepthEstimatorLibdeflate {
     /// do by subtracting the depth of the current node from the depth of the
     /// match node.
     fn match_depth(&mut self, token: DeflateTokenReference, input: &PreflateInput) -> bool {
+        if self.parser_observations.needs_sample(token, input) {
+            let next_hash = self.length4.hash.get_hash(input.cur_chars(1));
+            self.parser_observations
+                .observe(token, input, self.length4.head[next_hash as usize]);
+        }
         let length3hash = LIB_DEFLATE3_HASH.get_hash(input.cur_chars(0));
         let distance3 = input.pos() - self.head3[length3hash as usize];
 
@@ -308,6 +456,10 @@ impl HashTableDepthEstimator for HashTableDepthEstimatorLibdeflate {
     fn hash_algorithm(&self) -> HashAlgorithm {
         HashAlgorithm::Libdeflate4
     }
+
+    fn greedy_parser_detected(&self) -> bool {
+        self.parser_observations.detected()
+    }
 }
 
 /// Factory function to create a new HashTableDepthEstimator based on the hash algorithm
@@ -334,6 +486,7 @@ pub fn new_depth_estimator(hash_algorithm: HashAlgorithm) -> Box<dyn HashTableDe
         HashAlgorithm::Libdeflate4Fast => {
             HashTableDepthEstimatorImpl::box_new(LibdeflateHash4Fast {})
         }
+        HashAlgorithm::Libdeflate4Fast15 => LibdeflateFastDepthEstimator::default_boxed(),
 
         HashAlgorithm::ZlibNG => HashTableDepthEstimatorImpl::box_new(ZlibNGHash {}),
         HashAlgorithm::RandomVector => HashTableDepthEstimatorImpl::box_new(RandomVectorHash {}),
@@ -396,6 +549,62 @@ pub fn run_depth_candidates(
 }
 
 #[test]
+fn fastest_fingerprint_is_bounded_and_preserves_legacy_fallback() {
+    use crate::{deflate::deflate_reader::parse_deflate_whole, utils::read_file};
+    for (name, start_sampling, expected) in [
+        (
+            "compressed_libdeflate_level1.deflate",
+            0,
+            HashAlgorithm::Libdeflate4Fast15,
+        ),
+        (
+            "compressed_libdeflate_level1.deflate",
+            65500,
+            HashAlgorithm::Libdeflate4Fast15,
+        ),
+        (
+            "compressed_zlibng_level3.deflate",
+            0,
+            HashAlgorithm::Libdeflate4Fast,
+        ),
+    ] {
+        let (contents, plain) = parse_deflate_whole(&read_file(name)).unwrap();
+        let mut estimator = LibdeflateFastDepthEstimator::default_boxed();
+        let mut input = PreflateInput::new(&plain);
+        let mut frozen_heads = None;
+        'blocks: for block in &contents.blocks {
+            let DeflateTokenBlockType::Huffman { tokens, .. } = &block.block_type else {
+                panic!("expected Huffman fixture");
+            };
+            for token in tokens {
+                let length = match token {
+                    DeflateToken::Literal(_) => 1,
+                    DeflateToken::Reference(reference) => {
+                        if input.pos() >= start_sampling {
+                            assert!(estimator.match_depth(*reference, &input));
+                            if estimator.samples == 256 && frozen_heads.is_none() {
+                                frozen_heads = Some(estimator.previous_heads.to_vec());
+                            }
+                            if estimator.invalid15 {
+                                break 'blocks;
+                            }
+                        }
+                        reference.len()
+                    }
+                };
+                estimator.update_hash(DictionaryAddPolicy::AddAll, &input, length);
+                input.advance(length);
+            }
+        }
+        assert_eq!(estimator.hash_algorithm(), expected, "{name}");
+        if expected == HashAlgorithm::Libdeflate4Fast15 {
+            assert_eq!(estimator.samples, 256);
+            assert_eq!(estimator.previous_heads.as_slice(), frozen_heads.unwrap());
+        }
+    }
+}
+
+#[test]
 fn verify_max_chain_length() {
     use crate::deflate::deflate_reader::parse_deflate_whole;
 
@@ -411,6 +620,7 @@ fn verify_max_chain_length() {
         ("compressed_zlibng_level3.deflate", HashAlgorithm::Crc32cHash, DictionaryAddPolicy::AddFirstAndLast(96), 5),
         ("compressed_zlibng_level4.deflate", HashAlgorithm::Crc32cHash, DictionaryAddPolicy::AddFirstAndLast(191), 23),
         ("compressed_libdeflate_level1.deflate", HashAlgorithm::Libdeflate4Fast, DictionaryAddPolicy::AddAll, 1),
+        ("compressed_libdeflate_level1.deflate", HashAlgorithm::Libdeflate4Fast15, DictionaryAddPolicy::AddAll, 1),
         ("compressed_libdeflate_level2.deflate", HashAlgorithm::Libdeflate4, DictionaryAddPolicy::AddAll, 6),
         ("compressed_libdeflate_level3.deflate", HashAlgorithm::Libdeflate4, DictionaryAddPolicy::AddAll, 12),
         ("compressed_libdeflate_level4.deflate", HashAlgorithm::Libdeflate4, DictionaryAddPolicy::AddAll, 16),
@@ -464,4 +674,51 @@ fn verify_max_chain_length() {
             max_chain_length
         );
     }
+}
+
+#[test]
+fn greedy_observations_require_repeated_better_matches() {
+    let text = PlainText::new_with_data(b"@abcdXbcdefYabcdefZ".to_vec());
+    let mut input = PreflateInput::new(&text);
+    input.advance(12);
+    let token = DeflateTokenReference::new(3, 11);
+    let mut observations = GreedyParserObservations::default();
+    for _ in 0..3 {
+        observations.observe(token, &input, 6);
+        assert!(!observations.detected());
+    }
+    observations.observe(token, &input, 6);
+    assert!(observations.detected());
+    while observations.needs_sample(token, &input) {
+        observations.observe(token, &input, 6);
+    }
+    assert_eq!(observations.samples, 256);
+}
+
+#[test]
+fn greedy_observations_reject_invalid_or_costlier_candidates() {
+    let text = PlainText::new_with_data(b"@bcdeZ@bcX@abcdXbcdefYabcdefZ".to_vec());
+    let mut input = PreflateInput::new(&text);
+    input.advance(22);
+    let token = DeflateTokenReference::new(3, 11);
+    let mut observations = GreedyParserObservations::default();
+    for head in [0, 1, 7, 22] {
+        observations.observe(token, &input, head);
+    }
+    assert_eq!(observations.skipped_better_matches, 0);
+    assert!(!observations.needs_sample(DeflateTokenReference::new(4, 11), &input));
+    input.advance(3);
+    assert!(!observations.needs_sample(token, &input));
+}
+
+#[test]
+fn greedy_observations_handle_wrapped_positions() {
+    let mut text = vec![b'X'; 65536];
+    text.extend_from_slice(b"@abcdXbcdefYabcdefZ");
+    let text = PlainText::new_with_data(text);
+    let mut input = PreflateInput::new(&text);
+    input.advance(65536 + 12);
+    let mut observations = GreedyParserObservations::default();
+    observations.observe(DeflateTokenReference::new(3, 11), &input, 6);
+    assert_eq!(observations.skipped_better_matches, 1);
 }

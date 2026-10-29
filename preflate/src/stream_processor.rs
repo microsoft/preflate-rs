@@ -32,7 +32,7 @@ use crate::{
 ///
 /// The high bit is set because unversioned blobs from 0.7 and earlier start with a small bitcode
 /// byte (0x00 or 0x01 in practice), so they are rejected here instead of being misinterpreted.
-pub(crate) const RECONSTRUCTION_DATA_VERSION: u8 = 0x81;
+pub(crate) const RECONSTRUCTION_DATA_VERSION: u8 = 0x83;
 
 /// the data required to reconstruct the deflate stream exactly the way that it was
 #[derive(Encode, Decode)]
@@ -510,6 +510,10 @@ fn verify_roundtrip_assert() {
     assert!(v == recompressed);
 }
 
+#[cfg(test)]
+#[path = "prediction_diagnostics.rs"]
+mod prediction_diagnostics;
+
 #[test]
 fn verify_roundtrip_zlib() {
     crate::init_logging();
@@ -551,8 +555,18 @@ fn reconstruction_data_version() {
     let unversioned = bitcode::encode(&parsed);
     let mut wrong_version = r.corrections.clone();
     wrong_version[0] = RECONSTRUCTION_DATA_VERSION + 1;
+    let mut previous_version = r.corrections.clone();
+    previous_version[0] = 0x81;
+    let mut previous_models = r.corrections.clone();
+    previous_models[0] = 0x82;
 
-    for bad in [&unversioned[..], &wrong_version[..], &[]] {
+    for bad in [
+        &unversioned[..],
+        &wrong_version[..],
+        &previous_version[..],
+        &previous_models[..],
+        &[],
+    ] {
         let e = recreate_whole_deflate_stream(plain_text.text(), bad).unwrap_err();
         assert_eq!(e.exit_code(), ExitCode::InvalidCompressedWrapper);
     }

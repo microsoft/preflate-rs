@@ -16,6 +16,14 @@ pub enum MatchingType {
         good_length: u16,
         max_lazy: u16,
     },
+    MiniZ {
+        max_probes: u16,
+        greedy: bool,
+    },
+    LibdeflateLazy {
+        two_positions: bool,
+    },
+    LibdeflateGreedy,
 }
 
 pub struct PreflateParserConfig {
