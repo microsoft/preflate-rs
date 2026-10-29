@@ -205,6 +205,7 @@ impl HashImplementation for LibdeflateHash4Fast15 {
     const NUM_HASH_BYTES: usize = 4;
 
     fn get_hash(&self, b: &[u8]) -> u16 {
+        // Share the legacy multiply; the fastest table uses one fewer high hash bit.
         LibdeflateHash4Fast {}.get_hash(b) >> 1
     }
 

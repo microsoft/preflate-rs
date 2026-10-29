@@ -72,9 +72,12 @@ struct MinizDepthEstimator {
     nonzero_chain_found: u32,
 }
 
+// Merge adjacent 16-bit buckets to test the 15-bit signature without another hash pass.
 #[derive(DefaultBoxed)]
 struct LibdeflateFastDepthEstimator {
+    // Keep the full legacy history so a failed fingerprint needs no replay.
     legacy: HashTableDepthEstimatorImpl<LibdeflateHash4Fast>,
+    // The second-newest entry in each half-bucket is enough to detect ranks above one.
     previous_heads: [u16; 65536],
     invalid15: bool,
     samples: u16,
@@ -86,6 +89,7 @@ impl HashTableDepthEstimator for LibdeflateFastDepthEstimator {
         self.legacy.add_policy = add_policy;
         let legacy = &mut self.legacy;
         let previous_heads = &mut self.previous_heads;
+        // After the bounded sample, stop per-byte bookkeeping but retain legacy depth checks.
         let valid15 = !self.invalid15 && self.samples < 256;
         add_policy.update_hash(
             input.cur_chars(0),
@@ -110,10 +114,14 @@ impl HashTableDepthEstimator for LibdeflateFastDepthEstimator {
         }
         if !self.invalid15 && self.samples < 256 {
             self.samples += 1;
+            // Dropping the low hash bit merges h and h ^ 1. Count newer nodes in the
+            // opposite half to recover the reference's rank in the two-entry bucket.
             let other = LibdeflateHash4Fast {}.get_hash(input.cur_chars(0)) ^ 1;
             let head = self.legacy.head[usize::from(other)];
             let previous = self.previous_heads[usize::from(other)];
             let newer = |position: u16| {
+                // Positions wrap at 16 bits; reject overwritten slots and nodes outside
+                // the interval between this reference's source and the current position.
                 let age = u32::from((input.pos() as u16).wrapping_sub(position));
                 self.legacy.chain_depth_hash_verify[usize::from(position)] == other
                     && self.legacy.chain_depth[usize::from(position)] > 0

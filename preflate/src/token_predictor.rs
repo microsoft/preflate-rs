@@ -28,6 +28,7 @@ use crate::{
 
 const VERIFY: bool = false;
 
+// Capture the initial prediction, before correction recovery can hide model mismatches.
 #[cfg(test)]
 #[derive(Default)]
 pub(crate) struct TokenPredictionTrace {
@@ -97,6 +98,8 @@ impl TokenPredictor {
     }
 
     fn start_block(&mut self, input: &PreflateInput) {
+        // Encoding and reconstruction must reset lookahead and infer the same minimum
+        // at the same boundary, or their later correction decisions will diverge.
         self.pending_reference = None;
         self.pending_literals = 0;
         self.min_match_length = if self.params.matching_type == MatchingType::LibdeflateGreedy {
@@ -573,6 +576,8 @@ impl TokenPredictor {
                 if match_token.len() < self.params.nice_length
                     && input.remaining() > match_token.len()
                 {
+                    // Libdeflate halves/quarters the chain budget for lookahead and
+                    // scores distance as well as length, so equal-length matches can win.
                     let depth = self.params.max_chain.saturating_sub(1);
                     if let MatchResult::Success(next) =
                         self.state
@@ -591,6 +596,8 @@ impl TokenPredictor {
                         ) {
                             if prefer_libdeflate_match(match_token, next, 6) {
                                 self.pending_reference = Some(next);
+                                // This return emits the first literal; save one more
+                                // literal before the pending offset-two reference.
                                 self.pending_literals = 1;
                                 return DeflateToken::Literal(input.cur_char(0));
                             }
@@ -664,6 +671,7 @@ impl TokenPredictor {
 
         let match_token = self.state.match_token_0(0, self.params.max_chain, input);
 
+        // Re-prediction replaces any saved lookahead choice, including lazy2's extra literal.
         self.pending_reference = None;
         self.pending_literals = 0;
 
@@ -702,6 +710,8 @@ impl TokenPredictor {
     }
 }
 
+// Reproduce libdeflate's block heuristic, not a parameter search. Its short-input
+// cutoff and bounded alphabet sample must be identical during reconstruction.
 fn libdeflate_min_match_length(bytes: &[u8], depth: u32) -> u32 {
     if bytes.len() < 512 {
         return MIN_MATCH;
@@ -713,6 +723,7 @@ fn libdeflate_min_match_length(bytes: &[u8], depth: u32) -> u32 {
             seen[usize::from(byte)] = true;
             distinct += 1;
             if distinct >= 80 {
+                // More distinct bytes cannot lower the minimum below three.
                 return MIN_MATCH;
             }
         }
@@ -725,6 +736,7 @@ fn libdeflate_min_match_length(bytes: &[u8], depth: u32) -> u32 {
         16..=44 => 5,
         _ => 4,
     };
+    // The compressor caps the alphabet-based estimate by its configured search depth.
     let cap = match depth {
         0..=4 => 4,
         5..=9 => 5,
@@ -792,6 +804,8 @@ fn prefer_libdeflate_match(
     next: DeflateTokenReference,
     literal_cost: i32,
 ) -> bool {
+    // Mirror the source parser's length/log-distance score and literal penalty;
+    // choosing only the longest match would miss cheaper, nearer references.
     next.len() >= current.len()
         && 4 * (next.len() as i32 - current.len() as i32) + current.dist().ilog2() as i32
             - next.dist().ilog2() as i32

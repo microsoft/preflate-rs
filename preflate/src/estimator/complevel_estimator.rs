@@ -88,6 +88,8 @@ pub fn estimate_preflate_comp_level(
         && !candidates
             .iter()
             .any(|candidate| candidate.hash_algorithm() == HashAlgorithm::Libdeflate4);
+    // A 16-bit bucket is a subset of its 15-bit bucket, so minimum depth alone
+    // would favor the legacy hash even when the fastest fingerprint fits.
     let candidate = candidates
         .iter()
         .find(|candidate| {

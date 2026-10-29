@@ -132,6 +132,8 @@ impl HashTable {
 pub trait HashChain {
     fn get_num_hash_bytes() -> usize;
 
+    /// Expose the concrete hash identity so unrelated profile branches can be
+    /// optimized away in each monomorphized matcher.
     fn algorithm(&self) -> HashAlgorithm;
 
     fn secondary_match(&self, _input: &PreflateInput, _offset: u32) -> Option<u32> {
@@ -338,6 +340,8 @@ impl HashChain for HashChainLibflate4 {
 
     fn secondary_match(&self, input: &PreflateInput, offset: u32) -> Option<u32> {
         let hash = LIBFLATE_HASH_3.get_hash(input.cur_chars(offset as i32));
+        // Lookahead must see intervening positions as if they were already inserted.
+        // The nearest virtual slot overrides the stored three-byte hash head.
         for previous in (0..offset).rev() {
             if LIBFLATE_HASH_3.get_hash(input.cur_chars(previous as i32)) == hash {
                 return Some(offset - previous);

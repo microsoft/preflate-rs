@@ -130,6 +130,7 @@ pub fn estimate_preflate_parameters(
                 hash_shift: 5,
             } if info.max_dist_3_matches > 4096 => {
                 let greedy = cl.greedy_parser_detected;
+                // Use miniz's shipped probe budgets, rounded to whole three-probe groups.
                 let profiles: &[u16] = if greedy {
                     &[6, 32]
                 } else {
@@ -157,6 +158,8 @@ pub fn estimate_preflate_parameters(
                 };
             }
             HashAlgorithm::Libdeflate4 if cl.max_chain <= 601 => {
+                // Observed depth is only a lower bound. Select a shipped lazy/lazy2
+                // budget, excluding the secondary probe that is restored below.
                 let (depth, nice, two_positions) = match cl.max_chain {
                     0..=17 => (16, 30, false),
                     18..=36 => (35, 65, false),

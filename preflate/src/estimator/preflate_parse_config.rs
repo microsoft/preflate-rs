@@ -16,13 +16,16 @@ pub enum MatchingType {
         good_length: u16,
         max_lazy: u16,
     },
+    /// Grouped suffix probes, with an optional one-position lazy check.
     MiniZ {
         max_probes: u16,
         greedy: bool,
     },
+    /// Distance-aware lazy matching; two positions selects the lazy2 parser.
     LibdeflateLazy {
         two_positions: bool,
     },
+    /// Greedy matching with a block-local, alphabet-dependent minimum length.
     LibdeflateGreedy,
 }
 

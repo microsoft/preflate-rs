@@ -364,6 +364,8 @@ impl<H: HashChain> HashChainHolderImpl<H> {
     ) -> MatchResult {
         let start_pos = input.pos() + OFFSET;
         let max_len = std::cmp::min(input.total_length() - start_pos, MAX_MATCH);
+        // Apply source-compressor exclusions only to normal prediction. Expanded-budget
+        // correction searches must still recover references outside the selected profile.
         let fast_profile = self.hash.algorithm() == HashAlgorithm::Libdeflate4Fast15
             && max_depth <= self.params.max_chain;
         let greedy_profile = self.hash.algorithm() == HashAlgorithm::Libdeflate4
@@ -392,6 +394,7 @@ impl<H: HashChain> HashChainHolderImpl<H> {
         let cur_max_dist_hop0;
         let cur_max_dist_hop1_plus;
         if self.params.very_far_matches_detected {
+            // These libdeflate modes exclude the exact window-edge distance.
             cur_max_dist_hop0 = cmp::min(
                 max_dist_to_start,
                 self.window_bytes - u32::from(fast_profile || greedy_profile),
@@ -423,6 +426,8 @@ impl<H: HashChain> HashChainHolderImpl<H> {
         } else {
             None
         };
+        // A minimum of four or more bypasses the singleton three-byte candidate.
+        // The stored budget includes that slot, so remove both the slot and its probe.
         let skip_secondary =
             OFFSET == 0 && prev_len >= 3 && self.hash.algorithm() == HashAlgorithm::Libdeflate4;
         let max_depth = max_depth.saturating_sub(u32::from(skip_secondary)).max(1);
@@ -435,6 +440,7 @@ impl<H: HashChain> HashChainHolderImpl<H> {
 
         if let MatchingType::MiniZ { max_probes, .. } = self.params.matching_type {
             let available = (input.total_length() - start_pos).min(MAX_MATCH);
+            // Miniz reserves room for the possible match, reducing its usable distance.
             let window = self.window_bytes.saturating_sub(available);
             let max_dist = max_dist_to_start.min(window);
             let probes = if max_depth > self.params.max_chain {
@@ -473,6 +479,8 @@ fn match_miniz<const OFFSET: u32>(
     } else {
         max_probes >> 2
     };
+    // A group contains up to three suffix probes. Its first suffix hit consumes
+    // the group even if the prefix fails, unlike a simple N-hop chain budget.
     let mut groups = probes.div_ceil(3);
     let mut best = MatchResult::NoMoreMatchesFound;
     while groups > 0 {

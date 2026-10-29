@@ -3,6 +3,9 @@
  *  Licensed under the Apache License, Version 2.0. See LICENSE.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
+//! Offline diagnostics only: sweeps do not affect production parameter selection.
+//! Baselines and improving candidates are checked by exact bitstream reconstruction.
+
 use super::*;
 use crate::{
     deflate::deflate_reader::{DeflateContents, parse_deflate_whole},
