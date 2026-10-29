@@ -154,6 +154,30 @@ This uses exported raw streams, reports plaintext MiB/s and correction sizes, an
 disables the optional encode-time round-trip validator. Run timing comparisons
 without other builds or tests running concurrently.
 
+### Compressor regression coverage
+
+The normal regression suite combines focused compressor-contract tests with
+broader invariants and exact user-facing round trips:
+
+- Seeded random, nearly periodic, structured-record and mixed-entropy data,
+  alongside real fixtures and inputs around short-tail and dictionary boundaries.
+- 486 miniz/libdeflate round trips across levels 1-9, plus 96 zlib/zlib-ng controls.
+- 36 continuation cases across two inputs and two chunk limits, checking plaintext,
+  exact reconstructed bytes and first-chunk-only parameters.
+- An independent longest-prefix oracle for match searches, alphabet/depth
+  invariants, candidate-order independence and diagnostic parameter isolation.
+
+```shell
+cargo test -p preflate-rs
+cargo test --test end_to_end -- compressor_models_ compression_benchmark_overhead_size
+```
+
+An explicitly ignored periodic-miniz regression preserves a known reader
+limitation: a native-accepted stream with an incomplete Huffman tree is rejected
+before fingerprinting. It can be reproduced with
+`cargo test --test end_to_end periodic_miniz_streams_roundtrip -- --ignored`.
+This is not counted among the passing round trips.
+
 ## Workspace Layout
 
 | Crate | Output | Description |

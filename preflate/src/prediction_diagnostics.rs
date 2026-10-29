@@ -326,6 +326,9 @@ fn diagnostic_measurement_matches_production() {
         "compressed_libdeflate_level2.deflate",
         "compressed_libdeflate_level4.deflate",
         "compressed_zlib_level0.deflate",
+        "compressed_minizoxide_level1.deflate",
+        "compressed_flate2_level3.deflate",
+        "compressed_zlibng_level3.deflate",
     ] {
         let compressed = crate::utils::read_file(name);
         let (contents, plain_text) = parse_deflate_whole(&compressed).unwrap();
@@ -342,27 +345,53 @@ fn diagnostic_measurement_matches_production() {
         let (production, _) =
             preflate_whole_deflate_stream(&compressed, &PreflateConfig::default()).unwrap();
         assert_eq!(measurement.corrections, production.corrections);
-        assert!(measurement.trace.first_mismatches.len() <= 8);
+        assert_eq!(
+            measurement.trace.first_mismatches.len(),
+            measurement.trace.mismatch_count.min(8)
+        );
         assert!(measurement.trace.mismatch_count <= measurement.trace.token_count);
+        for (offset, actual, predicted) in &measurement.trace.first_mismatches {
+            assert_ne!(actual, predicted);
+            assert!((*offset as usize) < plain_text.len());
+        }
     }
 }
 
 // A diagnostic sweep cannot attribute improvements if unrelated settings change together.
-// Verify isolated variants change one search setting and preserve hash/insertion policy.
+// Verify isolated/combined variants change only their declared search axes, without duplicates.
 #[test]
 fn isolated_variants_change_one_parameter() {
-    let compressed = crate::utils::read_file("compressed_zlib_level1.deflate");
-    let (contents, plain_text) = parse_deflate_whole(&compressed).unwrap();
-    let params = estimate_preflate_parameters(&contents, &plain_text).unwrap();
-    let variants = parameter_variants(params, false);
-    assert!(!variants.is_empty());
-    for candidate in variants {
-        let changes = usize::from(candidate.matching_type != params.matching_type)
-            + usize::from(candidate.nice_length != params.nice_length)
-            + usize::from(candidate.max_chain != params.max_chain);
-        assert_eq!(changes, 1);
-        assert_eq!(candidate.hash_algorithm, params.hash_algorithm);
-        assert_eq!(candidate.add_policy, params.add_policy);
+    for name in [
+        "compressed_zlib_level1.deflate",
+        "compressed_libdeflate_level1.deflate",
+        "compressed_libdeflate_level4.deflate",
+        "compressed_minizoxide_level1.deflate",
+        "compressed_zlibng_level3.deflate",
+    ] {
+        let compressed = crate::utils::read_file(name);
+        let (contents, plain_text) = parse_deflate_whole(&compressed).unwrap();
+        let params = estimate_preflate_parameters(&contents, &plain_text).unwrap();
+        for combined in [false, true] {
+            let variants = parameter_variants(params, combined);
+            assert!(!variants.is_empty(), "{name}");
+            for (index, candidate) in variants.iter().enumerate() {
+                let changes = usize::from(candidate.matching_type != params.matching_type)
+                    + usize::from(candidate.nice_length != params.nice_length)
+                    + usize::from(candidate.max_chain != params.max_chain);
+                assert!((1..=3).contains(&changes), "{name}");
+                if !combined {
+                    assert_eq!(changes, 1, "{name}");
+                }
+                let expected = TokenPredictorParameters {
+                    matching_type: candidate.matching_type,
+                    nice_length: candidate.nice_length,
+                    max_chain: candidate.max_chain,
+                    ..params
+                };
+                assert_eq!(*candidate, expected, "{name}");
+                assert!(!variants[..index].contains(candidate), "{name}");
+            }
+        }
     }
 }
 
@@ -487,18 +516,26 @@ fn diagnostic_isolates_nice_length_cutoff() {
 // Verify counts continue beyond the sample cap while only eight ordered samples are retained.
 #[test]
 fn diagnostic_trace_bounds_samples_not_counts() {
-    let tokens = b"abcd"
-        .repeat(32)
-        .into_iter()
-        .map(DeflateToken::Literal)
-        .collect();
-    let (compressed, contents, plain_text) = synthetic_stream(tokens);
-    let measurement = measure(&contents, &plain_text, &synthetic_params()).unwrap();
-    verify(&measurement, &plain_text, &compressed);
-    assert_eq!(measurement.trace.token_count, 128);
-    assert!(measurement.trace.mismatch_count > 8);
-    assert_eq!(measurement.trace.first_mismatches.len(), 8);
-    for pair in measurement.trace.first_mismatches.windows(2) {
-        assert!(pair[0].0 < pair[1].0);
+    for length in [0, 1, 4, 8, 12, 16, 32, 128] {
+        let bytes: Vec<_> = (0..length).map(|i| b"abcd"[i % 4]).collect();
+        let tokens = bytes.iter().copied().map(DeflateToken::Literal).collect();
+        let (compressed, contents, plain_text) = synthetic_stream(tokens);
+        let measurement = measure(&contents, &plain_text, &synthetic_params()).unwrap();
+        verify(&measurement, &plain_text, &compressed);
+        assert_eq!(measurement.trace.token_count, length);
+        assert_eq!(
+            measurement.trace.first_mismatches.len(),
+            measurement.trace.mismatch_count.min(8)
+        );
+        if length == 128 {
+            assert!(measurement.trace.mismatch_count > 8);
+        }
+        for (offset, actual, predicted) in &measurement.trace.first_mismatches {
+            assert_eq!(*actual, DeflateToken::Literal(bytes[*offset as usize]));
+            assert_ne!(actual, predicted);
+        }
+        for pair in measurement.trace.first_mismatches.windows(2) {
+            assert!(pair[0].0 < pair[1].0);
+        }
     }
 }

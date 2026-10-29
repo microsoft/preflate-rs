@@ -9,7 +9,10 @@ use std::io::Read;
 use std::path::Path;
 use std::{mem, ptr};
 
-use libdeflate_sys::{libdeflate_alloc_compressor, libdeflate_deflate_compress};
+use libdeflate_sys::{
+    libdeflate_alloc_compressor, libdeflate_deflate_compress, libdeflate_deflate_compress_bound,
+    libdeflate_free_compressor,
+};
 use preflate_container::{
     PreflateContainerConfig, PreflateContainerProcessor, ProcessBuffer, RecreateContainerProcessor,
 };
@@ -264,7 +267,8 @@ fn libzsys_compress(input_data: &[u8], level: i32, strategy: Strategy) -> Vec<u8
             Z_OK
         );
 
-        output.resize(input_data.len() + 1000, 0);
+        let bound = deflateBound(&mut z_stream, input_data.len().try_into().unwrap());
+        output.resize(bound.try_into().unwrap(), 0);
 
         z_stream.next_out = output.as_mut_ptr() as *mut _;
         z_stream.avail_out = output.len() as u32;
@@ -279,9 +283,10 @@ fn libzsys_compress(input_data: &[u8], level: i32, strategy: Strategy) -> Vec<u8
 
 fn libdeflate_compress(in_data: &[u8], level: i32) -> Vec<u8> {
     unsafe {
-        let mut out_data = vec![0; in_data.len() + 1000];
-
         let compressor = libdeflate_alloc_compressor(level);
+        assert!(!compressor.is_null());
+        let bound = libdeflate_deflate_compress_bound(compressor, in_data.len());
+        let mut out_data = vec![0; bound];
         let sz = libdeflate_deflate_compress(
             compressor,
             in_data.as_ptr() as *const core::ffi::c_void,
@@ -289,6 +294,7 @@ fn libdeflate_compress(in_data: &[u8], level: i32) -> Vec<u8> {
             out_data.as_mut_ptr() as *mut core::ffi::c_void,
             out_data.len(),
         );
+        libdeflate_free_compressor(compressor);
 
         assert_ne!(sz, 0);
         out_data.resize(sz, 0);
@@ -299,8 +305,8 @@ fn libdeflate_compress(in_data: &[u8], level: i32) -> Vec<u8> {
 fn libngzsys_compress(input_data: &[u8], level: i32) -> Vec<u8> {
     let mut output = Vec::new();
     use libz_ng_sys::{
-        Z_DEFAULT_STRATEGY, Z_DEFLATED, Z_FINISH, Z_OK, Z_STREAM_END, deflate, deflateEnd,
-        deflateInit2_, z_stream, zlibVersion,
+        Z_DEFAULT_STRATEGY, Z_DEFLATED, Z_FINISH, Z_OK, Z_STREAM_END, deflate, deflateBound,
+        deflateEnd, deflateInit2_, z_stream, zlibVersion,
     };
     unsafe {
         let mut z_stream = z_stream {
@@ -342,7 +348,9 @@ fn libngzsys_compress(input_data: &[u8], level: i32) -> Vec<u8> {
             Z_OK
         );
 
-        output.resize(input_data.len() + 1000, 0);
+        // Quick profiles can expand incompressible input beyond a fixed spare-byte allowance.
+        let bound = deflateBound(&mut z_stream, input_data.len().try_into().unwrap());
+        output.resize(bound.try_into().unwrap(), 0);
 
         z_stream.next_out = output.as_mut_ptr() as *mut _;
         z_stream.avail_out = output.len() as u32;
@@ -593,67 +601,132 @@ fn export_compression_diagnostics() {
     }
 }
 
-// Matching models must survive continuation without re-fingerprinting every chunk.
-// Verify first-chunk-only parameters and exact reconstruction across dictionary shrinking.
+fn seeded_test_bytes(mut seed: u32, length: usize) -> Vec<u8> {
+    assert_ne!(seed, 0);
+    (0..length)
+        .map(|_| {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            seed as u8
+        })
+        .collect()
+}
+
+fn mixed_test_bytes(seed: u32, length: usize) -> Vec<u8> {
+    let mut bytes = seeded_test_bytes(seed, length);
+    let pattern = b"request completed status=200 path=/api/items\n";
+    for (i, byte) in bytes.iter_mut().enumerate() {
+        if (i / 4096) % 2 == 1 {
+            *byte = pattern[i % pattern.len()];
+        }
+    }
+    bytes
+}
+
+fn generated_prediction_inputs() -> Vec<(String, Vec<u8>)> {
+    let mut inputs = Vec::new();
+    for seed in [1, 0x5eed, 0xabcdef] {
+        inputs.push((format!("random_{seed}"), seeded_test_bytes(seed, 32769)));
+        let mutations = seeded_test_bytes(seed, 65);
+        let periodic = (0..65537)
+            .map(|i| {
+                if i % 1024 == 0 {
+                    mutations[i / 1024]
+                } else {
+                    ((i % 251) as u8).wrapping_add(seed as u8)
+                }
+            })
+            .collect();
+        inputs.push((format!("periodic_{seed}"), periodic));
+        let mut records = String::new();
+        for i in 0..512 {
+            use std::fmt::Write;
+            writeln!(
+                records,
+                "record={i:04} group={} status=200 payload={:08x}",
+                i % 17,
+                (i as u32).wrapping_mul(seed)
+            )
+            .unwrap();
+        }
+        inputs.push((format!("records_{seed}"), records.into_bytes()));
+        inputs.push((format!("mixed_{seed}"), mixed_test_bytes(seed, 98305)));
+    }
+    inputs
+}
+
+// Model state must survive different chunk boundaries, not just one fixture partition.
+// Verify plaintext, first-chunk-only parameters and exact bitstreams across dictionary shrinking.
 #[test]
 fn compressor_models_roundtrip_across_chunks() {
-    let original = read_file("sample1.bin");
-    let config = PreflateConfig {
-        plain_text_limit: 256 * 1024,
-        ..PreflateConfig::default()
-    };
-    for (name, level) in (2..=9)
-        .map(|level| ("miniz", level))
-        .chain([("libdeflate", 1)])
-    {
-        let compressed = if name == "miniz" {
-            miniz_oxide::deflate::compress_to_vec(&original, level as u8)
-        } else {
-            libdeflate_compress(&original, level)
-        };
-        println!("Chunk roundtrip: {name} level {level}");
-        let mut processor = PreflateStreamProcessor::new(&config);
-        let mut recreate = RecreateStreamProcessor::new();
-        let mut offset = 0;
-        let mut chunks = 0;
-        let mut recreated = Vec::new();
-        while !processor.is_done() {
-            let chunk = processor
-                .decompress(&compressed[offset..])
-                .unwrap_or_else(|error| panic!("{name} level {level} chunk {chunks}: {error:?}"));
-            assert!(chunk.compressed_size > 0);
-            assert_eq!(chunk.parameters.is_some(), chunks == 0);
-            if let Some(params) = chunk.parameters {
-                assert!(params.max_chain <= config.max_chain_length);
+    for (input_name, original) in [
+        ("sample1", read_file("sample1.bin")),
+        ("mixed", mixed_test_bytes(0x5eed, 524289)),
+    ] {
+        for (name, level) in (2..=9)
+            .map(|level| ("miniz", level))
+            .chain([("libdeflate", 1)])
+        {
+            let compressed = if name == "miniz" {
+                miniz_oxide::deflate::compress_to_vec(&original, level as u8)
+            } else {
+                libdeflate_compress(&original, level)
+            };
+            // Limits must accommodate a complete Huffman block before the parser can checkpoint.
+            for limit in [256 * 1024, 384 * 1024] {
+                let context = format!("{input_name}, {name} level {level}, limit={limit}");
+                let config = PreflateConfig {
+                    plain_text_limit: limit,
+                    verify_compression: false,
+                    ..PreflateConfig::default()
+                };
+                let mut processor = PreflateStreamProcessor::new(&config);
+                let mut recreate = RecreateStreamProcessor::new();
+                let mut offset = 0;
+                let mut chunks = 0;
+                let mut recreated = Vec::new();
+                let mut decoded = Vec::new();
+                while !processor.is_done() {
+                    let chunk = processor
+                        .decompress(&compressed[offset..])
+                        .unwrap_or_else(|error| panic!("{context}, chunk {chunks}: {error:?}"));
+                    assert!(chunk.compressed_size > 0, "{context}");
+                    assert_eq!(chunk.parameters.is_some(), chunks == 0, "{context}");
+                    if let Some(params) = chunk.parameters {
+                        assert!(params.max_chain <= config.max_chain_length, "{context}");
+                    }
+                    decoded.extend_from_slice(processor.plain_text().text());
+                    let (bytes, _) = recreate
+                        .recompress(
+                            &mut std::io::Cursor::new(processor.plain_text().text()),
+                            &chunk.corrections,
+                        )
+                        .unwrap_or_else(|error| panic!("{context}, chunk {chunks}: {error:?}"));
+                    recreated.extend_from_slice(&bytes);
+                    offset += chunk.compressed_size;
+                    chunks += 1;
+                    processor.shrink_to_dictionary();
+                }
+                assert!(chunks > 1, "{context}: did not exercise continuation");
+                assert_eq!(offset, compressed.len(), "{context}");
+                assert_eq!(original, decoded, "{context}");
+                assert_eq!(compressed, recreated, "{context}");
             }
-            let (bytes, _) = recreate
-                .recompress(
-                    &mut std::io::Cursor::new(processor.plain_text().text()),
-                    &chunk.corrections,
-                )
-                .unwrap();
-            recreated.extend_from_slice(&bytes);
-            offset += chunk.compressed_size;
-            chunks += 1;
-            processor.shrink_to_dictionary();
         }
-        assert!(
-            chunks > 1,
-            "{name} level {level} did not exercise continuation"
-        );
-        assert_eq!(offset, compressed.len());
-        assert_eq!(compressed, recreated, "{name} level {level}");
     }
 }
 
-// Matching improvements must generalize beyond the fixture used to tune them.
-// Verify 270 varied/boundary round trips and the document overhead bound for low libdeflate levels.
+// Model correctness must generalize across entropy, repetition and changing data distributions.
+// Verify native-compressor round trips on seeded families, size boundaries and real documents.
 #[test]
 fn compressor_models_roundtrip_varied_inputs() {
-    let mut inputs: Vec<(String, Vec<u8>)> = ["sample2.bin", "sample3.bin", "pptxplaintext.bin"]
-        .into_iter()
-        .map(|name| (name.to_owned(), read_file(name)))
-        .collect();
+    let mut inputs = generated_prediction_inputs();
+    inputs.extend(
+        ["sample2.bin", "sample3.bin", "pptxplaintext.bin"]
+            .into_iter()
+            .map(|name| (name.to_owned(), read_file(name))),
+    );
     for length in [0, 1, 3, 4, 5, 511, 512, 32767, 32768, 32769, 65537, 98304] {
         let data = (0..length)
             .map(|i| i as u8 ^ ((i / 257) % 17) as u8)
@@ -683,6 +756,70 @@ fn compressor_models_roundtrip_varied_inputs() {
                         result.corrections.len()
                     );
                 }
+                assert_eq!(original, plain.text(), "{context}");
+                let recreated = recreate_whole_deflate_stream(plain.text(), &result.corrections)
+                    .unwrap_or_else(|error| panic!("{context}: {error:?}"));
+                assert_eq!(compressed, recreated, "{context}");
+            }
+        }
+    }
+}
+
+// New compressor fingerprints must not break other supported compressor implementations.
+// Verify the same seeded corpus round-trips through zlib levels and zlib-ng's low-level parsers.
+#[test]
+fn compressor_models_roundtrip_other_compressors() {
+    let config = PreflateConfig {
+        verify_compression: false,
+        ..PreflateConfig::default()
+    };
+    for (name, original) in generated_prediction_inputs() {
+        for level in [1, 3, 6, 9] {
+            let wrapped = libzsys_compress(&original, level, Strategy::Default);
+            let compressed = &wrapped[2..wrapped.len() - 4];
+            let context = format!("{name}, zlib level {level}");
+            let (result, plain) = preflate_whole_deflate_stream(compressed, &config)
+                .unwrap_or_else(|error| panic!("{context}: {error:?}"));
+            assert_eq!(original, plain.text(), "{context}");
+            let recreated = recreate_whole_deflate_stream(plain.text(), &result.corrections)
+                .unwrap_or_else(|error| panic!("{context}: {error:?}"));
+            assert_eq!(compressed, recreated, "{context}");
+        }
+        for level in 1..=4 {
+            let wrapped = libngzsys_compress(&original, level);
+            let compressed = &wrapped[2..wrapped.len() - 4];
+            let context = format!("{name}, zlib-ng level {level}");
+            let (result, plain) = preflate_whole_deflate_stream(compressed, &config)
+                .unwrap_or_else(|error| panic!("{context}: {error:?}"));
+            assert_eq!(original, plain.text(), "{context}");
+            let recreated = recreate_whole_deflate_stream(plain.text(), &result.corrections)
+                .unwrap_or_else(|error| panic!("{context}: {error:?}"));
+            assert_eq!(compressed, recreated, "{context}");
+        }
+    }
+}
+
+// Pure periodic streams expose an existing reader failure before model estimation is reached.
+// Verify native inflate accepts each stream, then require exact preflate round trips once fixed.
+#[test]
+#[ignore = "Known reader limitation: valid miniz streams with incomplete Huffman trees"]
+fn periodic_miniz_streams_roundtrip() {
+    for length in [32769, 65537] {
+        for shift in [0u8, 1, 127] {
+            let original: Vec<_> = (0..length)
+                .map(|i| ((i % 251) as u8).wrapping_add(shift))
+                .collect();
+            for level in [2, 3, 6, 9] {
+                let context = format!("periodic length={length}, shift={shift}, miniz={level}");
+                let compressed = miniz_oxide::deflate::compress_to_vec(&original, level);
+                assert_eq!(
+                    miniz_oxide::inflate::decompress_to_vec(&compressed).unwrap(),
+                    original,
+                    "{context}"
+                );
+                let (result, plain) =
+                    preflate_whole_deflate_stream(&compressed, &PreflateConfig::default())
+                        .unwrap_or_else(|error| panic!("{context}: {error:?}"));
                 assert_eq!(original, plain.text(), "{context}");
                 let recreated = recreate_whole_deflate_stream(plain.text(), &result.corrections)
                     .unwrap_or_else(|error| panic!("{context}: {error:?}"));

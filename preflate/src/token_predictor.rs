@@ -788,6 +788,32 @@ fn libdeflate_minimum_match_length_is_bounded_and_depth_aware() {
     assert_eq!(libdeflate_min_match_length(&bytes, 16), 9);
 }
 
+// The block heuristic should depend on alphabet cardinality, not particular byte values.
+// Verify relabeling invariance and monotonic behavior across every alphabet size and depth cap.
+#[test]
+fn libdeflate_minimum_is_monotonic_and_alphabet_invariant() {
+    for length in [511, 512, 4095, 4096, 4352] {
+        let mut previous_alphabet = [9; 8];
+        for alphabet in 1..=256 {
+            let bytes: Vec<_> = (0..length).map(|i| (i % alphabet) as u8).collect();
+            let relabeled: Vec<_> = bytes
+                .iter()
+                .map(|byte| byte.wrapping_mul(129) ^ 0xa5)
+                .collect();
+            let mut previous_depth = 3;
+            for (index, depth) in [0, 4, 5, 9, 10, 15, 16, 600].into_iter().enumerate() {
+                let minimum = libdeflate_min_match_length(&bytes, depth);
+                assert!((3..=9).contains(&minimum));
+                assert_eq!(minimum, libdeflate_min_match_length(&relabeled, depth));
+                assert!(minimum >= previous_depth);
+                assert!(minimum <= previous_alphabet[index]);
+                previous_depth = minimum;
+                previous_alphabet[index] = minimum;
+            }
+        }
+    }
+}
+
 // A block's alphabet estimate must not leak into the next block.
 // Verify boundary resets change the minimum and honor the short remaining-input cutoff.
 #[test]

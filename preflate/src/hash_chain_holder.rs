@@ -795,6 +795,95 @@ fn miniz_successful_suffix_consumes_a_probe_group() {
     }
 }
 
+// Matching must remain valid beyond the hand-built probe-group regressions above.
+// Verify prefix correctness, window/length bounds, budget monotonicity and a full-search oracle.
+#[test]
+fn miniz_search_matches_prefix_oracle_across_budgets_and_boundaries() {
+    use crate::preflate_input::PlainText;
+
+    let distances = [512, 1024, 1536, 2048];
+    for mut seed in [1u32, 0x5eed, 0xabcdef] {
+        let target: Vec<_> = (0..258)
+            .map(|_| {
+                seed ^= seed << 13;
+                seed ^= seed >> 17;
+                seed ^= seed << 5;
+                seed as u8
+            })
+            .collect();
+        for position in [4096, 65536] {
+            let mut bytes = vec![0; position + target.len()];
+            bytes[position..].copy_from_slice(&target);
+            for (&distance, length) in distances.iter().zip([3, 31, 128, 258]) {
+                let source = position - distance as usize;
+                bytes[source..source + length].copy_from_slice(&target[..length]);
+                if length < target.len() {
+                    bytes[source + length] = target[length] ^ 1;
+                }
+            }
+            let plain = PlainText::new_with_data(bytes);
+            let mut input = PreflateInput::new(&plain);
+            input.advance(position as u32);
+            for max_len in [4, 5, 32, 128, 258] {
+                for previous in [2, 3, 31, 32, 127] {
+                    if previous >= max_len {
+                        continue;
+                    }
+                    for max_dist in [511, 512, 1024, 2048] {
+                        let longest = distances
+                            .iter()
+                            .filter(|&&distance| distance <= max_dist)
+                            .map(|&distance| {
+                                input
+                                    .cur_chars(-(distance as i32))
+                                    .iter()
+                                    .zip(input.cur_chars(0))
+                                    .take(max_len as usize)
+                                    .take_while(|(source, current)| source == current)
+                                    .count() as u32
+                            })
+                            .max()
+                            .unwrap_or(0)
+                            .max(previous);
+                        let mut last_length = previous;
+                        for probes in [0, 1, 3, 6, 12, 64] {
+                            let result = match_miniz::<0>(
+                                &input,
+                                max_len,
+                                max_dist,
+                                probes,
+                                previous,
+                                distances.into_iter(),
+                            );
+                            let length = match result {
+                                MatchResult::Success(reference) => {
+                                    assert!(distances.contains(&reference.dist()));
+                                    assert!(reference.dist() <= max_dist);
+                                    assert!((previous + 1..=max_len).contains(&reference.len()));
+                                    let source = input.cur_chars(-(reference.dist() as i32));
+                                    assert_eq!(
+                                        &source[..reference.len() as usize],
+                                        &input.cur_chars(0)[..reference.len() as usize]
+                                    );
+                                    reference.len()
+                                }
+                                MatchResult::NoMoreMatchesFound => previous,
+                                MatchResult::NoInput => panic!("search has sufficient input"),
+                            };
+                            assert!(length >= last_length);
+                            assert!(length <= longest);
+                            if probes == 64 {
+                                assert_eq!(length, longest);
+                            }
+                            last_length = length;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 // Miniz reduces lazy search effort once the saved match reaches length 32.
 // Verify the quartered budget misses a candidate that the unreduced budget reaches.
 #[test]

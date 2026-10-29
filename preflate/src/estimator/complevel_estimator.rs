@@ -209,6 +209,62 @@ fn miniz_fingerprint_preference_preserves_guards_and_fallback() {
     );
 }
 
+// Candidate ranking should be driven by evidence, not the incidental candidate order.
+// Verify minimum-depth fallback across reordered real estimators and explicit fingerprint priority.
+#[test]
+fn candidate_selection_uses_depth_independently_of_order() {
+    use super::preflate_stream_info::extract_preflate_info;
+    use crate::{deflate::deflate_token::DeflateTokenReference, preflate_input::PreflateInput};
+
+    let zlib = HashAlgorithm::Zlib {
+        hash_mask: 32767,
+        hash_shift: 5,
+    };
+    let plain = PlainText::new_with_data(vec![b'a'; 16]);
+    let mut input = PreflateInput::new(&plain);
+    let mut candidates = Vec::new();
+    for (algorithm, depth) in [
+        (zlib, 3),
+        (HashAlgorithm::RandomVector, 0),
+        (HashAlgorithm::ZlibNG, 2),
+        (HashAlgorithm::Crc32cHash, 1),
+    ] {
+        let mut estimator = new_depth_estimator(algorithm);
+        estimator.update_hash(DictionaryAddPolicy::AddAll, &input, 8);
+        candidates.push((estimator, depth));
+    }
+    input.advance(8);
+    let mut candidates: Vec<_> = candidates
+        .into_iter()
+        .map(|(mut estimator, depth)| {
+            assert!(estimator.match_depth(DeflateTokenReference::new(4, depth + 1), &input));
+            assert_eq!(estimator.max_chain_found(), depth);
+            estimator
+        })
+        .collect();
+    let mut info = extract_preflate_info(&[]);
+    for _ in 0..2 {
+        for _ in 0..candidates.len() {
+            assert_eq!(
+                select_depth_candidate(&candidates, DictionaryAddPolicy::AddAll, &info)
+                    .unwrap()
+                    .hash_algorithm(),
+                HashAlgorithm::RandomVector
+            );
+            info.max_dist_3_matches = 4097;
+            assert_eq!(
+                select_depth_candidate(&candidates, DictionaryAddPolicy::AddAll, &info)
+                    .unwrap()
+                    .hash_algorithm(),
+                zlib
+            );
+            info.max_dist_3_matches = 0;
+            candidates.rotate_left(1);
+        }
+        candidates.reverse();
+    }
+}
+
 // Minimum depth alone can hide a valid 15-bit fastest signature behind the legacy hash.
 // Verify explicit preference, legacy-only fallback and the empty-candidate outcome.
 #[test]
