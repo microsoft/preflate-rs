@@ -130,6 +130,12 @@ impl HashTable {
 pub trait HashChain {
     fn get_num_hash_bytes() -> usize;
 
+    /// Fewest remaining bytes at which `iterate` can still look for matches. Normally the hash
+    /// width, but a chain with a secondary shorter hash can search closer to the end of input.
+    fn min_lookup_bytes() -> usize {
+        Self::get_num_hash_bytes()
+    }
+
     fn iterate<'a, const OFFSET: u32>(
         &'a self,
         input: &PreflateInput,
@@ -336,8 +342,13 @@ impl HashChain for HashChainLibflate4 {
                 first_match = Some(ref_pos.dist(start_pos));
             }
 
-            let curr_hash = LIBFLATE_HASH_4.get_hash(input.cur_chars(0));
-            cur_pos = self.hash_table.get_head(curr_hash);
+            if input.remaining() >= 4 {
+                let curr_hash = LIBFLATE_HASH_4.get_hash(input.cur_chars(0));
+                cur_pos = self.hash_table.get_head(curr_hash);
+            } else {
+                // only 3 bytes left, so only the length 3 slot can match
+                cur_pos = InternalPosition::default();
+            }
         } else {
             assert_eq!(OFFSET, 1);
 
@@ -409,5 +420,10 @@ impl HashChain for HashChainLibflate4 {
 
     fn get_num_hash_bytes() -> usize {
         4
+    }
+
+    /// the length 3 table still works when only 3 bytes are left
+    fn min_lookup_bytes() -> usize {
+        3
     }
 }

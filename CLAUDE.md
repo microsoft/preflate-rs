@@ -27,7 +27,7 @@ cargo clippy
 
 The CI runs on `windows-latest` and builds for multiple targets: `wasm32-wasip1`, `aarch64-unknown-linux-musl`, `x86_64-pc-windows-msvc`, `x86_64-unknown-linux-gnu`.
 
-The release build uses Spectre mitigations (`/Qspectre /sdl`) and produces `preflate_rs_0_7.dll` and `preflate_util.exe`.
+The release build uses Spectre mitigations (`/Qspectre /sdl`) and produces `preflate_rs_0_8.dll` and `preflate_util.exe`.
 
 ## Architecture
 
@@ -40,7 +40,7 @@ The release build uses Spectre mitigations (`/Qspectre /sdl`) and produces `pref
 | `preflate/` | library | Core DEFLATE analysis and reconstruction |
 | `container/` | library | Scans binary files (ZIP, PNG, JPEG) for DEFLATE streams |
 | `util/` | `preflate_util.exe` | CLI for testing on files/directories |
-| `dll/` | `preflate_rs_0_7.dll` | C FFI wrapper for .NET interop |
+| `dll/` | `preflate_rs_0_8.dll` | C FFI wrapper for .NET interop |
 | `fuzz/` | fuzz harnesses | libfuzzer targets |
 | `tests/` | integration tests | End-to-end round-trip tests using `samples/` |
 

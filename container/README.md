@@ -110,10 +110,10 @@ pub struct PreflateStats {
 
 ## Container Format
 
-The output is a self-describing binary format (version 2). Framing bytes are written raw; block payloads go through a single persistent Zstd encoder:
+The output is a self-describing binary format (version 3). Version 3 uses the 0.8 corrections format, including explicit reference distances; version 2 containers are incompatible and rejected. Framing bytes are written raw; block payloads go through a single persistent Zstd encoder:
 
 ```
-[0x02]                           ← format version byte
+[0x03]                           ← format version byte
 
 For each block:
   [type_byte]                    ← block kind + compression flag

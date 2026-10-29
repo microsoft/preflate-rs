@@ -535,7 +535,7 @@ dependencies = [
 
 [[package]]
 name = "preflate-container"
-version = "0.7.6"
+version = "0.8.0"
 dependencies = [
  "adler32",
  "byteorder",
@@ -551,7 +551,7 @@ dependencies = [
 
 [[package]]
 name = "preflate-rs"
-version = "0.7.6"
+version = "0.8.0"
 dependencies = [
  "bitcode",
  "byteorder",
@@ -563,7 +563,7 @@ dependencies = [
 
 [[package]]
 name = "preflate-rs-root"
-version = "0.7.6"
+version = "0.8.0"
 dependencies = [
  "libdeflate-sys",
  "libz-ng-sys",
@@ -574,8 +574,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "preflate_rs_0_7"
-version = "0.7.6"
+name = "preflate_rs_0_8"
+version = "0.8.0"
 dependencies = [
  "preflate-container",
  "preflate-rs",
@@ -583,7 +583,7 @@ dependencies = [
 
 [[package]]
 name = "preflate_util"
-version = "0.7.6"
+version = "0.8.0"
 dependencies = [
  "clap",
  "cpu-time",

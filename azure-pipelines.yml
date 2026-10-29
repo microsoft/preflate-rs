@@ -99,7 +99,7 @@ extends:
                     AuthSignCertName: 'CodeSigningCertificate'
                     FolderPath: '$(Build.SourcesDirectory)'
                     Pattern: '
-                      target\release\preflate_rs_0_7.dll,
+                      target\release\preflate_rs_0_8.dll,
                       target\release\preflate_util.exe'
                     signConfigType: 'inlineSignParams'
                     inlineOperation: |
