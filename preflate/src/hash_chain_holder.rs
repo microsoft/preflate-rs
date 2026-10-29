@@ -699,6 +699,8 @@ fn calc_diff(diff: u64) -> u32 {
     return 8;
 }
 
+// Source tail/window exclusions must not prevent recovery of valid foreign references.
+// Verify normal boundary decisions and expanded-budget recovery for both low-level models.
 #[test]
 fn libdeflate_low_level_limits_preserve_correction_recovery() {
     use crate::{
@@ -747,6 +749,8 @@ fn libdeflate_low_level_limits_preserve_correction_recovery() {
     }
 }
 
+// Miniz spends one group on three failed suffix probes rather than treating each as a group.
+// Verify the fourth candidate is unreachable with one group but reachable with two.
 #[test]
 fn miniz_probe_groups_skip_three_failed_suffixes() {
     use crate::preflate_input::PlainText;
@@ -769,6 +773,8 @@ fn miniz_probe_groups_skip_three_failed_suffixes() {
     ));
 }
 
+// A suffix hit ends miniz's probe group even when its prefix fails.
+// Verify neither a short match nor a false suffix hit searches the group's remaining nodes.
 #[test]
 fn miniz_successful_suffix_consumes_a_probe_group() {
     use crate::preflate_input::PlainText;
@@ -789,6 +795,8 @@ fn miniz_successful_suffix_consumes_a_probe_group() {
     }
 }
 
+// Miniz reduces lazy search effort once the saved match reaches length 32.
+// Verify the quartered budget misses a candidate that the unreduced budget reaches.
 #[test]
 fn miniz_long_saved_match_quarters_the_probe_budget() {
     use crate::preflate_input::PlainText;

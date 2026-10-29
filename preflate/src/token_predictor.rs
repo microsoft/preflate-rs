@@ -552,24 +552,7 @@ impl TokenPredictor {
             }
 
             if let MatchingType::MiniZ { greedy, .. } = self.params.matching_type {
-                if match_token.dist() == input.pos() & 32767 {
-                    return DeflateToken::Literal(input.cur_char(0));
-                }
-                if !greedy && match_token.len() < 128 && input.remaining() > match_token.len() {
-                    if let MatchResult::Success(next) =
-                        self.state
-                            .match_token_1(match_token.len(), self.params.max_chain, input)
-                    {
-                        if next.len() > match_token.len()
-                            && !(next.len() == 3 && next.dist() >= 8192)
-                            && next.dist() != (input.pos() + 1) & 32767
-                        {
-                            self.pending_reference = Some(next);
-                            return DeflateToken::Literal(input.cur_char(0));
-                        }
-                    }
-                }
-                return DeflateToken::Reference(match_token);
+                return self.predict_miniz_token(input, match_token, greedy);
             }
 
             if let MatchingType::LibdeflateLazy { two_positions } = self.params.matching_type {
@@ -645,6 +628,33 @@ impl TokenPredictor {
         } else {
             DeflateToken::Literal(input.cur_char(0))
         }
+    }
+
+    #[inline(always)]
+    fn predict_miniz_token(
+        &mut self,
+        input: &PreflateInput,
+        match_token: DeflateTokenReference,
+        greedy: bool,
+    ) -> DeflateToken {
+        if match_token.dist() == input.pos() & 32767 {
+            return DeflateToken::Literal(input.cur_char(0));
+        }
+        if !greedy && match_token.len() < 128 && input.remaining() > match_token.len() {
+            if let MatchResult::Success(next) =
+                self.state
+                    .match_token_1(match_token.len(), self.params.max_chain, input)
+            {
+                if next.len() > match_token.len()
+                    && !(next.len() == 3 && next.dist() >= 8192)
+                    && next.dist() != (input.pos() + 1) & 32767
+                {
+                    self.pending_reference = Some(next);
+                    return DeflateToken::Literal(input.cur_char(0));
+                }
+            }
+        }
+        DeflateToken::Reference(match_token)
     }
 
     /// When the predicted token was a literal, but the actual token was a reference, try again
@@ -746,6 +756,8 @@ fn libdeflate_min_match_length(bytes: &[u8], depth: u32) -> u32 {
     length.min(cap)
 }
 
+// Libdeflate's greedy minimum depends on alphabet size and search depth, not a fixed length.
+// Verify threshold boundaries, depth caps, the short-input cutoff and the 4096-byte sample bound.
 #[test]
 fn libdeflate_minimum_match_length_is_bounded_and_depth_aware() {
     for (distinct, expected) in [
@@ -776,6 +788,8 @@ fn libdeflate_minimum_match_length_is_bounded_and_depth_aware() {
     assert_eq!(libdeflate_min_match_length(&bytes, 16), 9);
 }
 
+// A block's alphabet estimate must not leak into the next block.
+// Verify boundary resets change the minimum and honor the short remaining-input cutoff.
 #[test]
 fn libdeflate_greedy_recomputes_minimum_at_block_boundaries() {
     use crate::preflate_input::PlainText;
@@ -812,6 +826,56 @@ fn prefer_libdeflate_match(
             > literal_cost
 }
 
+// Extracting miniz's parser decisions must preserve its window exclusion and deferred match.
+// Verify zero-slot rejection, greedy emission and lazy pending-reference consumption.
+#[test]
+fn miniz_token_decisions_preserve_lazy_state_and_zero_slot_exclusion() {
+    use crate::preflate_input::PlainText;
+
+    for greedy in [true, false] {
+        let mut bytes = b"@abcXbcdEFY".to_vec();
+        let position = bytes.len() as u32;
+        bytes.extend_from_slice(b"abcdEFQ");
+        let plain = PlainText::new_with_data(bytes);
+        let mut input = PreflateInput::new(&plain);
+        let params = TokenPredictorParameters {
+            matching_type: MatchingType::MiniZ {
+                max_probes: 16,
+                greedy,
+            },
+            add_policy: DictionaryAddPolicy::AddAll,
+            max_chain: 18,
+            ..zlib_level_1_params()
+        };
+        let mut predictor = TokenPredictor::new(&params);
+        while input.pos() < position {
+            predictor.commit_token(&DeflateToken::Literal(input.cur_char(0)), &mut input);
+        }
+        assert_eq!(
+            predictor.predict_miniz_token(&input, DeflateTokenReference::new(3, position), greedy),
+            DeflateToken::Literal(b'a')
+        );
+        assert_eq!(predictor.pending_reference, None);
+        let first = predictor.predict_token(&input);
+        if greedy {
+            assert_eq!(first, DeflateToken::new_ref(3, position - 1));
+            assert_eq!(predictor.pending_reference, None);
+        } else {
+            assert_eq!(first, DeflateToken::Literal(b'a'));
+            let next = DeflateTokenReference::new(5, position - 4);
+            assert_eq!(predictor.pending_reference, Some(next));
+            predictor.commit_token(&first, &mut input);
+            assert_eq!(
+                predictor.predict_token(&input),
+                DeflateToken::Reference(next)
+            );
+            assert_eq!(predictor.pending_reference, None);
+        }
+    }
+}
+
+// Longest-match-only selection misses libdeflate's distance-aware lazy decisions.
+// Verify nearby equal-length matches can win, but insufficient savings or shorter matches cannot.
 #[test]
 fn libdeflate_lazy_prefers_a_nearer_equal_length_match() {
     let current = DeflateTokenReference::new(3, 136);
@@ -837,6 +901,8 @@ fn libdeflate_lazy_prefers_a_nearer_equal_length_match() {
     ));
 }
 
+// Lazy2 must defer two literals without leaving stale choices during correction recovery.
+// Verify one/two-position saved matches and re-prediction clearing the pending state.
 #[test]
 fn libdeflate_lazy_models_saved_matches_and_two_literals() {
     use crate::{hash_algorithm::HashAlgorithm, preflate_input::PlainText};

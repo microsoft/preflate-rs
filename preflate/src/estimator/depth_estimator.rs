@@ -556,6 +556,8 @@ pub fn run_depth_candidates(
     }
 }
 
+// The fastest fingerprint must remain cheap without losing legacy compatibility.
+// Verify the 256-reference bookkeeping cap, wrapped positions and legacy fallback.
 #[test]
 fn fastest_fingerprint_is_bounded_and_preserves_legacy_fallback() {
     use crate::{deflate::deflate_reader::parse_deflate_whole, utils::read_file};
@@ -684,6 +686,8 @@ fn verify_max_chain_length() {
     }
 }
 
+// One skipped lazy opportunity is not enough evidence to classify a parser as greedy.
+// Verify the repeated-evidence threshold and the 256-observation sampling limit.
 #[test]
 fn greedy_observations_require_repeated_better_matches() {
     let text = PlainText::new_with_data(b"@abcdXbcdefYabcdefZ".to_vec());
@@ -703,6 +707,8 @@ fn greedy_observations_require_repeated_better_matches() {
     assert_eq!(observations.samples, 256);
 }
 
+// Unusable lookahead candidates must not create false greedy fingerprints.
+// Verify invalid, farther and mismatching candidates, plus token-length/tail guards.
 #[test]
 fn greedy_observations_reject_invalid_or_costlier_candidates() {
     let text = PlainText::new_with_data(b"@bcdeZ@bcX@abcdXbcdefYabcdefZ".to_vec());
@@ -719,6 +725,8 @@ fn greedy_observations_reject_invalid_or_costlier_candidates() {
     assert!(!observations.needs_sample(token, &input));
 }
 
+// Hash heads store only 16-bit positions, so lookahead can cross their wrap boundary.
+// Verify that a genuine skipped better match is still counted after position 65536.
 #[test]
 fn greedy_observations_handle_wrapped_positions() {
     let mut text = vec![b'X'; 65536];

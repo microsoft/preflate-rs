@@ -166,6 +166,8 @@ fn fixture_directory() -> PathBuf {
         })
 }
 
+// Separate encoding costs from fixture generation and optional round-trip validation.
+// This manual benchmark reports throughput and correction sizes, not a pass/fail speed limit.
 #[test]
 #[ignore = "throughput measurement using exported fixtures; run in release mode"]
 fn benchmark_prediction_throughput() {
@@ -206,6 +208,8 @@ fn benchmark_prediction_throughput() {
     }
 }
 
+// Poor ratios need attributable token/tree diagnostics rather than blind parameter changes.
+// This manual harness verifies supported baselines and accepted trials before reporting them.
 #[test]
 #[ignore = "run export_compression_diagnostics first; optionally filter or sweep parameters"]
 fn diagnose_compression() {
@@ -312,6 +316,8 @@ fn diagnose_compression() {
     println!("Unsupported streams: {unsupported}");
 }
 
+// The isolation harness must measure the real format without changing predictor behavior.
+// Verify production-byte parity, exact reconstruction and zero fastest-profile token errors.
 #[test]
 fn diagnostic_measurement_matches_production() {
     for name in [
@@ -341,6 +347,8 @@ fn diagnostic_measurement_matches_production() {
     }
 }
 
+// A diagnostic sweep cannot attribute improvements if unrelated settings change together.
+// Verify isolated variants change one search setting and preserve hash/insertion policy.
 #[test]
 fn isolated_variants_change_one_parameter() {
     let compressed = crate::utils::read_file("compressed_zlib_level1.deflate");
@@ -385,6 +393,8 @@ fn synthetic_params() -> TokenPredictorParameters {
     }
 }
 
+// Greedy/lazy misclassification should have a distinct, reproducible diagnostic signature.
+// Verify one known lookahead decision causes exactly one traced and coded literal mismatch.
 #[test]
 fn diagnostic_isolates_greedy_from_lazy_matching() {
     let mut tokens: Vec<_> = b"@abcdX"
@@ -430,6 +440,8 @@ fn diagnostic_isolates_greedy_from_lazy_matching() {
     );
 }
 
+// An early nice-length exit can hide a longer match despite the correct hash and parser.
+// Verify changing only that cutoff produces the expected single length-correction mismatch.
 #[test]
 fn diagnostic_isolates_nice_length_cutoff() {
     let mut tokens: Vec<_> = b"@abcdefX"
@@ -471,6 +483,8 @@ fn diagnostic_isolates_nice_length_cutoff() {
     );
 }
 
+// Mismatch tracing must bound memory without undercounting errors on badly matched streams.
+// Verify counts continue beyond the sample cap while only eight ordered samples are retained.
 #[test]
 fn diagnostic_trace_bounds_samples_not_counts() {
     let tokens = b"abcd"

@@ -552,6 +552,8 @@ fn compression_benchmark_overhead_size() {
     }
 }
 
+// Keep native compressor setup outside the core prediction measurements.
+// This manual harness exports raw compressor/level fixtures; it does not assert compression ratios.
 #[test]
 #[ignore = "exports generated streams for the core prediction diagnostic harness"]
 fn export_compression_diagnostics() {
@@ -591,6 +593,8 @@ fn export_compression_diagnostics() {
     }
 }
 
+// Matching models must survive continuation without re-fingerprinting every chunk.
+// Verify first-chunk-only parameters and exact reconstruction across dictionary shrinking.
 #[test]
 fn compressor_models_roundtrip_across_chunks() {
     let original = read_file("sample1.bin");
@@ -642,6 +646,8 @@ fn compressor_models_roundtrip_across_chunks() {
     }
 }
 
+// Matching improvements must generalize beyond the fixture used to tune them.
+// Verify 270 varied/boundary round trips and the document overhead bound for low libdeflate levels.
 #[test]
 fn compressor_models_roundtrip_varied_inputs() {
     let mut inputs: Vec<(String, Vec<u8>)> = ["sample2.bin", "sample3.bin", "pptxplaintext.bin"]

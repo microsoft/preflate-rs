@@ -104,13 +104,10 @@ pub fn estimate_preflate_parameters(
     let cl = estimate_preflate_comp_level(
         window_bits,
         mem_level,
-        info.min_len,
+        &info,
         deflate_contents,
         plain_text,
         add_policy,
-        add_policy == DictionaryAddPolicy::AddAll
-            && info.max_dist_3_matches > 4096
-            && !info.matches_to_start_detected,
     )?;
 
     let zlib_compatible = !info.matches_to_start_detected
@@ -331,6 +328,8 @@ fn verify_miniz_recognition() {
     }
 }
 
+// Sharing libdeflate's dictionary must not collapse greedy and lazy parser profiles.
+// Verify levels 2-4 select their greedy cutoffs while level 5 remains lazy.
 #[test]
 fn verify_libdeflate_greedy_recognition() {
     use crate::{deflate::deflate_reader::parse_deflate_whole, utils::read_file};
