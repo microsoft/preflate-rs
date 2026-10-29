@@ -100,8 +100,7 @@ automatic conversion.
 Remaining gaps include zlib-ng levels 5/6 (match-end lookahead and backward match
 adjustment), libdeflate's adaptive minimum lengths in lazy modes, and Huffman-tree details.
 The medium-parser investigation did not justify coercing unrelated hash profiles
-or adding trial encodes. Some valid short streams with incomplete Huffman trees
-also hit an existing reader limitation before fingerprinting.
+or adding trial encodes.
 
 ---
 
@@ -161,7 +160,8 @@ broader invariants and exact user-facing round trips:
 
 - Seeded random, nearly periodic, structured-record and mixed-entropy data,
   alongside real fixtures and inputs around short-tail and dictionary boundaries.
-- 486 miniz/libdeflate round trips across levels 1-9, plus 96 zlib/zlib-ng controls.
+- 486 miniz/libdeflate round trips across levels 1-9, plus 96 zlib/zlib-ng controls
+  and 24 periodic miniz cases exercising one-symbol distance alphabets.
 - 36 continuation cases across two inputs and two chunk limits, checking plaintext,
   exact reconstructed bytes and first-chunk-only parameters.
 - An independent longest-prefix oracle for match searches, alphabet/depth
@@ -172,11 +172,12 @@ cargo test -p preflate-rs
 cargo test --test end_to_end -- compressor_models_ compression_benchmark_overhead_size
 ```
 
-An explicitly ignored periodic-miniz regression preserves a known reader
-limitation: a native-accepted stream with an incomplete Huffman tree is rejected
-before fingerprinting. It can be reproduced with
-`cargo test --test end_to_end periodic_miniz_streams_roundtrip -- --ignored`.
-This is not counted among the passing round trips.
+Huffman regressions also cover one-symbol literal/length trees, empty distance
+alphabets in literal-only blocks, and rejection of unused branches, missing
+end-of-block codes, oversubscribed trees and other invalid incomplete trees.
+The periodic miniz cases verify the compressor's own inflater accepts each stream
+before checking plaintext and exact reconstruction:
+`cargo test --test end_to_end periodic_miniz_streams_roundtrip`.
 
 ## Workspace Layout
 

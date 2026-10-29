@@ -799,10 +799,9 @@ fn compressor_models_roundtrip_other_compressors() {
     }
 }
 
-// Pure periodic streams expose an existing reader failure before model estimation is reached.
-// Verify native inflate accepts each stream, then require exact preflate round trips once fixed.
+// Pure periodic streams exercise valid one-symbol distance alphabets in real compressor output.
+// Verify native inflate, decoded plaintext and exact reconstruction across lengths, shifts and levels.
 #[test]
-#[ignore = "Known reader limitation: valid miniz streams with incomplete Huffman trees"]
 fn periodic_miniz_streams_roundtrip() {
     for length in [32769, 65537] {
         for shift in [0u8, 1, 127] {
