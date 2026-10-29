@@ -89,7 +89,7 @@ extends:
                     packageType: 'sdk'
                     version: '6.x'
               
-                - task: EsrpCodeSigning@5
+                - task: EsrpCodeSigning@6
                   inputs:
                     ConnectedServiceName: 'ESRP CodeSigningV2-OneDrive Service'
                     AppRegistrationClientId: 'bd3fbc52-4cf5-4cca-a25d-94160e5ed309' 
