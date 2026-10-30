@@ -23,9 +23,10 @@ rust-version = "1.89"
 repository = "https://github.com/microsoft/preflate-rs"
 
 [dev-dependencies]
-preflate-rs = { path = "preflate" }
+preflate-rs = { path = "preflate", features = ["diagnostics"] }
 preflate-container = { path = "container" }
 libz-sys = "1.1"
 libdeflate-sys = "1.19"
 libz-ng-sys = "1.1.12"
 miniz_oxide = "0.9"
+libc = "0.2"

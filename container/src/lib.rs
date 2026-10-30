@@ -22,6 +22,7 @@
 mod container_common;
 mod container_read;
 mod container_write;
+mod diagnostics;
 mod idat_parse;
 mod scan_deflate;
 mod scoped_read;
@@ -30,6 +31,10 @@ mod utils;
 pub use container_common::{PreflateContainerConfig, PreflateStats, ProcessBuffer};
 pub use container_read::RecreateContainerProcessor;
 pub use container_write::PreflateContainerProcessor;
+pub use diagnostics::{
+    DeflateDiagnostic, DiagnosticScanOptions, scan_deflate_diagnostics,
+    scan_deflate_diagnostics_with_options,
+};
 
 pub use utils::process_limited_buffer;
 

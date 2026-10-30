@@ -2,6 +2,9 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+See [AGENTS.md](AGENTS.md) for shared agent instructions, including mandatory
+release builds for corpus work and the current breaking-format policy.
+
 > **Important:** This file (and all sub-project `CLAUDE.md` files) are checked into the
 > repository. Only include information that is valid for **any** developer or machine:
 > project conventions, architecture, commands, constraints. **Do not** add machine-specific

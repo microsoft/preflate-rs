@@ -27,10 +27,12 @@ mod estimator;
 mod hash_algorithm;
 mod hash_chain;
 mod hash_chain_holder;
+mod models;
 
 mod preflate_error;
 mod preflate_input;
 
+mod block_predictor;
 mod statistical_codec;
 mod stream_processor;
 mod token_predictor;
@@ -38,16 +40,21 @@ mod tree_predictor;
 mod utils;
 
 pub use estimator::preflate_parameter_estimator::TokenPredictorParameters;
+pub use estimator::preflate_parse_config::{LazyBehavior, MatchingType};
 pub use hash_algorithm::HashAlgorithm;
 pub use preflate_error::ExitCode;
 pub use preflate_error::{AddContext, PreflateError, Result, err_exit_code};
 pub use preflate_input::{PlainText, PreflateInput};
 
+#[cfg(feature = "diagnostics")]
+pub use deflate::deflate_token::{DeflateHuffmanType, DeflateToken, DeflateTokenBlockType};
 pub use statistical_codec::{CodecCorrection, CountNonDefaultActions};
 pub use stream_processor::{
     PreflateStreamChunkResult, PreflateStreamProcessor, RecreateStreamProcessor,
     preflate_whole_deflate_stream, recreate_whole_deflate_stream,
 };
+#[cfg(any(test, feature = "diagnostics"))]
+pub use token_predictor::TokenPredictionTrace;
 
 /// Configure the preflate stream processor
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

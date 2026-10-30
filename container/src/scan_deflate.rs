@@ -37,7 +37,7 @@ pub enum FoundStreamType {
 }
 
 #[derive(Hash, Eq, PartialEq, Clone, Debug)]
-enum Signature {
+pub(crate) enum Signature {
     Zlib(u8),
     ZipLocalFileHeader,
     Gzip,
@@ -50,7 +50,7 @@ enum Signature {
     JPEG,
 }
 
-fn next_signature(src: &[u8], index: &mut usize) -> Option<Signature> {
+pub(crate) fn next_signature(src: &[u8], index: &mut usize) -> Option<Signature> {
     if src.is_empty() {
         return None;
     }
@@ -294,7 +294,7 @@ pub fn find_compressable_stream(
     FindStreamResult::None
 }
 
-fn skip_gzip_header<R: Read>(reader: &mut R) -> Result<()> {
+pub(crate) fn skip_gzip_header<R: Read>(reader: &mut R) -> Result<()> {
     let mut buffer = [0; 10];
     reader.read_exact(&mut buffer)?; // Read past the fixed 10-byte GZIP header
 

@@ -183,6 +183,13 @@ impl DeflateParser {
                         return err_exit_code(ExitCode::InvalidDeflate, "Block length mismatch");
                     }
 
+                    if self.plain_text.len() + usize::from(len) > self.plain_text_limit {
+                        return err_exit_code(
+                            ExitCode::PlainTextLimit,
+                            "Plain text limit exceeded",
+                        );
+                    }
+
                     let mut uncompressed = Vec::with_capacity(len as usize);
 
                     for _i in 0..len {

@@ -59,11 +59,15 @@ src/
     deflate_token.rs / deflate_constants.rs
   estimator/
     preflate_parameter_estimator.rs  ← main estimator entry point
-    complevel_estimator.rs
-    depth_estimator.rs
+    complevel_estimator.rs           ← candidate selection and evidence snapshots
+    depth_estimator.rs               ← existing hash/depth observation walk
+    evidence_policy.rs               ← family-specific observation restrictions
+    compressor_profile.rs            ← coupled profile settings and selection provenance
+    parser_estimator.rs              ← bounded evidence inference and matching policy
     add_policy_estimator.rs
     preflate_parse_config.rs
     preflate_stream_info.rs
+  models/                           ← family policy, parsing decisions and search/boundary rules
   token_predictor.rs
   tree_predictor.rs
   statistical_codec.rs
@@ -77,8 +81,18 @@ src/
 
 ## Constraints
 
+- Family policy and library-specific runtime behavior belong in `models/`; the profile coordinator preserves
+  inferred/fingerprinted/prefix-validated provenance. Hash identity alone is not
+  compressor identity. Keep candidate ordering and existing observation/refinement
+  bounds stable when relocating policy.
+- Shared collectors and predictors execute the selected behavior and manage state.
+  Keep family helpers statically called/inlined; do not duplicate generic traversal
+  or add trait-object family dispatch inside probe loops to organize policy.
+  Reconstruction must use the same helpers with finalized parameters, not
+  encoder-only estimation evidence.
+
 - `#![forbid(unsafe_code)]` — strictly enforced.
 - Serialization: parameters via `bitcode`; correction data via CABAC (`src/cabac/`).
-- The first chunk's corrections blob starts with `RECONSTRUCTION_DATA_VERSION` (`stream_processor.rs`); bump it on any incompatible corrections format change.
+- The first chunk's corrections blob starts with `RECONSTRUCTION_DATA_VERSION` (`stream_processor.rs`). Follow the current breaking-0.8 format policy in [AGENTS.md](../AGENTS.md); do not add versioning or compatibility layers unless requested.
 - The format is chunked to bound peak memory use.
 - `#![deny(trivial_casts, non_ascii_idents)]` also set.

@@ -27,12 +27,13 @@ use crate::{
     token_predictor::TokenPredictor,
 };
 
-/// Version byte written in front of the serialized `ReconstructionData`. Bump this whenever the
-/// corrections format changes in a way that other versions cannot decode.
+/// Version byte written in front of the serialized `ReconstructionData`.
+/// The developing 0.8 format intentionally permits breaking changes under the same tag.
 ///
 /// The high bit is set because unversioned blobs from 0.7 and earlier start with a small bitcode
 /// byte (0x00 or 0x01 in practice), so they are rejected here instead of being misinterpreted.
-pub(crate) const RECONSTRUCTION_DATA_VERSION: u8 = 0x81;
+pub(crate) const RECONSTRUCTION_DATA_VERSION: u8 = 0x84;
+const LEGACY_RECONSTRUCTION_DATA_VERSION: u8 = 0x83;
 
 /// the data required to reconstruct the deflate stream exactly the way that it was
 #[derive(Encode, Decode)]
@@ -50,7 +51,7 @@ impl ReconstructionData {
 
     pub fn read(data: &[u8]) -> Result<Self> {
         match data.split_first() {
-            Some((&RECONSTRUCTION_DATA_VERSION, payload)) => {
+            Some((&RECONSTRUCTION_DATA_VERSION | &LEGACY_RECONSTRUCTION_DATA_VERSION, payload)) => {
                 bitcode::decode(payload).map_err(|e| {
                     PreflateError::new(
                         ExitCode::InvalidCompressedWrapper,
@@ -61,7 +62,7 @@ impl ReconstructionData {
             Some((&version, _)) => Err(PreflateError::new(
                 ExitCode::InvalidCompressedWrapper,
                 format!(
-                    "unsupported corrections version {version:#04x}, expected {RECONSTRUCTION_DATA_VERSION:#04x}"
+                    "unsupported corrections version {version:#04x}, expected {RECONSTRUCTION_DATA_VERSION:#04x} or {LEGACY_RECONSTRUCTION_DATA_VERSION:#04x}"
                 )
                 .as_str(),
             )),
@@ -97,6 +98,8 @@ pub struct PreflateStreamProcessor {
     validator: Option<RecreateStreamProcessor>,
     parser: DeflateParser,
     max_chain_length: u32,
+    #[cfg(any(test, feature = "diagnostics"))]
+    trace: Option<crate::TokenPredictionTrace>,
 }
 
 impl PreflateStreamProcessor {
@@ -108,12 +111,28 @@ impl PreflateStreamProcessor {
             predictor: None,
             parser: DeflateParser::new(config.plain_text_limit),
             max_chain_length: config.max_chain_length,
+            #[cfg(any(test, feature = "diagnostics"))]
+            trace: None,
             validator: if config.verify_compression {
                 Some(RecreateStreamProcessor::new())
             } else {
                 None
             },
         }
+    }
+
+    /// Enable bounded mismatch sampling while counting all initial token predictions.
+    #[cfg(any(test, feature = "diagnostics"))]
+    pub fn enable_trace(&mut self, max_mismatches: usize) {
+        self.trace = Some(crate::TokenPredictionTrace {
+            max_mismatches,
+            ..Default::default()
+        });
+    }
+
+    #[cfg(any(test, feature = "diagnostics"))]
+    pub fn prediction_trace(&self) -> Option<&crate::TokenPredictionTrace> {
+        self.trace.as_ref()
     }
 
     pub fn is_done(&self) -> bool {
@@ -134,12 +153,37 @@ impl PreflateStreamProcessor {
 
     /// decompresses a deflate stream and returns the plaintext and cabac_encoded data that can be used to reconstruct it
     pub fn decompress(&mut self, compressed_data: &[u8]) -> Result<PreflateStreamChunkResult> {
+        self.decompress_counted(compressed_data, ())
+    }
+
+    /// Like `decompress`, also accumulating nonzero correction actions for diagnostics.
+    /// Counts include structural actions; they are not token mismatch counts or bit costs.
+    pub fn decompress_with_statistics(
+        &mut self,
+        compressed_data: &[u8],
+        counts: &mut crate::CountNonDefaultActions,
+    ) -> Result<PreflateStreamChunkResult> {
+        self.decompress_counted(compressed_data, counts)
+    }
+
+    fn decompress_counted(
+        &mut self,
+        compressed_data: &[u8],
+        counter: impl PredictionEncoder,
+    ) -> Result<PreflateStreamChunkResult> {
+        #[cfg(any(test, feature = "diagnostics"))]
+        if let Some(trace) = &mut self.trace {
+            trace.stage = "parse";
+            trace.block_profile = "Default";
+        }
         let contents = self.parser.parse(compressed_data)?;
 
         let mut cabac_encoded = Vec::new();
 
-        let mut cabac_encoder =
-            PredictionEncoderCabac::new(VP8Writer::new(&mut cabac_encoded).unwrap());
+        let mut cabac_encoder = (
+            counter,
+            PredictionEncoderCabac::new(VP8Writer::new(&mut cabac_encoded).unwrap()),
+        );
 
         if let Some(predictor) = &mut self.predictor {
             let mut input = PreflateInput::new(&self.parser.plain_text());
@@ -148,11 +192,28 @@ impl PreflateStreamProcessor {
             // have the full plaintext yet.
             predictor.add_missing_previous_hash(&input);
 
-            predict_blocks(&contents.blocks, predictor, &mut cabac_encoder, &mut input)?;
+            #[cfg(any(test, feature = "diagnostics"))]
+            {
+                if let Some(trace) = &mut self.trace {
+                    trace.stage = "predict";
+                }
+                predictor.trace = self.trace.take();
+            }
+            let prediction =
+                predict_blocks(&contents.blocks, predictor, &mut cabac_encoder, &mut input);
+            #[cfg(any(test, feature = "diagnostics"))]
+            {
+                self.trace = predictor.trace.take();
+            }
+            prediction?;
 
             cabac_encoder.finish();
 
             if let Some(validator) = &mut self.validator {
+                #[cfg(any(test, feature = "diagnostics"))]
+                if let Some(trace) = &mut self.trace {
+                    trace.stage = "verify";
+                }
                 let (recompressed, _rec_blocks) = validator.recompress(
                     &mut Cursor::new(self.parser.plain_text().text()),
                     &cabac_encoded,
@@ -178,6 +239,10 @@ impl PreflateStreamProcessor {
                 }
             }
 
+            #[cfg(any(test, feature = "diagnostics"))]
+            if let Some(trace) = &mut self.trace {
+                trace.stage = "complete";
+            }
             Ok(PreflateStreamChunkResult {
                 corrections: cabac_encoded,
                 compressed_size: contents.compressed_size,
@@ -185,9 +250,18 @@ impl PreflateStreamProcessor {
                 blocks: contents.blocks,
             })
         } else {
+            #[cfg(any(test, feature = "diagnostics"))]
+            if let Some(trace) = &mut self.trace {
+                trace.stage = "estimate";
+            }
             let params =
                 estimate_preflate_parameters(&contents, &self.parser.plain_text()).context()?;
 
+            #[cfg(any(test, feature = "diagnostics"))]
+            if let Some(trace) = &mut self.trace {
+                trace.parameters = Some(params);
+                trace.stage = "chain_limit";
+            }
             if params.max_chain > self.max_chain_length {
                 return Err(PreflateError::new(
                     ExitCode::NoCompressionCandidates,
@@ -201,16 +275,35 @@ impl PreflateStreamProcessor {
             let mut input = PreflateInput::new(&self.parser.plain_text());
 
             let mut token_predictor = TokenPredictor::new(&params);
+            token_predictor
+                .enable_parameter_normalization(contents.compressed_size, self.parser.is_done());
 
-            predict_blocks(
+            #[cfg(any(test, feature = "diagnostics"))]
+            {
+                if let Some(trace) = &mut self.trace {
+                    trace.stage = "predict";
+                }
+                token_predictor.trace = self.trace.take();
+            }
+            let prediction = predict_blocks(
                 &contents.blocks,
                 &mut token_predictor,
                 &mut cabac_encoder,
                 &mut input,
-            )?;
+            );
+            #[cfg(any(test, feature = "diagnostics"))]
+            {
+                self.trace = token_predictor.trace.take();
+            }
+            prediction?;
 
             cabac_encoder.finish();
 
+            let params = token_predictor.reconstruction_parameters();
+            #[cfg(any(test, feature = "diagnostics"))]
+            if let Some(trace) = &mut self.trace {
+                trace.parameters = Some(params);
+            }
             let reconstruction_data = ReconstructionData {
                 parameters: params,
                 corrections: cabac_encoded,
@@ -220,6 +313,10 @@ impl PreflateStreamProcessor {
             self.predictor = Some(token_predictor);
 
             if let Some(validator) = &mut self.validator {
+                #[cfg(any(test, feature = "diagnostics"))]
+                if let Some(trace) = &mut self.trace {
+                    trace.stage = "verify";
+                }
                 let (recompressed, _rec_blocks) = validator.recompress(
                     &mut Cursor::new(self.parser.plain_text().text()),
                     &reconstruction_data,
@@ -245,6 +342,10 @@ impl PreflateStreamProcessor {
                 }
             }
 
+            #[cfg(any(test, feature = "diagnostics"))]
+            if let Some(trace) = &mut self.trace {
+                trace.stage = "complete";
+            }
             Ok(PreflateStreamChunkResult {
                 corrections: reconstruction_data,
                 compressed_size: contents.compressed_size,
@@ -321,7 +422,11 @@ impl RecreateStreamProcessor {
         } else {
             let r = ReconstructionData::read(corrections)?;
 
-            let mut predictor = TokenPredictor::new(&r.parameters);
+            let mut predictor = if corrections[0] == LEGACY_RECONSTRUCTION_DATA_VERSION {
+                TokenPredictor::new_legacy(&r.parameters)
+            } else {
+                TokenPredictor::new(&r.parameters)
+            };
 
             let mut cabac_decoder =
                 PredictionDecoderCabac::new(VP8Reader::new(Cursor::new(r.corrections)).unwrap());
@@ -382,13 +487,18 @@ fn predict_blocks(
     encoder: &mut impl PredictionEncoder,
     input: &mut PreflateInput,
 ) -> Result<()> {
+    let tail_length = token_predictor.begin_chunk(blocks);
     for i in 0..blocks.len() {
-        token_predictor.predict_block(&blocks[i], encoder, input, i == blocks.len() - 1)?;
-        // end of stream normally is the last block
+        token_predictor.predict_block(
+            &blocks[i],
+            encoder,
+            input,
+            i + tail_length + 1 == blocks.len(),
+        )?;
         encoder.encode_correction_bool(
             CodecCorrection::EndOfChunk,
             i == blocks.len() - 1,
-            input.remaining() == 0,
+            token_predictor.predict_end_of_chunk(input),
         );
     }
     assert!(input.remaining() == 0);
@@ -417,6 +527,7 @@ fn recreate_blocks<D: PredictionDecoder>(
     deflate_writer: &mut DeflateWriter,
     input: &mut PreflateInput,
 ) -> Result<Vec<DeflateTokenBlock>> {
+    token_predictor.begin_chunk(&[]);
     let mut output_blocks = Vec::new();
     loop {
         let block = token_predictor.recreate_block(decoder, input)?;
@@ -425,9 +536,10 @@ fn recreate_blocks<D: PredictionDecoder>(
 
         output_blocks.push(block);
 
-        // end of stream normally is the last block
-        let last =
-            decoder.decode_correction_bool(CodecCorrection::EndOfChunk, input.remaining() == 0);
+        let last = decoder.decode_correction_bool(
+            CodecCorrection::EndOfChunk,
+            token_predictor.predict_end_of_chunk(input),
+        );
 
         if last {
             break;
@@ -510,6 +622,10 @@ fn verify_roundtrip_assert() {
     assert!(v == recompressed);
 }
 
+#[cfg(test)]
+#[path = "prediction_diagnostics.rs"]
+mod prediction_diagnostics;
+
 #[test]
 fn verify_roundtrip_zlib() {
     crate::init_logging();
@@ -551,8 +667,18 @@ fn reconstruction_data_version() {
     let unversioned = bitcode::encode(&parsed);
     let mut wrong_version = r.corrections.clone();
     wrong_version[0] = RECONSTRUCTION_DATA_VERSION + 1;
+    let mut previous_version = r.corrections.clone();
+    previous_version[0] = 0x81;
+    let mut previous_models = r.corrections.clone();
+    previous_models[0] = 0x82;
 
-    for bad in [&unversioned[..], &wrong_version[..], &[]] {
+    for bad in [
+        &unversioned[..],
+        &wrong_version[..],
+        &previous_version[..],
+        &previous_models[..],
+        &[],
+    ] {
         let e = recreate_whole_deflate_stream(plain_text.text(), bad).unwrap_err();
         assert_eq!(e.exit_code(), ExitCode::InvalidCompressedWrapper);
     }

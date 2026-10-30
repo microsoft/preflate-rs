@@ -9,7 +9,9 @@ use default_boxed::DefaultBoxed;
 use crate::{
     bit_helper::DebugHash,
     deflate::deflate_token::DeflateTokenReference,
-    hash_algorithm::{HashImplementation, LibdeflateHash3Secondary, LibdeflateHash4},
+    hash_algorithm::{
+        HashAlgorithm, HashImplementation, LibdeflateHash3Secondary, LibdeflateHash4,
+    },
     preflate_input::PreflateInput,
 };
 
@@ -130,8 +132,16 @@ impl HashTable {
 pub trait HashChain {
     fn get_num_hash_bytes() -> usize;
 
+    /// Expose the concrete hash identity so unrelated profile branches can be
+    /// optimized away in each monomorphized matcher.
+    fn algorithm(&self) -> HashAlgorithm;
+
+    fn secondary_match(&self, _input: &PreflateInput, _offset: u32) -> Option<u32> {
+        None
+    }
+
     /// Fewest remaining bytes at which `iterate` can still look for matches. Normally the hash
-    /// width, but a chain with a secondary shorter hash can search closer to the end of input.
+    /// width, but shorter hashes or native zero-padded lookahead can search closer to EOF.
     fn min_lookup_bytes() -> usize {
         Self::get_num_hash_bytes()
     }
@@ -183,6 +193,10 @@ impl<H: HashImplementation> HashChainDefault<H> {
 }
 
 impl<H: HashImplementation> HashChain for HashChainDefault<H> {
+    fn algorithm(&self) -> HashAlgorithm {
+        self.hash.algorithm()
+    }
+
     #[inline]
     fn iterate<'a, const OFFSET: u32>(
         &'a self,
@@ -271,13 +285,7 @@ impl<H: HashImplementation> HashChain for HashChainDefault<H> {
             target_reference, input
         );
 
-        assert_eq!(
-            &input.cur_chars(0)[..(target_reference.len() as usize)],
-            &input.cur_chars(-(target_reference.dist() as i32))
-                [..(target_reference.len() as usize)],
-            "dictionary out of sync for {:?}",
-            target_reference
-        );
+        assert_reference_valid(target_reference, input);
 
         let curr_hash = self.hash.get_hash(input.cur_chars(0));
         println!("hash {}", curr_hash);
@@ -293,6 +301,19 @@ impl<H: HashImplementation> HashChain for HashChainDefault<H> {
     fn get_num_hash_bytes() -> usize {
         H::NUM_HASH_BYTES
     }
+
+    fn min_lookup_bytes() -> usize {
+        H::MIN_LOOKUP_BYTES
+    }
+}
+
+fn assert_reference_valid(target: DeflateTokenReference, input: &PreflateInput) {
+    let length = target.len() as usize;
+    assert_eq!(
+        &input.cur_chars(0)[..length],
+        &input.cur_chars(-(target.dist() as i32))[..length],
+        "dictionary out of sync for {target:?}"
+    );
 }
 
 /// implementation of the hash chain that uses the libdeflate rotating hash.
@@ -320,6 +341,25 @@ const LIBFLATE_HASH_3: LibdeflateHash3Secondary = LibdeflateHash3Secondary {};
 const LIBFLATE_HASH_4: LibdeflateHash4 = LibdeflateHash4 {};
 
 impl HashChain for HashChainLibflate4 {
+    fn algorithm(&self) -> HashAlgorithm {
+        HashAlgorithm::Libdeflate4
+    }
+
+    fn secondary_match(&self, input: &PreflateInput, offset: u32) -> Option<u32> {
+        let hash = LIBFLATE_HASH_3.get_hash(input.cur_chars(offset as i32));
+        // Lookahead must see intervening positions as if they were already inserted.
+        // The nearest virtual slot overrides the stored three-byte hash head.
+        for previous in (0..offset).rev() {
+            if LIBFLATE_HASH_3.get_hash(input.cur_chars(previous as i32)) == hash {
+                return Some(offset - previous);
+            }
+        }
+        let head = self.hash_table_3.get_head(hash);
+        head.is_valid().then(|| {
+            InternalPosition::from_absolute(input.pos() + offset, self.total_shift).dist(head)
+        })
+    }
+
     fn iterate<'a, const OFFSET: u32>(
         &'a self,
         input: &PreflateInput,
@@ -349,11 +389,10 @@ impl HashChain for HashChainLibflate4 {
                 // only 3 bytes left, so only the length 3 slot can match
                 cur_pos = InternalPosition::default();
             }
-        } else {
-            assert_eq!(OFFSET, 1);
+        } else if input.remaining().saturating_sub(OFFSET) >= 4 {
+            assert!(OFFSET <= 2);
 
-            // current hash is the next hash since we are starting at offset 1
-            let curr_hash = LIBFLATE_HASH_4.get_hash(input.cur_chars(1));
+            let curr_hash = LIBFLATE_HASH_4.get_hash(input.cur_chars(OFFSET as i32));
 
             // we are a lazy match, then we haven't added the last byte to the hash yet
             // which is a problem if that hash should have been part of this hash chain
@@ -364,14 +403,24 @@ impl HashChain for HashChainLibflate4 {
             // a distance 1 item to the iterator that we return.
             let prev_hash = LIBFLATE_HASH_4.get_hash(input.cur_chars(0));
             if prev_hash == curr_hash {
-                first_match = Some(1);
+                first_match = Some(OFFSET);
             }
 
             cur_pos = self.hash_table.get_head(curr_hash);
+        } else {
+            cur_pos = InternalPosition::default();
         }
 
+        let mut next_match = if OFFSET == 2 && input.remaining() >= 6 {
+            let curr_hash = LIBFLATE_HASH_4.get_hash(input.cur_chars(2));
+            (LIBFLATE_HASH_4.get_hash(input.cur_chars(1)) == curr_hash).then_some(1)
+        } else {
+            None
+        };
         std::iter::from_fn(move || {
-            if let Some(d) = first_match {
+            if let Some(d) = next_match.take() {
+                Some(d)
+            } else if let Some(d) = first_match {
                 first_match = None;
                 Some(d)
             } else if cur_pos.is_valid() {
@@ -391,10 +440,10 @@ impl HashChain for HashChainLibflate4 {
 
     fn assert_dictionary_valid(
         &self,
-        _target_reference: DeflateTokenReference,
-        _input: &PreflateInput,
+        target_reference: DeflateTokenReference,
+        input: &PreflateInput,
     ) {
-        todo!();
+        assert_reference_valid(target_reference, input);
     }
 
     fn update_hash(&mut self, input: &[u8], pos: u32, length: u32) {

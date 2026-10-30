@@ -11,6 +11,7 @@
 use bitcode::{Decode, Encode};
 
 use crate::deflate::deflate_token::{DeflateToken, DeflateTokenBlock, DeflateTokenBlockType};
+use crate::models::{miniz::cross_4k_boundary, zlib_ng::is_at_32k_boundary};
 
 #[derive(Encode, Decode, Default, Eq, PartialEq, Debug, Clone, Copy)]
 pub enum DictionaryAddPolicy {
@@ -37,12 +38,6 @@ pub enum DictionaryAddPolicy {
     /// last character to the dictionary which ends up being the
     /// last chacacter of the previous match.
     AddFirstWith32KBoundary,
-}
-
-/// Check if we are crossing the 4k boundary. MiniZ in fast mode
-/// doesn't process the last 3 bytes before the 4k boundary for optimization reasons.
-pub fn cross_4k_boundary(pos: u32) -> bool {
-    (pos & 4095) >= 4093
 }
 
 impl DictionaryAddPolicy {
@@ -98,14 +93,6 @@ impl DictionaryAddPolicy {
             }
         }
     }
-}
-
-/// Check if the match is crossing the 32k boundary as which happens
-/// in zlibng.  
-fn is_at_32k_boundary(length: u32, pos: u32) -> bool {
-    length > 1
-        && (((pos) & 0x7fff) <= (32768 - 0x106))
-        && (((pos + length) & 0x7fff) >= (32768 - 0x106))
 }
 
 /// When adding matches to the dictionary, some of the fast variants
