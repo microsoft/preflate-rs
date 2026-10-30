@@ -10,27 +10,46 @@
 use crate::{
     deflate::deflate_reader::DeflateContents,
     hash_algorithm::HashAlgorithm,
+    models::{self, zlib::refine_depth_candidate},
     preflate_error::{ExitCode, Result, err_exit_code},
     preflate_input::PlainText,
 };
 
 use super::{
     add_policy_estimator::DictionaryAddPolicy,
-    depth_estimator::{HashTableDepthEstimator, new_depth_estimator, run_depth_candidates},
-    preflate_parse_config::{
-        MatchingType, SLOW_PREFLATE_PARSER_SETTINGS, ZLIB_PREFLATE_PARSER_SETTINGS,
+    depth_estimator::{
+        DistancePolicy, HashTableDepthEstimator, new_depth_estimator, run_depth_candidates,
     },
+    parser_estimator::{InsertionConstraint, ParserInference},
     preflate_stream_info::PreflateStreamInfo,
 };
 
-#[derive(Default)]
-pub struct CompLevelInfo {
-    pub very_far_matches_detected: bool,
+/// Snapshot the existing walk's evidence before assigning compressor defaults.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct CandidateEvidence {
     pub hash_algorithm: HashAlgorithm,
-    pub match_type: MatchingType,
-    pub nice_length: u32,
-    pub max_chain: u32,
-    pub greedy_parser_detected: bool,
+    pub required_chain: u32,
+    pub distance_policy: DistancePolicy,
+    pub parser: ParserInference,
+}
+
+impl CandidateEvidence {
+    fn collect(candidate: &dyn HashTableDepthEstimator, wsize: u32) -> Self {
+        Self {
+            hash_algorithm: candidate.hash_algorithm(),
+            required_chain: candidate.max_chain_found() + 1,
+            distance_policy: candidate.distance_policy(wsize),
+            parser: candidate
+                .parser_evidence()
+                .infer(candidate.greedy_parser_detected()),
+        }
+    }
+}
+
+pub(crate) struct DepthEstimate {
+    pub selected: CandidateEvidence,
+    pub zlib_candidates: Vec<CandidateEvidence>,
+    pub short_match_rejections: Vec<(HashAlgorithm, u16)>,
 }
 
 fn select_depth_candidate<'a>(
@@ -38,27 +57,20 @@ fn select_depth_candidate<'a>(
     add_policy: DictionaryAddPolicy,
     info: &PreflateStreamInfo,
 ) -> Option<&'a dyn HashTableDepthEstimator> {
-    // Miniz shares zlib's hash, but permits length-three distances that rule out
-    // normal zlib parsing. A surviving libdeflate signature vetoes this preference.
-    // AddAll and exclusion of position zero keep the preference within that parser family.
-    let prefer_miniz_hash = add_policy == DictionaryAddPolicy::AddAll
-        && info.max_dist_3_matches > 4096
-        && !info.matches_to_start_detected
-        && !candidates
+    let prefer_miniz_hash = models::miniz::prefer_rotating_hash(
+        add_policy,
+        info,
+        candidates
             .iter()
-            .any(|candidate| candidate.hash_algorithm() == HashAlgorithm::Libdeflate4);
-    // A 16-bit bucket is a subset of its 15-bit bucket, so minimum depth alone
-    // would favor the legacy hash even when the fastest fingerprint fits.
+            .any(|candidate| models::miniz::vetoes_rotating_hash(candidate.hash_algorithm())),
+    );
     candidates
         .iter()
         .find(|candidate| {
-            candidate.hash_algorithm() == HashAlgorithm::Libdeflate4Fast15
-                || prefer_miniz_hash
-                    && candidate.hash_algorithm()
-                        == HashAlgorithm::Zlib {
-                            hash_mask: 32767,
-                            hash_shift: 5,
-                        }
+            models::libdeflate::prefer_fingerprint(candidate.hash_algorithm())
+                || info.chromium_short_matches.supports_chromium()
+                    && matches!(candidate.hash_algorithm(), HashAlgorithm::Chromium { .. })
+                || prefer_miniz_hash && candidate.hash_algorithm() == models::zlib::DEFAULT_HASH
         })
         .or_else(|| {
             // Without a stronger fingerprint, prefer the shallowest surviving chain.
@@ -70,101 +82,65 @@ fn select_depth_candidate<'a>(
         .map(|candidate| candidate.as_ref())
 }
 
-pub fn estimate_preflate_comp_level(
+pub(super) fn estimate_preflate_depth(
     wbits: u32,
     mem_level: u32,
     info: &PreflateStreamInfo,
     deflate_contents: &DeflateContents,
     plain_text: &PlainText,
     add_policy: DictionaryAddPolicy,
-) -> Result<CompLevelInfo> {
-    let hash_bits = mem_level + 7;
-    let mem_hash_shift = (hash_bits + 2) / 3;
-    let mem_hash_mask = ((1u32 << hash_bits) - 1) as u16;
+) -> Result<DepthEstimate> {
     let wsize = 1 << wbits;
 
     let mut candidates: Vec<Box<dyn HashTableDepthEstimator>> = Vec::new();
 
-    if info.min_len == 3 {
-        // A three-byte reference rules out primary-only four-byte hashes, but not
-        // libdeflate's four-byte primary plus its three-byte secondary table.
-        candidates.push(new_depth_estimator(HashAlgorithm::MiniZFast));
-
-        // Include zlib/miniz's shared 15-bit shape, zlib's small-table shape, and the
-        // memLevel-derived guess; the inferred block capacity need not identify the encoder.
-        for (hash_shift, hash_mask) in [(5, 32767), (4, 2047), (mem_hash_shift, mem_hash_mask)] {
-            candidates.push(new_depth_estimator(HashAlgorithm::Zlib {
-                hash_mask,
-                hash_shift,
-            }));
-        }
-
-        // Libdeflate levels 2+ can emit three-byte matches through their secondary table.
-        candidates.push(new_depth_estimator(HashAlgorithm::Libdeflate4));
-
-        // Windows' built-in DEFLATE uses fixed table-XOR hashing rather than zlib's rotation.
-        candidates.push(new_depth_estimator(HashAlgorithm::RandomVector));
-    } else {
-        // With no three-byte references, prune to four-byte families. This is a cheap
-        // candidate heuristic, not proof that the original encoder cannot emit length three.
-        // Check the two-entry 15-bit buckets while updating the legacy 16-bit candidate.
-        if add_policy == DictionaryAddPolicy::AddAll {
-            candidates.push(new_depth_estimator(HashAlgorithm::Libdeflate4Fast15));
+    for algorithm in models::candidate_hashes(mem_level, info, add_policy) {
+        candidates.push(new_depth_estimator(algorithm));
+    }
+    run_depth_candidates(
+        if InsertionConstraint::observe(add_policy, info.max_len) == InsertionConstraint::Unresolved
+        {
+            DictionaryAddPolicy::AddAll
         } else {
-            candidates.push(new_depth_estimator(HashAlgorithm::Libdeflate4Fast));
+            add_policy
+        },
+        deflate_contents,
+        plain_text,
+        &mut candidates,
+        info.min_len,
+        info.max_dist_3_matches,
+        wsize,
+    );
+    #[cfg(test)]
+    if std::env::var_os("PREFLATE_ESTIMATOR_TRACE").is_some() {
+        for candidate in &candidates {
+            println!(
+                "HASH {:?} depth={} greedy={} evidence={:?} short_rejections={}",
+                candidate.hash_algorithm(),
+                candidate.max_chain_found(),
+                candidate.greedy_parser_detected(),
+                candidate.parser_evidence(),
+                candidate.short_match_rejections(),
+            );
         }
-
-        // Zlib-ng builds can use either a multiplicative or a CRC32C four-byte hash.
-        // Test the stream's behavior rather than choosing from this machine's CPU features.
-        candidates.push(new_depth_estimator(HashAlgorithm::ZlibNG));
-
-        candidates.push(new_depth_estimator(HashAlgorithm::Crc32cHash));
     }
 
-    run_depth_candidates(add_policy, deflate_contents, plain_text, &mut candidates);
-
-    let Some(candidate) = select_depth_candidate(&candidates, add_policy, info) else {
+    let zlib_candidates: Vec<_> = candidates
+        .iter()
+        .filter(|candidate| matches!(candidate.hash_algorithm(), HashAlgorithm::Zlib { .. }))
+        .filter(|candidate| candidate.max_chain_found() < 4096)
+        .map(|candidate| CandidateEvidence::collect(candidate.as_ref(), wsize))
+        .collect();
+    let Some(initial) = select_depth_candidate(&candidates, add_policy, info) else {
         return err_exit_code(ExitCode::NoCompressionCandidates, "no candidates found");
     };
+    let candidate = refine_depth_candidate(&candidates, initial, add_policy, info);
 
     if candidate.max_chain_found() > 4096 {
         return err_exit_code(
             ExitCode::NoCompressionCandidates,
             "no candidate found with reasonable chain length",
         );
-    }
-
-    let mut match_type = MatchingType::Greedy;
-    let mut nice_length = 258;
-
-    let max_chain = candidate.max_chain_found() + 1;
-
-    match add_policy {
-        DictionaryAddPolicy::AddFirst(_)
-        | DictionaryAddPolicy::AddFirstAndLast(_)
-        | DictionaryAddPolicy::AddFirstWith32KBoundary
-        | DictionaryAddPolicy::AddFirstExcept4kBoundary => {
-            // Partial insertion resembles zlib levels 1-3; use their greedy defaults
-            // unless the hash-specific refinement supplies stronger evidence later.
-            for config in &ZLIB_PREFLATE_PARSER_SETTINGS {
-                if candidate.max_chain_found() < config.max_chain {
-                    match_type = config.match_type;
-                    nice_length = config.nice_length;
-                    break;
-                }
-            }
-        }
-        DictionaryAddPolicy::AddAll => {
-            // Full insertion gets zlib levels 4-9 as a baseline, not a compressor identity.
-            // Miniz and libdeflate refine this in estimate_preflate_parameters.
-            for config in &SLOW_PREFLATE_PARSER_SETTINGS {
-                if candidate.max_chain_found() < config.max_chain {
-                    match_type = config.match_type;
-                    nice_length = config.nice_length;
-                    break;
-                }
-            }
-        }
     }
 
     if candidate.max_chain_found() >= 4096 {
@@ -174,18 +150,97 @@ pub fn estimate_preflate_comp_level(
         );
     }
 
-    Ok(CompLevelInfo {
-        very_far_matches_detected: candidate.very_far_matches_detected(wsize),
-        match_type,
-        nice_length,
-        max_chain,
-        hash_algorithm: candidate.hash_algorithm(),
-        greedy_parser_detected: candidate.greedy_parser_detected(),
+    Ok(DepthEstimate {
+        selected: models::libdeflate::primary_chain_evidence(
+            CandidateEvidence::collect(candidate, wsize),
+            info,
+            add_policy,
+        ),
+        zlib_candidates,
+        short_match_rejections: candidates
+            .iter()
+            .filter_map(|candidate| {
+                let count = candidate.short_match_rejections();
+                (count > 0).then(|| (candidate.hash_algorithm(), count))
+            })
+            .collect(),
     })
 }
 
-// Miniz's shared zlib hash needs guarded preference, not unconditional selection.
-// Verify the distance, insertion-policy and start-position guards, plus libdeflate veto.
+#[test]
+fn fast_hash_refinement_requires_a_real_cutoff_and_consistent_evidence() {
+    use super::parser_estimator::ParserEvidence;
+    struct Fingerprint(HashAlgorithm, u32, u16);
+    impl HashTableDepthEstimator for Fingerprint {
+        fn update_hash(
+            &mut self,
+            _: DictionaryAddPolicy,
+            _: &crate::preflate_input::PreflateInput,
+            _: u32,
+        ) {
+        }
+        fn match_depth(
+            &mut self,
+            _: crate::deflate::deflate_token::DeflateTokenReference,
+            _: &crate::preflate_input::PreflateInput,
+        ) -> bool {
+            true
+        }
+        fn max_chain_found(&self) -> u32 {
+            self.1
+        }
+        fn distance_policy(&self, _: u32) -> DistancePolicy {
+            DistancePolicy::ZlibWindow
+        }
+        fn hash_algorithm(&self) -> HashAlgorithm {
+            self.0
+        }
+        fn parser_evidence(&self) -> ParserEvidence {
+            ParserEvidence {
+                lazy_matches: self.2,
+                longest_lazy_match: 3,
+            }
+        }
+    }
+    let zlib = HashAlgorithm::Zlib {
+        hash_mask: 32767,
+        hash_shift: 5,
+    };
+    let fallback = HashAlgorithm::RandomVector;
+    let mut candidates: Vec<Box<dyn HashTableDepthEstimator>> = vec![
+        Box::new(Fingerprint(fallback, 3, 4)),
+        Box::new(Fingerprint(zlib, 3, 0)),
+    ];
+    let mut info = super::preflate_stream_info::extract_preflate_info(&[]);
+    for (policy, max_len, expected) in [
+        (DictionaryAddPolicy::AddFirst(4), 258, zlib),
+        (DictionaryAddPolicy::AddFirst(4), 4, fallback),
+        (DictionaryAddPolicy::AddFirst(9), 258, fallback),
+        (DictionaryAddPolicy::AddAll, 258, fallback),
+    ] {
+        info.max_len = max_len;
+        assert_eq!(
+            refine_depth_candidate(&candidates, candidates[0].as_ref(), policy, &info)
+                .hash_algorithm(),
+            expected
+        );
+    }
+    info.max_len = 258;
+    for (depth, lazy) in [(4, 0), (3, 1)] {
+        candidates[1] = Box::new(Fingerprint(zlib, depth, lazy));
+        assert_eq!(
+            refine_depth_candidate(
+                &candidates,
+                candidates[0].as_ref(),
+                DictionaryAddPolicy::AddFirst(4),
+                &info
+            )
+            .hash_algorithm(),
+            fallback
+        );
+    }
+}
+
 #[test]
 fn miniz_fingerprint_preference_preserves_guards_and_fallback() {
     use super::preflate_stream_info::extract_preflate_info;

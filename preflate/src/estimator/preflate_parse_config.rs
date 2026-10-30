@@ -8,6 +8,10 @@ use bitcode::{Decode, Encode};
 
 use crate::estimator::add_policy_estimator::DictionaryAddPolicy;
 
+// Retain the existing table paths for diagnostics, even when only tests consume them.
+#[allow(unused_imports)]
+pub use crate::models::zlib::{SLOW_PREFLATE_PARSER_SETTINGS, ZLIB_PREFLATE_PARSER_SETTINGS};
+
 #[derive(Encode, Decode, Debug, Copy, Clone, PartialEq, Eq, Default)]
 pub enum MatchingType {
     /// Immediate-match baseline: zlib's fast levels, miniz's special fastest mode,
@@ -16,7 +20,11 @@ pub enum MatchingType {
     Greedy,
     /// Zlib-style one-position lookahead, used as the default for full-insertion streams
     /// until a compressor-specific fingerprint justifies a different matching policy.
-    Lazy { good_length: u16, max_lazy: u16 },
+    Lazy {
+        max_lazy: u16,
+        filtered_matching: bool,
+        behavior: LazyBehavior,
+    },
     /// Miniz/miniz_oxide's normal chain parser: grouped suffix probes, optionally lazy.
     /// Separate from MiniZFast hashing; this parser shares zlib's usual rotating hash.
     MiniZ { max_probes: u16, greedy: bool },
@@ -26,6 +34,14 @@ pub enum MatchingType {
     /// Libdeflate's modeled levels 2-4, also using Libdeflate4:
     /// greedy matching with a block-local, alphabet-dependent minimum length.
     LibdeflateGreedy,
+}
+
+#[derive(Encode, Decode, Debug, Copy, Clone, PartialEq, Eq)]
+pub enum LazyBehavior {
+    /// Quarter the lookahead budget after a good match and reuse a deferred reference.
+    Zlib { good_length: u16 },
+    /// Use the full lookahead budget and search again after emitting the literal.
+    RecomputeAfterLiteral,
 }
 
 pub struct PreflateParserConfig {
@@ -39,92 +55,3 @@ pub struct PreflateParserConfig {
     pub nice_length: u32,
     pub max_chain: u32,
 }
-
-pub const ZLIB_PREFLATE_PARSER_SETTINGS: [PreflateParserConfig; 3] = [
-    // these three levels are used by zlib
-
-    // max speed, no lazy matches (the lazy field means
-    // the maximum length that is added to the dictionary during
-    // a match)
-    PreflateParserConfig {
-        match_type: MatchingType::Greedy,
-        dictionary_add_policy: DictionaryAddPolicy::AddFirst(4),
-        nice_length: 8,
-        max_chain: 4,
-    },
-    PreflateParserConfig {
-        match_type: MatchingType::Greedy,
-        dictionary_add_policy: DictionaryAddPolicy::AddFirst(5),
-        nice_length: 16,
-        max_chain: 8,
-    },
-    PreflateParserConfig {
-        match_type: MatchingType::Greedy,
-        dictionary_add_policy: DictionaryAddPolicy::AddFirst(6),
-        nice_length: 32,
-        max_chain: 32,
-    },
-];
-
-pub const SLOW_PREFLATE_PARSER_SETTINGS: [PreflateParserConfig; 6] = [
-    // 4
-    PreflateParserConfig {
-        match_type: MatchingType::Lazy {
-            good_length: 4,
-            max_lazy: 4,
-        },
-        dictionary_add_policy: DictionaryAddPolicy::AddAll,
-        nice_length: 16,
-        max_chain: 16,
-    },
-    // 5
-    PreflateParserConfig {
-        match_type: MatchingType::Lazy {
-            good_length: 8,
-            max_lazy: 16,
-        },
-        dictionary_add_policy: DictionaryAddPolicy::AddAll,
-        nice_length: 32,
-        max_chain: 32,
-    },
-    // 6
-    PreflateParserConfig {
-        match_type: MatchingType::Lazy {
-            good_length: 8,
-            max_lazy: 16,
-        },
-        dictionary_add_policy: DictionaryAddPolicy::AddAll,
-        nice_length: 128,
-        max_chain: 128,
-    },
-    // 7
-    PreflateParserConfig {
-        match_type: MatchingType::Lazy {
-            good_length: 8,
-            max_lazy: 32,
-        },
-        dictionary_add_policy: DictionaryAddPolicy::AddAll,
-        nice_length: 128,
-        max_chain: 256,
-    },
-    // 8
-    PreflateParserConfig {
-        match_type: MatchingType::Lazy {
-            good_length: 32,
-            max_lazy: 128,
-        },
-        dictionary_add_policy: DictionaryAddPolicy::AddAll,
-        nice_length: 258,
-        max_chain: 1024,
-    },
-    // 9
-    PreflateParserConfig {
-        match_type: MatchingType::Lazy {
-            good_length: 32,
-            max_lazy: 258,
-        },
-        dictionary_add_policy: DictionaryAddPolicy::AddAll,
-        nice_length: 258,
-        max_chain: 4096,
-    }, // max compression
-];

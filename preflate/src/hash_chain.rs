@@ -141,7 +141,7 @@ pub trait HashChain {
     }
 
     /// Fewest remaining bytes at which `iterate` can still look for matches. Normally the hash
-    /// width, but a chain with a secondary shorter hash can search closer to the end of input.
+    /// width, but shorter hashes or native zero-padded lookahead can search closer to EOF.
     fn min_lookup_bytes() -> usize {
         Self::get_num_hash_bytes()
     }
@@ -285,13 +285,7 @@ impl<H: HashImplementation> HashChain for HashChainDefault<H> {
             target_reference, input
         );
 
-        assert_eq!(
-            &input.cur_chars(0)[..(target_reference.len() as usize)],
-            &input.cur_chars(-(target_reference.dist() as i32))
-                [..(target_reference.len() as usize)],
-            "dictionary out of sync for {:?}",
-            target_reference
-        );
+        assert_reference_valid(target_reference, input);
 
         let curr_hash = self.hash.get_hash(input.cur_chars(0));
         println!("hash {}", curr_hash);
@@ -307,6 +301,19 @@ impl<H: HashImplementation> HashChain for HashChainDefault<H> {
     fn get_num_hash_bytes() -> usize {
         H::NUM_HASH_BYTES
     }
+
+    fn min_lookup_bytes() -> usize {
+        H::MIN_LOOKUP_BYTES
+    }
+}
+
+fn assert_reference_valid(target: DeflateTokenReference, input: &PreflateInput) {
+    let length = target.len() as usize;
+    assert_eq!(
+        &input.cur_chars(0)[..length],
+        &input.cur_chars(-(target.dist() as i32))[..length],
+        "dictionary out of sync for {target:?}"
+    );
 }
 
 /// implementation of the hash chain that uses the libdeflate rotating hash.
@@ -433,10 +440,10 @@ impl HashChain for HashChainLibflate4 {
 
     fn assert_dictionary_valid(
         &self,
-        _target_reference: DeflateTokenReference,
-        _input: &PreflateInput,
+        target_reference: DeflateTokenReference,
+        input: &PreflateInput,
     ) {
-        todo!();
+        assert_reference_valid(target_reference, input);
     }
 
     fn update_hash(&mut self, input: &[u8], pos: u32, length: u32) {

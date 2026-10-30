@@ -35,6 +35,9 @@ pub enum HashAlgorithm {
     /// Libdeflate's fastest level-1 profile: a 15-bit primary hash with two entries per bucket.
     /// Selected only while the bounded bucket-rank fingerprint remains consistent.
     Libdeflate4Fast15,
+    /// Chromium zlib's non-CRC four-byte multiply-and-add hash.
+    /// The table mask comes from the zlib memory level, with at least 15 bits.
+    Chromium { hash_mask: u16 },
 }
 
 const HASH_ALGORITHM_NONE: u16 = 0;
@@ -46,6 +49,7 @@ const HASH_ALGORITHM_ZLIBNG: u16 = 5;
 const HASH_ALGORITHM_RANDOMVECTOR: u16 = 6;
 const HASH_ALGORITHM_CRC32C: u16 = 7;
 const HASH_ALGORITHM_LIBDEFLATE4_FAST15: u16 = 8;
+const HASH_ALGORITHM_CHROMIUM: u16 = 9;
 
 impl HashAlgorithm {
     pub fn to_u16(self) -> u16 {
@@ -66,6 +70,9 @@ impl HashAlgorithm {
             HashAlgorithm::RandomVector => HASH_ALGORITHM_RANDOMVECTOR,
             HashAlgorithm::Crc32cHash => HASH_ALGORITHM_CRC32C,
             HashAlgorithm::Libdeflate4Fast15 => HASH_ALGORITHM_LIBDEFLATE4_FAST15,
+            HashAlgorithm::Chromium { hash_mask } => {
+                HASH_ALGORITHM_CHROMIUM | ((hash_mask.trailing_ones() as u16) << 8)
+            }
         }
     }
 
@@ -87,6 +94,13 @@ impl HashAlgorithm {
             HASH_ALGORITHM_RANDOMVECTOR => Some(HashAlgorithm::RandomVector),
             HASH_ALGORITHM_CRC32C => Some(HashAlgorithm::Crc32cHash),
             HASH_ALGORITHM_LIBDEFLATE4_FAST15 => Some(HashAlgorithm::Libdeflate4Fast15),
+            HASH_ALGORITHM_CHROMIUM => {
+                let bits = v >> 8;
+                (15..=16).contains(&bits).then(|| {
+                    let hash_mask = ((1u32 << bits) - 1) as u16;
+                    HashAlgorithm::Chromium { hash_mask }
+                })
+            }
             _ => None,
         }
     }
@@ -106,6 +120,8 @@ fn roundtrip_hash_algorithm_to_int() {
         HashAlgorithm::RandomVector,
         HashAlgorithm::Crc32cHash,
         HashAlgorithm::Libdeflate4Fast15,
+        HashAlgorithm::Chromium { hash_mask: 0x7fff },
+        HashAlgorithm::Chromium { hash_mask: 0xffff },
     ];
 
     for &hash in test_hashes.iter() {
@@ -115,8 +131,29 @@ fn roundtrip_hash_algorithm_to_int() {
     }
 }
 
+#[test]
+fn chromium_hash_encoding_validates_native_table_widths() {
+    for bits in [15, 16] {
+        let algorithm = HashAlgorithm::Chromium {
+            hash_mask: ((1u32 << bits) - 1) as u16,
+        };
+        assert_eq!(HashAlgorithm::from_u16(algorithm.to_u16()), Some(algorithm));
+        assert_eq!(
+            bitcode::decode::<HashAlgorithm>(&bitcode::encode(&algorithm)).unwrap(),
+            algorithm
+        );
+    }
+    for bits in [0, 1, 14, 17, 255] {
+        assert_eq!(
+            HashAlgorithm::from_u16(HASH_ALGORITHM_CHROMIUM | (bits << 8)),
+            None
+        );
+    }
+}
+
 pub trait HashImplementation: Default + Copy + Clone {
     const NUM_HASH_BYTES: usize;
+    const MIN_LOOKUP_BYTES: usize = Self::NUM_HASH_BYTES;
 
     fn get_hash(&self, b: &[u8]) -> u16;
     fn algorithm(&self) -> HashAlgorithm;
@@ -291,6 +328,45 @@ impl HashImplementation for ZlibNGHash {
 
     fn algorithm(&self) -> HashAlgorithm {
         HashAlgorithm::ZlibNG
+    }
+}
+
+#[test]
+fn chromium_hash_discards_only_the_fourth_high_bit() {
+    let original = *b"abcd";
+    let hash = ChromiumHash { hash_mask: 0x7fff };
+    assert_eq!(hash.get_hash(&[0, 0, 0, 0]), 1);
+    assert_eq!(hash.get_hash(&[1, 0, 0, 0]), 2);
+    assert_eq!(hash.get_hash(&[255, 255, 255, 255]), 0);
+    let mut high_bit = original;
+    high_bit[3] ^= 0x80;
+    assert_eq!(hash.get_hash(&original), hash.get_hash(&high_bit));
+    let full = ChromiumHash { hash_mask: 0xffff };
+    assert_ne!(full.get_hash(&original), full.get_hash(&high_bit));
+    let mut low_bit = original;
+    low_bit[3] ^= 1;
+    assert_ne!(hash.get_hash(&original), hash.get_hash(&low_bit));
+}
+
+#[derive(Default, Copy, Clone)]
+pub struct ChromiumHash {
+    pub hash_mask: u16,
+}
+
+impl HashImplementation for ChromiumHash {
+    const NUM_HASH_BYTES: usize = 4;
+    const MIN_LOOKUP_BYTES: usize = 3;
+
+    fn get_hash(&self, b: &[u8]) -> u16 {
+        // Native zlib zero-initializes lookahead beyond the end of the input.
+        let value = u32::from_le_bytes([b[0], b[1], b[2], b.get(3).copied().unwrap_or(0)]);
+        ((value.wrapping_mul(66521).wrapping_add(66521) >> 16) as u16) & self.hash_mask
+    }
+
+    fn algorithm(&self) -> HashAlgorithm {
+        HashAlgorithm::Chromium {
+            hash_mask: self.hash_mask,
+        }
     }
 }
 

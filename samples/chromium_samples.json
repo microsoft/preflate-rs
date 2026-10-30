@@ -1,0 +1,73 @@
+{
+  "source_revision": "4f66b6ddf944cff07a2282dd5fa4c064d389966e",
+  "source_url": "https://chromium.googlesource.com/chromium/src/+archive/4f66b6ddf944cff07a2282dd5fa4c064d389966e/third_party/zlib.tar.gz",
+  "generator": "tests/generate_chromium_samples.c",
+  "hash": "Chromium non-CRC, 15-bit mask; SIMD and canonical-zlib hash disabled",
+  "window_bits": 15,
+  "memory_level": 8,
+  "strategy": "Z_DEFAULT_STRATEGY",
+  "input_file": "chromium_model_input.bin",
+  "input_sha256": "F871D309DCD9F514F7ED9CFE1D70AF3DF667E991BA0444E01939D0D42580B4EF",
+  "fixtures": [
+    {
+      "level": 0,
+      "file": "compressed_chromium_level0.deflate",
+      "bytes": 262169,
+      "sha256": "A2FF7EC3E42C7EC7B295CD818181716EFD1F3ECC8B40B727BAB432ECFA429607"
+    },
+    {
+      "level": 1,
+      "file": "compressed_chromium_level1.deflate",
+      "bytes": 147708,
+      "sha256": "ADD1F64EA12F971499F36B33C297B2B207D1270BA4ADC8E75B8D6A3EB793E231"
+    },
+    {
+      "level": 2,
+      "file": "compressed_chromium_level2.deflate",
+      "bytes": 144499,
+      "sha256": "DE9D0BD0F2997C2FB56BB03F6D1FAB121DB09F19B67163176DA848AE62A6420D"
+    },
+    {
+      "level": 3,
+      "file": "compressed_chromium_level3.deflate",
+      "bytes": 142081,
+      "sha256": "9FCA8F1BD977F895C0B74C8EF1B259D2FC36532A763736EECA7661524B3CC0AA"
+    },
+    {
+      "level": 4,
+      "file": "compressed_chromium_level4.deflate",
+      "bytes": 142662,
+      "sha256": "CFBC07A9FA2EE239728DF97D1533399B4B3A0A3186870D4FF7DA6F6778B02485"
+    },
+    {
+      "level": 5,
+      "file": "compressed_chromium_level5.deflate",
+      "bytes": 140077,
+      "sha256": "F208A8E86F2E23235BD600FA23DE3250C50C7F7369E2E8875858F20926D6A965"
+    },
+    {
+      "level": 6,
+      "file": "compressed_chromium_level6.deflate",
+      "bytes": 138170,
+      "sha256": "57EFDB3E0950728FE6D4D76162A3513705B73F9CF744BE9B86AD1395238E4D8D"
+    },
+    {
+      "level": 7,
+      "file": "compressed_chromium_level7.deflate",
+      "bytes": 137353,
+      "sha256": "54840F475B2EC62C7F36D57F85B9A2DAD5B0BF2F9BCBAA351B7183AAFCE38109"
+    },
+    {
+      "level": 8,
+      "file": "compressed_chromium_level8.deflate",
+      "bytes": 136735,
+      "sha256": "AEC0EA57C787A264084F133515518329B1404055467F2A0D75DBB009C39789E2"
+    },
+    {
+      "level": 9,
+      "file": "compressed_chromium_level9.deflate",
+      "bytes": 136720,
+      "sha256": "EC958C1E137864462C3F95333E6AA290AE5625290F291D7215B7D368DE410801"
+    }
+  ]
+}

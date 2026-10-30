@@ -5,17 +5,21 @@
  *--------------------------------------------------------------------------------------------*/
 
 use crate::bit_helper::DebugHash;
-use crate::deflate::deflate_constants::{MAX_MATCH, MIN_LOOKAHEAD, MIN_MATCH};
+use crate::deflate::deflate_constants::{MAX_MATCH, MIN_MATCH};
 use crate::deflate::deflate_token::DeflateTokenReference;
 use crate::estimator::preflate_parameter_estimator::{PreflateStrategy, TokenPredictorParameters};
 use crate::estimator::preflate_parse_config::MatchingType;
 use crate::hash_algorithm::{
-    Crc32cHash, HashAlgorithm, LibdeflateHash4Fast, LibdeflateHash4Fast15, MiniZHash,
+    ChromiumHash, Crc32cHash, HashAlgorithm, LibdeflateHash4Fast, LibdeflateHash4Fast15, MiniZHash,
     RandomVectorHash, ZlibNGHash, ZlibRotatingHash, ZlibRotatingHashFixed,
 };
 use crate::hash_chain::{HashChain, HashChainDefault, HashChainLibflate4, MAX_UPDATE_HASH_BATCH};
+use crate::models::{libdeflate, miniz, zlib};
 use crate::preflate_error::{ExitCode, Result, err_exit_code};
 use crate::preflate_input::PreflateInput;
+
+#[cfg(test)]
+use crate::models::miniz::match_chain as match_miniz;
 
 use std::cmp;
 
@@ -79,6 +83,10 @@ pub fn new_hash_chain_holder(params: &TokenPredictorParameters) -> Box<dyn HashC
             params,
             HashChainDefault::new(ZlibNGHash {}),
         )),
+        HashAlgorithm::Chromium { hash_mask } => Box::new(HashChainHolderImpl::new(
+            params,
+            HashChainDefault::new(ChromiumHash { hash_mask }),
+        )),
 
         HashAlgorithm::RandomVector => Box::new(HashChainHolderImpl::new(
             params,
@@ -95,6 +103,12 @@ pub fn new_hash_chain_holder(params: &TokenPredictorParameters) -> Box<dyn HashC
 /// trait that is not dependent on the HashImplementation so it can
 /// be used in a concrete boxed type by the TokenPredictor
 pub trait HashChainHolder {
+    fn enable_window_normalization(&mut self) {}
+
+    fn normalized_window_bits(&self) -> Option<u32> {
+        None
+    }
+
     /// updates the hash dictionary for a given length of matches.
     ///
     /// If this is a literal, then the update policy is to add all the bytes to the dictionary.
@@ -195,9 +209,19 @@ struct HashChainHolderImpl<H: HashChain> {
     hash: H,
     params: TokenPredictorParameters,
     window_bytes: u32,
+    window_constraint: zlib::WindowConstraint,
+    search_restrictions: libdeflate::SearchRestrictions,
 }
 
 impl<H: HashChain + 'static> HashChainHolder for HashChainHolderImpl<H> {
+    fn enable_window_normalization(&mut self) {
+        self.window_constraint.enable(&self.params);
+    }
+
+    fn normalized_window_bits(&self) -> Option<u32> {
+        self.window_constraint.window_bits(self.params.window_bits)
+    }
+
     fn update_hash(&mut self, length: u32, input: &PreflateInput) {
         debug_assert!(length <= MAX_UPDATE_HASH_BATCH);
 
@@ -337,7 +361,7 @@ impl<H: HashChain + 'static> HashChainHolder for HashChainHolderImpl<H> {
 
 // Read the two bytes starting at pos and interpret them as an u16.
 #[inline(always)]
-fn read_u16_le(slice: &[u8], pos: usize) -> u16 {
+pub(crate) fn read_u16_le(slice: &[u8], pos: usize) -> u16 {
     // The compiler is smart enough to optimize this into an unaligned load.
     u16::from_le_bytes((&slice[pos..pos + 2]).try_into().unwrap())
 }
@@ -352,9 +376,14 @@ fn read_u32_le(slice: &[u8], pos: usize) -> u32 {
 impl<H: HashChain> HashChainHolderImpl<H> {
     pub fn new(params: &TokenPredictorParameters, hash: H) -> Self {
         Self {
+            search_restrictions: libdeflate::search_restrictions(
+                hash.algorithm(),
+                params.matching_type,
+            ),
             hash,
             window_bytes: 1 << params.window_bits,
             params: *params,
+            window_constraint: zlib::WindowConstraint::default(),
         }
     }
 
@@ -369,12 +398,8 @@ impl<H: HashChain> HashChainHolderImpl<H> {
         let max_len = std::cmp::min(input.total_length() - start_pos, MAX_MATCH);
         // Apply source-compressor exclusions only to normal prediction. Expanded-budget
         // correction searches must still recover references outside the selected profile.
-        let fast_profile = self.hash.algorithm() == HashAlgorithm::Libdeflate4Fast15
-            && max_depth <= self.params.max_chain;
-        let greedy_profile = self.hash.algorithm() == HashAlgorithm::Libdeflate4
-            && self.params.matching_type == MatchingType::LibdeflateGreedy
-            && max_depth <= self.params.max_chain;
-        if (fast_profile || greedy_profile) && max_len < 5 {
+        let normal_prediction = max_depth <= self.params.max_chain;
+        if normal_prediction && max_len < self.search_restrictions.minimum_input {
             return MatchResult::NoInput;
         }
         if max_len
@@ -397,10 +422,14 @@ impl<H: HashChain> HashChainHolderImpl<H> {
         let cur_max_dist_hop0;
         let cur_max_dist_hop1_plus;
         if self.params.very_far_matches_detected {
-            // These libdeflate modes exclude the exact window-edge distance.
             cur_max_dist_hop0 = cmp::min(
                 max_dist_to_start,
-                self.window_bytes - u32::from(fast_profile || greedy_profile),
+                self.window_bytes
+                    - if normal_prediction {
+                        self.search_restrictions.window_edge_exclusion
+                    } else {
+                        0
+                    },
             );
             cur_max_dist_hop1_plus = cur_max_dist_hop0;
         } else {
@@ -413,9 +442,13 @@ impl<H: HashChain> HashChainHolderImpl<H> {
                     cur_max_dist_hop1_plus = 1;
                 }
                 _ => {
-                    let max_dist: u32 = self.window_bytes - MIN_LOOKAHEAD + 1;
-                    cur_max_dist_hop0 = cmp::min(max_dist_to_start, max_dist);
-                    cur_max_dist_hop1_plus = cmp::min(max_dist_to_start, max_dist - 1);
+                    (cur_max_dist_hop0, cur_max_dist_hop1_plus) =
+                        crate::models::chromium::distance_limits(
+                            self.hash.algorithm(),
+                            normal_prediction,
+                            self.window_bytes,
+                            max_dist_to_start,
+                        );
                 }
             }
         }
@@ -431,8 +464,7 @@ impl<H: HashChain> HashChainHolderImpl<H> {
         };
         // A minimum of four or more bypasses the singleton three-byte candidate.
         // The stored budget includes that slot, so remove both the slot and its probe.
-        let skip_secondary =
-            OFFSET == 0 && prev_len >= 3 && self.hash.algorithm() == HashAlgorithm::Libdeflate4;
+        let skip_secondary = libdeflate::skip_secondary(self.hash.algorithm(), OFFSET, prev_len);
         let max_depth = max_depth.saturating_sub(u32::from(skip_secondary)).max(1);
         let mut iter = secondary
             .into_iter()
@@ -442,18 +474,31 @@ impl<H: HashChain> HashChainHolderImpl<H> {
         }
 
         if let MatchingType::MiniZ { max_probes, .. } = self.params.matching_type {
-            let available = (input.total_length() - start_pos).min(MAX_MATCH);
-            // Miniz reserves room for the possible match, reducing its usable distance.
-            let window = self.window_bytes.saturating_sub(available);
-            let max_dist = max_dist_to_start.min(window);
-            let probes = if max_depth > self.params.max_chain {
-                max_depth
-            } else {
-                u32::from(max_probes)
-            };
-            return match_miniz::<OFFSET>(input, max_len, max_dist, probes, prev_len.max(2), iter);
+            let max_dist = miniz::maximum_distance(self.window_bytes, max_dist_to_start, max_len);
+            let probes = miniz::probe_limit(max_depth, self.params.max_chain, max_probes);
+            return miniz::match_chain::<OFFSET>(
+                input,
+                max_len,
+                max_dist,
+                probes,
+                prev_len.max(2),
+                iter,
+            );
         }
 
+        if !self.window_constraint.is_enabled() {
+            return match_less3::<OFFSET>(
+                input,
+                max_len,
+                cur_max_dist_hop0,
+                cur_max_dist_hop1_plus,
+                nice_length,
+                max_depth,
+                best_len,
+                iter,
+                |_, _| {},
+            );
+        }
         match_less3::<OFFSET>(
             input,
             max_len,
@@ -463,59 +508,13 @@ impl<H: HashChain> HashChainHolderImpl<H> {
             max_depth,
             best_len,
             iter,
+            |distance, first_hop| {
+                if distance <= max_dist_to_start {
+                    self.window_constraint.exclude(distance, first_hop);
+                }
+            },
         )
     }
-}
-
-#[inline]
-fn match_miniz<const OFFSET: u32>(
-    input: &PreflateInput<'_>,
-    max_len: u32,
-    max_dist: u32,
-    max_probes: u32,
-    mut best_len: u32,
-    mut iter: impl Iterator<Item = u32>,
-) -> MatchResult {
-    let bytes = input.cur_chars(OFFSET as i32);
-    let probes = if best_len < 32 {
-        max_probes
-    } else {
-        max_probes >> 2
-    };
-    // A group contains up to three suffix probes. Its first suffix hit consumes
-    // the group even if the prefix fails, unlike a simple N-hop chain budget.
-    let mut groups = probes.div_ceil(3);
-    let mut best = MatchResult::NoMoreMatchesFound;
-    while groups > 0 {
-        groups -= 1;
-        let suffix = read_u16_le(bytes, (best_len - 1) as usize);
-        let mut candidate = None;
-        for _ in 0..3 {
-            let Some(dist) = iter.next() else { return best };
-            if dist > max_dist {
-                return best;
-            }
-            let source = input.cur_chars(OFFSET as i32 - dist as i32);
-            if read_u16_le(source, (best_len - 1) as usize) == suffix {
-                candidate = Some((dist, source));
-                break;
-            }
-        }
-        if let Some((dist, source)) = candidate {
-            if read_u16_le(source, 0) != read_u16_le(bytes, 0) {
-                continue;
-            }
-            let length = prefix_compare(source, bytes, max_len);
-            if length > best_len {
-                best_len = length;
-                best = MatchResult::Success(DeflateTokenReference::new(length, dist));
-                if length == max_len {
-                    return best;
-                }
-            }
-        }
-    }
-    best
 }
 
 /// searches for a match that is at least 3 bytes long
@@ -529,6 +528,7 @@ fn match_less3<const OFFSET: u32>(
     mut max_chain: u32,
     best_len: u32,
     mut iter: impl Iterator<Item = u32>,
+    mut excluded: impl FnMut(u32, bool),
 ) -> MatchResult {
     let input_chars = input.cur_chars(OFFSET as i32);
 
@@ -537,13 +537,16 @@ fn match_less3<const OFFSET: u32>(
 
     let mut best = MatchResult::NoMoreMatchesFound;
     let mut max_dist = cur_max_dist_hop0;
+    let mut first_hop = true;
 
     while let Some(dist) = iter.next() {
         if dist > max_dist {
+            excluded(dist, first_hop);
             break;
         }
 
         max_dist = cur_max_dist_hop1_plus;
+        first_hop = false;
 
         let match_start = input.cur_chars(OFFSET as i32 - dist as i32);
 
@@ -571,6 +574,7 @@ fn match_less3<const OFFSET: u32>(
                     match_length,
                     iter,
                     &mut best,
+                    excluded,
                 );
                 return best;
             }
@@ -596,6 +600,7 @@ fn match_4<const OFFSET: u32>(
     mut best_len: u32,
     mut iter: impl Iterator<Item = u32>,
     best: &mut MatchResult,
+    mut excluded: impl FnMut(u32, bool),
 ) {
     let input_chars = input.cur_chars(OFFSET as i32);
 
@@ -604,6 +609,7 @@ fn match_4<const OFFSET: u32>(
 
     while let Some(dist) = iter.next() {
         if dist > max_dist {
+            excluded(dist, false);
             break;
         }
 
@@ -634,11 +640,48 @@ fn match_4<const OFFSET: u32>(
 }
 
 #[inline(always)]
-fn prefix_compare(s1: &[u8], s2: &[u8], max_len: u32) -> u32 {
+pub(crate) fn prefix_compare(s1: &[u8], s2: &[u8], max_len: u32) -> u32 {
     if max_len == 258 {
         prefix_compare_fast(s1, s2)
     } else {
         prefix_cmp_odd_size(max_len, s1, s2)
+    }
+}
+
+#[test]
+fn window_constraints_preserve_first_and_later_hop_boundaries() {
+    let mut bytes = vec![b'a'; 32768];
+    bytes[32600..32605].copy_from_slice(b"bcdeZ");
+    bytes[32500..32505].copy_from_slice(b"bcdeY");
+    let plain = crate::preflate_input::PlainText::new_with_data(bytes);
+    let mut input = PreflateInput::new(&plain);
+    input.advance(32600);
+    for (distances, expected_bits) in [
+        (vec![32507], 9),
+        (vec![32508], 15),
+        (vec![1, 32506], 9),
+        (vec![1, 32507], 15),
+        (vec![100, 32506], 9),
+        (vec![100, 32507], 15),
+    ] {
+        let parameters = TokenPredictorParameters {
+            window_bits: 9,
+            ..crate::token_predictor::zlib_level_1_params()
+        };
+        let mut constraint = zlib::WindowConstraint::default();
+        constraint.enable(&parameters);
+        match_less3::<0>(
+            &input,
+            100,
+            251,
+            250,
+            258,
+            32,
+            1,
+            distances.into_iter(),
+            |distance, first| constraint.exclude(distance, first),
+        );
+        assert_eq!(constraint.window_bits(9), Some(expected_bits));
     }
 }
 
@@ -702,6 +745,74 @@ fn calc_diff(diff: u64) -> u32 {
     return 8;
 }
 
+#[test]
+fn chromium_window_boundary_distinguishes_head_chained_and_recovery_matches() {
+    use crate::{preflate_input::PlainText, token_predictor::zlib_level_1_params};
+
+    let parameters = TokenPredictorParameters {
+        hash_algorithm: HashAlgorithm::Chromium { hash_mask: 0x7fff },
+        add_policy: crate::estimator::add_policy_estimator::DictionaryAddPolicy::AddAll,
+        window_bits: 15,
+        max_chain: 128,
+        nice_length: 128,
+        ..zlib_level_1_params()
+    };
+    for (distance, chained, allowed) in [
+        (32506, false, true),
+        (32507, false, false),
+        (32505, true, true),
+        (32506, true, false),
+    ] {
+        let position = 33000;
+        let mut bytes = vec![b'x'; position];
+        bytes[position - distance..position - distance + 7].copy_from_slice(b"abcdefQ");
+        if chained {
+            bytes[position - 16..position - 9].copy_from_slice(b"abc\xe4!!!");
+        }
+        bytes.extend_from_slice(b"abcdefR");
+        let plain = PlainText::new_with_data(bytes);
+        let mut input = PreflateInput::new(&plain);
+        let mut holder = new_hash_chain_holder(&parameters);
+        while input.pos() < position as u32 {
+            let length = (position as u32 - input.pos()).min(MAX_UPDATE_HASH_BATCH);
+            holder.update_hash(length, &input);
+            input.advance(length);
+        }
+        let expected = DeflateTokenReference::new(6, distance as u32);
+        assert_eq!(
+            matches!(
+                holder.match_token_0(3, parameters.max_chain, &input),
+                MatchResult::Success(reference) if reference == expected
+            ),
+            allowed,
+            "distance={distance}, chained={chained}"
+        );
+        assert!(matches!(
+            holder.match_token_0(3, 4096, &input),
+            MatchResult::Success(reference) if reference == expected
+        ));
+        let hops = holder.calculate_hops(&expected, &input).unwrap();
+        assert_eq!(holder.hop_match(6, hops, &input).unwrap(), distance as u32);
+    }
+}
+
+#[test]
+fn missing_libdeflate_reference_returns_match_not_found() {
+    use crate::{preflate_input::PlainText, token_predictor::zlib_level_1_params};
+    let params = TokenPredictorParameters {
+        hash_algorithm: HashAlgorithm::Libdeflate4,
+        ..zlib_level_1_params()
+    };
+    let holder = new_hash_chain_holder(&params);
+    let plain = PlainText::new_with_data(b"abcdabcd".to_vec());
+    let mut input = PreflateInput::new(&plain);
+    input.advance(4);
+    let error = holder
+        .calculate_hops(&DeflateTokenReference::new(4, 4), &input)
+        .unwrap_err();
+    assert_eq!(error.exit_code(), ExitCode::MatchNotFound);
+}
+
 // Source tail/window exclusions must not prevent recovery of valid foreign references.
 // Verify normal boundary decisions and expanded-budget recovery for both low-level models.
 #[test]
@@ -713,6 +824,18 @@ fn libdeflate_low_level_limits_preserve_correction_recovery() {
     for (hash_algorithm, matching_type) in [
         (HashAlgorithm::Libdeflate4Fast15, MatchingType::Greedy),
         (HashAlgorithm::Libdeflate4, MatchingType::LibdeflateGreedy),
+        (
+            HashAlgorithm::Libdeflate4,
+            MatchingType::LibdeflateLazy {
+                two_positions: false,
+            },
+        ),
+        (
+            HashAlgorithm::Libdeflate4,
+            MatchingType::LibdeflateLazy {
+                two_positions: true,
+            },
+        ),
     ] {
         let params = TokenPredictorParameters {
             hash_algorithm,
@@ -737,7 +860,9 @@ fn libdeflate_low_level_limits_preserve_correction_recovery() {
                 input.advance(length);
             }
             let normal = holder.match_token_0(2, params.max_chain, &input);
-            if distance == 32767 {
+            if distance == 32767
+                || distance == 5 && matches!(matching_type, MatchingType::LibdeflateLazy { .. })
+            {
                 assert!(
                     matches!(normal, MatchResult::Success(reference) if reference == DeflateTokenReference::new(4, distance as u32))
                 );

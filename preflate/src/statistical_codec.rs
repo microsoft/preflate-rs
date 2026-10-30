@@ -19,7 +19,8 @@ pub enum CodecCorrection {
     RepeatCountCorrection,
     LDBitLengthCorrection,
 
-    TreeCodeCountCorrection,
+    // Reuses the reserved tree-count slot without growing the CABAC action mask.
+    TreeProfile,
     LiteralCountCorrection,
     DistanceCountCorrection,
     UncompressBlockLenCorrection,
@@ -121,7 +122,7 @@ impl CountNonDefaultActions {
             LDTypeCorrection,
             RepeatCountCorrection,
             LDBitLengthCorrection,
-            TreeCodeCountCorrection,
+            TreeProfile,
             LiteralCountCorrection,
             DistanceCountCorrection,
             UncompressBlockLenCorrection,
@@ -143,6 +144,24 @@ impl CountNonDefaultActions {
             }
         }
     }
+}
+
+impl PredictionEncoder for &mut CountNonDefaultActions {
+    fn encode_correction(&mut self, action: CodecCorrection, value: u32) {
+        self.record_correction(action, value);
+    }
+
+    fn encode_verify_state(&mut self, _message: &'static str, _checksum: u64) {}
+
+    fn finish(&mut self) {}
+}
+
+impl PredictionEncoder for () {
+    fn encode_correction(&mut self, _action: CodecCorrection, _value: u32) {}
+
+    fn encode_verify_state(&mut self, _message: &'static str, _checksum: u64) {}
+
+    fn finish(&mut self) {}
 }
 
 pub struct VerifyPredictionDecoder {
@@ -168,6 +187,19 @@ impl VerifyPredictionEncoder {
 
     pub fn actions(&self) -> Vec<CodecAction> {
         self.actions.clone()
+    }
+
+    pub(crate) fn replay(&self, encoder: &mut impl PredictionEncoder) {
+        for &action in &self.actions {
+            match action {
+                CodecAction::Correction(correction, value) => {
+                    encoder.encode_correction(correction, value);
+                }
+                CodecAction::VerifyState(message, checksum) => {
+                    encoder.encode_verify_state(message, checksum);
+                }
+            }
+        }
     }
 
     pub fn print(&self) {

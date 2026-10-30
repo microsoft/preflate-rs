@@ -1,5 +1,6 @@
 [package]
 name = "preflate_util"
+default-run = "preflate_util"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
@@ -8,11 +9,21 @@ rust-version.workspace = true
 
 [dependencies]
 preflate-rs = { path = "../preflate" }
-preflate-container = { path = "../container" }
+preflate-container = { path = "../container", features = ["diagnostics"] }
 env_logger = "0.11"
 log = "0.4"
 clap ={ version = "4", features = ["derive"]}
 cpu-time = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+miniz_oxide = "0.9"
+tempfile = "3"
 
 [[bin]]
 name = "preflate_util"
+
+[[bin]]
+name = "preflate_scan"
+path = "src/scan_main.rs"
