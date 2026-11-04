@@ -122,9 +122,9 @@ def evaluate(file_report: Mapping[str, Any], *, truncated: bool, known: Known, s
 
 
 def _scanned_files(report: Path) -> dict[str, dict[str, Any]]:
-    from corpus.database.database import scan_records
+    from corpus.database.json_scan import json_scan_records
 
-    return {Path(record["path"]).name: record for kind, record in scan_records(report) if kind == "file"}
+    return {Path(record["path"]).name: record for kind, record in json_scan_records(report) if kind == "file"}
 
 
 def _capture_seconds(meta: Mapping[str, Any]) -> int | None:
@@ -139,13 +139,30 @@ def merge_crawl_scan(
     report: Path, names: Mapping[str, Mapping[str, Any]], *, label: str,
     crawl_db: CorpusDatabase,
 ) -> None:
-    """Merge a completed SQLite batch, replacing temporary paths with captured URLs."""
-    def captured(record: dict[str, Any]) -> dict[str, Any]:
-        meta = names[Path(record["path"]).name]
-        record.update(path=meta["url"], modified_unix_seconds=_capture_seconds(meta))
-        return record
+    """Persist a completed JSON batch, replacing temporary paths with captured URLs."""
+    from corpus.database.json_scan import json_scan_records
 
-    crawl_db.merge_scan(report, label, transform=captured)
+    with contextlib.closing(json_scan_records(report)) as records:
+        _, header = next(records)
+        summary: dict[str, Any] = {}
+
+        def files():
+            seen: set[str] = set()
+            for kind, record in records:
+                if kind == "file":
+                    name = Path(record["path"]).name
+                    if name not in names or name in seen:
+                        raise ValueError("Scanner JSON batch contains an unknown or duplicate payload")
+                    seen.add(name)
+                    meta = names[name]
+                    record.update(path=meta["url"], modified_unix_seconds=_capture_seconds(meta))
+                    yield record
+                elif kind == "summary":
+                    summary.update(record)
+            if seen != set(names):
+                raise ValueError("Scanner JSON batch is missing expected downloaded payloads")
+
+        crawl_db.record_run(files(), label, header=header, summary=summary)
 
 
 def selection_marker(rare: bool, sampled: bool) -> str | None:
@@ -184,7 +201,7 @@ def process_batch(
               "saved_documents": 0, "saved_streams": 0, "saved_bytes": 0, "verify_mismatches": 0}
     if not staged:
         return totals
-    report = batch_dir / "scan.sqlite"
+    report = batch_dir / "scan.json"
     scan(payload_dir, report)
     merge_crawl_scan(report, {name: meta for meta, name, _, _ in staged}, label=batch_dir.name,
                      crawl_db=crawl_db)
@@ -231,7 +248,7 @@ def process_batch(
                 "selection": selection_marker(bool(chosen[index]), sampled), "reasons": chosen[index],
             })
     if settings.verify_saved and any(item.saves for item in pending):
-        verify_report = batch_dir / "verify.sqlite"
+        verify_report = batch_dir / "verify.json"
         scan(extract_dir, verify_report)
         rescanned = _scanned_files(verify_report)
         for item in pending:

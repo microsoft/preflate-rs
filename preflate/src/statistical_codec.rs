@@ -156,6 +156,18 @@ impl PredictionEncoder for &mut CountNonDefaultActions {
     fn finish(&mut self) {}
 }
 
+impl PredictionEncoder for Option<&mut CountNonDefaultActions> {
+    fn encode_correction(&mut self, action: CodecCorrection, value: u32) {
+        if let Some(counts) = self {
+            counts.record_correction(action, value);
+        }
+    }
+
+    fn encode_verify_state(&mut self, _message: &'static str, _checksum: u64) {}
+
+    fn finish(&mut self) {}
+}
+
 impl PredictionEncoder for () {
     fn encode_correction(&mut self, _action: CodecCorrection, _value: u32) {}
 

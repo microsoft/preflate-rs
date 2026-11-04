@@ -16,12 +16,14 @@ Private/local directories are supported separately by
 [directory scanning](../database/README.md); the crawler never opens their databases.
 Common Crawl results go to a **separate** crawl database (`commoncrawl.sqlite`
 under `storage` by default). It uses the shared corpus database schema plus the
-crawl's sampling tables. Every batch scan is merged directly from SQLite as one
-run, with scratch paths replaced by captured URLs and modification times by
-capture times. No legacy JSON ingestion is used. Never mix private scan
+crawl's sampling tables. Download analysis and saved-extract verification use
+current scanner JSON reports, without temporary SQLite databases. Python validates
+each completed batch and records it as one transactional persistent run, with
+scratch paths replaced by captured URLs and modification times by capture times.
+No legacy archived-report ingestion is used. Never mix private scan
 databases and crawl databases; matching configured paths are rejected.
 
-Dependencies (`requests`, `warcio`) are managed by the root uv project; run from
+Dependencies (`requests`, `warcio`, `ijson`) are managed by the root uv project; run from
 the repository root:
 
 ```powershell
@@ -134,7 +136,9 @@ uncommitted records remain eligible on restart.
 - Downloads use up to `min(fetch_workers, parallelism)` HTTP workers.
 - Scanning uses up to `parallelism` independent release scanner processes,
   scheduling files dynamically across CPU cores. Saved-extract verification
-  uses the same limit, after the initial scan has finished.
+  uses the same limit, after the initial scan has finished. Each subprocess
+  explicitly passes `--jobs 1`: native standalone scanning has its own file
+  workers, but the crawler must not multiply its process limit by that pool.
 - SQLite imports, rarity selection, sampling and payload saves run on the
   coordinator thread, preserving deterministic batch ordering and save caps.
 
@@ -145,11 +149,13 @@ Backpressure prevents an unbounded download backlog. Index selection stays on
 the coordinator; a batch excludes digests already committed or reserved by the
 current batch. No SQLite connections are shared with worker threads.
 
-Worker SQLite scans are merged in input order into one batch SQLite run;
+Worker JSON reports are merged in input order into one batch JSON report;
 summary counts and byte totals are summed, the weighted correction ratio is
 recomputed, and only the worst 20 streams are retained. The merger streams
 file records instead of loading all worker reports at once. `parallelism = 1`
 limits each stage to one worker but still overlaps downloading with scanning.
+The coordinator streams validated file records into the persistent SQLite run;
+incomplete reports and inconsistent totals fail and roll back that run.
 
 ## Rare and sampled files
 
@@ -320,7 +326,7 @@ by documents selected together.
 1. Choose a crawl, a random CDX index shard and a random byte range of that shard.
 2. Resynchronize on whole gzip members in that range and filter `status=200` lines by MIME, size and unseen payload digest.
 3. Fetch the sampled WARC records by HTTP range request, overlapping the next batch's downloads with processing the current batch. Write the current HTTP bodies to `storage/scratch/batch-*`.
-4. Run bounded parallel release `preflate_scan` processes with verification enabled, merge their temporary SQLite results into the crawl database, then judge each file against earlier crawl evidence.
+4. Run bounded parallel release `preflate_scan` processes with verification enabled and JSON output, stream the validated results into the persistent crawl database, then judge each file against earlier crawl evidence.
 5. Extract the selected streams (see [Saved streams](#saved-streams)), rescan the extracts to check that they reproduce, and store payloads under `storage/corpus/` with source metadata under `storage/sources/`.
 6. Record every processed payload and saved stream in the crawl database and delete the scratch batch, including the downloaded documents.
 

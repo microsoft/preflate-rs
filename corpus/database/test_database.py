@@ -9,8 +9,10 @@ import unittest
 import zlib
 from pathlib import Path
 from unittest import mock
+import ijson
 
 from .database import PROFILE_FIELDS, CorpusDatabase, scan_records
+from .json_scan import json_scan_records
 
 
 class CorpusDatabaseTests(unittest.TestCase):
@@ -22,6 +24,36 @@ class CorpusDatabaseTests(unittest.TestCase):
     def tearDown(self):
         self.db.close()
         self.temporary.cleanup()
+
+    def test_json_scan_streams_records_and_validates_completion_and_totals(self):
+        record = self.file_record()
+        summary = dict(entries=1, successful_streams=1, verified_streams=1,
+                       successful_deflate_bytes=2000, successful_plaintext_bytes=9000,
+                       successful_correction_bytes=40)
+        document = dict(schema_version=1, configuration={}, files=[record], summary=summary)
+        path = self.root / "scan.json"
+        path.write_text(json.dumps(document), encoding="utf-8")
+        records = list(json_scan_records(path))
+        self.assertEqual([kind for kind, _ in records], ["header", "file", "summary"])
+        self.assertEqual(records[1][1], record)
+        self.assertEqual(records[2][1], summary)
+        for invalid in (
+            {**document, "schema_version": 2},
+            {key: value for key, value in document.items() if key != "summary"},
+            {**document, "summary": {**summary, "verified_streams": 0}},
+            {**document, "files": [0]},
+        ):
+            with self.subTest(invalid=invalid):
+                path.write_text(json.dumps(invalid), encoding="utf-8")
+                with self.assertRaises((ValueError, ijson.JSONError)):
+                    list(json_scan_records(path))
+        path.write_text('{"schema_version":1,"configuration":{},"files":['
+                        + json.dumps(record) + ',{"path":', encoding="utf-8")
+        with contextlib.closing(json_scan_records(path)) as records:
+            self.assertEqual(next(records)[0], "header")
+            self.assertEqual(next(records), ("file", record))
+            with self.assertRaises((ValueError, ijson.JSONError)):
+                list(records)
 
     def report(self, name, correction=40, modified=1, traced=False, footer=True, source="synthetic.bin"):
         stream = dict(
@@ -300,6 +332,19 @@ class CorpusDatabaseTests(unittest.TestCase):
         self.assertNotIn("--no-verify", arguments)
         self.assertNotIn("--output", arguments)
         self.assertTrue(run.call_args.kwargs["check"])
+
+    def test_database_scan_cli_passes_explicit_input_selection(self):
+        from .__main__ import main
+        for flags in (["--from-run", "before"], ["--from-crawl", "--source-root", str(self.root)]):
+            with (self.subTest(flags=flags), mock.patch("sys.argv", [
+                "corpus.database", "--db", str(self.db.path), "scan", "source.sqlite",
+                "--label", "after", "--scanner", "release-scanner", "--jobs", "3", *flags,
+            ]), mock.patch("subprocess.run") as run):
+                main()
+                self.assertEqual(run.call_args.args[0][-len(flags):], flags)
+                arguments = run.call_args.args[0]
+                self.assertEqual(arguments[arguments.index("--jobs") + 1], "3")
+                self.assertTrue(run.call_args.kwargs["check"])
 
     def test_native_private_directory_scan_through_python_entry_point(self):
         from .__main__ import main

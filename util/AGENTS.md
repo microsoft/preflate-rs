@@ -35,14 +35,25 @@ no verification-disable flag.
 `src/main.rs` implements container compression. `src/scan_main.rs` implements the
 preflate-only scanner, with SQLite persistence in `src/scan_database.rs` and
 diagnostic CPU/wall JSONL output in `src/scan_perf.rs`.
+`src/scan_source.rs` selects saved crawl payloads or a completed run's local
+files from a read-only SQLite snapshot. It never follows directory entries or
+symlinks from database rows; preserve root and cloud-file protections.
 `src/match_main.rs` implements `preflate_match_check`, a streaming parameter guard
 for verified token-perfect streams in a completed SQLite run selected with
 `--run`. It uses a read-only snapshot and writes diagnostic JSON; it does not
 accept JSON baselines. Both diagnostics share cloud-file
 checks in `src/scan_fs.rs`; parameter checks do not replace exact reconstruction.
+`src/replay_main.rs` implements JSON-in/JSON-out `preflate_replay` using the
+feature-gated typed core replay API. Preserve explicit parameters, bounded input,
+traces and work, full first-chunk context for reported block ranges, structured
+errors and exact verification when encoding. Synthetic blocks use fixed trees;
+original streams are required for original Huffman/padding costs. Never add
+automatic estimation, model retry or plaintext output to this diagnostic path.
 The [corpus project](../corpus/README.md) supports private-directory scans and
 Common Crawl with separate databases using the same normalized SQLite schema.
-Python merges completed SQLite runs; legacy JSON ingestion is not supported.
+Crawler workers output current streaming JSON; the Python coordinator validates
+and persists it directly, without temporary SQLite databases. SQLite run merging
+remains available; legacy archived-report ingestion is not supported.
 See [database/README.md](../corpus/database/README.md) for identity and run-set
 queries, and [crawl/README.md](../corpus/crawl/README.md) for Common Crawl sampling.
 Run Python tools through the root uv project and release-build the scanner.

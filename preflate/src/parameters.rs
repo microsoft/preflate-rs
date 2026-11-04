@@ -4,6 +4,8 @@ use crate::hash_algorithm::HashAlgorithm;
 use bitcode::{Decode, Encode};
 
 #[derive(Encode, Decode, Debug, Copy, Clone, Eq, PartialEq)]
+#[cfg_attr(feature = "diagnostics", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "diagnostics", serde(deny_unknown_fields))]
 pub struct TokenPredictorParameters {
     /// Zlib does not match to first byte of a file in order to reserve 0 for the end of chain
     pub matches_to_start_detected: bool,
@@ -57,6 +59,7 @@ impl TokenPredictorParameters {
 
 #[derive(Encode, Decode, Debug, Copy, Clone, Eq, PartialEq)]
 #[repr(u8)]
+#[cfg_attr(feature = "diagnostics", derive(serde::Serialize, serde::Deserialize))]
 pub enum BlockTypeStrategy {
     Dynamic,
     Mixed,
@@ -66,6 +69,7 @@ pub enum BlockTypeStrategy {
 
 #[derive(Encode, Decode, Debug, Copy, Clone, Eq, PartialEq)]
 #[repr(u8)]
+#[cfg_attr(feature = "diagnostics", derive(serde::Serialize, serde::Deserialize))]
 pub enum PreflateStrategy {
     Default,
     RleOnly,
@@ -74,6 +78,8 @@ pub enum PreflateStrategy {
 }
 
 #[derive(Encode, Decode, Debug, Copy, Clone, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "diagnostics", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "diagnostics", serde(deny_unknown_fields))]
 pub enum MatchingType {
     /// Immediate-match baseline: zlib's fast levels, miniz's special fastest mode,
     /// and libdeflate's primary-only level-1 profiles.
@@ -100,6 +106,8 @@ pub enum MatchingType {
 }
 
 #[derive(Encode, Decode, Debug, Copy, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "diagnostics", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "diagnostics", serde(deny_unknown_fields))]
 pub enum LazyBehavior {
     /// Quarter the lookahead budget after a good match and reuse a deferred reference.
     Zlib { good_length: u16 },
@@ -118,6 +126,7 @@ pub struct PreflateParserConfig {
 }
 
 #[derive(Encode, Decode, Default, Eq, PartialEq, Debug, Clone, Copy)]
+#[cfg_attr(feature = "diagnostics", derive(serde::Serialize, serde::Deserialize))]
 pub enum DictionaryAddPolicy {
     /// Add all substrings of a match to the dictionary
     #[default]

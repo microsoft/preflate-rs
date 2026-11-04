@@ -14,6 +14,12 @@ Given those two parts, the original DEFLATE stream can be reconstructed bit-for-
 
 ### Analysis pipeline
 
+For explicit-parameter experiments without editing Rust tests, use the
+diagnostic-only typed replay API and the utility's
+[JSON replay command](../util/README.md#json-replay). It supports synthetic blocks
+or original DEFLATE, preserves full chunk context when reporting a block range,
+and optionally measures complete reconstruction bytes with exact verification.
+
 1. **Parse** (`deflate/`) — Decode the DEFLATE bitstream into a token sequence: literals and length/distance back-references.
 2. **Estimate** (`estimator/`) — Analyze the token sequence to fingerprint the original compressor. Identifies hash algorithm, chain depth, nice-length cutoff, window size, and add policy.
 3. **Predict** (`prediction_state.rs`) — Shared codec-free matching state predicts
@@ -29,6 +35,13 @@ statistics and insertion traversals remain separate; stored/Huffman-only fast
 paths skip insertion analysis. Insertion policies and other parameter hypotheses
 are derived from those observations, not stored as facts. Hash-chain depths,
 parser contradictions, and prediction scores remain candidate-dependent.
+
+Estimation replay does not spend its informative sample budget on length-258,
+distance-one references. It still predicts and accepts every token, retaining
+mismatches, hash state, frequencies and block/flush transitions. Shorter matches
+and literals remain informative. Replays stop at 32,768 total tokens or upon
+reaching 8 MiB plaintext, checked before each token. Encoding uses the selected
+profile once; there is no alternative-model retry.
 
 ### Reconstruction pipeline
 
@@ -160,11 +173,32 @@ The following differences from the predicted stream are encoded:
 
 ## Diagnostics
 
+Insertion observations constrain the minimum required dictionary updates, not
+the exact compressor cutoff. Incomplete first chunks default ambiguous
+three-/four-byte fast insertion to `AddFirst(4)` when a nonfinal interior of a
+three-byte match was referenced and no endpoint in a match longer than four bytes
+requires first-and-last insertion. Complete streams retain their observed policy:
+all reference requirements are already known. Stronger boundary evidence and
+other observed cutoffs are preserved.
+
 The optional `diagnostics` feature exposes bounded token-mismatch traces and
 `estimate_first_chunk_parameters`. The latter parses and estimates only the first
 chunk, including any bounded candidate scoring; it does not encode corrections
 or verify reconstruction. Tiny complete streams may normalize parameters during
 encoding, so raw estimates can differ from the parameters reported after analysis.
+
+For an offline insertion-origin audit, set `PREFLATE_REFERENCE` to a local raw
+DEFLATE file and run
+`cargo test --release -p preflate-rs diagnose_dictionary_insertion_origins -- --ignored --nocapture`.
+The audit bounds compressed input to 8 MiB and plaintext to 128 MiB, prints at
+most 32 omitted-source examples without plaintext, and compares first-chunk
+and complete-stream insertion evidence. For inferred three-byte cutoffs, it
+also verifies diagnostic replays with the existing four-byte cutoff policies.
+These replays do not change production selection or establish production savings.
+For a selected dual-hash Libdeflate model, it also reports at most 16 unreachable
+three-byte references and compares existing zlib parser tuples offline, retaining
+the independently inferred window. Exact reconstruction of a diagnostic
+alternative does not identify the original compressor.
 
 ## Constraints
 

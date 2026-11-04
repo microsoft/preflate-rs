@@ -51,6 +51,8 @@ pub struct TokenPredictionTrace {
     pub mismatch_count: usize,
     pub first_mismatches: Vec<(u32, DeflateToken, DeflateToken)>,
     pub(crate) max_mismatches: usize,
+    pub(crate) block_limit: Option<u32>,
+    pub(crate) dictionary_reset: Option<bool>,
 }
 
 #[cfg(any(test, feature = "diagnostics"))]
@@ -64,6 +66,8 @@ impl Default for TokenPredictionTrace {
             mismatch_count: 0,
             first_mismatches: Vec::new(),
             max_mismatches: 8,
+            block_limit: None,
+            dictionary_reset: None,
         }
     }
 }
@@ -204,6 +208,11 @@ impl TokenPredictor {
         input: &mut PreflateInput,
         final_block_in_chunk: bool,
     ) -> Result<()> {
+        #[cfg(any(test, feature = "diagnostics"))]
+        if let Some(trace) = &mut self.trace {
+            trace.block_limit = None;
+            trace.dictionary_reset = None;
+        }
         codec.encode_verify_state("blocktypestart", 0);
 
         let (tokens, huffman_encoding) = match &block.block_type {
@@ -255,6 +264,11 @@ impl TokenPredictor {
         };
 
         self.prediction.begin_known_huffman_block(tokens, input)?;
+        #[cfg(any(test, feature = "diagnostics"))]
+        if let Some(trace) = &mut self.trace {
+            trace.block_limit = self.prediction.block_lookahead_limit()?;
+            trace.dictionary_reset = self.prediction.block_reset_tag()?;
+        }
         if self.prediction.flush_enabled() {
             codec.encode_correction(
                 CodecCorrection::UncompressBlockLenCorrection,
@@ -303,7 +317,6 @@ impl TokenPredictor {
             );
 
             let predicted_token = self.prediction.predict(input, &freq);
-
             #[cfg(any(test, feature = "diagnostics"))]
             if let Some(trace) = &mut self.trace {
                 trace.token_count += 1;

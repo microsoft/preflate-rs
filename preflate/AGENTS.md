@@ -169,6 +169,13 @@ src/
   Finalized complete streams ending at or before the first slide point may use
   the smaller, behaviorally equivalent boundary-policy encoding, without
   upgrading family identity; partial or longer streams cannot use that proof.
+- Estimator replay excludes only length-258, distance-one references from its
+  informative token/byte budget. Predict and accept them normally, retaining
+  errors, hash insertions, frequencies and block/flush transitions. Preserve
+  shorter-match and literal boundary evidence. Stop each replay at 32,768 total
+  tokens or upon reaching 8 MiB plaintext, checked before each token.
+  Keep existing candidate sets and acceptance gates; do not add an
+  alternative-model encoding retry.
 - Shared collectors and predictors execute the selected behavior and manage state.
   Shared runtime types belong in `parameters`, not estimator modules.
   Keep that module independent of estimator, model, prediction, and codec policy.

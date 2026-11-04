@@ -22,6 +22,7 @@ byteorder = "1.4"
 default-boxed = "0.2"
 bitcode = "0.6.3"
 deranged = "0.5"
+serde = { version = "1", features = ["derive"], optional = true }
 
 [dev-dependencies]
 env_logger = "0.11"
@@ -33,4 +34,4 @@ name = "preflate_rs"
 crate-type = ["lib"]
 
 [features]
-diagnostics = []
+diagnostics = ["dep:serde"]

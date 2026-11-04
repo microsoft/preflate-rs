@@ -3,7 +3,9 @@
 This package supports **private/local directory scans** and analysis of both
 private scans and public Common Crawl runs. Python 3.14+ uses the root uv project;
 the release Rust scanner writes the shared [schema](schema.sql) directly.
-There is no JSON report ingestion or import/resume/overlay compatibility path.
+The crawler exchanges current scanner JSON reports and streams them into its
+persistent SQLite catalog; it does not create per-download SQLite databases.
+There is no legacy archived-report import/resume/overlay compatibility path.
 Existing version-1 SQLite databases remain readable.
 
 ## Scan private directories
@@ -65,6 +67,86 @@ scanner = '<repository>/target/release/preflate_scan.exe'
 Configure `scope.runs` directly; report-file scope discovery has been removed.
 Foreign keys remain enabled; unsafe SQLite connection policies are rejected.
 No actual machine paths belong in checked-in documentation.
+
+## Database-driven scans
+
+The scanner can select input files from SQLite instead of walking a directory.
+Choose exactly one source mode:
+
+```powershell
+# Distinct saved extracts, not original download URLs or deleted scratch documents:
+.\target\release\preflate_scan.exe "<crawl-folder>\commoncrawl.sqlite" --from-crawl --output "<new-scan.json>"
+# Select local source files from a completed prior run:
+.\target\release\preflate_scan.exe "<private.sqlite>" --from-run before --database "<new-results.sqlite>" --label after
+# The Python wrapper forwards the same input selection for SQLite output:
+uv run --locked python -m corpus.database --db "<new-results.sqlite>" scan "<private.sqlite>" --from-run before --label after
+```
+
+Either source mode supports `--output` JSON or `--database` plus `--label`.
+The source database is opened read-only in a consistent snapshot; source and
+output databases must differ. Merge a completed output run afterwards if needed.
+`--from-crawl` deduplicates `saved_streams.path` and defaults to the catalog's
+parent as its storage root. Use `--source-root "<storage>"` when the catalog is
+stored elsewhere. Relative saved paths resolve within that root.
+`--from-run` uses only the selected run's recorded local file paths and saved
+absolute input root, not newly discovered directory entries or URL rows.
+
+These are full scans with current settings, not parameter-only checks: changed
+files receive new snapshots; missing files become explicit errors. Directory
+entries and symlinks are not followed, and files outside the source root are
+rejected. Existing cloud, file, candidate and plaintext limits still apply.
+Trace and performance-repetition modes remain single-file/directory diagnostics,
+not database selection options.
+Native scans use four file workers by default; `--jobs 1` selects serial execution.
+Both SQLite and JSON outputs have a single ordered writer. The Python `scan`
+wrapper forwards `--jobs`; memory budgets apply per worker.
+
+## Read-only baseline comparisons
+
+Use the native scanner to compare the current implementation with a **completed
+run ID**, without creating a run or modifying the database:
+
+```powershell
+.\target\release\preflate_scan.exe "<baseline.sqlite>" --baseline-run 123 --output "<new-diff.json>" --build-identity current-build
+```
+
+Find IDs with the `runs` command below. Only recorded local files are selected;
+new directory entries are not discovered. Current scanner defaults and explicit
+flags apply, rather than silently inheriting baseline settings. Normal bit-exact
+verification is mandatory; `--no-verify`, other source selectors, SQLite output,
+traces and performance repetitions cannot be combined with this mode.
+
+The streaming JSON envelope has `report_type: "baseline_diff"`, `baseline` and
+`current` provenance, `configuration_differences`, `comparison_compatible`,
+`differences`, and a final `summary`. Missing build labels remain null, not
+inferred from the package version. Different limits, raw/verification modes or
+candidate/trace retention settings flag an incompatible comparison; results
+remain diagnostic, not controlled modelling gains.
+`--jobs` also applies to baseline comparisons; worker-count differences do not
+make modelling results incompatible. The SQLite snapshot and JSON writer stay
+on the coordinator; workers only read source files and perform analysis.
+
+Only differences are listed. Stream events carry the path/location,
+classification and changed fields with `before`/`after` values. Newly detected
+and missing streams carry the available observation. Equal-size changes to
+settings, corrections or outcomes are distinct from size improvements and
+regressions. Parameters are compared by their full JSON values, never by
+database-local profile IDs. Timings and optional detailed traces are not compared.
+
+`summary.coverage` counts unchanged and compared streams, failures/recoveries,
+new/missing streams, boundary changes, same-size changes, unavailable files and
+changed/unknown source identities. Its reconstruction-byte totals include only
+verified pairs with matching boundaries; `summary.scan` contains normal current
+scan totals, including excluded inputs. Source identity uses the recorded path,
+size and second-precision mtime, **not content hashes**. Changed or unavailable
+files are excluded from stream comparisons, not reported as modelling gains.
+Unknown size/mtime cannot establish equivalence.
+
+As with ordinary scans, a completed report can contain failures or incompatible
+settings; inspect its summary and compatibility flag, not just the exit code.
+Incomplete output is never a finished comparison. Existing output files are
+never overwritten. This JSON is a comparison report, not a crawler scan envelope
+or an importable persistent run.
 
 ## Queries and maintenance
 
@@ -130,3 +212,6 @@ The Python API provides `CorpusDatabase.record_run` for typed observations,
 `merge_scan` for SQLite copies, comparison/query methods, and maintenance.
 `corpus.database.scan.scan_records` reads a completed run read-only, one file at
 a time, checking its totals. The profile cache is bounded to 4096 entries.
+`corpus.database.json_scan.json_scan_records` similarly streams current JSON
+scanner output with `ijson`, validating completion and measured totals before
+the crawler commits a persistent run.

@@ -73,7 +73,19 @@ pub struct ScanDatabase {
 }
 
 impl ScanDatabase {
+    #[cfg(test)]
     pub fn create(path: &Path, label: &str, cli: &Cli) -> Result<Self> {
+        let mut configuration = serde_json::to_value(cli)?;
+        configuration["input"] = serde_json::to_value(std::fs::canonicalize(&cli.input)?)?;
+        Self::create_with_configuration(path, label, cli, &configuration)
+    }
+
+    pub fn create_with_configuration(
+        path: &Path,
+        label: &str,
+        cli: &Cli,
+        configuration: &Value,
+    ) -> Result<Self> {
         let db = Connection::open(path)?;
         db.busy_timeout(Duration::from_secs(60))?;
         db.execute_batch("PRAGMA foreign_keys=ON;")?;
@@ -93,8 +105,6 @@ impl ScanDatabase {
             return Err("run label must not be empty".into());
         }
         db.execute_batch(include_str!("../../corpus/database/schema.sql"))?;
-        let mut configuration = serde_json::to_value(cli)?;
-        configuration["input"] = serde_json::to_value(std::fs::canonicalize(&cli.input)?)?;
         db.execute(
             "INSERT INTO runs(label,build_identity,report_path,report_size,report_mtime_ns,\
              configuration_json,started_unix_seconds,state) VALUES (?,?,?,0,0,?,?,'importing')",

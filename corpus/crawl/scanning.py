@@ -1,9 +1,10 @@
-"""Bounded release-scanner processes with a single SQLite batch result."""
+"""Bounded release-scanner processes with a streaming JSON batch result."""
 
 from __future__ import annotations
 
 import concurrent.futures
 import contextlib
+import json
 import subprocess
 import tempfile
 import threading
@@ -13,8 +14,7 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
 
-from corpus.database.database import CorpusDatabase
-from corpus.database.scan import scan_records
+from corpus.database.json_scan import json_scan_records
 
 from .settings import CrawlSettings
 
@@ -22,7 +22,7 @@ from .settings import CrawlSettings
 def _invoke(scanner: Path, source: Path, report: Path, settings: CrawlSettings, stop: threading.Event) -> None:
     if stop.is_set():
         raise concurrent.futures.CancelledError()
-    command = [str(scanner), str(source), "--database", str(report), "--label", "scan",
+    command = [str(scanner), str(source), "--output", str(report), "--jobs", "1",
                "--max-file-mib", str(max(1, settings.scan_max_file_mib))]
     with subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True) as process:
         deadline = time.monotonic() + settings.scan_timeout_seconds
@@ -53,7 +53,7 @@ def _merge(reports: Sequence[Path], directory: Path, report: Path, elapsed_ms: f
 
     def files():
         for part in reports:
-            with contextlib.closing(scan_records(part)) as records:
+            with contextlib.closing(json_scan_records(part)) as records:
                 next(records)
                 for kind, record in records:
                     if kind == "file":
@@ -77,12 +77,22 @@ def _merge(reports: Sequence[Path], directory: Path, report: Path, elapsed_ms: f
     if report.exists():
         raise FileExistsError(report)
     if reports:
-        with contextlib.closing(scan_records(reports[0])) as records:
+        with contextlib.closing(json_scan_records(reports[0])) as records:
             _, metadata = next(records)
             header.update(metadata)
-            header["configuration"].update(input=str(directory), database=str(report))
-    with CorpusDatabase(report) as database:
-        database.record_run(files(), "scan", header=header, summary=summary)
+            header["configuration"].update(input=str(directory.resolve()), output=str(report))
+            header["root"] = str(directory.resolve())
+    with report.open("x", encoding="utf-8") as output:
+        output.write(json.dumps(header)[:-1] + ',"files":[')
+        first = True
+        for record in files():
+            if not first:
+                output.write(",")
+            json.dump(record, output)
+            first = False
+        output.write('],"summary":')
+        json.dump(summary, output)
+        output.write("}\n")
 
 
 def run_scanner(scanner: Path, settings: CrawlSettings) -> Callable[[Path, Path], None]:
@@ -94,7 +104,7 @@ def run_scanner(scanner: Path, settings: CrawlSettings) -> Callable[[Path, Path]
             return
         started = time.monotonic()
         with tempfile.TemporaryDirectory(prefix="scanner-", dir=report.parent) as scratch:
-            parts = [Path(scratch) / f"{index:05d}.sqlite" for index in range(len(files))]
+            parts = [Path(scratch) / f"{index:05d}.json" for index in range(len(files))]
             pool = concurrent.futures.ThreadPoolExecutor(max_workers=settings.parallelism)
             try:
                 futures = [pool.submit(_invoke, scanner, source, part, settings, stop)

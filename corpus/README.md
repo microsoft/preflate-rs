@@ -32,12 +32,17 @@ uv run --locked python -m corpus.database --db "<private-folder>\private.sqlite"
 uv run --locked python -m corpus.crawl --config "<local-config.toml>" crawl --batches 5
 ```
 
-The scanner writes normalized SQLite rows directly. Parallel crawl workers write
-temporary SQLite scans; the coordinator merges completed runs, replacing scratch
-paths with capture URLs. Legacy JSON report import, overlay import, timing import
-and local oracle-search orchestration have been removed. Existing SQLite data
-remains readable. Diagnostic JSON/JSONL scanner exports are still available, but
-are not an ingestion path.
+Standalone scans can write JSON or normalized SQLite rows directly. Parallel
+crawl workers analyze downloads and verify saved extracts using streaming JSON,
+not temporary SQLite databases. The coordinator validates completed JSON reports
+and records one transactional run in the persistent crawl database, replacing
+scratch paths with capture URLs. Legacy archived-report, overlay and timing import
+commands are not restored. Existing SQLite data remains readable.
+
+Database-driven scans explicitly select saved payloads with `--from-crawl` or
+local files from a completed run with `--from-run <label>`. Either selection can
+write JSON or a new labelled run in a separate SQLite output database; see
+[database-driven scans](database/README.md#database-driven-scans).
 
 Use synthetic/public fixtures for committed tests. Keep private databases,
 configuration, payloads, reports and profiling results outside commits and

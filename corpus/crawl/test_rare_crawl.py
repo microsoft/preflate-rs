@@ -56,8 +56,7 @@ def write_report(path, records):
                    successful_plaintext_bytes=sum(s["plaintext_bytes"] for s in ok),
                    successful_correction_bytes=sum(s["correction_bytes"] for s in ok))
     header = dict(schema_version=1, configuration={}, started_unix_seconds=1)
-    with CorpusDatabase(path) as database:
-        database.record_run(records, "scan", header=header, summary=summary)
+    path.write_text(json.dumps({**header, "files": records, "summary": summary}), encoding="utf-8")
     return path
 
 
@@ -303,8 +302,8 @@ class RareCrawlTests(unittest.TestCase):
         png = make_png(zlib.compress(text[::-1], 9), split=4096)
         (source / "original.png").write_bytes(png)
         scan = run_scanner(scanner, self.settings)
-        scan(source, self.root / "source-scan.sqlite")
-        records = _scanned_files(self.root / "source-scan.sqlite")
+        scan(source, self.root / "source-scan.json")
+        records = _scanned_files(self.root / "source-scan.json")
         record = records["doc.bin"]
         kinds = sorted(stream["kind"] for stream in record["streams"] if stream["status"] == "ok")
         self.assertEqual(kinds, ["png_idat", "zlib"])
@@ -320,14 +319,14 @@ class RareCrawlTests(unittest.TestCase):
         self.assertEqual(piece.data, png)
         (extracts / "original.png").write_bytes(piece.data)
         pieces["original.png"] = (png_stream, piece)
-        scan(extracts, self.root / "extracts-scan.sqlite")
-        rescanned = _scanned_files(self.root / "extracts-scan.sqlite")
+        scan(extracts, self.root / "extracts-scan.json")
+        rescanned = _scanned_files(self.root / "extracts-scan.json")
         for name, (stream, piece) in pieces.items():
             self.assertEqual(extract.compare(stream, rescanned[name]["streams"], piece.location["extract"]),
                              ("match", ""), name)
         self.settings.parallelism = 1
-        scan(source, self.root / "serial-scan.sqlite")
-        serial = _scanned_files(self.root / "serial-scan.sqlite")
+        scan(source, self.root / "serial-scan.json")
+        serial = _scanned_files(self.root / "serial-scan.json")
         for name, record in records.items():
             original = record["streams"]
             repeated = serial[name]["streams"]
@@ -361,15 +360,43 @@ class RareCrawlTests(unittest.TestCase):
             finally:
                 with lock:
                     active -= 1
-        report = self.root / "parallel-scan.sqlite"
+        report = self.root / "parallel-scan.json"
         with patch.object(scanning, "_invoke", side_effect=invoke):
             run_scanner(Path("unused"), self.settings)(source, report)
         self.assertEqual(maximum, 3)
         self.assertEqual(len(_scanned_files(report)), 7)
         with CorpusDatabase(self.root / "parallel.sqlite") as db:
-            db.merge_scan(report, "parallel")
+            crawler.merge_crawl_scan(report, {
+                f"{n}.deflate": {"url": f"https://example.com/{n}"} for n in range(7)
+            }, label="parallel", crawl_db=db)
             self.assertEqual(db.connection.execute("SELECT count(*) FROM stream_results").fetchone()[0], 7)
         self.assertFalse(list(self.root.glob("scanner-*")))
+
+    def test_json_batch_validation_rolls_back_persistent_run(self):
+        record = dict(path="body.bin", size_bytes=9, modified_unix_seconds=1,
+                      status="ok", elapsed_ms=1, streams=[stream()])
+        report = write_report(self.root / "batch.json", [record])
+        document = json.loads(report.read_text())
+        document["summary"]["successful_correction_bytes"] += 1
+        report.write_text(json.dumps(document))
+        with CorpusDatabase(self.root / "history.sqlite") as db:
+            with self.assertRaisesRegex(ValueError, "totals"):
+                crawler.merge_crawl_scan(report, {"body.bin": {"url": "https://example.com/body"}},
+                                         label="invalid", crawl_db=db)
+            self.assertEqual(db.runs(), [])
+            self.assertEqual(db.connection.execute("SELECT count(*) FROM profiles").fetchone()[0], 0)
+        self.assertEqual(list(self.root.glob("*.json")), [report])
+
+    def test_json_batch_rejects_missing_duplicate_and_unknown_payloads(self):
+        record = dict(path="body.bin", size_bytes=9, modified_unix_seconds=1,
+                      status="ok", elapsed_ms=1, streams=[stream()])
+        names = {"body.bin": {"url": "https://example.com/body"}}
+        with CorpusDatabase(self.root / "history.sqlite") as db:
+            for index, records in enumerate(([], [record, record], [{**record, "path": "unknown.bin"}])):
+                report = write_report(self.root / f"invalid-{index}.json", records)
+                with self.subTest(index=index), self.assertRaisesRegex(ValueError, "payload"):
+                    crawler.merge_crawl_scan(report, names, label=f"invalid-{index}", crawl_db=db)
+                self.assertEqual(db.runs(), [])
 
     def test_scanner_failure_cancels_other_workers(self):
         source = self.root / "failed-input"
@@ -387,7 +414,7 @@ class RareCrawlTests(unittest.TestCase):
                 raise RuntimeError("scanner failed")
             if stop.wait(timeout=5):
                 cancelled.set()
-        report = self.root / "failed-scan.sqlite"
+        report = self.root / "failed-scan.json"
         with patch.object(scanning, "_invoke", side_effect=invoke):
             with self.assertRaisesRegex(RuntimeError, "scanner failed"):
                 run_scanner(Path("unused"), self.settings)(source, report)
@@ -434,9 +461,11 @@ class RareCrawlTests(unittest.TestCase):
                 raise scanning.subprocess.TimeoutExpired("scanner", 0.2)
             return None, ""
         process.communicate.side_effect = communicate
-        with patch.object(scanning.subprocess, "Popen", return_value=process):
+        with patch.object(scanning.subprocess, "Popen", return_value=process) as popen:
             with self.assertRaises(scanning.concurrent.futures.CancelledError):
-                scanning._invoke(Path("scanner"), self.root, self.root / "report-scan.sqlite", self.settings, stop)
+                scanning._invoke(Path("scanner"), self.root, self.root / "report-scan.json", self.settings, stop)
+        command = popen.call_args.args[0]
+        self.assertEqual(command[command.index("--jobs") + 1], "1")
         process.kill.assert_called_once()
         self.assertEqual(process.communicate.call_count, 2)
 

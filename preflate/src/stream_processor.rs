@@ -18,7 +18,8 @@ use crate::{
     PreflateConfig, Result,
     cabac_codec::{PredictionDecoderCabac, PredictionEncoderCabac},
     deflate::{
-        deflate_reader::DeflateParser, deflate_token::DeflateTokenBlock,
+        deflate_reader::{DeflateContents, DeflateParser},
+        deflate_token::DeflateTokenBlock,
         deflate_writer::DeflateWriter,
     },
     parameters::TokenPredictorParameters,
@@ -118,6 +119,52 @@ pub struct PreflateStreamChunkResult {
     pub blocks: Vec<DeflateTokenBlock>,
 }
 
+fn encode_first_chunk(
+    predictor: &mut TokenPredictor,
+    contents: &DeflateContents,
+    plain: &PlainText,
+    complete: bool,
+    counter: Option<&mut crate::CountNonDefaultActions>,
+) -> Result<Vec<u8>> {
+    encode_first_chunk_observed(
+        predictor,
+        contents,
+        plain,
+        complete,
+        counter,
+        |_, _, _, _| {},
+    )
+}
+
+pub(crate) fn encode_first_chunk_observed(
+    predictor: &mut TokenPredictor,
+    contents: &DeflateContents,
+    plain: &PlainText,
+    complete: bool,
+    counter: Option<&mut crate::CountNonDefaultActions>,
+    observe: impl FnMut(usize, bool, &mut TokenPredictor, &PreflateInput),
+) -> Result<Vec<u8>> {
+    predictor.enable_parameter_normalization(contents.compressed_size, complete);
+    let mut corrections = Vec::new();
+    let mut encoder = (
+        counter,
+        PredictionEncoderCabac::new(VP8Writer::new(&mut corrections).unwrap()),
+    );
+    predict_blocks_observed(
+        &contents.blocks,
+        predictor,
+        &mut encoder,
+        &mut PreflateInput::new(plain),
+        observe,
+    )?;
+    encoder.finish();
+    Ok(ReconstructionData {
+        parameters: predictor.reconstruction_parameters(),
+        corrections,
+    }
+    .write())
+}
+
 /// Takes a stream of deflate compressed data removes the deflate compression, recording the data
 /// that can be used to reconstruct it along with the plain-text.
 #[derive(Debug)]
@@ -183,7 +230,7 @@ impl PreflateStreamProcessor {
     /// new plaintext through [`Self::plain_text`], then call [`Self::shrink_to_dictionary`]
     /// before the next chunk. Retain the processor until [`Self::is_done`] is true.
     pub fn decompress(&mut self, compressed_data: &[u8]) -> Result<PreflateStreamChunkResult> {
-        self.decompress_counted(compressed_data, ())
+        self.decompress_counted(compressed_data, None)
     }
 
     /// Like `decompress`, also accumulating nonzero correction actions for diagnostics.
@@ -193,13 +240,13 @@ impl PreflateStreamProcessor {
         compressed_data: &[u8],
         counts: &mut crate::CountNonDefaultActions,
     ) -> Result<PreflateStreamChunkResult> {
-        self.decompress_counted(compressed_data, counts)
+        self.decompress_counted(compressed_data, Some(counts))
     }
 
     fn decompress_counted(
         &mut self,
         compressed_data: &[u8],
-        counter: impl PredictionEncoder,
+        counter: Option<&mut crate::CountNonDefaultActions>,
     ) -> Result<PreflateStreamChunkResult> {
         #[cfg(any(test, feature = "diagnostics"))]
         if let Some(trace) = &mut self.trace {
@@ -208,14 +255,12 @@ impl PreflateStreamProcessor {
         }
         let contents = self.parser.parse(compressed_data)?;
 
-        let mut cabac_encoded = Vec::new();
-
-        let mut cabac_encoder = (
-            counter,
-            PredictionEncoderCabac::new(VP8Writer::new(&mut cabac_encoded).unwrap()),
-        );
-
         if let Some(predictor) = &mut self.predictor {
+            let mut cabac_encoded = Vec::new();
+            let mut cabac_encoder = (
+                counter,
+                PredictionEncoderCabac::new(VP8Writer::new(&mut cabac_encoded).unwrap()),
+            );
             let mut input = PreflateInput::new(self.parser.plain_text());
 
             // we are missing the last couple hashes in the dictionary since we didn't
@@ -307,11 +352,7 @@ impl PreflateStreamProcessor {
                 ));
             }
 
-            let mut input = PreflateInput::new(self.parser.plain_text());
-
             let mut token_predictor = TokenPredictor::new_profile(profile);
-            token_predictor
-                .enable_parameter_normalization(contents.compressed_size, self.parser.is_done());
 
             #[cfg(any(test, feature = "diagnostics"))]
             {
@@ -320,31 +361,23 @@ impl PreflateStreamProcessor {
                 }
                 token_predictor.trace = self.trace.take();
             }
-            let prediction = predict_blocks(
-                &contents.blocks,
+            let prediction = encode_first_chunk(
                 &mut token_predictor,
-                &mut cabac_encoder,
-                &mut input,
+                &contents,
+                self.parser.plain_text(),
+                self.parser.is_done(),
+                counter,
             );
             #[cfg(any(test, feature = "diagnostics"))]
             {
                 self.trace = token_predictor.trace.take();
             }
-            prediction?;
-
-            cabac_encoder.finish();
-
+            let reconstruction_data = prediction?;
             let params = token_predictor.reconstruction_parameters();
             #[cfg(any(test, feature = "diagnostics"))]
             if let Some(trace) = &mut self.trace {
                 trace.parameters = Some(params);
             }
-            let reconstruction_data = ReconstructionData {
-                parameters: params,
-                corrections: cabac_encoded,
-            }
-            .write();
-
             self.predictor = Some(token_predictor);
 
             if let Some(validator) = &mut self.validator {
@@ -545,8 +578,19 @@ fn predict_blocks(
     encoder: &mut impl PredictionEncoder,
     input: &mut PreflateInput,
 ) -> Result<()> {
+    predict_blocks_observed(blocks, token_predictor, encoder, input, |_, _, _, _| {})
+}
+
+pub(crate) fn predict_blocks_observed(
+    blocks: &[DeflateTokenBlock],
+    token_predictor: &mut TokenPredictor,
+    encoder: &mut impl PredictionEncoder,
+    input: &mut PreflateInput,
+    mut observe: impl FnMut(usize, bool, &mut TokenPredictor, &PreflateInput),
+) -> Result<()> {
     let tail_length = token_predictor.begin_chunk(blocks);
     for i in 0..blocks.len() {
+        observe(i, true, token_predictor, input);
         token_predictor.predict_block(
             &blocks[i],
             encoder,
@@ -558,6 +602,7 @@ fn predict_blocks(
             i == blocks.len() - 1,
             token_predictor.predict_end_of_chunk(input),
         );
+        observe(i, false, token_predictor, input);
     }
     assert!(input.remaining() == 0);
     Ok(())

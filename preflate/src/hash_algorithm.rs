@@ -4,6 +4,8 @@ use bitcode::{Decode, Encode};
 /// A shared hash can have different insertion/search rules; those are recorded separately.
 /// Compressor versions and build options can change the hash, so selection uses observed tokens.
 #[derive(Encode, Decode, Debug, Copy, Clone, Eq, PartialEq, Default)]
+#[cfg_attr(feature = "diagnostics", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "diagnostics", serde(deny_unknown_fields))]
 pub enum HashAlgorithm {
     /// Stored and Huffman-only streams: no back-reference dictionary is needed.
     #[default]

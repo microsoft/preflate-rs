@@ -142,6 +142,16 @@ Prefix validation measures token fit over its bounded sample, not full-stream
 optimality. The existing depth-walk candidate set, traversal count,
 refinement-slot count, and default acceptance thresholds are preserved.
 
+Bounded estimation replay advances through full-length distance-one matches
+without spending its informative token/byte budget on them. Their predictions,
+mismatches, hash insertions and block transitions are still processed normally;
+shorter references and literals retain boundary/startup evidence. This lets
+existing candidates reach varied data after long single-byte runs without
+another decompression pass. Each candidate replay stops after 32,768 total
+tokens or upon reaching 8 MiB of plaintext, checked before each token, even if
+the informative budget is unspent.
+Encoding uses the selected profile once, without an alternative-model retry.
+
 Candidate scoring, correction encoding, and reconstruction share a codec-free
 runtime parameter vocabulary in `preflate/src/parameters.rs`, independent of
 estimation policy. Family-specific parameter projection and insertion behavior
@@ -401,6 +411,13 @@ a repeated chain/MiniZ selector. The window size remains common even for disable
 `calculate_hops` and `hop_match` use it for correction recovery. Tests cover
 identical CABAC bytes, exact reconstruction, MiniZ's window-minus-input limit,
 source-start admission during expanded searches, and the disabled-match gate.
+
+Insertion observations are lower bounds: incomplete first chunks with ambiguous
+three-/four-byte fast insertion prefer the existing four-byte cutoff, without
+adding all longer-match interiors. Complete streams retain their observed policy
+because all reference requirements are already known. Longer-match endpoint
+references and slide-boundary evidence retain their own policies; the preference
+adds no observation pass or prediction replay.
 
 Large zlib-style streams can separately select short-match suppression from
 contradictory token evidence. The existing depth walk inspects at most 256
@@ -852,6 +869,7 @@ before checking plaintext and exact reconstruction:
 | [`util/`](util/) | `preflate_util.exe` | CLI tool for testing and benchmarking |
 | [`util/`](util/) | `preflate_scan.exe` | Recursive read-only DEFLATE modelling diagnostics, native SQLite or diagnostic JSON, without Zstd |
 | [`util/`](util/) | `preflate_match_check.exe` | Parameter regression guard for verified token-perfect streams in completed SQLite runs |
+| [`util/`](util/README.md#json-replay) | `preflate_replay.exe` | Bounded JSON-in/JSON-out explicit-parameter replay, block diagnostics and exact reconstruction verification |
 | [`dll/`](dll/) | `preflate_rs_0_8.dll` | C FFI wrapper for .NET interop |
 | [`fuzz/`](fuzz/) | fuzz harnesses | libfuzzer targets for the core and container APIs |
 
@@ -935,8 +953,9 @@ SQLite runs append under unique labels, commit per file, and become queryable
 only after totals reconcile. Interrupted runs stay incomplete. See
 [SQLite scanning and analysis](corpus/database/README.md) and
 [Common Crawl discovery](corpus/crawl/README.md); the crawler never consults
-private history. JSON below is an optional diagnostic export, not an ingestion
-format:
+private history. Crawler workers use JSON for download analysis and extract
+verification; Python validates completed reports and writes the persistent crawl
+database, without temporary SQLite databases. JSON is also useful independently:
 
 ```powershell
 .\target\release\preflate_scan.exe "C:\Users\you\OneDrive" --output scan-report.json
@@ -959,12 +978,26 @@ recorded without stopping the scan; report-write failures stop it with a nonzero
 exit code. A completed report exits successfully even when individual files fail.
 Existing JSON reports are never overwritten; SQLite scans require new labels.
 SQLite databases and their sidecars are excluded from the input walk.
+Console progress is rate-limited to one update every two seconds, plus startup
+and completion. SQLite-selected scans show a file percentage; directory walks
+show processed counts without a preliminary counting pass. Detailed file
+outcomes remain in the report rather than being printed per file.
+Standalone scans use four file workers by default (`--jobs 1` is serial).
+One coordinator writes results in input order; pending work/results are bounded
+to twice the worker count. File and chunk memory budgets apply per worker.
+Library calls remain serial. Performance repetitions require one worker, and
+crawler subprocesses explicitly use one worker to avoid nested parallelism.
 
 Useful options:
 
 | Option | Default | Meaning |
 |---|---|---|
 | `--database`, `--label` | unset | Write a native SQLite run with a unique label instead of `--output` JSON |
+| `--from-run` | unset | Treat the input as SQLite and rescan local file paths from this completed run label |
+| `--from-crawl` | off | Treat the input as a crawl catalog and rescan its distinct saved payload paths |
+| `--baseline-run` | unset | Rescan this completed SQLite run ID and write JSON differences without recording a run |
+| `--jobs` | `4` | File workers, 1-64; performance repetitions and single-file traces default to 1 |
+| `--source-root` | catalog parent | Storage root for `--from-crawl` when payloads live elsewhere |
 | `--poor-ratio-percent` | `1` | Flag corrections exceeding this percent of original DEFLATE bytes |
 | `--min-stream-bytes` | `1024` | Minimum original DEFLATE bytes for flags/rankings; smaller streams are still recorded |
 | `--max-chain` | `4096` | Maximum permitted estimated hash-chain depth |
@@ -983,6 +1016,27 @@ Useful options:
 | `--perf-iterations` | `1` | Attempts per regular file for performance output; first attempt followed by warm repetitions |
 | `--build-identity` | unset | Explicit binary/build label for SQLite runs or performance provenance |
 
+Database-driven input selection is separate from the output format: both source
+modes support JSON or a new labelled SQLite run in a different database. See
+[database-driven scans](corpus/database/README.md#database-driven-scans) for root
+protections, local-file requirements and examples. SQLite input selection does
+not permit `--trace` or `--perf-output`; standalone file/directory scans retain
+those diagnostics.
+
+For a full verified regression check without persisting an experimental run:
+
+```powershell
+.\target\release\preflate_scan.exe "<baseline.sqlite>" --baseline-run 123 --output "<new-diff.json>" --build-identity current-build
+```
+
+The database stays read-only. The report lists changed aggregate stream results
+and file outcomes, counts unchanged streams, and separates changed/missing inputs
+from modelling changes. It includes both configurations and build identities
+(when supplied), and flags incompatible scan settings. See
+[baseline comparisons](corpus/database/README.md#read-only-baseline-comparisons)
+for coverage, identity limits and report fields. Unlike `preflate_match_check`,
+this performs full scanning and bit-exact reconstruction verification.
+
 #### Streaming performance measurements
 
 The native scanner can write timings directly, without a Python timing wrapper:
@@ -993,8 +1047,8 @@ The native scanner can write timings directly, without a Python timing wrapper:
 
 Do not run competing scans or builds during a controlled benchmark. The native
 header records configuration, build label, verification policy, and repetition
-scope. JSON/JSONL is for standalone diagnostics only; legacy Python timing/report
-ingestion has been removed. `--perf-output` cannot be combined with `--database`.
+scope. Performance JSONL is for standalone diagnostics; legacy Python timing/report
+import commands remain removed. `--perf-output` cannot be combined with `--database`.
 A final summary distinguishes completed measurements from interrupted output.
 
 Each sample measures file reading, signature scanning, preflate and optional exact

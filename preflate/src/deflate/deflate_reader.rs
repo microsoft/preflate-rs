@@ -85,6 +85,25 @@ impl DeflateParser {
     }
 
     pub fn parse(&mut self, compressed_data: &[u8]) -> Result<DeflateContents> {
+        self.parse_internal::<false>(compressed_data, usize::MAX, usize::MAX)
+    }
+
+    #[cfg(feature = "diagnostics")]
+    pub fn parse_limited(
+        &mut self,
+        compressed_data: &[u8],
+        max_tokens: usize,
+        max_blocks: usize,
+    ) -> Result<DeflateContents> {
+        self.parse_internal::<true>(compressed_data, max_tokens, max_blocks)
+    }
+
+    fn parse_internal<const LIMITED: bool>(
+        &mut self,
+        compressed_data: &[u8],
+        max_tokens: usize,
+        max_blocks: usize,
+    ) -> Result<DeflateContents> {
         let mut blocks = Vec::new();
 
         let mut cursor = &mut Cursor::new(compressed_data);
@@ -103,7 +122,13 @@ impl DeflateParser {
             self.bit_reader.get(8 - bits_left, cursor)?;
         }
 
-        if let Err(e) = self.read_blocks_internal(cursor, &mut blocks, &mut checkpoint) {
+        if let Err(e) = self.read_blocks_internal::<LIMITED>(
+            cursor,
+            &mut blocks,
+            &mut checkpoint,
+            max_tokens,
+            max_blocks,
+        ) {
             // reset back to known good checkpoint before returning the error.
             // this allows callers to try again once they have more data
             self.bit_reader = checkpoint.bit_reader;
@@ -142,13 +167,21 @@ impl DeflateParser {
         })
     }
 
-    fn read_blocks_internal(
+    fn read_blocks_internal<const LIMITED: bool>(
         &mut self,
         reader: &mut Cursor<&[u8]>,
         blocks: &mut Vec<DeflateTokenBlock>,
         checkpoint: &mut Checkpoint,
+        mut remaining_tokens: usize,
+        max_blocks: usize,
     ) -> Result<()> {
         loop {
+            if LIMITED && self.state != DeflateParserState::Done && blocks.len() >= max_blocks {
+                return err_exit_code(
+                    ExitCode::InvalidParameter,
+                    "parsed chunk exceeds max_blocks",
+                );
+            }
             let (last, mode) = match self.state {
                 DeflateParserState::StartBlock => (
                     self.bit_reader.get(1, reader)? != 0,
@@ -206,13 +239,14 @@ impl DeflateParser {
 
                     let mut tokens = Vec::new();
                     let decoder = HuffmanReader::create_fixed()?;
-                    decode_tokens(
+                    decode_tokens::<LIMITED>(
                         &decoder,
                         &mut tokens,
                         &mut self.plain_text,
                         &mut self.bit_reader,
                         reader,
                         self.plain_text_limit,
+                        remaining_tokens,
                     )
                     .context()?;
 
@@ -235,13 +269,14 @@ impl DeflateParser {
 
                     // don't checkpoint dynamic huffman blocks since they don't get very big
                     // and it adds unnecessary complexity
-                    decode_tokens(
+                    decode_tokens::<LIMITED>(
                         &decoder,
                         &mut tokens,
                         &mut self.plain_text,
                         &mut self.bit_reader,
                         reader,
                         self.plain_text_limit,
+                        remaining_tokens,
                     )
                     .context()?;
 
@@ -255,6 +290,15 @@ impl DeflateParser {
                 }
 
                 _ => return err_exit_code(ExitCode::InvalidDeflate, "Invalid block type"),
+            }
+
+            if LIMITED
+                && let Some(DeflateTokenBlock {
+                    block_type: DeflateTokenBlockType::Huffman { tokens, .. },
+                    ..
+                }) = blocks.last()
+            {
+                remaining_tokens -= tokens.len();
             }
 
             if last {
@@ -273,13 +317,14 @@ impl DeflateParser {
     }
 }
 
-fn decode_tokens(
+fn decode_tokens<const LIMITED: bool>(
     decoder: &HuffmanReader,
     tokens: &mut Vec<DeflateToken>,
     plain_text: &mut PlainText,
     bit_reader: &mut BitReader,
     reader: &mut Cursor<&[u8]>,
     plain_text_limit: usize,
+    max_tokens: usize,
 ) -> Result<()> {
     let mut earliest_reference = i32::MAX;
     let mut cur_pos = 0;
@@ -292,6 +337,12 @@ fn decode_tokens(
         }
 
         let lit_len: u32 = decoder.fetch_next_literal_code(bit_reader, reader)?.into();
+        if LIMITED && lit_len != 256 && tokens.len() >= max_tokens {
+            return err_exit_code(
+                ExitCode::InvalidParameter,
+                "parsed chunk exceeds max_tokens",
+            );
+        }
         if lit_len < 256 {
             plain_text.push(lit_len as u8);
             tokens.push(DeflateToken::Literal(lit_len as u8));

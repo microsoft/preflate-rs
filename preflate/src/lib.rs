@@ -47,6 +47,8 @@ mod bit_helper;
 mod cabac;
 mod cabac_codec;
 mod deflate;
+#[cfg(feature = "diagnostics")]
+pub mod diagnostics;
 mod estimator;
 mod hash_algorithm;
 mod hash_chain;
@@ -75,6 +77,8 @@ pub use preflate_input::{PlainText, PreflateInput};
 
 #[cfg(feature = "diagnostics")]
 pub use deflate::deflate_token::{DeflateHuffmanType, DeflateToken, DeflateTokenBlockType};
+#[cfg(feature = "diagnostics")]
+pub use parameters::{BlockTypeStrategy, DictionaryAddPolicy, PreflateStrategy};
 pub use statistical_codec::{CodecCorrection, CountNonDefaultActions};
 #[cfg(feature = "diagnostics")]
 pub use stream_processor::estimate_first_chunk_parameters;

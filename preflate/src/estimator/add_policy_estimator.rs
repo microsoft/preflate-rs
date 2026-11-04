@@ -13,13 +13,20 @@ pub(crate) struct InsertionEvidence {
 }
 
 impl InsertionEvidence {
-    pub(super) fn inferred_policy(&self) -> DictionaryAddPolicy {
+    pub(super) fn inferred_policy(&self, ends_with_final_block: bool) -> DictionaryAddPolicy {
         if self.max_interior_match_length == 0 && !self.references_cross_4k_boundary {
             DictionaryAddPolicy::AddFirstExcept4kBoundary
         } else if self.max_interior_match_length != 0
             && !self.interior_reference_outside_32k_boundary
         {
             DictionaryAddPolicy::AddFirstWith32KBoundary
+        } else if !ends_with_final_block
+            && self.max_nonfinal_interior_match_length == 3
+            && self.max_interior_match_length <= 4
+        {
+            // Unseen continuation can reference four-byte interiors. A complete
+            // stream already supplies the insertion requirements of every reference.
+            DictionaryAddPolicy::AddFirst(4)
         } else if self.max_nonfinal_interior_match_length < self.max_interior_match_length {
             DictionaryAddPolicy::AddFirstAndLast(self.max_nonfinal_interior_match_length as u16)
         } else if self.max_interior_match_length < 258 {
@@ -117,7 +124,8 @@ pub(super) fn observe_insertion(token_blocks: &[DeflateTokenBlock]) -> Insertion
 
 #[cfg(test)]
 pub(super) fn estimate_add_policy(token_blocks: &[DeflateTokenBlock]) -> DictionaryAddPolicy {
-    observe_insertion(token_blocks).inferred_policy()
+    observe_insertion(token_blocks)
+        .inferred_policy(token_blocks.last().is_some_and(|block| block.last))
 }
 
 #[test]
@@ -150,7 +158,7 @@ fn insertion_observations_distinguish_interior_and_final_positions() {
                 interior_reference_outside_32k_boundary: true,
             }
         );
-        assert_eq!(evidence.inferred_policy(), expected);
+        assert_eq!(evidence.inferred_policy(true), expected);
     }
 }
 
@@ -182,7 +190,50 @@ fn insertion_policy_preserves_existing_interpretation_and_precedence() {
             references_cross_4k_boundary: crosses_4k,
             interior_reference_outside_32k_boundary: outside_32k,
         };
-        assert_eq!(evidence.inferred_policy(), expected);
+        assert_eq!(evidence.inferred_policy(true), expected);
+    }
+}
+
+#[test]
+fn four_byte_fast_default_preserves_stronger_insertion_evidence() {
+    for (maximum, nonfinal, outside_boundary, expected) in [
+        (3, 3, true, DictionaryAddPolicy::AddFirst(4)),
+        (4, 3, true, DictionaryAddPolicy::AddFirst(4)),
+        (4, 4, true, DictionaryAddPolicy::AddFirst(4)),
+        (3, 0, true, DictionaryAddPolicy::AddFirstAndLast(0)),
+        (4, 0, true, DictionaryAddPolicy::AddFirstAndLast(0)),
+        (5, 3, true, DictionaryAddPolicy::AddFirstAndLast(3)),
+        (258, 3, true, DictionaryAddPolicy::AddFirstAndLast(3)),
+        (5, 5, true, DictionaryAddPolicy::AddFirst(5)),
+        (6, 6, true, DictionaryAddPolicy::AddFirst(6)),
+        (3, 3, false, DictionaryAddPolicy::AddFirstWith32KBoundary),
+        (4, 3, false, DictionaryAddPolicy::AddFirstWith32KBoundary),
+    ] {
+        let evidence = InsertionEvidence {
+            max_interior_match_length: maximum,
+            max_nonfinal_interior_match_length: nonfinal,
+            references_cross_4k_boundary: true,
+            interior_reference_outside_32k_boundary: outside_boundary,
+        };
+        assert_eq!(evidence.inferred_policy(false), expected, "{evidence:?}");
+    }
+}
+
+#[test]
+fn complete_stream_retains_its_observed_short_insertion_policy() {
+    for (maximum, nonfinal, expected) in [
+        (3, 3, DictionaryAddPolicy::AddFirst(3)),
+        (4, 3, DictionaryAddPolicy::AddFirstAndLast(3)),
+        (4, 4, DictionaryAddPolicy::AddFirst(4)),
+        (258, 3, DictionaryAddPolicy::AddFirstAndLast(3)),
+    ] {
+        let evidence = InsertionEvidence {
+            max_interior_match_length: maximum,
+            max_nonfinal_interior_match_length: nonfinal,
+            references_cross_4k_boundary: true,
+            interior_reference_outside_32k_boundary: true,
+        };
+        assert_eq!(evidence.inferred_policy(true), expected, "{evidence:?}");
     }
 }
 

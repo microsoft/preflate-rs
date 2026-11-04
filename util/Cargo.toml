@@ -33,3 +33,7 @@ path = "src/scan_main.rs"
 [[bin]]
 name = "preflate_match_check"
 path = "src/match_main.rs"
+
+[[bin]]
+name = "preflate_replay"
+path = "src/replay_main.rs"

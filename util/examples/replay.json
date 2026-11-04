@@ -1,0 +1,45 @@
+{
+  "source": {
+    "type": "blocks",
+    "blocks": [
+      {
+        "type": "huffman",
+        "last": false,
+        "tokens": [
+          { "type": "literal", "value": 64 },
+          { "type": "literal", "value": 97 },
+          { "type": "literal", "value": 98 },
+          { "type": "literal", "value": 99 },
+          { "type": "reference", "length": 12, "distance": 3 }
+        ]
+      },
+      { "type": "stored", "last": false, "bytes": [] },
+      {
+        "type": "huffman",
+        "last": true,
+        "tokens": [
+          { "type": "reference", "length": 12, "distance": 3 }
+        ]
+      }
+    ]
+  },
+  "parameters": {
+    "matches_to_start_detected": false,
+    "very_far_matches_detected": false,
+    "window_bits": 15,
+    "strategy": "Default",
+    "nice_length": 258,
+    "add_policy": "AddAll",
+    "max_token_count": 16383,
+    "max_dist_3_matches": 8192,
+    "matching_type": "Greedy",
+    "max_chain": 128,
+    "hash_algorithm": { "Zlib": { "hash_mask": 32767, "hash_shift": 5 } },
+    "block_type_strategy": "Static"
+  },
+  "options": {
+    "block_start": 2,
+    "block_count": 1,
+    "max_mismatches": 8
+  }
+}

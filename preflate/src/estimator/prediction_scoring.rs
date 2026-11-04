@@ -13,6 +13,8 @@
 //! retains its acceptance policy. Inconclusive continuation retains the prefix scores.
 //! A work-limit or decisive early return deliberately discards unfinished contexts:
 //! those candidate states are not reused after scoring.
+//! Full-length distance-one matches advance normally and retain their errors,
+//! but do not consume the informative sample budget. Total replay stays bounded.
 
 use crate::{
     deflate::deflate_token::{
@@ -23,6 +25,35 @@ use crate::{
     prediction_state::PredictionState,
     preflate_input::{PlainText, PreflateInput},
 };
+
+#[derive(Default)]
+struct ScoringBudget {
+    tokens: usize,
+    bytes: u32,
+    total_tokens: usize,
+}
+
+impl ScoringBudget {
+    fn exhausted(&self, position: u32, max_tokens: usize, max_bytes: u32) -> bool {
+        self.tokens >= max_tokens
+            || self.bytes >= max_bytes
+            || self.total_tokens >= 32768
+            || position >= 8 * 1024 * 1024
+    }
+
+    fn accept(&mut self, token: &DeflateToken) {
+        self.total_tokens += 1;
+        if matches!(token, DeflateToken::Reference(reference) if reference.dist() == 1 && reference.len() == 258)
+        {
+            return;
+        }
+        self.tokens += 1;
+        self.bytes += match token {
+            DeflateToken::Literal(_) => 1,
+            DeflateToken::Reference(reference) => reference.len(),
+        };
+    }
+}
 
 pub(crate) fn refine_profile(
     profile: CompressorProfile,
@@ -118,7 +149,7 @@ pub(crate) fn score_refinement(
     for predictor in predictors.iter_mut() {
         predictor.begin_chunk(blocks);
     }
-    let mut count = 0;
+    let mut budget = ScoringBudget::default();
     for block in blocks {
         match &block.block_type {
             DeflateTokenBlockType::Stored { uncompressed } => {
@@ -130,7 +161,7 @@ pub(crate) fn score_refinement(
                     }
                 }
                 for _ in uncompressed {
-                    if inputs[0].pos() >= max_bytes || count >= max_tokens {
+                    if budget.exhausted(inputs[0].pos(), max_tokens, max_bytes) {
                         return RefinementScores {
                             prefix_errors: if prefix_errors.is_empty() {
                                 errors.clone()
@@ -138,10 +169,11 @@ pub(crate) fn score_refinement(
                                 prefix_errors
                             },
                             errors,
-                            tokens: count,
+                            tokens: budget.total_tokens,
                             decisive: false,
                         };
                     }
+                    budget.bytes += 1;
                     for (i, predictor) in predictors.iter_mut().enumerate() {
                         if active[i] || i == 0 {
                             predictor.advance_stored_byte(&mut inputs[i]);
@@ -162,11 +194,11 @@ pub(crate) fn score_refinement(
                         .begin_known_huffman_block(tokens, input)
                         .expect("block-derived flush limit");
                 }
-                if prefix_errors.is_empty() && inputs[0].pos() >= 262144 {
+                if prefix_errors.is_empty() && budget.bytes >= 262144 {
                     prefix_errors = errors.clone();
                 }
                 for actual in tokens {
-                    if inputs[0].pos() >= max_bytes || count >= max_tokens {
+                    if budget.exhausted(inputs[0].pos(), max_tokens, max_bytes) {
                         return RefinementScores {
                             prefix_errors: if prefix_errors.is_empty() {
                                 errors.clone()
@@ -174,7 +206,7 @@ pub(crate) fn score_refinement(
                                 prefix_errors
                             },
                             errors,
-                            tokens: count,
+                            tokens: budget.total_tokens,
                             decisive: false,
                         };
                     }
@@ -192,10 +224,10 @@ pub(crate) fn score_refinement(
                             any_right |= !wrong;
                         }
                     }
-                    count += 1;
+                    budget.accept(actual);
                     {
                         if prefix_errors.is_empty()
-                            && (count >= minimum_tokens || inputs[0].pos() >= 262144)
+                            && (budget.tokens >= minimum_tokens || budget.bytes >= 262144)
                         {
                             prefix_errors = errors.clone();
                         }
@@ -210,7 +242,7 @@ pub(crate) fn score_refinement(
                                 return RefinementScores {
                                     errors,
                                     prefix_errors,
-                                    tokens: count,
+                                    tokens: budget.total_tokens,
                                     decisive: false,
                                 };
                             }
@@ -234,7 +266,7 @@ pub(crate) fn score_refinement(
                         return RefinementScores {
                             errors,
                             prefix_errors,
-                            tokens: count,
+                            tokens: budget.total_tokens,
                             decisive: true,
                         };
                     }
@@ -261,7 +293,7 @@ pub(crate) fn score_refinement(
             prefix_errors
         },
         errors,
-        tokens: count,
+        tokens: budget.total_tokens,
         decisive: true,
     }
 }
@@ -275,17 +307,18 @@ pub(crate) fn score_predictions(
 ) -> (usize, usize) {
     prediction.begin_chunk(blocks);
     let mut input = PreflateInput::new(plain);
-    let mut count = 0;
+    let mut budget = ScoringBudget::default();
     let mut mismatches = 0;
     for block in blocks {
         match &block.block_type {
             DeflateTokenBlockType::Stored { uncompressed } => {
                 prediction.begin_stored_block(&input).expect("idle block");
                 for _ in uncompressed {
-                    if input.pos() >= max_bytes || count >= max_tokens {
-                        return (mismatches, count);
+                    if budget.exhausted(input.pos(), max_tokens, max_bytes) {
+                        return (mismatches, budget.total_tokens);
                     }
                     prediction.advance_stored_byte(&mut input);
+                    budget.bytes += 1;
                 }
             }
             DeflateTokenBlockType::Huffman { tokens, .. } => {
@@ -294,12 +327,12 @@ pub(crate) fn score_predictions(
                     .expect("block-derived flush limit");
                 let mut frequency = TokenFrequency::default();
                 for actual in tokens {
-                    if input.pos() >= max_bytes || count >= max_tokens {
-                        return (mismatches, count);
+                    if budget.exhausted(input.pos(), max_tokens, max_bytes) {
+                        return (mismatches, budget.total_tokens);
                     }
                     mismatches +=
                         usize::from(score_token(prediction, actual, &mut input, &mut frequency));
-                    count += 1;
+                    budget.accept(actual);
                 }
             }
         }
@@ -307,7 +340,7 @@ pub(crate) fn score_predictions(
             .finish_block(&mut input)
             .expect("block-derived flush limit");
     }
-    (mismatches, count)
+    (mismatches, budget.total_tokens)
 }
 
 fn score_token(
@@ -327,6 +360,104 @@ fn score_token(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn repetition_budget_preserves_boundaries_and_hard_work_limits() {
+        let mut budget = ScoringBudget::default();
+        let repeated = DeflateToken::new_ref(258, 1);
+        budget.accept(&repeated);
+        assert_eq!(
+            (budget.tokens, budget.bytes, budget.total_tokens),
+            (0, 0, 1)
+        );
+        for token in [
+            DeflateToken::Literal(b'a'),
+            DeflateToken::new_ref(257, 1),
+            DeflateToken::new_ref(258, 2),
+        ] {
+            budget.accept(&token);
+        }
+        assert_eq!(
+            (budget.tokens, budget.bytes, budget.total_tokens),
+            (3, 516, 4)
+        );
+        assert!(!budget.exhausted(0, 4, 517));
+        assert!(budget.exhausted(0, 3, 517));
+        assert!(budget.exhausted(0, 4, 516));
+        assert!(!budget.exhausted(8 * 1024 * 1024 - 1, 4, 517));
+        assert!(budget.exhausted(8 * 1024 * 1024, 4, 517));
+        for _ in budget.total_tokens..32768 {
+            budget.accept(&repeated);
+        }
+        assert!(budget.exhausted(0, 4, 517));
+    }
+
+    #[test]
+    fn scoring_advances_repetitive_history_before_sampling_varied_tokens() {
+        use crate::deflate::{deflate_token::DeflateHuffmanType, deflate_writer::DeflateWriter};
+        let mut tokens = vec![DeflateToken::Literal(b'@'), DeflateToken::Literal(b'a')];
+        let mut bytes = b"@a".to_vec();
+        for _ in 0..6000 {
+            tokens.push(DeflateToken::new_ref(258, 1));
+            bytes.extend_from_slice(&[b'a'; 258]);
+        }
+        let tail = b"bcdefghabcde";
+        tokens.extend(tail.iter().copied().map(DeflateToken::Literal));
+        bytes.extend_from_slice(tail);
+        let token_count = tokens.len();
+        let blocks = vec![DeflateTokenBlock {
+            block_type: DeflateTokenBlockType::Huffman {
+                tokens,
+                huffman_type: DeflateHuffmanType::Static,
+            },
+            last: true,
+        }];
+        let plain = PlainText::new_with_data(bytes);
+        let parameters = TokenPredictorParameters {
+            add_policy: crate::parameters::DictionaryAddPolicy::AddAll,
+            nice_length: 258,
+            max_chain: 128,
+            ..crate::token_predictor::zlib_level_1_params()
+        };
+        let (errors, count) = score_predictions(
+            &mut PredictionState::new(&parameters),
+            &blocks,
+            &plain,
+            16,
+            64,
+        );
+        assert_eq!(count, token_count);
+        let scores = score_refinement(&[parameters; 2], &blocks, &plain, 1024, 1);
+        assert_eq!(scores.tokens, token_count);
+        assert_eq!(scores.errors, [errors; 2]);
+        assert!(scores.decisive);
+
+        let mut writer = DeflateWriter::new();
+        writer.encode_block(&blocks[0]).unwrap();
+        writer.flush();
+        let compressed = writer.detach_output();
+        let contents = crate::deflate::deflate_reader::DeflateContents {
+            compressed_size: compressed.len(),
+            blocks,
+        };
+        let mut predictor = crate::token_predictor::TokenPredictor::new(&parameters);
+        predictor.trace = Some(crate::token_predictor::TokenPredictionTrace::default());
+        let encoded = crate::stream_processor::encode_first_chunk_observed(
+            &mut predictor,
+            &contents,
+            &plain,
+            false,
+            None,
+            |_, _, _, _| {},
+        )
+        .unwrap();
+        assert_eq!(predictor.trace.as_ref().unwrap().token_count, count);
+        assert_eq!(predictor.trace.as_ref().unwrap().mismatch_count, errors);
+        assert_eq!(
+            crate::recreate_whole_deflate_stream(plain.text(), &encoded).unwrap(),
+            compressed
+        );
+    }
 
     #[test]
     fn refinement_stopping_counts_relative_errors_not_shared_predictions() {

@@ -15,7 +15,7 @@ def main() -> None:
     parser.add_argument("--db", help="SQLite database; overrides database.path in the local config")
     parser.add_argument("--config", help="Local TOML; defaults to corpus.local.toml")
     commands = parser.add_subparsers(dest="command", required=True)
-    scan = commands.add_parser("scan", help="Scan a local/private directory or file directly into SQLite")
+    scan = commands.add_parser("scan", help="Scan local files or SQLite-selected inputs into a new SQLite run")
     scan.add_argument("input")
     scan.add_argument("--label", required=True)
     scan.add_argument("--scanner", help="Release preflate_scan executable")
@@ -23,6 +23,11 @@ def main() -> None:
     scan.add_argument("--no-verify", action="store_true", help="Encode-only timing; disables reconstruction verification")
     scan.add_argument("--max-file-mib", type=int, default=256)
     scan.add_argument("--build-identity")
+    scan.add_argument("--jobs", type=int, help="Native file workers (default: 4)")
+    source = scan.add_mutually_exclusive_group()
+    source.add_argument("--from-run", help="Select local files from this completed run in the input database")
+    source.add_argument("--from-crawl", action="store_true", help="Select saved payloads from the input crawl catalog")
+    scan.add_argument("--source-root", help="Storage root for --from-crawl")
     merge = commands.add_parser("merge", help="Copy a completed SQLite scan, not a legacy JSON report")
     merge.add_argument("source")
     merge.add_argument("--source-label")
@@ -80,6 +85,8 @@ def main() -> None:
     if args.command == "outliers" and args.min_deflate_bytes is None:
         args.min_deflate_bytes = config.get("queries", {}).get("min_deflate_bytes", 1025)
     if args.command == "scan":
+        if args.source_root is not None and not args.from_crawl:
+            parser.error("--source-root requires --from-crawl")
         default = Path(__file__).resolve().parents[2] / "target" / "release" / (
             "preflate_scan.exe" if sys.platform == "win32" else "preflate_scan")
         scanner = args.scanner or config.get("locations", {}).get("scanner") or str(default)
@@ -90,6 +97,14 @@ def main() -> None:
                 command.append("--" + flag.replace("_", "-"))
         if args.build_identity is not None:
             command.extend(("--build-identity", args.build_identity))
+        if args.jobs is not None:
+            command.extend(("--jobs", str(args.jobs)))
+        if args.from_run is not None:
+            command.extend(("--from-run", args.from_run))
+        if args.from_crawl:
+            command.append("--from-crawl")
+        if args.source_root is not None:
+            command.extend(("--source-root", args.source_root))
         subprocess.run(command, check=True)
         return
     options = {field: connection[field] for field in

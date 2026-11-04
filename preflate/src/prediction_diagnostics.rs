@@ -117,6 +117,47 @@ fn generic_search_depth_does_not_imply_a_short_nice_length() {
 }
 
 #[test]
+fn ambiguous_prefix_insertion_keeps_later_four_byte_match_interiors() {
+    for endpoint_observed in [false, true] {
+        let mut tokens: Vec<_> = b"@abc".iter().copied().map(DeflateToken::Literal).collect();
+        tokens.extend([DeflateToken::new_ref(3, 3), DeflateToken::new_ref(3, 2)]);
+        tokens.extend(b"@abcdef".iter().copied().map(DeflateToken::Literal));
+        tokens.push(DeflateToken::new_ref(4, 6));
+        if endpoint_observed {
+            tokens.push(DeflateToken::new_ref(3, 1));
+        }
+        let (_, mut prefix, prefix_plain) = synthetic_stream(tokens.clone());
+        prefix.blocks.last_mut().unwrap().last = false;
+        let policy = estimate_preflate_parameters(&prefix, &prefix_plain)
+            .unwrap()
+            .add_policy;
+        assert_eq!(policy, DictionaryAddPolicy::AddFirst(4));
+        tokens.push(DeflateToken::new_ref(
+            3,
+            if endpoint_observed { 6 } else { 3 },
+        ));
+        tokens.extend([DeflateToken::Literal(b'!'), DeflateToken::Literal(b'$')]);
+        let (compressed, contents, plain) = synthetic_stream(tokens);
+        for hash in [
+            HashAlgorithm::RandomVector,
+            HashAlgorithm::Zlib {
+                hash_mask: 32767,
+                hash_shift: 5,
+            },
+        ] {
+            let parameters = TokenPredictorParameters {
+                add_policy: policy,
+                hash_algorithm: hash,
+                matching_type: MatchingType::Greedy,
+                ..synthetic_params()
+            };
+            let measured = measure(&contents, &plain, &parameters).unwrap();
+            verify(&measured, &plain, &compressed);
+        }
+    }
+}
+
+#[test]
 fn bounded_parameter_scores_match_full_prediction_traces() {
     for name in [
         "compressed_zlib_level6.deflate",
@@ -127,7 +168,8 @@ fn bounded_parameter_scores_match_full_prediction_traces() {
         let compressed = crate::utils::read_file(name);
         let (contents, plain) = parse_deflate_whole(&compressed).unwrap();
         let params = estimate_preflate_parameters(&contents, &plain).unwrap();
-        let measurement = measure(&contents, &plain, &params).unwrap();
+        let measurement =
+            measure_with_tracking(&contents, &plain, &params, false, false, 32768).unwrap();
         let score = crate::estimator::prediction_scoring::score_predictions(
             &mut crate::prediction_state::PredictionState::new(&params),
             &contents.blocks,
@@ -135,14 +177,42 @@ fn bounded_parameter_scores_match_full_prediction_traces() {
             usize::MAX,
             u32::MAX,
         );
+        assert!(score.1 <= 32768);
+        let mut remaining = score.1;
+        let mut end = 0;
+        'blocks: for block in &contents.blocks {
+            match &block.block_type {
+                DeflateTokenBlockType::Stored { uncompressed } => {
+                    end += uncompressed.len() as u32;
+                }
+                DeflateTokenBlockType::Huffman { tokens, .. } => {
+                    for token in tokens {
+                        if remaining == 0 {
+                            break 'blocks;
+                        }
+                        end += match token {
+                            DeflateToken::Literal(_) => 1,
+                            DeflateToken::Reference(reference) => reference.len(),
+                        };
+                        remaining -= 1;
+                    }
+                }
+            }
+        }
+        assert_eq!(remaining, 0);
         assert_eq!(
-            score,
-            (
-                measurement.trace.mismatch_count,
-                measurement.trace.token_count
-            ),
+            score.0,
+            measurement
+                .trace
+                .first_mismatches
+                .iter()
+                .filter(|(position, _, _)| *position < end)
+                .count(),
             "{name}"
         );
+        if score.1 == measurement.trace.token_count {
+            assert_eq!(score.0, measurement.trace.mismatch_count, "{name}");
+        }
         for limit in [0, 1, 257, 1024] {
             let (mismatches, tokens) = crate::estimator::prediction_scoring::score_predictions(
                 &mut crate::prediction_state::PredictionState::new(&params),
@@ -151,7 +221,18 @@ fn bounded_parameter_scores_match_full_prediction_traces() {
                 limit,
                 262144,
             );
-            assert!(tokens <= limit);
+            let informative = contents
+                .blocks
+                .iter()
+                .flat_map(|block| match &block.block_type {
+                    DeflateTokenBlockType::Huffman { tokens, .. } => tokens.as_slice(),
+                    DeflateTokenBlockType::Stored { .. } => &[],
+                })
+                .take(tokens)
+                .filter(|token| !matches!(token, DeflateToken::Reference(reference) if reference.dist() == 1 && reference.len() == 258))
+                .count();
+            assert!(informative <= limit);
+            assert!(tokens <= 32768);
             assert!(mismatches <= tokens);
         }
         assert_eq!(
@@ -4069,6 +4150,332 @@ fn diagnose_three_byte_backup_insertion() {
         &plain,
     );
     audit("windows3", RandomVectorHash {}, &contents, &plain);
+}
+
+#[test]
+#[ignore = "bounded offline insertion-origin audit; requires PREFLATE_REFERENCE"]
+fn diagnose_dictionary_insertion_origins() {
+    use crate::hash_chain::{HashChain, HashChainLibflate4};
+    use std::{collections::VecDeque, io::Read};
+
+    let path = std::env::var_os("PREFLATE_REFERENCE").expect("set PREFLATE_REFERENCE");
+    let mut compressed = Vec::new();
+    std::fs::File::open(path)
+        .unwrap()
+        .take(8 * 1024 * 1024 + 1)
+        .read_to_end(&mut compressed)
+        .unwrap();
+    assert!(compressed.len() <= 8 * 1024 * 1024);
+    let mut prefix = crate::deflate::deflate_reader::DeflateParser::new(32 * 1024 * 1024);
+    let first = prefix.parse(&compressed).unwrap();
+    let parameters = estimate_preflate_parameters(&first, prefix.plain_text()).unwrap();
+    println!("INSERTION parameters={parameters:?}");
+    println!(
+        "INSERTION first_evidence={:?}",
+        extract_preflate_info(&first.blocks).insertion_evidence
+    );
+    let first_info = extract_preflate_info(&first.blocks);
+    println!(
+        "INSERTION first_short_references={} first_minimum_length={} first_maximum_block_bytes={} stored_blocks={} stored_bytes={} maximum_distance={} maximum_short_distance={}",
+        first_info.short_reference_count,
+        first_info.min_len,
+        first_info.max_huffman_block_bytes,
+        first_info.count_stored_blocks,
+        first_info.stored_bytes,
+        first_info.max_dist,
+        first_info.max_dist_3_matches,
+    );
+    let first_plain = prefix.detach_plain_text();
+    let mut parser = crate::deflate::deflate_reader::DeflateParser::new(128 * 1024 * 1024);
+    let contents = parser.parse(&compressed).unwrap();
+    assert!(parser.is_done(), "audit exceeds plaintext limit");
+    let plain = parser.plain_text();
+    println!(
+        "INSERTION whole_evidence={:?}",
+        extract_preflate_info(&contents.blocks).insertion_evidence
+    );
+    let mut history: VecDeque<(u32, u32, usize, usize, bool)> = VecDeque::new();
+    let mut position = 0u32;
+    let mut skipped = 0;
+    let mut source_lengths = std::collections::BTreeMap::new();
+    let mut dual =
+        (parameters.hash_algorithm == HashAlgorithm::Libdeflate4).then(HashChainLibflate4::new);
+    let mut missing_short = 0;
+    for (block_index, block) in contents.blocks.iter().enumerate() {
+        let block_start = position;
+        let mut visit = |token: DeflateToken, token_index: usize, last: bool| {
+            if let DeflateToken::Reference(reference) = token {
+                let source = position - reference.dist();
+                let index = history.partition_point(|entry| entry.0 <= source);
+                let &(start, length, source_block, source_token, source_last) =
+                    history.get(index - 1).unwrap();
+                assert!(source < start + length);
+                if reference.len() == 3
+                    && let Some(chain) = &dual
+                {
+                    use crate::hash_algorithm::{HashImplementation, LibdeflateHash4};
+                    let mut input = PreflateInput::new(plain);
+                    input.advance(position);
+                    let mut found = false;
+                    let mut first_distances = Vec::new();
+                    for distance in chain.iterate::<0>(&input).take(65535) {
+                        if distance > 32768 {
+                            break;
+                        }
+                        found |= distance == reference.dist();
+                        if first_distances.len() < 8 {
+                            first_distances.push(distance);
+                        }
+                    }
+                    if !found {
+                        if missing_short < 16 {
+                            let head = chain.secondary_match(&input, 0).unwrap();
+                            let head_source = position - head;
+                            let head_index =
+                                history.partition_point(|entry| entry.0 <= head_source);
+                            let head_origin = history.get(head_index - 1).unwrap();
+                            println!(
+                                "DUAL_HASH missing position={position} reference={reference:?} block={block_index} token={token_index} source_origin={:?} secondary_distance={head} secondary_origin={head_origin:?} secondary_prefix_matches={} primary_hash_matches={} first_distances={first_distances:?}",
+                                history.get(index - 1).unwrap(),
+                                input.cur_chars(-(head as i32))[..3] == input.cur_chars(0)[..3],
+                                LibdeflateHash4 {}.get_hash(input.cur_chars(0))
+                                    == LibdeflateHash4 {}
+                                        .get_hash(input.cur_chars(-(reference.dist() as i32))),
+                            );
+                        }
+                        missing_short += 1;
+                    }
+                }
+                let mut inserted = false;
+                parameters.add_policy.update_hash(
+                    &plain.text()[start as usize..],
+                    start,
+                    length,
+                    |_, added, count| inserted |= (added..added + count).contains(&source),
+                );
+                if !inserted {
+                    if skipped < 32 {
+                        println!(
+                            "INSERTION omitted position={position} reference={reference:?} block={block_index} token={token_index} block_offset={} source={source} source_match_start={start} source_match_length={length} source_offset={} source_tail={} source_block={source_block} source_token={source_token} source_last={source_last} start_mod_32k={} end_mod_32k={}",
+                            position - block_start,
+                            source - start,
+                            start + length - source,
+                            start & 0x7fff,
+                            (start + length) & 0x7fff,
+                        );
+                    }
+                    skipped += 1;
+                    *source_lengths.entry(length).or_insert(0usize) += 1;
+                }
+            }
+            let length = match token {
+                DeflateToken::Literal(_) => 1,
+                DeflateToken::Reference(reference) => reference.len(),
+            };
+            if let Some(chain) = &mut dual {
+                parameters.add_policy.update_hash(
+                    &plain.text()[position as usize..],
+                    position,
+                    length,
+                    |bytes, position, count| chain.update_hash(bytes, position, count),
+                );
+            }
+            history.push_back((position, length, block_index, token_index, last));
+            position += length;
+            while history
+                .front()
+                .is_some_and(|entry| entry.0 + entry.1 + 32768 < position)
+            {
+                history.pop_front();
+            }
+        };
+        match &block.block_type {
+            DeflateTokenBlockType::Huffman { tokens, .. } => {
+                for (index, token) in tokens.iter().copied().enumerate() {
+                    visit(token, index, index + 1 == tokens.len());
+                }
+            }
+            DeflateTokenBlockType::Stored { uncompressed } => {
+                for (index, byte) in uncompressed.iter().copied().enumerate() {
+                    visit(
+                        DeflateToken::Literal(byte),
+                        index,
+                        index + 1 == uncompressed.len(),
+                    );
+                }
+            }
+        }
+    }
+    println!("INSERTION skipped={skipped} source_lengths={source_lengths:?}");
+    println!("DUAL_HASH missing_short_references={missing_short}");
+    if dual.is_some() {
+        let settings = &SLOW_PREFLATE_PARSER_SETTINGS[2];
+        let alternative = TokenPredictorParameters {
+            hash_algorithm: crate::models::zlib::DEFAULT_HASH,
+            matching_type: settings.match_type,
+            max_chain: settings.max_chain,
+            nice_length: settings.nice_length,
+            max_dist_3_matches: 4096,
+            very_far_matches_detected: false,
+            window_bits:
+                crate::estimator::preflate_parameter_estimator::estimate_preflate_window_bits(
+                    first_info.max_dist,
+                ),
+            ..parameters
+        };
+        for (name, candidate) in [("selected", parameters), ("zlib_level6", alternative)] {
+            let score = crate::estimator::prediction_scoring::score_predictions(
+                &mut crate::prediction_state::PredictionState::new(&candidate),
+                &first.blocks,
+                &first_plain,
+                4096,
+                524288,
+            );
+            let prefix =
+                measure_with_tracking(&first, &first_plain, &candidate, false, false, 16).unwrap();
+            println!(
+                "DUAL_HASH diagnostic_only candidate={name} bounded_score={score:?} prefix_bytes={} prefix_mismatches={}",
+                prefix.corrections.len(),
+                prefix.trace.mismatch_count,
+            );
+            if name == "zlib_level6" {
+                let mut start = 0;
+                for (index, block) in first.blocks.iter().enumerate() {
+                    let length: u32 = match &block.block_type {
+                        DeflateTokenBlockType::Stored { uncompressed } => uncompressed.len() as u32,
+                        DeflateTokenBlockType::Huffman { tokens, .. } => tokens
+                            .iter()
+                            .map(|token| match token {
+                                DeflateToken::Literal(_) => 1,
+                                DeflateToken::Reference(reference) => reference.len(),
+                            })
+                            .sum(),
+                    };
+                    for &(position, actual, predicted) in &prefix.trace.first_mismatches {
+                        if position >= start && position < start + length && position < 524288 {
+                            let shape = |token| match token {
+                                DeflateToken::Literal(_) => (1, 0),
+                                DeflateToken::Reference(reference) => {
+                                    (reference.len(), reference.dist())
+                                }
+                            };
+                            println!("QUALITY_MISMATCH position={position} block={index} block_start={start} block_bytes={length} bytes_to_end={} actual_length_distance={:?} predicted_length_distance={:?} followed_by_empty_stored={}",
+                                start + length - position, shape(actual), shape(predicted),
+                                first.blocks.get(index + 1).is_some_and(|next| matches!(&next.block_type,
+                                    DeflateTokenBlockType::Stored { uncompressed } if uncompressed.is_empty())));
+                        }
+                    }
+                    start += length;
+                }
+                let mut block_prediction = crate::block_predictor::BlockPrediction::default();
+                block_prediction.begin_chunk(&first.blocks);
+                let leading_score = crate::estimator::prediction_scoring::score_predictions(
+                    &mut crate::prediction_state::PredictionState::new(&candidate),
+                    &first.blocks[..first.blocks.len().min(64)],
+                    &first_plain,
+                    4096,
+                    524288,
+                );
+                println!(
+                    "QUALITY_FLUSH whole_chunk_flush_enabled={} first_64_blocks_score={leading_score:?}",
+                    block_prediction.flush
+                );
+            }
+            for max_bytes in [
+                524288, 1048576, 2097152, 4194304, 8388608, 16777216, 33554432,
+            ] {
+                let (errors, tokens) = crate::estimator::prediction_scoring::score_predictions(
+                    &mut crate::prediction_state::PredictionState::new(&candidate),
+                    &first.blocks,
+                    &first_plain,
+                    usize::MAX,
+                    max_bytes,
+                );
+                println!(
+                    "QUALITY_SAMPLE candidate={name} max_bytes={max_bytes} errors={errors} tokens={tokens} mismatch_percent={:.3}",
+                    100.0 * errors as f64 / tokens.max(1) as f64,
+                );
+            }
+        }
+        let measurement = measure(&contents, plain, &alternative).unwrap();
+        verify(&measurement, plain, &compressed[..contents.compressed_size]);
+        println!(
+            "DUAL_HASH diagnostic_only candidate=zlib_level6 whole_bytes={} whole_mismatches={} verified=true",
+            measurement.corrections.len(),
+            measurement.trace.mismatch_count,
+        );
+        for (index, settings) in SLOW_PREFLATE_PARSER_SETTINGS.iter().enumerate().skip(3) {
+            for hash_algorithm in [
+                crate::models::zlib::DEFAULT_HASH,
+                HashAlgorithm::Zlib {
+                    hash_mask: 4095,
+                    hash_shift: 4,
+                },
+            ] {
+                let candidate = TokenPredictorParameters {
+                    hash_algorithm,
+                    matching_type: settings.match_type,
+                    nice_length: settings.nice_length,
+                    max_chain: settings.max_chain,
+                    ..alternative
+                };
+                let score = crate::estimator::prediction_scoring::score_predictions(
+                    &mut crate::prediction_state::PredictionState::new(&candidate),
+                    &first.blocks,
+                    &first_plain,
+                    4096,
+                    524288,
+                );
+                let measured = measure(&first, &first_plain, &candidate).unwrap();
+                println!(
+                    "DUAL_HASH diagnostic_only level={} hash={hash_algorithm:?} bounded_score={score:?} prefix_bytes={} prefix_mismatches={}",
+                    index + 4,
+                    measured.corrections.len(),
+                    measured.trace.mismatch_count,
+                );
+                if measured.trace.mismatch_count == 0 {
+                    let whole = measure(&contents, plain, &candidate).unwrap();
+                    verify(&whole, plain, &compressed[..contents.compressed_size]);
+                    println!(
+                        "DUAL_HASH diagnostic_only level={} hash={hash_algorithm:?} whole_bytes={} whole_mismatches={} verified=true",
+                        index + 4,
+                        whole.corrections.len(),
+                        whole.trace.mismatch_count,
+                    );
+                }
+            }
+        }
+    }
+    if matches!(
+        parameters.add_policy,
+        DictionaryAddPolicy::AddFirst(3) | DictionaryAddPolicy::AddFirstAndLast(3)
+    ) {
+        let baseline = measure(&first, &first_plain, &parameters).unwrap();
+        println!(
+            "INSERTION original_prefix_bytes={} original_prefix_mismatches={}",
+            baseline.corrections.len(),
+            baseline.trace.mismatch_count,
+        );
+        for add_policy in [
+            DictionaryAddPolicy::AddFirst(4),
+            DictionaryAddPolicy::AddFirstAndLast(4),
+        ] {
+            let candidate = TokenPredictorParameters {
+                add_policy,
+                ..parameters
+            };
+            let prefix = measure(&first, &first_plain, &candidate).unwrap();
+            let measurement = measure(&contents, plain, &candidate).unwrap();
+            verify(&measurement, plain, &compressed[..contents.compressed_size]);
+            println!(
+                "INSERTION diagnostic_only policy={add_policy:?} prefix_bytes={} prefix_mismatches={} whole_bytes={} whole_mismatches={} verified=true",
+                prefix.corrections.len(),
+                prefix.trace.mismatch_count,
+                measurement.corrections.len(),
+                measurement.trace.mismatch_count,
+            );
+        }
+    }
 }
 
 #[test]

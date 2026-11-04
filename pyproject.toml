@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "Corpus generation, profiling and regression analysis for preflate-rs"
 requires-python = ">=3.14"
 dependencies = [
+    "ijson>=3.4",
     "requests>=2.34.2",
     "warcio>=1.8.1",
 ]

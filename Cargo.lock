@@ -657,6 +657,7 @@ dependencies = [
  "default-boxed",
  "deranged",
  "env_logger",
+ "serde",
  "serde_json",
 ]
 

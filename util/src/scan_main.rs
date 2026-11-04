@@ -1,8 +1,12 @@
 #![forbid(unsafe_code)]
 
+mod scan_baseline;
 mod scan_database;
 mod scan_fs;
+mod scan_parallel;
 mod scan_perf;
+mod scan_progress;
+mod scan_source;
 #[cfg(test)]
 use scan_fs::cloud_attributes;
 use scan_fs::cloud_only;
@@ -28,11 +32,28 @@ type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 #[derive(Debug, Parser, Serialize)]
 #[command(
     name = "preflate_scan",
-    about = "Recursively diagnose DEFLATE modelling without Zstd"
+    about = "Diagnose DEFLATE files or SQLite-selected sources without Zstd"
 )]
 struct Cli {
-    /// File or directory to scan. Source files are never modified.
+    /// File/directory, or SQLite database with a source/baseline selector. Sources are never modified.
     input: PathBuf,
+
+    /// Read local file paths from a completed SQLite run instead of walking a directory.
+    #[arg(long, conflicts_with = "from_crawl", conflicts_with_all = ["trace", "perf_output"])]
+    from_run: Option<String>,
+
+    /// Rescan a completed run ID and write JSON differences without recording a run.
+    #[arg(long, value_parser = clap::value_parser!(i64).range(1..), requires = "output",
+        conflicts_with_all = ["from_run", "from_crawl", "source_root", "database", "trace", "perf_output", "no_verify"])]
+    baseline_run: Option<i64>,
+
+    /// Read distinct saved payload paths from a Common Crawl SQLite catalog.
+    #[arg(long, conflicts_with_all = ["trace", "perf_output"])]
+    from_crawl: bool,
+
+    /// Storage root for --from-crawl; defaults to the catalog's parent directory.
+    #[arg(long, requires = "from_crawl")]
+    source_root: Option<PathBuf>,
 
     /// New JSON report to create (an existing file is never overwritten).
     #[arg(
@@ -62,6 +83,10 @@ struct Cli {
     /// Explicit binary/build label for performance provenance; never inferred from package version.
     #[arg(long)]
     build_identity: Option<String>,
+
+    /// File workers (default: 4; performance repetitions and single-file traces default to 1).
+    #[arg(long, value_parser = clap::value_parser!(u32).range(1..=64))]
+    jobs: Option<u32>,
 
     #[arg(long, default_value_t = 4096)]
     max_chain: u32,
@@ -116,6 +141,17 @@ struct Cli {
     /// Retain every rejected heuristic signature instead of counts and eight examples per file.
     #[arg(long)]
     include_rejected_candidates: bool,
+}
+
+impl Cli {
+    fn worker_count(&self) -> usize {
+        self.jobs
+            .unwrap_or(if self.perf_output.is_some() || self.trace {
+                1
+            } else {
+                4
+            }) as usize
+    }
 }
 
 fn parse_percent(value: &str) -> std::result::Result<f64, String> {
@@ -294,11 +330,6 @@ fn inspect_file(path: PathBuf, metadata: &Metadata, cli: &Cli) -> FileReport {
         return report;
     }
 
-    eprintln!(
-        "Scanning {} ({} bytes)",
-        report.path.display(),
-        metadata.len()
-    );
     let mut contents = Vec::new();
     let read =
         File::open(&report.path).and_then(|file| file.take(limit + 1).read_to_end(&mut contents));
@@ -418,24 +449,23 @@ fn is_scan_output(path: &Path, output: &Path, cli: &Cli) -> bool {
             }))
 }
 
-fn walk(
+fn walk_tasks(
     root: &Path,
     output: &Path,
     cli: &Cli,
-    mut perf: Option<&mut scan_perf::PerformanceWriter>,
-    mut emit: impl FnMut(FileReport) -> Result<()>,
+    perf: Option<&Path>,
+    mut emit: impl FnMut(scan_parallel::Task) -> Result<()>,
 ) -> Result<()> {
+    use scan_parallel::Task;
     let mut directories = vec![root.to_path_buf()];
     while let Some(path) = directories.pop() {
-        if is_scan_output(&path, output, cli)
-            || perf.as_ref().is_some_and(|writer| path == writer.path)
-        {
+        if is_scan_output(&path, output, cli) || perf.is_some_and(|output| path == output) {
             continue;
         }
         let metadata = match fs::symlink_metadata(&path) {
             Ok(metadata) => metadata,
             Err(error) => {
-                emit(FileReport::error(path, error))?;
+                emit(Task::Ready(FileReport::error(path, error)))?;
                 continue;
             }
         };
@@ -443,15 +473,15 @@ fn walk(
             let mut report = FileReport::new(path);
             report.status = "skipped";
             report.error = Some("symlink or non-regular filesystem entry".into());
-            emit(report)?;
+            emit(Task::Ready(report))?;
         } else if metadata.is_dir() {
             let entries = match fs::read_dir(&path) {
                 Ok(entries) => entries,
                 Err(error) => {
-                    emit(FileReport::error(
+                    emit(Task::Ready(FileReport::error(
                         path,
                         format!("listing directory: {error}"),
-                    ))?;
+                    )))?;
                     continue;
                 }
             };
@@ -466,7 +496,7 @@ fn walk(
                             Ok(_) => {
                                 let child = entry.path();
                                 if is_scan_output(&child, output, cli)
-                                    || perf.as_ref().is_some_and(|writer| child == writer.path)
+                                    || perf.is_some_and(|output| child == output)
                                 {
                                     continue;
                                 }
@@ -475,61 +505,127 @@ fn walk(
                                         if metadata.is_file()
                                             && !metadata.file_type().is_symlink() =>
                                     {
-                                        emit(match perf.as_deref_mut() {
-                                            Some(writer) => {
-                                                writer.inspect(child, &metadata, cli)?
-                                            }
-                                            None => inspect_file(child, &metadata, cli),
-                                        })?
+                                        emit(Task::File(child, metadata))?
                                     }
                                     Ok(_) => {
                                         let mut report = FileReport::new(child);
                                         report.status = "skipped";
                                         report.error =
                                             Some("symlink or non-regular filesystem entry".into());
-                                        emit(report)?;
+                                        emit(Task::Ready(report))?;
                                     }
-                                    Err(error) => emit(FileReport::error(child, error))?,
+                                    Err(error) => {
+                                        emit(Task::Ready(FileReport::error(child, error)))?
+                                    }
                                 }
                             }
-                            Err(error) => emit(FileReport::error(entry.path(), error))?,
+                            Err(error) => {
+                                emit(Task::Ready(FileReport::error(entry.path(), error)))?
+                            }
                         }
                     }
-                    Err(error) => emit(FileReport::error(
+                    Err(error) => emit(Task::Ready(FileReport::error(
                         path.clone(),
                         format!("reading directory entry: {error}"),
-                    ))?,
+                    )))?,
                 }
             }
         } else {
-            emit(match perf.as_deref_mut() {
-                Some(writer) => writer.inspect(path, &metadata, cli)?,
-                None => inspect_file(path, &metadata, cli),
-            })?;
+            emit(Task::File(path, metadata))?;
         }
     }
     Ok(())
 }
 
+fn walk(
+    root: &Path,
+    output: &Path,
+    cli: &Cli,
+    perf: Option<&mut scan_perf::PerformanceWriter>,
+    mut emit: impl FnMut(FileReport) -> Result<()>,
+) -> Result<()> {
+    if let Some(writer) = perf {
+        let perf_path = writer.path.clone();
+        return walk_tasks(root, output, cli, Some(&perf_path), |task| {
+            let report = match task {
+                scan_parallel::Task::File(path, metadata) => {
+                    writer.inspect(path, &metadata, cli)?
+                }
+                task => task.inspect(cli),
+            };
+            emit(report)
+        });
+    }
+    scan_parallel::run(
+        cli,
+        |pool| {
+            walk_tasks(root, output, cli, None, |task| {
+                pool.submit(task.path().to_path_buf(), task)
+            })
+        },
+        |_, report| emit(report),
+    )
+}
+
 fn run(cli: &Cli) -> Result<Summary> {
-    let root = fs::canonicalize(&cli.input)?;
+    if cli.perf_output.is_some() && cli.worker_count() != 1 {
+        return Err(
+            "--perf-output requires --jobs 1 so process CPU timings remain meaningful".into(),
+        );
+    }
+    let source = (cli.from_run.is_some() || cli.from_crawl || cli.baseline_run.is_some())
+        .then(|| scan_source::DatabaseSource::open(cli))
+        .transpose()?;
+    let root = match &source {
+        Some(source) => source.root.clone(),
+        None => fs::canonicalize(&cli.input)?,
+    };
+    let mut configuration = serde_json::to_value(cli)?;
+    configuration["jobs"] = serde_json::json!(cli.worker_count());
+    configuration["input"] = serde_json::to_value(&root)?;
+    if let Some(source) = &source {
+        configuration["source_database"] = serde_json::to_value(&source.path)?;
+    }
     if cli.trace && !root.is_file() {
         return Err("--trace requires a single file, not a directory".into());
     }
+    if cli.baseline_run.is_some() {
+        return scan_baseline::run(
+            source.as_ref().ok_or("missing baseline source")?,
+            cli,
+            &configuration,
+        );
+    }
+    let total = source
+        .as_ref()
+        .map(|source| source.file_count)
+        .or_else(|| root.is_file().then_some(1));
+    let mut progress = scan_progress::Progress::new(total);
     let start = Instant::now();
     if let Some(path) = &cli.database {
         let label = cli.label.as_deref().ok_or("--database requires --label")?;
-        let mut database = scan_database::ScanDatabase::create(path, label, cli)?;
+        let mut database = scan_database::ScanDatabase::create_with_configuration(
+            path,
+            label,
+            cli,
+            &configuration,
+        )?;
         let output_path = fs::canonicalize(path)?;
         let mut summary = Summary::default();
-        walk(&root, &output_path, cli, None, |report| {
-            eprintln!("{}: {}", report.status, report.path.display());
+        let mut emit = |report: FileReport| {
             database.record(&report)?;
             summary.record(&report);
+            progress.update(&summary, false);
             Ok(())
-        })?;
+        };
+        if let Some(source) = &source {
+            source.scan(&output_path, cli, &mut emit)?;
+        } else {
+            walk(&root, &output_path, cli, None, &mut emit)?;
+        }
         finish_summary(&mut summary, start);
         database.finish(&summary)?;
+        progress.update(&summary, true);
         return Ok(summary);
     }
     let output_name = cli.output.as_ref().ok_or("missing report output")?;
@@ -551,14 +647,13 @@ fn run(cli: &Cli) -> Result<Summary> {
         ",\"started_unix_seconds\":{},\"configuration\":",
         SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs()
     )?;
-    serde_json::to_writer(&mut output, cli)?;
+    serde_json::to_writer(&mut output, &configuration)?;
     write!(output, ",\"root\":")?;
     serde_json::to_writer(&mut output, &root)?;
     writeln!(output, ",\"files\":[")?;
     let mut first = true;
     let mut summary = Summary::default();
-    walk(&root, &output_path, cli, perf.as_mut(), |report| {
-        eprintln!("{}: {}", report.status, report.path.display());
+    let mut emit = |report: FileReport| {
         if !first {
             writeln!(output, ",")?;
         }
@@ -566,14 +661,21 @@ fn run(cli: &Cli) -> Result<Summary> {
         serde_json::to_writer(&mut output, &report)?;
         output.flush()?;
         summary.record(&report);
+        progress.update(&summary, false);
         Ok(())
-    })?;
+    };
+    if let Some(source) = &source {
+        source.scan(&output_path, cli, &mut emit)?;
+    } else {
+        walk(&root, &output_path, cli, perf.as_mut(), &mut emit)?;
+    }
     finish_summary(&mut summary, start);
     write!(output, "\n],\"summary\":")?;
     serde_json::to_writer(&mut output, &summary)?;
     writeln!(output, "}}")?;
     output.flush()?;
     output.get_ref().sync_all()?;
+    progress.update(&summary, true);
     if let Some(writer) = &mut perf {
         writer.finish()?;
     }

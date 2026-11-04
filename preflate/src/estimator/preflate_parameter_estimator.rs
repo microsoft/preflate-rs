@@ -79,7 +79,9 @@ pub(crate) fn estimate_preflate_profile(
 
     let window_bits = estimate_preflate_window_bits(info.max_dist);
     let mem_level = estimate_preflate_mem_level(info.max_tokens_per_block);
-    let add_policy = info.insertion_evidence.inferred_policy();
+    let add_policy = info
+        .insertion_evidence
+        .inferred_policy(info.ends_with_final_block);
 
     let max_token_count = (1 << (6 + mem_level)) - 1;
 
