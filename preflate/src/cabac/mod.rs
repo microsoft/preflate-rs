@@ -1,4 +1,4 @@
-//! Minimal subset of the cabac crate (https://github.com/mcroomp/cabac) used by preflate.
+//! Minimal subset of the cabac crate (<https://github.com/mcroomp/cabac>) used by preflate.
 
 #[cfg(test)]
 pub mod debug;

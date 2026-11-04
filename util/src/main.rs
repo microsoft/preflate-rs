@@ -121,9 +121,9 @@ fn main() {
             compress_start.elapsed()
         );
 
-        totalseen += stats.deflate_compressed_size as u64;
-        totalbaseline += stats.zstd_baseline_size as u64;
-        totalzstd += stats.zstd_compressed_size as u64;
+        totalseen += stats.deflate_compressed_size;
+        totalbaseline += stats.zstd_baseline_size;
+        totalzstd += stats.zstd_compressed_size;
 
         println!(
             "total seen ratio {totalzstd}:{totalbaseline}:{totalseen} {:.1}",

@@ -31,6 +31,10 @@ impl Write for MeasureWriteSink {
 }
 
 #[derive(Debug)]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "Retain stream state inline without extra per-stream allocations."
+)]
 pub(crate) enum ChunkParseState {
     Start,
     /// we are looking for a deflate stream or PNG chunk. The data of the PNG file
@@ -55,7 +59,7 @@ pub(crate) fn write_chunk_block_v2(
             write_varint(encoder, chunk.corrections.len() as u32)?;
             write_varint(encoder, state.plain_text().text().len() as u32)?;
             encoder.write_all(&chunk.corrections)?;
-            encoder.write_all(&state.plain_text().text())?;
+            encoder.write_all(state.plain_text().text())?;
 
             let compressed_size = emit_compressed_block(
                 BLOCK_COMPRESSION_ZSTD | BLOCK_TYPE_DEFLATE,
@@ -198,14 +202,14 @@ impl ProcessBuffer for PreflateContainerProcessor {
     ) -> Result<()> {
         use crate::container_common::COMPRESSED_WRAPPER_VERSION_3;
 
-        if self.input_complete && (input.len() > 0 || !input_complete) {
+        if self.input_complete && (!input.is_empty() || !input_complete) {
             return Err(PreflateError::new(
                 ExitCode::InvalidParameter,
                 "more data provided after input_complete signaled",
             ));
         }
 
-        if input.len() > 0 {
+        if !input.is_empty() {
             self.compression_stats.deflate_compressed_size += input.len() as u64;
             self.input_crc.update(input);
             self.content.extend_from_slice(input);
@@ -359,7 +363,7 @@ impl ProcessBuffer for PreflateContainerProcessor {
                             write_varint(encoder, res.corrections.len() as u32)?;
                             write_varint(encoder, state.plain_text().len() as u32)?;
                             encoder.write_all(&res.corrections)?;
-                            encoder.write_all(&state.plain_text().text())?;
+                            encoder.write_all(state.plain_text().text())?;
                             let sz = emit_compressed_block(
                                 BLOCK_COMPRESSION_ZSTD | BLOCK_TYPE_DEFLATE_CONTINUE,
                                 encoder,
@@ -389,7 +393,7 @@ impl ProcessBuffer for PreflateContainerProcessor {
         if input_complete && !self.input_complete {
             self.input_complete = true;
 
-            if self.content.len() > 0 {
+            if !self.content.is_empty() {
                 let encoder = self.encoder.as_mut().unwrap();
                 write_varint(encoder, self.content.len() as u32)?;
                 encoder.write_all(&self.content)?;
@@ -451,11 +455,14 @@ fn webp_compress(
     corrections: &[u8],
     idat: &IdatContents,
 ) -> Result<()> {
-    use crate::container_common::BLOCK_TYPE_PNG;
     log::debug!("{:?}", idat);
+
+    #[cfg(not(feature = "webp"))]
+    let _ = (result, plain_text, corrections);
 
     #[cfg(feature = "webp")]
     if let Some(png_header) = idat.png_header {
+        use crate::container_common::BLOCK_TYPE_PNG;
         use crate::idat_parse::{PngColorType, undo_png_filters};
         use std::ops::Deref;
 
@@ -478,8 +485,8 @@ fn webp_compress(
             let enc = webp::Encoder::new(
                 &bitmap,
                 match png_header.color_type {
-                    PngColorType::RGB => webp::PixelLayout::Rgb,
-                    PngColorType::RGBA => webp::PixelLayout::Rgba,
+                    PngColorType::Rgb => webp::PixelLayout::Rgb,
+                    PngColorType::Rgba => webp::PixelLayout::Rgba,
                 },
                 png_header.width,
                 png_header.height,
@@ -520,15 +527,15 @@ fn webp_compress(
             idat.write_to_bytestream(result)?;
             result.write_all(&filters)?;
 
-            result.write_all(&corrections)?;
+            result.write_all(corrections)?;
             result.write_all(comp.deref())?;
 
             return Ok(());
         }
     }
 
-    return preflate_rs::err_exit_code(
+    preflate_rs::err_exit_code(
         ExitCode::InvalidCompressedWrapper,
         "Webp compression not supported",
-    );
+    )
 }

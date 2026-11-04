@@ -1,0 +1,23 @@
+[project]
+name = "preflate-tools"
+version = "0.1.0"
+description = "Corpus generation, profiling and regression analysis for preflate-rs"
+requires-python = ">=3.14"
+dependencies = [
+    "requests>=2.34.2",
+    "warcio>=1.8.1",
+]
+
+[project.optional-dependencies]
+jpeg = ["Pillow>=10"]
+parquet = [
+    "pyarrow>=26.0.0",
+]
+
+[tool.uv]
+package = false
+
+[[tool.uv.index]]
+name = "microsoft-python"
+url = "https://packagefeedproxy.microsoft.io/pypi/simple/"
+default = true

@@ -73,7 +73,7 @@ pub trait CabacReader<Context> {
             value += 1;
         }
 
-        return Ok(value);
+        Ok(value)
     }
 
     /// reads num_bits of the lower bits of a known size
@@ -87,6 +87,6 @@ pub trait CabacReader<Context> {
             coef |= (self.get(&mut contexts[cmp::min(A - 1, i)])? as u64) << i;
         }
 
-        return Ok(coef);
+        Ok(coef)
     }
 }

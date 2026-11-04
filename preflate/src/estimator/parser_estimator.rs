@@ -4,12 +4,10 @@
  *  This software incorporates material from third parties. See NOTICE.txt for details.
  *--------------------------------------------------------------------------------------------*/
 
-use super::add_policy_estimator::DictionaryAddPolicy;
+use crate::parameters::DictionaryAddPolicy;
 
 #[cfg(test)]
-use crate::{
-    estimator::preflate_parse_config::MatchingType, models::generic::resolve_matching_policy,
-};
+use crate::{models::generic::resolve_matching_policy, parameters::MatchingType};
 
 // Confidence thresholds for inference, not constraints imposed by DEFLATE.
 const MIN_LAZY_OBSERVATIONS: u16 = 4;

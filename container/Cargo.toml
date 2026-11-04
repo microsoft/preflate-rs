@@ -7,8 +7,8 @@ license.workspace = true
 rust-version.workspace = true
 repository.workspace = true
 description = """
-Scans binary files for zStd streams and uses Preflate-rs to decompress the stream and repack with
-zStd compression. For PNG files, we use WEBP compression for RGB and RGBA to get better results.
+Scans binary files for DEFLATE streams and uses preflate-rs to extract plaintext and
+reconstruction data for Zstd compression. PNG images can use lossless WebP storage.
 """
 categories = ["compression"]
 keywords = ["gzip", "deflate", "zlib", "zip"]

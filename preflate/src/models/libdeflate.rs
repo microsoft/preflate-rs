@@ -7,17 +7,17 @@ use crate::{
     deflate::{deflate_constants::MIN_MATCH, deflate_token::DeflateTokenReference},
     estimator::{
         CandidateEvidence, DistancePolicy, InsertionConstraint, ParserEvidencePolicy,
-        ParserInference, PreflateStreamInfo, add_policy_estimator::DictionaryAddPolicy,
-        preflate_parameter_estimator::TokenPredictorParameters,
-        preflate_parse_config::MatchingType,
+        ParserInference, PreflateStreamInfo,
     },
     hash_algorithm::HashAlgorithm,
     hash_chain_holder::{HashChainHolder, MatchResult},
+    parameters::{DictionaryAddPolicy, MatchingType, TokenPredictorParameters},
     preflate_input::PreflateInput,
 };
 
 use super::MatchPrediction;
 
+#[derive(Copy, Clone)]
 pub(crate) struct SearchRestrictions {
     pub minimum_input: u32,
     pub window_edge_exclusion: u32,
@@ -26,15 +26,17 @@ pub(crate) struct SearchRestrictions {
 #[inline(always)]
 pub(crate) fn search_restrictions(
     hash: HashAlgorithm,
-    matching: MatchingType,
+    matching: &crate::reconstruction_parameters::BehaviorSettings,
 ) -> SearchRestrictions {
+    use crate::reconstruction_parameters::BehaviorSettings;
     let restricted = hash == HashAlgorithm::Libdeflate4Fast15
-        || (hash == HashAlgorithm::Libdeflate4 && matching == MatchingType::LibdeflateGreedy);
+        || (hash == HashAlgorithm::Libdeflate4
+            && matches!(matching, BehaviorSettings::LibdeflateGreedy(_)));
     SearchRestrictions {
         minimum_input: if restricted { 5 } else { 0 },
         window_edge_exclusion: u32::from(
             restricted
-                || hash == CHAIN_HASH && matches!(matching, MatchingType::LibdeflateLazy { .. }),
+                || hash == CHAIN_HASH && matches!(matching, BehaviorSettings::LibdeflateLazy(_)),
         ),
     }
 }
@@ -45,10 +47,14 @@ pub(crate) fn skip_secondary(hash: HashAlgorithm, offset: u32, previous_length: 
 }
 
 #[inline(always)]
-pub(crate) fn initial_search_length(matching: MatchingType, minimum: u32) -> u32 {
+pub(crate) fn initial_search_length(
+    matching: &crate::reconstruction_parameters::BehaviorSettings,
+    minimum: u32,
+) -> u32 {
     if matches!(
         matching,
-        MatchingType::LibdeflateGreedy | MatchingType::LibdeflateLazy { .. }
+        crate::reconstruction_parameters::BehaviorSettings::LibdeflateGreedy(_)
+            | crate::reconstruction_parameters::BehaviorSettings::LibdeflateLazy(_)
     ) {
         minimum - 1
     } else {
@@ -147,33 +153,30 @@ pub(crate) fn predict_lazy(
     input: &PreflateInput,
     state: &dyn HashChainHolder,
     current: DeflateTokenReference,
-    nice_length: u32,
-    max_chain: u32,
+    search: crate::reconstruction_parameters::ChainSettings,
     two_positions: bool,
 ) -> MatchPrediction {
-    if current.len() < nice_length && input.remaining() > current.len() {
-        let depth = max_chain.saturating_sub(1);
+    if current.len() < search.nice_length && input.remaining() > current.len() {
+        let depth = search.budget.max_chain.saturating_sub(1);
         if let MatchResult::Success(next) =
             state.match_token_1(current.len() - 1, (depth >> 1).max(1), input)
+            && prefer_match(current, next, 2)
         {
-            if prefer_match(current, next, 2) {
-                return MatchPrediction::Literal {
-                    pending_reference: Some(next),
-                    pending_literals: 0,
-                };
-            }
+            return MatchPrediction::Literal {
+                pending_reference: Some(next),
+                pending_literals: 0,
+            };
         }
-        if two_positions && input.remaining() > current.len() + 1 {
-            if let MatchResult::Success(next) =
+        if two_positions
+            && input.remaining() > current.len() + 1
+            && let MatchResult::Success(next) =
                 state.match_token_2(current.len() - 1, (depth >> 2).max(1), input)
-            {
-                if prefer_match(current, next, 6) {
-                    return MatchPrediction::Literal {
-                        pending_reference: Some(next),
-                        pending_literals: 1,
-                    };
-                }
-            }
+            && prefer_match(current, next, 6)
+        {
+            return MatchPrediction::Literal {
+                pending_reference: Some(next),
+                pending_literals: 1,
+            };
         }
     }
     MatchPrediction::Reference
@@ -234,6 +237,8 @@ fn primary_chain_reuse_preserves_fast_and_incompatible_candidates() {
         required_chain: 100,
         distance_policy: DistancePolicy::ZlibWindow,
         parser: ParserInference::Unresolved,
+        shallow_miniz_greedy: false,
+        minimum_nice_length: 0,
     };
     for (hash, depth, minimum, bytes, insertion, expected) in [
         (
@@ -366,6 +371,8 @@ fn chained_insertion_normalizes_only_an_unobserved_cutoff() {
         required_chain: 100,
         distance_policy: DistancePolicy::ZlibWindow,
         parser: ParserInference::Unresolved,
+        shallow_miniz_greedy: false,
+        minimum_nice_length: 0,
     };
     for (bytes, hash) in [
         (299999, HashAlgorithm::Libdeflate4Fast),
@@ -377,6 +384,26 @@ fn chained_insertion_normalizes_only_an_unobserved_cutoff() {
                 .hash_algorithm,
             hash
         );
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Profile(pub(super) TokenPredictorParameters);
+
+impl Profile {
+    pub(super) fn parameters(self) -> TokenPredictorParameters {
+        self.0
+    }
+
+    pub(super) fn parameters_mut(&mut self) -> &mut TokenPredictorParameters {
+        &mut self.0
+    }
+
+    pub(super) fn fingerprint(
+        parameters: TokenPredictorParameters,
+        evidence: &CandidateEvidence,
+    ) -> Option<Self> {
+        fingerprint(parameters, evidence).map(Self)
     }
 }
 
@@ -439,9 +466,10 @@ pub(crate) fn fingerprint(
 
 #[test]
 fn verify_libdeflate_greedy_recognition() {
-    use crate::{
-        deflate::deflate_reader::parse_deflate_whole,
-        estimator::preflate_parameter_estimator::estimate_preflate_parameters, utils::read_file,
+    use {
+        crate::deflate::deflate_reader::parse_deflate_whole,
+        crate::estimator::preflate_parameter_estimator::estimate_preflate_parameters,
+        crate::utils::read_file,
     };
 
     for (level, nice_length) in [(2, 10), (3, 14), (4, 30)] {

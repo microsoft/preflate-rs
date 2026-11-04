@@ -385,11 +385,25 @@ pub(crate) fn recreate_tree_with_rules<D: PredictionDecoder>(
 fn calc_tc_lengths_without_trailing_zeros(bit_lengths: &[u8]) -> usize {
     let mut len = bit_lengths.len();
     // remove trailing zeros
-    while len > 4 && bit_lengths[TREE_CODE_ORDER_TABLE[len - 1]] == 0 {
+    // Omitted symbols in the trimmed predicted alphabet have zero length.
+    while len > 4
+        && bit_lengths
+            .get(TREE_CODE_ORDER_TABLE[len - 1])
+            .copied()
+            .unwrap_or(0)
+            == 0
+    {
         len -= 1;
     }
 
     len
+}
+
+#[test]
+fn trimmed_code_alphabet_handles_permuted_missing_symbols() {
+    assert_eq!(calc_tc_lengths_without_trailing_zeros(&[1; 11]), 10);
+    assert_eq!(calc_tc_lengths_without_trailing_zeros(&[1; 19]), 19);
+    assert_eq!(calc_tc_lengths_without_trailing_zeros(&[0; 19]), 4);
 }
 
 fn predict_ld_trees<D: PredictionEncoder>(

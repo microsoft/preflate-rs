@@ -5,12 +5,9 @@
 
 use crate::{
     deflate::deflate_constants::MIN_LOOKAHEAD,
-    estimator::{
-        CandidateEvidence, InsertionConstraint, ParserInference,
-        add_policy_estimator::DictionaryAddPolicy,
-        preflate_parameter_estimator::TokenPredictorParameters,
-    },
+    estimator::{CandidateEvidence, InsertionConstraint, ParserInference, PreflateStreamInfo},
     hash_algorithm::HashAlgorithm,
+    parameters::{DictionaryAddPolicy, TokenPredictorParameters},
     preflate_input::PlainText,
 };
 
@@ -54,16 +51,10 @@ impl ShortMatchEvidence {
     }
 }
 
-pub(crate) fn substitute_candidate(
-    hashes: &mut [Option<HashAlgorithm>; 3],
-    evidence: &ShortMatchEvidence,
-) {
-    if evidence.supports_chromium()
-        && let Some(slot) = hashes.iter_mut().skip(1).rfind(|slot| slot.is_some())
-    {
-        // Keep the memory-level hash and reuse an optional alternate's existing budget.
-        *slot = Some(HashAlgorithm::Chromium { hash_mask: 0x7fff });
-    }
+pub(crate) fn hash_candidate(evidence: &ShortMatchEvidence) -> Option<HashAlgorithm> {
+    evidence
+        .supports_chromium()
+        .then_some(HashAlgorithm::Chromium { hash_mask: 0x7fff })
 }
 
 pub(crate) fn add_policy(
@@ -94,6 +85,75 @@ pub(crate) fn depth_add_policy(
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Profile(pub(super) TokenPredictorParameters);
+
+impl Profile {
+    pub(super) fn parameters(self) -> TokenPredictorParameters {
+        self.0
+    }
+
+    pub(super) fn parameters_mut(&mut self) -> &mut TokenPredictorParameters {
+        &mut self.0
+    }
+
+    pub(super) fn fingerprint(
+        parameters: TokenPredictorParameters,
+        evidence: &CandidateEvidence,
+    ) -> Option<Self> {
+        profile(parameters, evidence).map(Self)
+    }
+
+    pub(super) fn alternatives(
+        parameters: TokenPredictorParameters,
+        info: &PreflateStreamInfo,
+    ) -> [Option<Self>; 2] {
+        let [fast, lazy] = alternatives(parameters, info);
+        [fast.map(Self), lazy.map(Self)]
+    }
+}
+
+pub(crate) fn alternatives(
+    parameters: TokenPredictorParameters,
+    info: &PreflateStreamInfo,
+) -> [Option<TokenPredictorParameters>; 2] {
+    if info.chromium_short_matches.incompatible
+        || info.matches_to_start_detected
+        || info.max_dist > 32768 - MIN_LOOKAHEAD
+    {
+        return [None, None];
+    }
+    let fast = &super::zlib::ZLIB_PREFLATE_PARSER_SETTINGS[match parameters.add_policy {
+        DictionaryAddPolicy::AddFirst(5) => 1,
+        DictionaryAddPolicy::AddFirst(6) => 2,
+        _ => 0,
+    }];
+    let slow = &super::zlib::SLOW_PREFLATE_PARSER_SETTINGS[2];
+    [fast, slow].map(|config| {
+        let is_slow = config.dictionary_add_policy == DictionaryAddPolicy::AddAll;
+        if is_slow && info.max_dist_3_matches > super::zlib::SHORT_MATCH_CUTOFF {
+            return None;
+        }
+        Some(TokenPredictorParameters {
+            hash_algorithm: HashAlgorithm::Chromium { hash_mask: 0x7fff },
+            matching_type: config.match_type,
+            add_policy: config.dictionary_add_policy,
+            nice_length: config.nice_length,
+            max_chain: config.max_chain,
+            window_bits: 15,
+            very_far_matches_detected: false,
+            max_dist_3_matches: if info.short_reference_count == 0 {
+                0
+            } else if is_slow {
+                super::zlib::SHORT_MATCH_CUTOFF
+            } else {
+                32768
+            },
+            ..parameters
+        })
+    })
+}
+
 pub(crate) fn profile(
     mut parameters: TokenPredictorParameters,
     evidence: &CandidateEvidence,
@@ -112,9 +172,7 @@ pub(crate) fn profile(
                     ParserInference::Lazy {
                         longest_deferred_match,
                     },
-                    crate::estimator::preflate_parse_config::MatchingType::Lazy {
-                        max_lazy, ..
-                    },
+                    crate::parameters::MatchingType::Lazy { max_lazy, .. },
                 ) => max_lazy > longest_deferred_match,
                 _ => true,
             }
@@ -131,30 +189,15 @@ pub(crate) fn profile(
 }
 
 #[inline(always)]
-pub(crate) fn distance_limits(
-    algorithm: HashAlgorithm,
-    normal_prediction: bool,
-    window: u32,
-    history: u32,
-) -> (u32, u32) {
-    if normal_prediction && matches!(algorithm, HashAlgorithm::Chromium { .. }) {
-        let maximum = window - MIN_LOOKAHEAD;
-        (history.min(maximum), history.min(maximum - 1))
-    } else {
-        super::zlib::distance_limits(window, history)
-    }
+pub(crate) fn distance_limits(window: u32, history: u32) -> (u32, u32) {
+    let maximum = window - MIN_LOOKAHEAD;
+    (history.min(maximum), history.min(maximum - 1))
 }
 
 #[test]
 fn chromium_oldest_source_is_inclusive_only_at_the_head() {
-    let hash = HashAlgorithm::Chromium { hash_mask: 0x7fff };
-    assert_eq!(distance_limits(hash, true, 32768, 65536), (32506, 32505));
-    assert_eq!(distance_limits(hash, true, 512, 100), (100, 100));
-    assert_eq!(distance_limits(hash, false, 32768, 65536), (32507, 32506));
-    assert_eq!(
-        distance_limits(super::zlib::DEFAULT_HASH, true, 32768, 65536),
-        (32507, 32506)
-    );
+    assert_eq!(distance_limits(32768, 65536), (32506, 32505));
+    assert_eq!(distance_limits(512, 100), (100, 100));
 }
 
 #[test]
@@ -189,28 +232,44 @@ fn recognition_requires_repeated_compatible_short_references_and_is_bounded() {
 #[test]
 fn recognition_reuses_an_optional_candidate_and_preserves_the_memory_level_hash() {
     for memory_level in 1..=9 {
-        let original = super::zlib::candidate_hashes(memory_level);
-        let mut hashes = original;
-        substitute_candidate(&mut hashes, &ShortMatchEvidence::default());
-        assert_eq!(hashes, original);
+        let mut info = crate::estimator::extract_preflate_info(&[]);
+        info.min_len = 3;
+        let original = super::candidate_hashes(memory_level, &info, DictionaryAddPolicy::AddAll)
+            .collect::<Vec<_>>();
         let evidence = ShortMatchEvidence {
             sampled: 16,
             high_bit_aliases: 16,
             incompatible: false,
         };
-        substitute_candidate(&mut hashes, &evidence);
-        assert_eq!(hashes[0], original[0]);
-        assert_eq!(
-            hashes.iter().flatten().count(),
-            original.iter().flatten().count()
-        );
+        info.chromium_short_matches = evidence;
+        let hashes = super::candidate_hashes(memory_level, &info, DictionaryAddPolicy::AddAll)
+            .collect::<Vec<_>>();
+        let mut expected = original.clone();
+        *expected.last_mut().unwrap() = HashAlgorithm::Chromium { hash_mask: 0x7fff };
+        assert_eq!(hashes, expected);
+        assert!(hashes.contains(&super::zlib::memory_hash(memory_level)));
+        assert_eq!(hashes.len(), original.len());
         assert_eq!(
             hashes
                 .iter()
-                .flatten()
                 .filter(|hash| matches!(hash, HashAlgorithm::Chromium { .. }))
                 .count(),
             1
         );
     }
+}
+
+#[test]
+fn fallback_admits_missing_aliases_but_rejects_contradictory_evidence() {
+    let parameters = crate::token_predictor::zlib_level_1_params();
+    let mut info = crate::estimator::extract_preflate_info(&[]);
+    assert!(alternatives(parameters, &info).iter().all(Option::is_some));
+    info.chromium_short_matches = ShortMatchEvidence {
+        sampled: 1,
+        high_bit_aliases: 1,
+        incompatible: false,
+    };
+    assert!(alternatives(parameters, &info).iter().all(Option::is_some));
+    info.chromium_short_matches.incompatible = true;
+    assert_eq!(alternatives(parameters, &info), [None, None]);
 }

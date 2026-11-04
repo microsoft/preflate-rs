@@ -4,15 +4,57 @@
  *--------------------------------------------------------------------------------------------*/
 
 use crate::hash_algorithm::HashAlgorithm;
+use crate::parameters::{DictionaryAddPolicy, TokenPredictorParameters};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Profile(pub(super) TokenPredictorParameters);
+
+impl Profile {
+    pub(super) fn parameters(self) -> TokenPredictorParameters {
+        self.0
+    }
+
+    pub(super) fn parameters_mut(&mut self) -> &mut TokenPredictorParameters {
+        &mut self.0
+    }
+
+    pub(super) fn inferred(parameters: TokenPredictorParameters) -> Option<Self> {
+        if !matches!(
+            parameters.add_policy,
+            DictionaryAddPolicy::AddAll
+                | DictionaryAddPolicy::AddFirstAndLast(_)
+                | DictionaryAddPolicy::AddFirstWith32KBoundary
+        ) {
+            return None;
+        }
+        match parameters.hash_algorithm {
+            HashAlgorithm::ZlibNG | HashAlgorithm::Crc32cHash => Some(Self(parameters)),
+            _ => None,
+        }
+    }
+}
 
 // Both signatures must be tested, independently of this machine's CPU features.
 pub(crate) const HASHES: [HashAlgorithm; 2] = [HashAlgorithm::ZlibNG, HashAlgorithm::Crc32cHash];
+pub(super) const SLIDE_POINT: u32 = 32768 - crate::deflate::deflate_constants::MIN_LOOKAHEAD;
+
+pub(crate) fn greedy_nice_length(parameters: &TokenPredictorParameters) -> Option<u32> {
+    if !HASHES.contains(&parameters.hash_algorithm) {
+        return None;
+    }
+    // Observed insertion cutoffs are lower bounds on the family's fixed thresholds.
+    match parameters.add_policy {
+        DictionaryAddPolicy::AddFirstWith32KBoundary
+        | DictionaryAddPolicy::AddFirstAndLast(0..=4) => Some(8),
+        DictionaryAddPolicy::AddFirstAndLast(5..=96) => Some(16),
+        DictionaryAddPolicy::AddFirstAndLast(97..=191) => Some(32),
+        _ => None,
+    }
+}
 
 #[inline(always)]
 pub(crate) fn is_at_32k_boundary(length: u32, pos: u32) -> bool {
-    length > 1
-        && ((pos & 0x7fff) <= (32768 - 0x106))
-        && (((pos + length) & 0x7fff) >= (32768 - 0x106))
+    length > 1 && ((pos & 0x7fff) <= SLIDE_POINT) && (((pos + length) & 0x7fff) >= SLIDE_POINT)
 }
 
 #[test]
@@ -20,11 +62,8 @@ fn verify_zlibng_recognition() {
     use crate::{
         PreflateConfig,
         deflate::deflate_reader::parse_deflate_whole,
-        estimator::{
-            add_policy_estimator::DictionaryAddPolicy,
-            preflate_parameter_estimator::estimate_preflate_parameters,
-            preflate_parse_config::MatchingType,
-        },
+        estimator::preflate_parameter_estimator::estimate_preflate_parameters,
+        parameters::{DictionaryAddPolicy, MatchingType},
         preflate_whole_deflate_stream, recreate_whole_deflate_stream,
         utils::read_file,
     };
@@ -51,7 +90,7 @@ fn verify_zlibng_recognition() {
 
 #[test]
 fn boundary_insertion_adds_the_last_match_byte_only_when_crossing_the_slide_point() {
-    use crate::estimator::add_policy_estimator::DictionaryAddPolicy;
+    use crate::parameters::DictionaryAddPolicy;
 
     let bytes = [b'a'; 8];
     for base in [0, 32768, 65536] {

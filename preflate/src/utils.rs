@@ -91,14 +91,14 @@ pub fn assert_block_eq(
                 huffman_type: hb,
             },
         ) => {
-            assert_eq_array(&ta, &tb);
+            assert_eq_array(ta, tb);
             assert_eq!(ha, hb);
         }
         (
             DeflateTokenBlockType::Stored { uncompressed: ua },
             DeflateTokenBlockType::Stored { uncompressed: ub },
         ) => {
-            assert_eq_array(&ua, &ub);
+            assert_eq_array(ua, ub);
         }
         _ => {
             panic!("unexpected block type");

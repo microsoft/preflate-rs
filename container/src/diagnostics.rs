@@ -9,7 +9,7 @@ use preflate_rs::{
 };
 #[cfg(feature = "diagnostics")]
 use preflate_rs::{DeflateHuffmanType, DeflateToken, DeflateTokenBlockType};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::{
     idat_parse::parse_idat,
@@ -99,7 +99,8 @@ pub struct StreamTrace {
     pub blocks_truncated: bool,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct DiagnosticParameters {
     hash_algorithm: String,
     matching_type: String,
@@ -131,6 +132,46 @@ impl From<TokenPredictorParameters> for DiagnosticParameters {
             matches_to_start_detected: p.matches_to_start_detected,
             very_far_matches_detected: p.very_far_matches_detected,
         }
+    }
+}
+
+/// Extract a previously reported raw stream, assembling PNG IDAT chunks if needed.
+#[cfg(feature = "diagnostics")]
+pub fn diagnostic_deflate_payload(
+    source: &[u8],
+    offset: usize,
+    deflate_offset: Option<usize>,
+    deflate_bytes: usize,
+) -> preflate_rs::Result<std::borrow::Cow<'_, [u8]>> {
+    use preflate_rs::err_exit_code;
+
+    if let Some(start) = deflate_offset {
+        let Some(end) = start.checked_add(deflate_bytes) else {
+            return err_exit_code(ExitCode::InvalidDeflate, "reported payload range overflows");
+        };
+        let Some(payload) = source.get(start..end) else {
+            return err_exit_code(
+                ExitCode::ShortRead,
+                "reported payload is outside source file",
+            );
+        };
+        Ok(std::borrow::Cow::Borrowed(payload))
+    } else {
+        let Some(chunks) = source.get(offset..) else {
+            return err_exit_code(
+                ExitCode::ShortRead,
+                "reported IDAT offset is outside source file",
+            );
+        };
+        let (_, mut payload) = parse_idat(None, chunks)?;
+        if payload.len() < deflate_bytes {
+            return err_exit_code(
+                ExitCode::ShortRead,
+                "reported payload exceeds assembled IDAT data",
+            );
+        }
+        payload.truncate(deflate_bytes);
+        Ok(std::borrow::Cow::Owned(payload))
     }
 }
 
@@ -468,7 +509,7 @@ pub fn scan_deflate_diagnostics_with_options(
                 }
                 "zip"
             }
-            Signature::IDAT if index >= 4 && src[index..].starts_with(b"IDAT") => "png_idat",
+            Signature::Idat if index >= 4 && src[index..].starts_with(b"IDAT") => "png_idat",
             _ => {
                 index += 1;
                 continue;
@@ -586,7 +627,7 @@ pub fn scan_deflate_diagnostics_with_options(
                     Ok(())
                 })
             }
-            Signature::IDAT => {
+            Signature::Idat => {
                 diagnostic.offset = index - 4;
                 parse_idat(None, &src[index - 4..]).map(|(idat, payload)| {
                     next = index - 4 + idat.total_chunk_length;

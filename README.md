@@ -72,6 +72,13 @@ budgets, and its window exclusions. Libdeflate lazy matching compares length and
 distance cost, with bounded one- or two-position lookahead. Reconstruction uses the
 serialized profile rather than repeating the fingerprint.
 
+Normal shallow miniz greedy streams require repeated evidence that a second probe
+group would have improved an emitted match, not just a small observed chain depth.
+The existing depth walk reuses unused classic-hash head slots for these bounded
+comparisons; incompatible references, greedy-skipped matches at literal positions,
+and established lazy evidence veto the fingerprint. No additional prediction pass
+or hash array is required.
+
 Libdeflate's fastest fingerprint shares the existing 16-bit hash calculations and
 depth table, with at most 256 references checking the merged 15-bit, two-entry
 buckets. The legacy 16-bit candidate remains available if that fingerprint fails.
@@ -132,19 +139,113 @@ settings to family policy modules. Its result explicitly distinguishes inferred 
 fingerprints, and accepted prefix-prediction refinements. The evidence-only parser
 resolver cannot overwrite either protected choice, even if the hash is unchanged.
 Prefix validation measures token fit over its bounded sample, not full-stream
-optimality. The existing traversal count, candidate set, refinement order, and
-confidence thresholds are preserved.
+optimality. The existing depth-walk candidate set, traversal count,
+refinement-slot count, and default acceptance thresholds are preserved.
+
+Candidate scoring, correction encoding, and reconstruction share a codec-free
+runtime parameter vocabulary in `preflate/src/parameters.rs`, independent of
+estimation policy. Family-specific parameter projection and insertion behavior
+remain in `models`. They also share a codec-free prediction state in
+`preflate/src/prediction_state.rs`. Estimation uses this
+common module directly, without constructing the correction-coding wrapper.
+Scoring, work limits, general profile-refinement acceptance, and refinement stopping belong to
+`preflate/src/estimator/prediction_scoring.rs`. All consumers use
+the same matching, lazy lookahead, block/flush state, and actual-token acceptance
+transitions. Scoring counts initial prediction errors without correction-recovery searches
+or CABAC coding; encoding and reconstruction resolve corrections before accepting
+the actual token. The depth estimator remains a separate evidence-only walk.
+
+The shared token lifecycle is **predict -> resolve the actual token -> accept**.
+Prediction can retain lazy lookahead; acceptance updates hash history using the
+actual token and discards lookahead superseded by a corrected reference.
+Encoder and decoder resolve corrections before acceptance, while scoring already
+knows the actual token. Huffman-tree frequencies, traces, and parameter reporting
+remain outside the shared matching state. Block/flush transitions must agree
+across all consumers, including stored blocks and chunked continuation.
+The state's fields are private. Consumers use semantic operations for block
+transitions, stored-byte history, token prediction/acceptance, correction recovery,
+and normalization proofs rather than manipulating hash or lookahead internals.
+The state reports safe normalization bounds; `TokenPredictor` applies
+profile-specific canonicalization to select reconstruction parameters.
+Block setup retains one private active context with the initial empty-input
+state and lookahead-limit status. Nested setup and unmatched finishing are errors;
+failed finishing retains the context. Successful finishing records stored-block or
+Huffman-block history and restores limited input. Known-token Huffman setup infers
+limit/reset decisions; decoded setup applies them. Both retain those decisions in
+the same context, including reset-tag presence from before setup, for the encoder
+to read without exposing a separate transition object. Correction codecs remain
+outside the shared state.
+
+For ambiguous full-insertion lazy streams using the table hash, a bounded
+continuation can distinguish hashes that agree over the initial 1024-token /
+256 KiB prefix. This applies only above 1024 compressed bytes, with observed
+three-byte references and a full power-of-two-minus-one token buffer. The
+buffer-sized zlib hash must survive the existing depth walk and support the
+coupled lazy-16 / nice-128 / chain-128 candidate. Continuation requires zero or
+one baseline prefix error and an equal error count for the alternative;
+otherwise the original prefix decision is retained.
+Otherwise, only the baseline and this one alternative continue, retaining their
+hash and lazy state rather than replaying progressively longer prefixes.
+An eight-error lead stops the comparison; shared correct predictions do not
+increase confidence. End of input also ends scoring. A hard cap of 32768 tokens,
+with token starts restricted to the first 1 MiB, bounds ambiguous work and falls
+back to the original prefix decision.
+This is a heuristic for prediction fit, not statistical certainty, compressor
+identification, or a full-stream guarantee. The broader 4096-token / 512 KiB
+profile refinement is unchanged.
+
+The absence of three-byte references does not exclude a three-byte hash. For
+ambiguous full-insertion lazy streams with an observed power-of-two token buffer,
+the existing table-hash refinement slot can consider the Windows-style hash and
+its complete lazy tuple together: lookahead 258, nice length 258, and search
+budget 100. A different hash's inferred depth does not constrain that tuple.
+Selection still requires a perfect bounded prefix (at most 4096 tokens starting
+within 512 KiB), at least two baseline errors, and at least 64 scored tokens.
+This adds no depth-walk hash state, full-stream pass, trial encoding, or refinement
+slot; existing three-byte-reference refinements retain their order. A successful
+prefix is evidence for a model, not proof of producer identity or full-stream fit.
 
 Compressor policies and library-specific runtime behavior live in `preflate/src/models/`, with modules for
-zlib, zlib-ng, libdeflate, miniz, Windows DEFLATE, and the generic fallback.
+zlib, zlib-ng, libdeflate, miniz, Windows DEFLATE, Chromium, and the generic fallback.
 The family modules own candidate signatures, recognition preferences, evidence
 restrictions, coupled profile settings, and family-specific refinements. They also
 own lazy-match decisions, library-specific search restrictions, adaptive match
 minimums, and insertion-boundary rules. Zlib's
-shipped parser tables live with its policy; their previous public paths remain
-re-exports. The generic fallback borrows those tables without asserting zlib
-identity. Windows and zlib-ng currently register their signatures and retain
-generic inference where no stronger fingerprint exists.
+shipped parser tables live with its policy; internal consumers import them directly
+from `models::zlib`. The generic fallback borrows those tables without asserting zlib
+identity. Windows also models lazy recomputation, deferred-match token-buffer
+boundaries, and two trailing literals; zlib-ng retains generic inference where
+no stronger fingerprint exists.
+For partial-insertion greedy streams, fast defaults must satisfy both the
+observed insertion cutoff and the required search depth. An observed
+`AddFirst(4)` does not establish level-1 search effort or a nice length of 8.
+The generic fallback can borrow a compatible fast tuple with a non-zlib hash,
+without claiming zlib identity. Full-insertion generic search keeps its
+independent nice limit; chain rank alone does not establish an early exit.
+For `AddFirst` fast insertion, the existing depth walk also samples at most 256
+eligible chain heads per hash, spaced across the plaintext and comparing at most
+33 bytes each. Other insertion engines retain their own defaults.
+Four newer matching heads bypassed for older references reject a contradicted
+fast nice limit. This reuses the current
+head and adds no hash state, chain traversal, prediction replay, or estimation pass.
+Table-hash alternatives belong to the Windows policy module, but retain `Custom`
+profiling when only the hash and generic lazy parser fit. Only candidates using
+the Windows-specific parser receive its family profile. Shared traversal code
+dispatches to family-owned rules; hash-window distance policy is selected once
+when constructing the matcher, not repeatedly inside its search loop.
+
+One shared profile selector returns `CompressorProfile`, partitioned into
+family-owned `Profile` structs plus `Custom` for unresolved or nonstandard
+combinations. Each selected variant retains its complete parameter tuple through
+parser resolution and bounded prefix refinement; a shared hash does not assign
+producer identity. Inferred family candidates remain refinable, while fingerprint
+and prefix-validation provenance protect accepted choices. The internal
+`estimate_preflate_profile` entry point retains this family information; the
+existing parameter API lowers it to concrete predictor settings at its boundary.
+Family profile tags are not serialized and do not enter matcher dispatch.
+This organizational change preserves existing profile preferences, parameter
+normalization, candidate order, and probe budgets; it does not introduce preset
+trials or force known presets onto ambiguous tiny streams.
 
 Collectors, hash-chain traversal, and predictor state management remain shared
 mechanics; they do not independently select a compressor family. Family helpers
@@ -190,16 +291,116 @@ parameters must remain valid for later chunks. Other model families and
 full-window search policies retain their existing windows.
 
 The same complete-tiny-stream gate permits short-match cutoff canonicalization
-for all model families. During existing prediction, accepted three-byte
+for all model families. During existing prediction, influential accepted three-byte
 candidates raise an inclusive lower bound and rejected candidates lower an
-inclusive upper bound. Only cutoffs inside this decision-preserving interval
-are eligible: zero, common cutoffs (4096, 8192, 32768), then binary range endpoints,
-with the original retained if none fits. A zero cutoff is not blindly replaced,
+inclusive upper bound. Only cutoffs inside this prediction-preserving interval
+are eligible: zero when allowed, otherwise the most coarsely aligned binary-grid
+value in the interval (for example, 3072 for an interval of 2500 through 3500).
+The selector uses a single highest-differing-bit calculation rather than searching
+a sparse candidate list. A zero cutoff is not blindly replaced,
 and compressor identity is not inferred from a hash signature. Selection respects
 the current singleton-u32 encoding width, so it cannot grow the parameter field;
 it requires no trial encoding. Window and cutoff normalization preserve the
 same prediction path and CABAC payload. Partial initial chunks and streams at
 least 1024 compressed bytes retain both original settings.
+
+Ordinary lazy models using rotating or table-XOR hash chains can defer a rejected
+three-byte constraint until the next existing fresh search. These chains already
+model literal insertion during lazy lookahead. Before 32 KiB of unprefixed input,
+a longer next match can therefore prove that accepting the rejected candidate
+would emit the same literal and converge to the same deferred-match state.
+The proof requires an unchanged input limit, a committed literal, identical search
+budgets, and no early exit at length three. Block/reset boundaries, corrected
+references, unsupported policies, and unresolved proofs retain the original bound.
+Accepted candidates that defer without caching a reference need no lower bound.
+The encoder uses one provisional record, with no added searches or prediction
+passes. Reconstruction uses the finalized parameters without enabling this analysis.
+
+Complete tiny streams also canonicalize an unobserved insertion threshold to
+`AddAll` when every actual reference is at most that threshold. Active skip
+policies and boundary-specific insertion are retained. The final family profile
+survives into prediction; this equivalence does not infer a different producer.
+During the existing block encoding, the encoder also collects the token-buffer
+capacities that preserve every token-count correction. It prefers the standard
+1023-token capacity, or another existing memory-level capacity within the same
+encoded width. Full nonfinal blocks pin their original capacity. Windows lazy
+parsing retains its capacity because buffer edges also affect literal prediction.
+These changes add no passes or probes and preserve the exact CABAC payload.
+Partial chunks and streams at least 1024 compressed bytes are excluded.
+
+Generic greedy profiles retain the observed search-budget lower bound without deriving
+`nice_length` from it: reaching a reference at a shallow chain rank does not prove
+that a shorter earlier match would have stopped the compressor's search. Their
+initial limit is 255, increased when a longer match is observed and multiple chain
+candidates can be visited, avoiding an extra value byte where possible. Recognized
+zlib/zlib-ng fast insertion policies supply family-owned early-exit lengths
+independently of chain depth. Coupled lazy defaults, fingerprints, and validated
+family refinements retain their settings. This is a modelling default, not a proof
+of equivalent predictions. It adds no estimation passes or prediction replays;
+existing searches retain their chain budgets but may visit more entries before stopping.
+
+Reconstruction parameters describe predictor behavior, not just producer identity.
+Some fields are inactive for a selected model: the chained `MiniZ` parser ignores
+`nice_length`, and `HashAlgorithm::None` has no dictionary search or insertion
+settings. `MiniZFast` uses the ordinary greedy matcher, so its nice-length cutoff
+is still active. `Dynamic` and `Mixed` block strategies currently predict the
+same block type, so serialization canonicalizes `Mixed` to `Dynamic` at every
+stream size. This alias removal needs no stream-dependent observations.
+A filtered lazy parser with a minimum match length of six
+does not use the three-byte distance cutoff, including during correction recovery.
+The `inactive_profile_fields` tests compare CABAC bytes and
+verify exact reconstruction for these cases. Estimated window, search, distance,
+and token-count limits are not generally removable: they can change prediction
+and correction coding. Compact profile serialization must restore effective
+values or prove a model-specific equivalence rather than discard estimates.
+
+The current reconstruction schema nests settings under their selected behavior.
+Dictionary-free streams have no hash, history, insertion, or search payload.
+Dictionary behaviors carry only their applicable parser settings: lazy lookahead
+belongs to lazy variants, MiniZ probe settings have no nice-length value, and the
+filtered-six-byte lazy variant has no three-byte cutoff. Hash mask/shift fields
+remain specific to the corresponding hash variant. Common token-count and block
+prediction settings remain independent because they affect every behavior.
+The estimator and diagnostic parameter interface remains flat. Conversion at the
+behavior boundary selects typed settings used by encoding and matching. Enum variants carry
+shared structs: dictionary storage (hash, window, insertion) is reused across
+applicable parsers. Chain and MiniZ common structs each pair their search settings
+with their own distance policy; a MiniZ branch cannot carry chain distance settings
+or a nice-length field. Model helpers receive typed
+lookahead, chain, or shared search-budget structs rather than the flat estimates.
+Source-history limits similarly consume a shared struct after policy dispatch.
+The hash-holder factory dispatches directly from the behavior variant's common
+struct, selecting a concrete chain or MiniZ search type alongside the concrete
+hash. Search and distance helpers consume that engine's common struct and shared
+transient requests; they do not redispatch an independent engine enum per lookup.
+Holder construction precomputes normal and expanded chain distance ceilings,
+including hash-specific head/chain boundaries and full-window edge exclusions.
+Matching only clamps those ceilings to the currently admitted history. Reset
+boundaries remain position-dependent; MiniZ also retains its input-length-dependent
+window subtraction. These prepared limits are runtime state, not extra serialized
+settings.
+Exhaustive dispatch checks new variants at compile time; behavioral equivalence
+and exact reconstruction still require tests. Decoding can restore the effective
+flat interface, but matching consumes the same typed settings as serialization.
+Active values, including nonstandard search budgets, are retained.
+This step does not introduce preset IDs, parameter sweeps, or new estimation work.
+The existing flat `0x83` path retains its unfiltered three-byte cutoff when
+constructing typed runtime settings; it does not apply the current filtered-six
+serialization omission to legacy behavior.
+
+Distance settings follow the matching consumer's branches rather than compressor
+labels: disabled prediction, MiniZ's specialized distance rule, or ordinary chain
+limits (full window, hash-specific window, or RLE distance one). Full-window chain
+matching does not store an ignored strategy. MiniZ stores neither an ignored
+full-window flag nor an enabled strategy; without full-window override, HuffOnly
+and Store still select disabled prediction. Source-start admission belongs to
+full-window, hash-window, or enabled MiniZ prediction. RLE distance one has no
+source-start field: normal matching ignores it, and raw hop recovery uses its
+own history bound. There is only one distance selector within each engine, not
+a repeated chain/MiniZ selector. The window size remains common even for disabled prediction:
+`calculate_hops` and `hop_match` use it for correction recovery. Tests cover
+identical CABAC bytes, exact reconstruction, MiniZ's window-minus-input limit,
+source-start admission during expanded searches, and the disabled-match gate.
 
 Large zlib-style streams can separately select short-match suppression from
 contradictory token evidence. The existing depth walk inspects at most 256
@@ -212,6 +413,38 @@ select a zero cutoff. Genuine short references remain recoverable through
 corrections. Unlike tiny-stream canonicalization, this deliberately changes
 predictions to reduce correction cost; it adds no pass, trial encoding, hash table,
 or serialized parameter.
+
+For ambiguous streams larger than 1024 compressed bytes, a final bounded check
+can repair coupled hash, parser, and insertion choices. It tries at most eleven
+family-specific alternatives against the same 4096-token / 512 KiB prefix.
+An already-perfect prefix, fewer than two baseline errors, or fewer than 64
+scored tokens leaves every parameter unchanged. A replacement must have zero
+prefix errors with identical coverage. This admits shallow greedy miniz hidden
+by hash ranking or insertion estimates, Chromium without enough three-byte
+aliases, ambiguous table-hash insertion and lazy settings, Windows token-buffer
+boundaries, low-memory zlib flush settings, and underestimated slow parsing.
+It also checks table-XOR lazy parsing hidden behind a libdeflate fingerprint
+when the observed three-byte references remain within the 4096-byte cutoff.
+Shallow table-XOR lazy fingerprints also receive a greedy Windows-style
+alternative that preserves observed search depth and reserves two tail bytes.
+For partial table-XOR blocks, a slow Windows-style alternative retains the
+unobserved token-buffer capacity while checking 258-byte lazy lookahead and
+the full window. It shares the deferred-match marker and two-literal tail
+policy rather than treating a short final block as a full token buffer.
+Partial blocks do not establish the producer's hash-table memory level, so a
+coupled tuned-zlib alternative also checks a 14-bit hash despite a smaller
+observed token count. Contradictory three-byte aliases reject the Chromium alternatives
+before prediction trials. It adds no full-stream estimation pass or hash-candidate array;
+a prefix fit is not a claim that the complete stream has no corrections.
+
+Explicit block-profile corrections can model flush lookahead limits and
+dictionary resets without changing serialized estimator parameters. Lookahead
+is bounded only when a terminal reference contradicts continued matching.
+An empty stored block alone never resets history: the following block must
+use only fresh references and provide bounded literal evidence against retained
+history. Prediction-history exclusions retain old dictionary entries for
+correction recovery. Limits and reset decisions are encoded for symmetric
+reconstruction; legacy and untagged records keep their previous behavior.
 
 Run the ignored `profile_tiny_parameter_normalization` test in release mode with
 `PREFLATE_DIAGNOSTICS` pointing at local tiny `.deflate` fixtures and
@@ -290,7 +523,8 @@ Document levels 2-4 gained 2.7-4.3%. Timings are workload-dependent; use the
 throughput test below to check other inputs.
 
 New corrections use the developing **0.8 / 0x84** format, including the six-byte
-minimum for filtered zlib predictions and adaptive Huffman tree profiles.
+minimum for filtered zlib predictions, adaptive Huffman tree profiles, and nested
+behavior parameters instead of the earlier flat parameter record.
 Breaking changes within 0.8 intentionally retain this tag; older 0.8 builds
 cannot necessarily decode new corrections. Existing **0x83** blobs remain
 readable. Older **0x81**, **0x82**, and unversioned correction blobs are rejected.
@@ -337,8 +571,8 @@ corrections without changing production parameters or the reconstruction format.
 Generate raw streams for every compressor at levels 0-9, then analyze them:
 
 ```shell
-cargo test --test end_to_end export_compression_diagnostics -- --ignored --nocapture
-cargo test -p preflate-rs diagnose_compression -- --ignored --nocapture
+cargo test --release --test end_to_end export_compression_diagnostics -- --ignored --nocapture
+cargo test --release -p preflate-rs diagnose_compression -- --ignored --nocapture
 ```
 
 Fixtures default to `target/prediction-diagnostics`. Set `PREFLATE_DIAGNOSTICS`
@@ -358,7 +592,7 @@ For a focused experiment in PowerShell:
 ```powershell
 $env:PREFLATE_DIAGNOSTICS_FILTER = "miniz_2"
 $env:PREFLATE_DIAGNOSTICS_SWEEP = "1"
-cargo test -p preflate-rs diagnose_compression -- --ignored --nocapture
+cargo test --release -p preflate-rs diagnose_compression -- --ignored --nocapture
 Remove-Item Env:PREFLATE_DIAGNOSTICS_FILTER, Env:PREFLATE_DIAGNOSTICS_SWEEP
 ```
 
@@ -367,7 +601,7 @@ then combine matching mode, nice length, and chain-budget candidates while holdi
 the dictionary policy and hash algorithm fixed. Isolated variants and improving
 combined candidates are verified byte-for-byte; rejected candidates are printed
 explicitly. "Best tested" is not an exhaustive optimum. The normal overhead
-benchmark remains `cargo test --test end_to_end compression_benchmark_overhead_size`.
+benchmark remains `cargo test --release --test end_to_end compression_benchmark_overhead_size`.
 
 For a bounded profile investigation, run the ignored
 `diagnose_fixed_family_profiles` test in release mode with `PREFLATE_DIAGNOSTICS`
@@ -599,7 +833,7 @@ broader invariants and exact user-facing round trips:
 
 ```shell
 cargo test -p preflate-rs
-cargo test --test end_to_end -- compressor_models_ compression_benchmark_overhead_size
+cargo test --release --test end_to_end -- compressor_models_ compression_benchmark_overhead_size
 ```
 
 Huffman regressions also cover one-symbol literal/length trees, empty distance
@@ -616,9 +850,16 @@ before checking plaintext and exact reconstruction:
 | [`preflate/`](preflate/) | library | Core DEFLATE analysis and reconstruction engine |
 | [`container/`](container/) | library | Scans binary files (ZIP, PNG, JPEG) for DEFLATE streams and orchestrates the Zstd pipeline |
 | [`util/`](util/) | `preflate_util.exe` | CLI tool for testing and benchmarking |
-| [`util/`](util/) | `preflate_scan.exe` | Recursive read-only DEFLATE modelling diagnostics and JSON reports, without Zstd |
+| [`util/`](util/) | `preflate_scan.exe` | Recursive read-only DEFLATE modelling diagnostics, native SQLite or diagnostic JSON, without Zstd |
+| [`util/`](util/) | `preflate_match_check.exe` | Parameter regression guard for verified token-perfect streams in completed SQLite runs |
 | [`dll/`](dll/) | `preflate_rs_0_8.dll` | C FFI wrapper for .NET interop |
 | [`fuzz/`](fuzz/) | fuzz harnesses | libfuzzer targets for the core and container APIs |
+
+Development tooling lives separately in [`corpus/`](corpus/README.md), outside
+the Rust workspace crates. Rust performs scanning, prediction, reconstruction
+verification and parameter checking; Python handles Common Crawl discovery,
+scanner orchestration, SQLite merging/analysis and synthetic fixture generation.
+Python is not required by the Rust libraries or command-line binaries.
 
 ---
 
@@ -627,6 +868,19 @@ before checking plaintext and exact reconstruction:
 ### Requirements
 
 - [Rust 1.89 or above](https://www.rust-lang.org/tools/install)
+- For optional corpus tooling: [uv](https://docs.astral.sh/uv/) and Python 3.14.
+  Run `uv sync --locked` from the repository root; uv uses the checked-in
+  `.python-version`, `pyproject.toml` and `uv.lock`.
+
+Rust CI checks all workspace targets and features on the minimum Rust 1.89,
+as well as release tests, warning-strict Clippy and Rustdoc on stable Rust.
+
+The root uv project uses the Microsoft Python feed for all dependency resolution.
+Run Python helpers with `uv run --locked <script.py>` or
+`uv run --locked python -m <module>`. Optional JPEG generation uses
+`uv run --locked --extra jpeg corpus/gen_corpus.py`; Parquet Common Crawl
+sampling uses `--extra parquet`. Machine-local paths and run scopes belong in
+the Git-ignored `corpus.local.toml`, never in checked-in documentation.
 
 ### Build from Source
 
@@ -650,19 +904,39 @@ Options:
   --max-chain <N>    Hash chain depth limit (default: 4096)
   -c, --level <N>    Zstd compression level 0–14 (default: 9)
   --loglevel <L>     Log verbosity (default: Error)
-  --verify <bool>    Round-trip verify after compression (default: true)
-  --baseline <bool>  Also measure raw Zstd-only size for comparison (default: false)
+  --verify          Enable round-trip verification (already enabled by default)
+  --baseline        Also measure raw Zstd-only size for comparison (default: off)
 ```
 
-### Scanning a document corpus (JSON diagnostics, no Zstd)
+The boolean options are flags, not `true`/`false` arguments; the current utility
+does not expose a verification-disable flag. See the [utility README](util/README.md)
+for output and error behavior.
 
-Build the standalone scanner:
+### Scanning a document corpus (SQLite and JSON diagnostics, no Zstd)
+
+The [corpus project](corpus/README.md) supports both private/local directories
+and Common Crawl. Both use native SQLite output, with separate databases for
+private scans and public crawl observations. Build the standalone scanner:
 
 ```shell
 cargo build --release -p preflate_util --bin preflate_scan
 ```
 
-Then recursively scan a folder, including ZIP-based Office documents:
+For a private/local directory, including ZIP-based Office documents:
+
+```powershell
+.\target\release\preflate_scan.exe "<private-directory>" --database "<private-folder>\private.sqlite" --label before
+# After rebuilding with the changes to compare:
+.\target\release\preflate_scan.exe "<private-directory>" --database "<private-folder>\private.sqlite" --label after
+uv run --locked python -m corpus.database --db "<private-folder>\private.sqlite" compare before after
+```
+
+SQLite runs append under unique labels, commit per file, and become queryable
+only after totals reconcile. Interrupted runs stay incomplete. See
+[SQLite scanning and analysis](corpus/database/README.md) and
+[Common Crawl discovery](corpus/crawl/README.md); the crawler never consults
+private history. JSON below is an optional diagnostic export, not an ingestion
+format:
 
 ```powershell
 .\target\release\preflate_scan.exe "C:\Users\you\OneDrive" --output scan-report.json
@@ -678,17 +952,19 @@ Use the **release** executable for corpus scans and traces; debug builds are muc
 
 The scanner reads source files without modifying them. It runs **preflate only**,
 with bit-exact DEFLATE reconstruction verification enabled by default, and writes
-a JSON report. It never runs Zstd, WebP or Lepton. Windows cloud-only files are
+a SQLite run or diagnostic JSON report. It never runs Zstd, WebP or Lepton. Windows cloud-only files are
 skipped unless `--hydrate` explicitly allows downloading them. Symlinks and
 junctions are not followed. Unreadable files/directories and preflate panics are
 recorded without stopping the scan; report-write failures stop it with a nonzero
 exit code. A completed report exits successfully even when individual files fail.
-Existing reports are never overwritten.
+Existing JSON reports are never overwritten; SQLite scans require new labels.
+SQLite databases and their sidecars are excluded from the input walk.
 
 Useful options:
 
 | Option | Default | Meaning |
 |---|---|---|
+| `--database`, `--label` | unset | Write a native SQLite run with a unique label instead of `--output` JSON |
 | `--poor-ratio-percent` | `1` | Flag corrections exceeding this percent of original DEFLATE bytes |
 | `--min-stream-bytes` | `1024` | Minimum original DEFLATE bytes for flags/rankings; smaller streams are still recorded |
 | `--max-chain` | `4096` | Maximum permitted estimated hash-chain depth |
@@ -703,6 +979,37 @@ Useful options:
 | `--trace` | off | Detailed trace for one file (not a directory) |
 | `--trace-limit` | `64` | Maximum mismatch examples and block descriptions per traced stream |
 | `--stream-offset` | all | Trace one signature offset from a previous report; requires `--trace` |
+| `--perf-output` | off | With JSON output only, additionally write native process CPU/wall timings as streaming JSONL |
+| `--perf-iterations` | `1` | Attempts per regular file for performance output; first attempt followed by warm repetitions |
+| `--build-identity` | unset | Explicit binary/build label for SQLite runs or performance provenance |
+
+#### Streaming performance measurements
+
+The native scanner can write timings directly, without a Python timing wrapper:
+
+```powershell
+.\target\release\preflate_scan.exe "C:\path\fixtures" --output scan.json --perf-output perf.jsonl --perf-iterations 5 --build-identity my-build
+```
+
+Do not run competing scans or builds during a controlled benchmark. The native
+header records configuration, build label, verification policy, and repetition
+scope. JSON/JSONL is for standalone diagnostics only; legacy Python timing/report
+ingestion has been removed. `--perf-output` cannot be combined with `--database`.
+A final summary distinguishes completed measurements from interrupted output.
+
+Each sample measures file reading, signature scanning, preflate and optional exact
+reconstruction using process CPU seconds (all threads) and wall seconds. Directory
+walking, JSON serialization and metadata checks are outside the timed interval.
+The scanner still runs no Zstd. The usual modelling report contains only the first
+attempt, not duplicate streams for subsequent iterations. Regular files are
+repeated consecutively without warmup; skipped files are recorded once, while
+directory/symlink errors remain in the modelling report only. Later attempts may
+benefit from filesystem caches; this is not a cold-cache or alternating-build
+benchmark. Use `--no-verify` only for explicitly labelled encode-only measurements
+and validate correctness separately. Source size and precise modification time
+must remain unchanged between attempts. Failures and skips are retained but are
+excluded from timing medians. Both output files are excluded from the input walk
+and neither overwrites an existing file.
 
 The report contains:
 
@@ -746,6 +1053,75 @@ $report = Get-Content -Raw .\scan-report.json | ConvertFrom-Json
 $report.summary
 $report.summary.worst_streams | Format-Table path, member_name, correction_ratio, correction_bytes
 ```
+
+#### Quickly checking estimator regressions
+
+Capture a SQLite baseline before estimator changes, retaining the source files:
+
+```shell
+cargo run --release -p preflate_util --bin preflate_scan -- "<directory>" --database baseline.sqlite --label before
+```
+
+Then use Cargo after changes so the checker runs newly rebuilt code:
+
+```shell
+cargo run --release -p preflate_util --bin preflate_match_check -- baseline.sqlite --run before --output match-check.json
+```
+
+The built executable can also be run directly; rebuild it after code changes:
+
+```powershell
+.\target\release\preflate_match_check.exe baseline.sqlite --run before --output match-check.json
+
+# Explicitly restrict coverage to streams at least 1 KiB:
+.\target\release\preflate_match_check.exe baseline.sqlite --run before --min-stream-bytes 1024 --output large-match-check.json
+```
+
+This freezes **every reported parameter** for verified successful streams with
+zero token mismatches in the baseline scan. Token-perfect streams may still have
+Huffman-tree, block or profile-metadata corrections; those do not exclude them.
+Both explicit trace mismatch counts, when present, and token-correction counts
+are checked. Unverified or imperfect streams are not regression baselines.
+
+The checker opens the corpus database **read-only**, selects the completed run
+named by `--run`, and holds a consistent SQLite snapshot. It visits file and
+stream rows one file at a time and reads only sources containing eligible streams.
+Incomplete runs, unknown labels, unsupported schemas and inconsistent totals
+fail explicitly; there is no JSON baseline import or fallback.
+It uses saved payload offsets instead
+of repeating signature discovery, including reassembly of split PNG IDAT data.
+Repeated payloads reuse estimates within the same invocation, with full byte
+equality checks (not just hashes). This in-memory cache is bounded to 64 MiB of
+payload data and 4096 entries; nothing is cached on disk or reused across code
+changes. Every occurrence still compares against its own saved parameters.
+The scanner saves an absolute input root so checks can run from another working
+directory. Baselines with missing or relative input roots must be rescanned with
+the current scanner. Common Crawl rows containing URLs cannot be replayed as
+local files: scan the saved local extracts into a new run first.
+It preserves the baseline's plaintext chunk limit: parameters are estimated from
+the first chunk and reused across the stream. Later chunks are not independently
+estimated. Whole streams with any baseline token mismatch are excluded.
+
+Streams of at least 1024 DEFLATE bytes use parsing and estimation only: no CABAC,
+reconstruction, Zstd or full-stream prediction. Smaller streams replay their
+first chunk without reconstruction because tiny complete streams can normalize
+window/cutoff parameters during prediction. This avoids comparing raw estimates
+against normalized saved parameters and reporting false regressions.
+
+The JSON results identify the baseline database and selected run and contain
+only parameter changes and errors, plus coverage/timing
+totals. Any parameter change, unavailable/changed source, estimation error,
+incomplete/inconsistent baseline, or empty selection exits nonzero. Existing
+output files are never overwritten. Source size and modification time must match
+the baseline snapshot, and are checked again after reading. File identity has no
+content hashes, so this is not a cryptographic source-identity check. Cloud-only
+sources fail explicitly rather than downloading unless `--hydrate` is supplied.
+Symlink source files are rejected.
+
+This is an **estimator parameter guard**, not a substitute for predictor or
+bit-exact round-trip tests: unchanged parameters alone cannot prove unchanged
+runtime predictions. Keep the baseline database and match-check JSON local; they contain
+private source paths. Do not commit them or extracted document payloads.
 
 #### Investigating a single file
 
@@ -821,19 +1197,70 @@ For direct use of the core DEFLATE analysis API, see the [`preflate` crate](pref
 
 ## Design Notes
 
-- **No unsafe code** — `#![forbid(unsafe_code)]` is enforced in every crate.
-- **Chunked processing** — memory use is bounded regardless of input size.
-- **Format versioning** — the DLL name encodes the format version (`preflate_rs_0_8.dll`) so old decoders can coexist with new ones during upgrades. Corrections blobs and containers also start with a version byte, so data from an incompatible version is rejected.
+- **Safe core/container** — `#![forbid(unsafe_code)]` is enforced in these crates.
+  The DLL isolates unsafe pointer operations at the C FFI boundary; native test
+  helpers also use unsafe interop.
+- **Chunked processing** — streaming processors bound memory by configured limits.
+  Whole-file container convenience helpers buffer their entire input; the core
+  convenience helper analyzes one plaintext-limited chunk.
+- **Shared prediction** — `PredictionState` owns matching, actual-token acceptance,
+  lookahead and block lifecycle. `TokenPredictor` owns correction coding and traces;
+  estimator scoring reuses the same state without correction coding.
+- **Format tags** — the DLL name identifies the `0_8` release family, not a stable
+  development-format contract. Current corrections use `0x84` with behavior-specific
+  parameters; the decoder retains the existing `0x83` path. Containers use version 3.
+  Other correction tags and older containers are rejected. Breaking changes within
+  the developing 0.8 format do not require new tags or compatibility layers.
 - **CABAC coding** — the corrections codec is shared with the [Lepton](https://github.com/microsoft/lepton_jpeg_rust) JPEG re-compression library.
 - Parameters are serialized via [`bitcode`](https://crates.io/crates/bitcode); corrections via CABAC.
 
 ---
+
+## Backlog
+
+- **Deferred corner case: Revit checksum-paged OLE streams.** Some Revit
+  logical streams store 64,896 payload bytes followed by a 353-byte checksum/ECC
+  trailer per complete 65,249-byte page. These trailers are storage framing,
+  not DEFLATE behavior; interpreting them as compressed data can inflate
+  reconstruction overhead even when raw DEFLATE decoding succeeds.
+  See the reverse-engineered [rvt-rs implementation](https://github.com/DrunkOnJava/rvt-rs/blob/main/src/compression.rs)
+  and [independent discussion](https://github.com/DrunkOnJava/rvt-rs/discussions/112).
+  Future support must respect logical OLE stream alignment, preserve every
+  trailer and the original physical layout, bound buffering, and verify
+  byte-exact reconstruction. Contiguous forward-ordered streams are a possible
+  initial scope; fragmented/interleaved streams need additional handling.
+  Prioritize broader compressor-modelling gains before this container adapter.
+  Rank opportunities by prevalence across distinct documents and common
+  compressor profiles, typical reconstruction savings, and CPU cost, rather
+  than aggregate overhead dominated by a few pathological streams. Report
+  outliers separately; chunks whose final representation does not save space
+  can remain verbatim instead of requiring a specialized model.
 
 ## Contributing
 
 * [Submit bugs and feature requests](https://github.com/microsoft/preflate-rs/issues)
 * [Review or submit pull requests](https://github.com/microsoft/preflate-rs/pulls)
 * The library uses only **stable Rust features**.
+* Follow [AGENTS.md](AGENTS.md) and the subproject guidance for validation,
+  shared prediction boundaries, and corpus data handling. Use release builds for
+  all corpus scans, diagnostic replays, profiling, and benchmarks.
+* Keep Rust compiler, Clippy and Rustdoc output warning-free. Before submitting:
+
+```shell
+cargo fmt --check --all
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo clippy -p preflate-container --no-default-features --all-targets -- -D warnings
+cargo clippy -p preflate-rs --no-default-features --all-targets -- -D warnings
+cargo test --release --workspace --all-features
+```
+
+Build API documentation with `cargo doc --workspace --all-features --no-deps`
+and `RUSTDOCFLAGS` set to `-D warnings` in your shell.
+
+For Python changes, build the release scanner and run the warning-strict
+[corpus validation commands](corpus/README.md#validation), including both optional
+dependency extras. Keep local configuration, databases, downloaded payloads,
+generated corpora and diagnostic reports out of the PR.
 
 ---
 

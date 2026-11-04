@@ -31,14 +31,19 @@ mod utils;
 pub use container_common::{PreflateContainerConfig, PreflateStats, ProcessBuffer};
 pub use container_read::RecreateContainerProcessor;
 pub use container_write::PreflateContainerProcessor;
+#[cfg(feature = "diagnostics")]
+pub use diagnostics::diagnostic_deflate_payload;
 pub use diagnostics::{
-    DeflateDiagnostic, DiagnosticScanOptions, scan_deflate_diagnostics,
+    DeflateDiagnostic, DiagnosticParameters, DiagnosticScanOptions, scan_deflate_diagnostics,
     scan_deflate_diagnostics_with_options,
 };
 
 pub use utils::process_limited_buffer;
 
-/// Convenience wrapper: compresses an entire input stream into the preflate container format.
+/// Compresses an entire input stream into the preflate container format.
+///
+/// This convenience helper buffers the entire input. Use [`PreflateContainerProcessor`]
+/// with [`ProcessBuffer::copy_to_end`] for bounded input buffering.
 pub fn preflate_whole_into_container(
     config: &PreflateContainerConfig,
     input: &mut impl std::io::Read,
@@ -52,7 +57,10 @@ pub fn preflate_whole_into_container(
     processor.process_buffer(&buf, true, output)
 }
 
-/// Convenience wrapper: recreates the original data from a preflate container stream.
+/// Recreates the original data from a preflate container stream.
+///
+/// This convenience helper buffers the entire container. Use [`RecreateContainerProcessor`]
+/// with [`ProcessBuffer::copy_to_end`] for bounded input buffering.
 pub fn recreate_whole_from_container(
     input: &mut impl std::io::Read,
     output: &mut impl std::io::Write,

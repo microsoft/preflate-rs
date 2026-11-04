@@ -15,13 +15,15 @@ use crate::{
     preflate_input::PlainText,
 };
 
-use super::{
-    add_policy_estimator::DictionaryAddPolicy,
-    depth_estimator::{
-        DistancePolicy, HashTableDepthEstimator, new_depth_estimator, run_depth_candidates,
+use {
+    super::{
+        depth_estimator::{
+            DistancePolicy, HashTableDepthEstimator, new_depth_estimator, run_depth_candidates,
+        },
+        parser_estimator::{InsertionConstraint, ParserInference},
+        preflate_stream_info::PreflateStreamInfo,
     },
-    parser_estimator::{InsertionConstraint, ParserInference},
-    preflate_stream_info::PreflateStreamInfo,
+    crate::parameters::DictionaryAddPolicy,
 };
 
 /// Snapshot the existing walk's evidence before assigning compressor defaults.
@@ -31,6 +33,8 @@ pub(crate) struct CandidateEvidence {
     pub required_chain: u32,
     pub distance_policy: DistancePolicy,
     pub parser: ParserInference,
+    pub shallow_miniz_greedy: bool,
+    pub minimum_nice_length: u16,
 }
 
 impl CandidateEvidence {
@@ -42,6 +46,8 @@ impl CandidateEvidence {
             parser: candidate
                 .parser_evidence()
                 .infer(candidate.greedy_parser_detected()),
+            shallow_miniz_greedy: candidate.shallow_miniz_greedy(),
+            minimum_nice_length: candidate.minimum_nice_length(),
         }
     }
 }
@@ -57,29 +63,25 @@ fn select_depth_candidate<'a>(
     add_policy: DictionaryAddPolicy,
     info: &PreflateStreamInfo,
 ) -> Option<&'a dyn HashTableDepthEstimator> {
-    let prefer_miniz_hash = models::miniz::prefer_rotating_hash(
-        add_policy,
-        info,
+    models::preferred_depth_candidate(candidates, add_policy, info).or_else(|| {
+        // Without a stronger fingerprint, prefer the shallowest surviving chain.
+        // Observed depth is a lower bound on search effort, not an exact level identifier.
+        let shallowest = candidates
+            .iter()
+            .min_by(|&a, &b| a.max_chain_found().cmp(&b.max_chain_found()))
+            .map(|candidate| candidate.as_ref())?;
+        let supported_hash = models::zlib::supported_memory_hash(info);
         candidates
             .iter()
-            .any(|candidate| models::miniz::vetoes_rotating_hash(candidate.hash_algorithm())),
-    );
-    candidates
-        .iter()
-        .find(|candidate| {
-            models::libdeflate::prefer_fingerprint(candidate.hash_algorithm())
-                || info.chromium_short_matches.supports_chromium()
-                    && matches!(candidate.hash_algorithm(), HashAlgorithm::Chromium { .. })
-                || prefer_miniz_hash && candidate.hash_algorithm() == models::zlib::DEFAULT_HASH
-        })
-        .or_else(|| {
-            // Without a stronger fingerprint, prefer the shallowest surviving chain.
-            // Observed depth is a lower bound on search effort, not an exact level identifier.
-            candidates
-                .iter()
-                .min_by(|&a, &b| a.max_chain_found().cmp(&b.max_chain_found()))
-        })
-        .map(|candidate| candidate.as_ref())
+            .find(|candidate| {
+                Some(candidate.hash_algorithm()) == supported_hash
+                    && matches!(shallowest.hash_algorithm(), HashAlgorithm::Zlib { .. })
+                    && candidate.max_chain_found() == shallowest.max_chain_found()
+                    && candidate.parser_evidence().lazy_matches == 0
+                    && candidate.minimum_nice_length() <= shallowest.minimum_nice_length()
+            })
+            .map_or(Some(shallowest), |candidate| Some(candidate.as_ref()))
+    })
 }
 
 pub(super) fn estimate_preflate_depth(
@@ -113,14 +115,22 @@ pub(super) fn estimate_preflate_depth(
     );
     #[cfg(test)]
     if std::env::var_os("PREFLATE_ESTIMATOR_TRACE").is_some() {
+        println!(
+            "BLOCK_SIZE all_tokens={} ordinary_tokens={} ordinary_bytes={} supported_hash={:?}",
+            info.max_tokens_per_block,
+            info.max_unflushed_tokens_per_block,
+            info.max_unflushed_huffman_block_bytes,
+            models::zlib::supported_memory_hash(info),
+        );
         for candidate in &candidates {
             println!(
-                "HASH {:?} depth={} greedy={} evidence={:?} short_rejections={}",
+                "HASH {:?} depth={} greedy={} evidence={:?} short_rejections={} shallow_miniz={}",
                 candidate.hash_algorithm(),
                 candidate.max_chain_found(),
                 candidate.greedy_parser_detected(),
                 candidate.parser_evidence(),
                 candidate.short_match_rejections(),
+                candidate.shallow_miniz_greedy(),
             );
         }
     }
@@ -168,7 +178,7 @@ pub(super) fn estimate_preflate_depth(
 }
 
 #[test]
-fn fast_hash_refinement_requires_a_real_cutoff_and_consistent_evidence() {
+fn fast_hash_selection_and_refinement_require_consistent_evidence() {
     use super::parser_estimator::ParserEvidence;
     struct Fingerprint(HashAlgorithm, u32, u16);
     impl HashTableDepthEstimator for Fingerprint {
@@ -239,6 +249,38 @@ fn fast_hash_refinement_requires_a_real_cutoff_and_consistent_evidence() {
             fallback
         );
     }
+    let memory_hash = HashAlgorithm::Zlib {
+        hash_mask: 16383,
+        hash_shift: 5,
+    };
+    info.max_tokens_per_block = 8191;
+    for (unflushed, depth, lazy, expected) in [
+        (0, 3, 0, zlib),
+        (8191, 3, 0, memory_hash),
+        (8191, 4, 0, zlib),
+        (8191, 3, 1, zlib),
+        (8000, 3, 0, zlib),
+    ] {
+        info.max_unflushed_tokens_per_block = unflushed;
+        candidates = vec![
+            Box::new(Fingerprint(zlib, 3, 0)),
+            Box::new(Fingerprint(memory_hash, depth, lazy)),
+        ];
+        assert_eq!(
+            select_depth_candidate(&candidates, DictionaryAddPolicy::AddFirst(4), &info)
+                .unwrap()
+                .hash_algorithm(),
+            expected
+        );
+    }
+    candidates.insert(0, Box::new(Fingerprint(fallback, 3, 0)));
+    info.max_unflushed_tokens_per_block = 8191;
+    assert_eq!(
+        select_depth_candidate(&candidates, DictionaryAddPolicy::AddFirst(4), &info)
+            .unwrap()
+            .hash_algorithm(),
+        fallback
+    );
 }
 
 #[test]

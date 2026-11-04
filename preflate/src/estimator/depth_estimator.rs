@@ -10,9 +10,9 @@ use crate::{
     preflate_input::{PlainText, PreflateInput},
 };
 
-use super::{
-    add_policy_estimator::DictionaryAddPolicy, evidence_policy::ParserEvidencePolicy,
-    parser_estimator::ParserEvidence,
+use {
+    super::{evidence_policy::ParserEvidencePolicy, parser_estimator::ParserEvidence},
+    crate::parameters::DictionaryAddPolicy,
 };
 
 /// Whether the model reserves zlib's lookahead space or permits the full window.
@@ -25,6 +25,18 @@ pub(crate) enum DistancePolicy {
 
 pub(crate) trait HashTableDepthEstimator {
     fn update_hash(&mut self, add_policy: DictionaryAddPolicy, input: &PreflateInput, length: u32);
+
+    fn update_literal_hash(&mut self, add_policy: DictionaryAddPolicy, input: &PreflateInput) {
+        self.update_hash(add_policy, input, 1);
+    }
+
+    fn shallow_miniz_greedy(&self) -> bool {
+        false
+    }
+
+    fn minimum_nice_length(&self) -> u16 {
+        0
+    }
 
     /// sees how many matches we need to walk to reach match_pos, which we
     /// do by subtracting the depth of the current node from the depth of the
@@ -145,7 +157,7 @@ impl HashTableDepthEstimator for LibdeflateFastDepthEstimator {
     }
 
     fn match_depth(&mut self, token: DeflateTokenReference, input: &PreflateInput) -> bool {
-        let depth16 = self.legacy.match_depth_internal(token, input);
+        let depth16 = self.legacy.match_depth_internal(token, input).0;
         if depth16 > 1 || token.dist() >= 32768 {
             self.invalid15 = true;
         }
@@ -202,6 +214,10 @@ impl HashTableDepthEstimator for LibdeflateFastDepthEstimator {
 
     fn parser_evidence(&self) -> ParserEvidence {
         self.legacy.parser_evidence()
+    }
+
+    fn minimum_nice_length(&self) -> u16 {
+        self.legacy.minimum_nice_length()
     }
 
     fn observe_literal(
@@ -317,6 +333,9 @@ struct HashTableDepthEstimatorImpl<H: HashImplementation> {
     evidence_policy: ParserEvidencePolicy,
 
     short_match_rejections: u16,
+
+    shallow_miniz: crate::models::miniz::ShallowGreedyObservations,
+    greedy_nice: crate::models::generic::GreedyNiceObservations,
 }
 
 impl<H: HashImplementation> HashTableDepthEstimatorImpl<H> {
@@ -353,7 +372,7 @@ impl<H: HashImplementation> HashTableDepthEstimatorImpl<H> {
         mut observe: impl FnMut(u16, u16),
     ) {
         debug_assert!(length as usize <= chars.len());
-        if length as usize + H::NUM_HASH_BYTES - 1 >= chars.len() {
+        if length as usize + H::NUM_HASH_BYTES > chars.len() {
             // reached on of the stream so there will be no more matches
             return;
         }
@@ -364,6 +383,13 @@ impl<H: HashImplementation> HashTableDepthEstimatorImpl<H> {
             let h = self.hash.get_hash(&chars[i as usize..]);
             observe(h, self.head[usize::from(h)]);
 
+            if self.hash.algorithm() == crate::models::zlib::DEFAULT_HASH
+                && self.add_policy == DictionaryAddPolicy::AddAll
+                && self.shallow_miniz.active()
+            {
+                // The classic 15-bit hash leaves the upper half free for second heads.
+                self.head[usize::from(h) + 32768] = self.head[usize::from(h)];
+            }
             self.chain_depth[usize::from(pos)] =
                 self.chain_depth[self.head[h as usize] as usize] + 1;
             self.chain_depth_hash_verify[usize::from(pos)] = h;
@@ -384,7 +410,11 @@ impl<H: HashImplementation> HashTableDepthEstimatorImpl<H> {
         depth < 4096
     }
 
-    fn match_depth_internal(&self, token: DeflateTokenReference, input: &PreflateInput<'_>) -> u32 {
+    fn match_depth_internal(
+        &self,
+        token: DeflateTokenReference,
+        input: &PreflateInput<'_>,
+    ) -> (u32, u16) {
         let match_pos = (input.pos() - token.dist()) as u16;
 
         let h = self.hash.get_hash(input.cur_chars(0));
@@ -402,11 +432,28 @@ impl<H: HashImplementation> HashTableDepthEstimatorImpl<H> {
             match_depth
         );
 
-        (cur_depth - match_depth) as u32
+        ((cur_depth - match_depth) as u32, head)
     }
 }
 
 impl<H: HashImplementation> HashTableDepthEstimator for HashTableDepthEstimatorImpl<H> {
+    fn update_literal_hash(&mut self, add_policy: DictionaryAddPolicy, input: &PreflateInput) {
+        if self.hash.algorithm() == crate::models::zlib::DEFAULT_HASH
+            && add_policy == DictionaryAddPolicy::AddAll
+            && input.remaining() >= 258
+            && self.shallow_miniz.active()
+        {
+            let hash = usize::from(self.hash.get_hash(input.cur_chars(0)));
+            self.shallow_miniz
+                .observe_literal(input, [self.head[hash], self.head[hash + 32768]]);
+        }
+        self.update_hash(add_policy, input, 1);
+    }
+
+    fn shallow_miniz_greedy(&self) -> bool {
+        self.hash.algorithm() == crate::models::zlib::DEFAULT_HASH && self.shallow_miniz.detected()
+    }
+
     fn update_hash(&mut self, add_policy: DictionaryAddPolicy, input: &PreflateInput, length: u32) {
         let add_policy =
             crate::models::chromium::depth_add_policy(self.hash.algorithm(), add_policy);
@@ -430,7 +477,21 @@ impl<H: HashImplementation> HashTableDepthEstimator for HashTableDepthEstimatorI
             self.parser_observations
                 .observe(token, input, self.head[next_hash as usize]);
         }
-        let mdepth = self.match_depth_internal(token, input);
+        let (mdepth, head) = self.match_depth_internal(token, input);
+        self.greedy_nice
+            .observe(self.add_policy, input, token, mdepth, head);
+        if self.hash.algorithm() == crate::models::zlib::DEFAULT_HASH
+            && self.add_policy == DictionaryAddPolicy::AddAll
+            && self.shallow_miniz.active()
+        {
+            let hash = usize::from(self.hash.get_hash(input.cur_chars(0)));
+            self.shallow_miniz.observe_reference(
+                input,
+                token,
+                mdepth,
+                [self.head[hash], self.head[hash + 32768]],
+            );
+        }
         self.record_depth(token, mdepth)
     }
 
@@ -458,6 +519,10 @@ impl<H: HashImplementation> HashTableDepthEstimator for HashTableDepthEstimatorI
 
     fn parser_evidence(&self) -> ParserEvidence {
         self.evidence
+    }
+
+    fn minimum_nice_length(&self) -> u16 {
+        self.greedy_nice.minimum()
     }
 
     fn observe_literal_run(
@@ -654,7 +719,7 @@ const LIB_DEFLATE3_HASH: LibdeflateHash3Secondary = LibdeflateHash3Secondary {};
 impl HashTableDepthEstimatorLibdeflate {
     fn internal_update_hash3(&mut self, chars: &[u8], pos: u32, length: u32) {
         debug_assert!(length as usize <= chars.len());
-        if length as usize + 3 - 1 >= chars.len() {
+        if length as usize + 3 > chars.len() {
             // reached on of the stream so there will be no more matches
             return;
         }
@@ -700,7 +765,7 @@ impl HashTableDepthEstimator for HashTableDepthEstimatorLibdeflate {
                 65535
             } else {
                 (if distance3 < 32768 { 1 } else { 0 })
-                    + self.length4.match_depth_internal(token, input)
+                    + self.length4.match_depth_internal(token, input).0
             }
         };
 
@@ -1060,7 +1125,7 @@ fn update_candidate_hashes(
     input: &mut PreflateInput,
 ) {
     for i in candidates {
-        i.update_hash(add_policy, &input, length);
+        i.update_hash(add_policy, input, length);
     }
 
     input.advance(length);
@@ -1078,7 +1143,7 @@ pub(super) fn run_depth_candidates(
     max_dist_3_matches: u32,
     window_bytes: u32,
 ) {
-    let mut input = PreflateInput::new(&plain_text);
+    let mut input = PreflateInput::new(plain_text);
     let mut literal_samples = 0;
     let mut short_samples = if crate::models::zlib::sample_short_match_policy(
         add_policy,
@@ -1099,7 +1164,7 @@ pub(super) fn run_depth_candidates(
         );
     }
 
-    for (_i, b) in deflate.blocks.iter().enumerate() {
+    for b in deflate.blocks.iter() {
         match &b.block_type {
             DeflateTokenBlockType::Stored { uncompressed, .. } => {
                 #[cfg(test)]
@@ -1108,7 +1173,10 @@ pub(super) fn run_depth_candidates(
                 }
                 short_samples = 256;
                 for _i in 0..uncompressed.len() {
-                    update_candidate_hashes(1, candidates, add_policy, &mut input);
+                    for candidate in candidates.iter_mut() {
+                        candidate.update_literal_hash(add_policy, &input);
+                    }
+                    input.advance(1);
                 }
             }
             DeflateTokenBlockType::Huffman { tokens, .. } => {

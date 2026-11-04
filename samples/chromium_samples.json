@@ -69,5 +69,21 @@
       "bytes": 136720,
       "sha256": "EC958C1E137864462C3F95333E6AA290AE5625290F291D7215B7D368DE410801"
     }
+  ],
+  "no_short_input_file": "chromium_no_short_input.bin",
+  "no_short_input_sha256": "774527D72A780AFA5CD79F01DFDB3986145DD105D5F57144936BB5FA3B45BC10",
+  "no_short_fixtures": [
+    {
+      "level": 1,
+      "file": "compressed_chromium_no_short_level1.deflate",
+      "bytes": 127562,
+      "sha256": "4CE20269D156C246EF8C3EDCC77E45448A4D011661B321A04662FD88A14C7C9D"
+    },
+    {
+      "level": 6,
+      "file": "compressed_chromium_no_short_level6.deflate",
+      "bytes": 127113,
+      "sha256": "F521B9BA8F1449CA2BE3A42CC639E81115B98B94628092203284726B271277D7"
+    }
   ]
 }

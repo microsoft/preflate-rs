@@ -126,7 +126,7 @@ fn libzng() {
 fn verifyresult(compressed_data: &[u8]) {
     let (result, plain_text) =
         preflate_whole_deflate_stream(compressed_data, &PreflateConfig::default()).unwrap();
-    let recomp = recreate_whole_deflate_stream(&plain_text.text(), &result.corrections).unwrap();
+    let recomp = recreate_whole_deflate_stream(plain_text.text(), &result.corrections).unwrap();
 
     println!(
         "compressed size: {}, cabac: {}",
@@ -270,6 +270,26 @@ fn libzsys_compress_with_flush(
     mem_level: i32,
     flush: Option<i32>,
 ) -> Vec<u8> {
+    libzsys_compress_tuned(
+        input_data,
+        level,
+        strategy,
+        window_bits,
+        mem_level,
+        flush,
+        None,
+    )
+}
+
+fn libzsys_compress_tuned(
+    input_data: &[u8],
+    level: i32,
+    strategy: Strategy,
+    window_bits: i32,
+    mem_level: i32,
+    flush: Option<i32>,
+    tuning: Option<[i32; 4]>,
+) -> Vec<u8> {
     let mut output = Vec::new();
     use libz_sys::*;
     unsafe {
@@ -316,6 +336,12 @@ fn libzsys_compress_with_flush(
             Z_OK
         );
 
+        if let Some([good_length, max_lazy, nice_length, max_chain]) = tuning {
+            assert_eq!(
+                deflateTune(&mut z_stream, good_length, max_lazy, nice_length, max_chain),
+                Z_OK
+            );
+        }
         let bound = deflateBound(&mut z_stream, input_data.len().try_into().unwrap());
         output.resize(
             usize::try_from(bound).unwrap() + if flush.is_some() { 32 } else { 0 },
@@ -341,6 +367,61 @@ fn libzsys_compress_with_flush(
         assert_eq!(Z_OK, deflateEnd(&mut z_stream));
     }
     output
+}
+
+#[test]
+fn tuned_zlib_partial_blocks_roundtrip_without_token_corrections() {
+    use preflate_rs::{CodecCorrection, CountNonDefaultActions, PreflateStreamProcessor};
+
+    let mut seed = 0x9e37_79b9u32;
+    let template: Vec<_> = (0..2048)
+        .map(|_| {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            b' ' + (seed % 80) as u8
+        })
+        .collect();
+    let mut plain = template.clone();
+    for row in 0..480usize {
+        let start = (row * 97) % 1500;
+        let length = 32 + row % 224;
+        plain.extend_from_slice(&template[start..start + length]);
+        plain.push(b'\n');
+    }
+    for (level, memory, tuning) in [(6, 7, Some([8, 4, 258, 32])), (9, 4, None)] {
+        for flush in [None, Some(libz_sys::Z_SYNC_FLUSH)] {
+            let wrapped =
+                libzsys_compress_tuned(&plain, level, Strategy::Default, 15, memory, flush, tuning);
+            let compressed = &wrapped[2..wrapped.len() - 4];
+            assert!(compressed.len() > 1024);
+            let mut counts = CountNonDefaultActions::default();
+            let mut processor = PreflateStreamProcessor::new(&PreflateConfig::default());
+            let chunk = processor
+                .decompress_with_statistics(compressed, &mut counts)
+                .unwrap();
+            assert_eq!(processor.plain_text().text(), plain);
+            assert_eq!(chunk.compressed_size, compressed.len());
+            for correction in [
+                CodecCorrection::LiteralPredictionWrong,
+                CodecCorrection::ReferencePredictionWrong,
+                CodecCorrection::LenCorrection,
+                CodecCorrection::DistOnlyCorrection,
+                CodecCorrection::DistAfterLenCorrection,
+            ] {
+                assert_eq!(
+                    counts.corrections_count[correction as usize], 0,
+                    "level={level} memory={memory} flush={flush:?} correction={correction:?} params={:?}",
+                    chunk.parameters
+                );
+            }
+            assert_eq!(
+                recreate_whole_deflate_stream(processor.plain_text().text(), &chunk.corrections)
+                    .unwrap(),
+                compressed
+            );
+        }
+    }
 }
 
 #[test]
@@ -501,7 +582,7 @@ fn libngzsys_compress(input_data: &[u8], level: i32) -> Vec<u8> {
         z_stream.avail_out = output.len() as u32;
 
         assert_eq!(Z_STREAM_END, deflate(&mut z_stream, Z_FINISH));
-        let output_len = usize::try_from(z_stream.total_out).unwrap();
+        let output_len = z_stream.total_out;
         assert!(
             output_len <= output.len(),
             "zlib-ng exceeded its output buffer"
@@ -564,15 +645,15 @@ fn compression_benchmark_overhead_size() {
             name: "libngzsys",
             compress_fn: libngzsys,
             overhead: [
-                Ok(19),
-                Ok(34),
-                Ok(21),
-                Ok(21),
-                Ok(42),
-                Ok(2501),
-                Ok(1801),
-                Ok(49),
-                Ok(27),
+                Ok(7),
+                Ok(33),
+                Ok(20),
+                Ok(20),
+                Ok(41),
+                Ok(2500),
+                Ok(1800),
+                Ok(48),
+                Ok(26),
                 Err(ExitCode::NoCompressionCandidates),
             ],
         },
@@ -580,48 +661,48 @@ fn compression_benchmark_overhead_size() {
             name: "zlib",
             compress_fn: zlib,
             overhead: [
-                Ok(19),
-                Ok(26),
-                Ok(26),
-                Ok(26),
-                Ok(30),
-                Ok(30),
-                Ok(30),
-                Ok(328),
-                Ok(130),
-                Ok(28),
+                Ok(7),
+                Ok(25),
+                Ok(25),
+                Ok(25),
+                Ok(29),
+                Ok(29),
+                Ok(29),
+                Ok(327),
+                Ok(129),
+                Ok(27),
             ],
         },
         BenchmarkResult {
             name: "libdeflate",
             compress_fn: libdeflate,
             overhead: [
-                Ok(19),
-                Ok(76),
-                Ok(123),
+                Ok(7),
+                Ok(75),
+                Ok(122),
+                Ok(93),
                 Ok(94),
-                Ok(95),
-                Ok(162),
-                Ok(106),
-                Ok(73),
-                Ok(90),
+                Ok(161),
+                Ok(105),
+                Ok(72),
                 Ok(89),
+                Ok(88),
             ],
         },
         BenchmarkResult {
             name: "miniz_oxide",
             compress_fn: miniz_oxide,
             overhead: [
-                Ok(28),
-                Ok(177),
-                Ok(76),
-                Ok(85),
-                Ok(65),
-                Ok(65),
-                Ok(62),
-                Ok(63),
-                Ok(64),
-                Ok(63),
+                Ok(16),
+                Ok(176),
+                Ok(48),
+                Ok(50),
+                Ok(51),
+                Ok(49),
+                Ok(48),
+                Ok(49),
+                Ok(49),
+                Ok(49),
             ],
         },
     ];
@@ -663,8 +744,8 @@ fn compression_benchmark_overhead_size() {
     for (i, results) in bench.iter().zip(all_results.iter()) {
         println!("{}:", i.name);
         println!(
-            "  {:>3}  {:>11}  {:>11}  {:>11}  {:>9}  {}",
-            "Lv", "Compressed", "Expected", "Actual", "Delta", "Status"
+            "  {:>3}  {:>11}  {:>11}  {:>11}  {:>9}  Status",
+            "Lv", "Compressed", "Expected", "Actual", "Delta"
         );
         for (level, (result, expected)) in results.iter().zip(i.overhead.iter()).enumerate() {
             let expected_str = match expected {
@@ -700,7 +781,7 @@ fn compression_benchmark_overhead_size() {
 
     // Now assert — failures will name the compressor and show the diff above.
     for (i, results) in bench.iter().zip(all_results.iter()) {
-        let actual: Vec<_> = results.iter().map(|r| r.overhead.clone()).collect();
+        let actual: Vec<_> = results.iter().map(|r| r.overhead).collect();
         assert_eq!(
             actual,
             i.overhead.as_ref(),
@@ -854,6 +935,186 @@ fn generated_prediction_inputs() -> Vec<(String, Vec<u8>)> {
         inputs.push((format!("mixed_{seed}"), mixed_test_bytes(seed, 98305)));
     }
     inputs
+}
+
+fn miniz_compress_flags(plain: &[u8], flags: u32) -> Vec<u8> {
+    use miniz_oxide::deflate::core::{
+        CompressorOxide, TDEFLFlush, TDEFLStatus, compress_to_output,
+    };
+
+    let mut compressor = CompressorOxide::new(flags);
+    let mut output = Vec::new();
+    let (status, consumed) =
+        compress_to_output(&mut compressor, plain, TDEFLFlush::Finish, |bytes| {
+            output.extend_from_slice(bytes);
+            true
+        });
+    assert_eq!(status, TDEFLStatus::Done);
+    assert_eq!(consumed, plain.len());
+    assert_eq!(
+        miniz_oxide::inflate::decompress_to_vec(&output).unwrap(),
+        plain,
+    );
+    output
+}
+
+fn miniz_shallow_test_bytes() -> Vec<u8> {
+    miniz_shallow_test_bytes_with_alphabet(31)
+}
+
+fn miniz_shallow_test_bytes_with_alphabet(mask: u8) -> Vec<u8> {
+    let mut bytes = seeded_test_bytes(0xabcdef, 524289);
+    for byte in &mut bytes {
+        *byte &= mask;
+    }
+    for start in (8192..bytes.len() - 768).step_by(4096) {
+        let earlier = bytes[start - 4096 + 128..start - 4096 + 640].to_vec();
+        bytes[start..start + 512].copy_from_slice(&earlier);
+    }
+    bytes
+}
+
+#[test]
+fn miniz_shallow_fingerprint_preserves_canonical_native_profiles() {
+    let plain = miniz_shallow_test_bytes();
+    for level in 2..=9 {
+        let compressed = miniz_oxide::deflate::compress_to_vec(&plain, level);
+        let mut processor = PreflateStreamProcessor::new(&PreflateConfig::default());
+        let result = processor.decompress(&compressed).unwrap();
+        assert!(processor.is_done());
+        assert_eq!(processor.plain_text().text(), plain);
+        assert_ne!(
+            result.parameters.unwrap().matching_type,
+            preflate_rs::MatchingType::MiniZ {
+                max_probes: 3,
+                greedy: true,
+            },
+            "native level {level}"
+        );
+        assert_eq!(
+            recreate_whole_deflate_stream(processor.plain_text().text(), &result.corrections)
+                .unwrap(),
+            compressed,
+        );
+    }
+}
+
+#[test]
+fn miniz_low_probe_profiles_roundtrip_synthetic() {
+    use miniz_oxide::deflate::core::deflate_flags::TDEFL_GREEDY_PARSING_FLAG;
+    use std::io::Write;
+
+    let mut inputs = vec![
+        ("records".to_owned(), pdf_style_test_bytes()),
+        ("mixed".to_owned(), mixed_test_bytes(0x5eed, 262145)),
+    ];
+    for mask in [3, 15, 63] {
+        let bytes = seeded_test_bytes(0xabcdef, 262145)
+            .into_iter()
+            .map(|byte| byte & mask)
+            .collect();
+        inputs.push((format!("alphabet_{}", mask + 1), bytes));
+    }
+    let mut zero_link = seeded_test_bytes(0x5eed, 262145);
+    for byte in &mut zero_link {
+        *byte &= 15;
+    }
+    zero_link[65532..65544].copy_from_slice(b"abcX`BcXabcY");
+    inputs.push(("zero_link".to_owned(), zero_link));
+    inputs.push(("long_matches".to_owned(), miniz_shallow_test_bytes()));
+    inputs.push((
+        "ambiguous_long_matches".to_owned(),
+        miniz_shallow_test_bytes_with_alphabet(15),
+    ));
+    let export = std::env::var_os("PREFLATE_MINIZ_SYNTHETIC_OUTPUT").map(std::path::PathBuf::from);
+    for (name, plain) in inputs {
+        for greedy in [false, true] {
+            // Two or three probes use normal matching, unlike one probe plus greedy.
+            let flags = 3 | if greedy { TDEFL_GREEDY_PARSING_FLAG } else { 0 };
+            let compressed = miniz_compress_flags(&plain, flags);
+            if let Some(directory) = &export {
+                std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(directory.join(format!("synthetic_{name}_greedy_{greedy}.deflate")))
+                    .unwrap()
+                    .write_all(&compressed)
+                    .unwrap();
+            }
+            let mut processor = PreflateStreamProcessor::new(&PreflateConfig::default());
+            processor.enable_trace(0);
+            let result = processor.decompress(&compressed).unwrap();
+            assert!(processor.is_done());
+            assert_eq!(processor.plain_text().text(), plain);
+            assert_eq!(
+                recreate_whole_deflate_stream(processor.plain_text().text(), &result.corrections)
+                    .unwrap(),
+                compressed,
+            );
+            if name == "long_matches" || name == "ambiguous_long_matches" {
+                let parameters = result.parameters.unwrap();
+                if greedy {
+                    assert_eq!(
+                        parameters.matching_type,
+                        preflate_rs::MatchingType::MiniZ {
+                            max_probes: 3,
+                            greedy: true,
+                        }
+                    );
+                    assert_eq!(parameters.max_chain, 3);
+                    assert_eq!(parameters.max_dist_3_matches, 8191);
+                    assert_eq!(processor.prediction_trace().unwrap().mismatch_count, 0);
+                } else {
+                    assert_ne!(
+                        parameters.matching_type,
+                        preflate_rs::MatchingType::MiniZ {
+                            max_probes: 3,
+                            greedy: true,
+                        }
+                    );
+                }
+            }
+            println!(
+                "SYNTHETIC_LOW_PROBE {name}: greedy={greedy} bytes={} corrections={} mismatches={} parameters={:?}",
+                compressed.len(),
+                result.corrections.len(),
+                processor.prediction_trace().unwrap().mismatch_count,
+                result.parameters,
+            );
+        }
+    }
+}
+
+#[test]
+#[ignore = "offline low-probe provenance check; requires local PREFLATE_DIAGNOSTICS fixtures"]
+fn diagnose_native_miniz_low_probe_modes() {
+    use miniz_oxide::deflate::core::deflate_flags::TDEFL_GREEDY_PARSING_FLAG;
+
+    let directory = std::env::var_os("PREFLATE_DIAGNOSTICS").expect("set PREFLATE_DIAGNOSTICS");
+    let mut matched = 0;
+    for entry in std::fs::read_dir(directory).unwrap() {
+        let file = entry.unwrap().path();
+        if !file.extension().is_some_and(|ext| ext == "deflate") {
+            continue;
+        }
+        matched += 1;
+        let name = file.file_stem().unwrap().to_string_lossy();
+        let compressed = std::fs::read(&file).unwrap();
+        let plain = miniz_oxide::inflate::decompress_to_vec(&compressed).unwrap();
+        for probes in [1, 2, 3] {
+            for greedy in [false, true] {
+                let flags = probes | if greedy { TDEFL_GREEDY_PARSING_FLAG } else { 0 };
+                let output = miniz_compress_flags(&plain, flags);
+                println!(
+                    "NATIVE_LOW_PROBE {name}: probes={probes} greedy={greedy} exact={} bytes={} reference_bytes={}",
+                    output == compressed,
+                    output.len(),
+                    compressed.len(),
+                );
+            }
+        }
+    }
+    assert!(matched > 0, "no .deflate fixtures found");
 }
 
 fn pdf_style_test_bytes() -> Vec<u8> {

@@ -1,5 +1,7 @@
 # container (preflate-container)
 
+These instructions supplement the root [AGENTS.md](../AGENTS.md).
+
 Scans binary files (ZIP, PNG, JPEG) for DEFLATE streams, orchestrates the
 preflate + Zstd pipeline, and reassembles the output. Only format version 3 is supported.
 Versions 1 and 2 are rejected; version 3 uses the incompatible 0.8 corrections format.
@@ -47,6 +49,9 @@ Repeat for each block:
   [type]                           ← block type byte (1 byte, raw) — see bit-field below
   [varint(content_len)]            ← byte count of what follows (1–5 bytes, raw)
   [content_bytes × content_len]    ← meaning depends on type (see below)
+
+End:
+  [0xFF] [crc32_le × 4]           ← CRC-32 of original input, no varint
 ```
 
 All framing bytes (`type`, `varint`) are written directly to the output stream —
@@ -61,7 +66,7 @@ Bit 7-6  BLOCK_COMPRESSION_*   00 = none/raw   01 = Zstd   10-11 = reserved
 Bit 5-0  BLOCK_TYPE_*          block content kind (0–63)
 ```
 
-Mask constants (defined in `container_processor.rs`):
+Mask constants (defined in `container_common.rs`):
 
 | Constant | Value | Meaning |
 |---|---|---|
@@ -91,7 +96,8 @@ Mask constants (defined in `container_processor.rs`):
 - Each flush segment is decodable in sequence: the decoder is a persistent
   `zstd::stream::raw::Decoder` that maintains cross-block history, so compression
   quality benefits from all previously seen blocks.
-- The stream is terminated by EOF — there is no explicit end-of-stream block.
+- The final raw `0xFF` block carries a four-byte little-endian CRC-32 of the
+  original input. Reconstruction checks it against all output bytes.
 
 ### Inner payload layout (inside Zstd, after decompression)
 
@@ -139,7 +145,7 @@ IdatContents metadata:
   varint(chunk_size_1) … varint(chunk_size_N) varint(0)
   zlib_header[2]
   addler32[4]
-  color_type[1]                                ← PngColorType (RGB=2, RGBA=6)
+  color_type[1]                                ← PngColorType (Rgb=2, Rgba=6)
   varint(width)
   varint(height)
 filters[height]                ← PNG row filter bytes (one per row)
@@ -166,15 +172,17 @@ if input_complete && !self.input_complete {   // NOT just `if input_complete`
 ```
 src/
   lib.rs                  ← public types and re-exports
-  container_processor.rs  ← PreflateContainerProcessor, RecreateContainerProcessor,
-                            ProcessBuffer trait, MeasureWriteSink,
-                            block-type constants, emit_compressed_block(),
-                            write_chunk_block_v2(), write_varint(), read_varint()
+  container_common.rs     ← configuration, statistics, ProcessBuffer, block constants,
+                            write_varint(), read_varint()
+  container_write.rs      ← PreflateContainerProcessor, MeasureWriteSink,
+                            emit_compressed_block(), write_chunk_block_v2()
+  container_read.rs       ← RecreateContainerProcessor and sequential Zstd decoding
+  diagnostics.rs          ← bounded preflate-only stream analysis and payload extraction
   scan_deflate.rs         ← locates DEFLATE stream boundaries in raw bytes
-                            identifies: raw deflate, zlib-wrapped, PNG IDAT, ZIP, JPEG
+                            identifies: zlib, gzip, PNG IDAT, ZIP, JPEG signatures
   idat_parse.rs           ← extracts / reassembles PNG IDAT chunks; parses IHDR
   scoped_read.rs          ← bounded reader adapter
-  utils.rs                ← process_limited_buffer(), TakeReader, test helpers
+  utils.rs                ← process_limited_buffer(), test helpers
 ```
 
 ## Key Internal Types
@@ -183,12 +191,11 @@ src/
 |---|---|
 | `MeasureWriteSink` | `pub(crate)` sink that counts bytes; used for baseline Zstd measurement |
 | `PreflateStats` | pub struct: `deflate_compressed_size`, `zstd_compressed_size`, `uncompressed_size`, `overhead_bytes`, `hash_algorithm`, `zstd_baseline_size` |
-| `TakeReader<T>` | `pub` BufRead wrapper that reads at most N bytes (used in utils.rs) |
 
 ## Features
 
-- `webp` (default-enabled) — allows PNG images to be stored as WebP instead of lossless PNG,
-  using the `webp` crate.
+- `webp` (default-enabled) — stores eligible PNG images as lossless WebP.
+- `diagnostics` — enables core diagnostics, bounded traces and saved-payload extraction.
 
 ## Dependencies of Note
 
@@ -201,3 +208,8 @@ src/
 
 - `#![forbid(unsafe_code)]` enforced.
 - `main.rs` exists but is a stub; this crate is a library.
+- Zstd flush segments require the persistent decoder and preceding history; they
+  are not independently decodable frames.
+- Whole-file convenience helpers buffer the complete input. Use `ProcessBuffer`
+  or its `copy_to_end` helpers for bounded streaming.
+- Preserve CRC accumulation across calls and write the end block only once.

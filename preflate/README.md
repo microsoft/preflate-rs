@@ -16,12 +16,33 @@ Given those two parts, the original DEFLATE stream can be reconstructed bit-for-
 
 1. **Parse** (`deflate/`) — Decode the DEFLATE bitstream into a token sequence: literals and length/distance back-references.
 2. **Estimate** (`estimator/`) — Analyze the token sequence to fingerprint the original compressor. Identifies hash algorithm, chain depth, nice-length cutoff, window size, and add policy.
-3. **Predict** (`token_predictor.rs`) — Re-run compression using the estimated parameters, generating a predicted token sequence.
+3. **Predict** (`prediction_state.rs`) — Shared codec-free matching state predicts
+   tokens and accepts the resolved actual tokens. `token_predictor.rs` handles
+   correction recovery/coding, tree frequencies, traces, and parameter reporting.
 4. **Encode** (`statistical_codec.rs`, `cabac_codec.rs`) — Record each position where the actual token differs from the prediction, using CABAC arithmetic coding.
+
+Estimation first collects candidate-independent evidence in `PreflateStreamInfo`:
+token and block statistics, whether the chunk ends with the final DEFLATE block,
+ordinary versus flush/final block boundaries, bounded
+short-match signatures, and references into earlier match interiors. The existing
+statistics and insertion traversals remain separate; stored/Huffman-only fast
+paths skip insertion analysis. Insertion policies and other parameter hypotheses
+are derived from those observations, not stored as facts. Hash-chain depths,
+parser contradictions, and prediction scores remain candidate-dependent.
 
 ### Reconstruction pipeline
 
 Feed the plaintext and corrections back into the predictor. It replays every compression decision, applying corrections where recorded, and writes the resulting tokens back to a DEFLATE bitstream using the original Huffman trees.
+
+Estimation uses the same state directly through bounded replay in
+`estimator/prediction_scoring.rs`; candidate scoring and stopping remain outside
+the state. The lifecycle is predict, resolve corrections, then accept the actual
+token. Block setup/finish retain one private active context. The state reports
+safe normalization bounds; the wrapper selects profile-specific canonical values.
+See [AGENTS.md](AGENTS.md) for contributor constraints.
+Shared parameter types live in `parameters.rs`; runtime modules import them
+directly rather than depending on estimator modules. Family-specific behavior
+remains in `models/`, and public parameter re-exports are unchanged.
 
 ## API
 
@@ -41,23 +62,38 @@ let recreated = recreate_whole_deflate_stream(plain_text.text(), &result.correct
 assert_eq!(compressed_data, recreated);
 ```
 
+The analysis helper processes one plaintext-limited chunk, not an arbitrary-size
+stream. Use the streaming API when the stream can exceed `plain_text_limit`;
+`compressed_size` reports how much of the supplied compressed input was consumed.
+
 ### Streaming (chunked)
 
 For large streams where memory is a concern, use the streaming processors:
 
 ```rust
-use preflate_rs::{PreflateStreamProcessor, RecreateStreamProcessor, PreflateConfig};
+use std::io::Cursor;
+use preflate_rs::{PreflateStreamProcessor, RecreateStreamProcessor};
 
-// Analysis
 let mut processor = PreflateStreamProcessor::new(&config);
-let chunk_result = processor.decompress(&compressed_chunk)?;
-// chunk_result.corrections contains the encoded corrections for this chunk
-// processor.plain_text() gives access to the decompressed data
-
-// Reconstruction
 let mut recreator = RecreateStreamProcessor::new();
-let (deflate_output, _blocks) = recreator.recompress(&mut plain_text_reader, &corrections)?;
+let mut remaining = compressed_data.as_slice();
+let mut recreated = Vec::new();
+while !processor.is_done() {
+    let chunk = processor.decompress(remaining)?;
+    remaining = &remaining[chunk.compressed_size..];
+    let (output, _blocks) = recreator.recompress(
+        &mut Cursor::new(processor.plain_text().text()),
+        &chunk.corrections,
+    )?;
+    recreated.extend_from_slice(&output);
+    processor.shrink_to_dictionary();
+}
+assert_eq!(compressed_data, recreated);
 ```
+
+Retain both processors between chunks. The first chunk carries serialized
+parameters; continuation chunks carry only corrections. Shrink the analysis
+plaintext only after consuming it; reconstruction retains its own dictionary.
 
 ## Configuration
 
@@ -83,6 +119,7 @@ The estimator detects the following DEFLATE implementations by their token patte
 | Compressor | Detection method |
 |---|---|
 | zlib | Default hash, standard chain behavior |
+| Chromium zlib | Conservative 15-bit non-CRC hash recognition |
 | zlib-ng | Distinct hash variant |
 | libdeflate | 4-byte hash tables |
 | miniz / miniz_oxide | Fastest-mode hash function |
@@ -96,7 +133,7 @@ Unknown compressors still round-trip correctly with higher corrections overhead.
 |---|---|
 | `PreflateStreamChunkResult` | Output of analysis: corrections blob, compressed size, estimated parameters |
 | `TokenPredictorParameters` | Compressor fingerprint: hash algorithm, nice_length, max_chain, window_bits, add policy |
-| `HashAlgorithm` | Enum of detected compressor families |
+| `HashAlgorithm` | Hash implementations; hash identity alone does not prove producer identity |
 | `PlainText` | Decompressed data with sliding-window dictionary support |
 | `PreflateError` | Rich error type with detailed exit codes |
 
@@ -104,7 +141,14 @@ Unknown compressors still round-trip correctly with higher corrections overhead.
 
 Parameters are serialized with [`bitcode`](https://crates.io/crates/bitcode). Corrections use CABAC (Context Adaptive Binary Arithmetic Coding), the same codec used in [Lepton JPEG](https://github.com/microsoft/lepton_jpeg_rust) compression. The format is chunked so memory use is bounded regardless of input size.
 
-The first chunk's corrections blob starts with a format version byte (currently `0x81`). Blobs with a different version, including unversioned blobs from 0.7 and earlier, are rejected with `ExitCode::InvalidCompressedWrapper`.
+The first chunk's corrections blob starts with `0x84`, followed by nested,
+behavior-specific reconstruction parameters and CABAC corrections. The public
+parameter and diagnostic interfaces remain flat. The decoder also accepts the
+existing `0x83` flat-parameter format through its legacy prediction mode; `0x81`,
+`0x82`, unversioned 0.7 blobs and unknown tags are rejected with
+`ExitCode::InvalidCompressedWrapper`.
+The developing 0.8 format intentionally permits breaking changes under its
+current tag; it is not a stable compatibility promise.
 
 The following differences from the predicted stream are encoded:
 
@@ -113,6 +157,14 @@ The following differences from the predicted stream are encoded:
 - Dynamic Huffman tree encoding
 - Literal vs. length/distance choice
 - Incorrect distance or length (encoded as hop count back through the hash chain)
+
+## Diagnostics
+
+The optional `diagnostics` feature exposes bounded token-mismatch traces and
+`estimate_first_chunk_parameters`. The latter parses and estimates only the first
+chunk, including any bounded candidate scoring; it does not encode corrections
+or verify reconstruction. Tiny complete streams may normalize parameters during
+encoding, so raw estimates can differ from the parameters reported after analysis.
 
 ## Constraints
 

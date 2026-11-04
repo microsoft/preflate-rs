@@ -92,7 +92,7 @@ impl DeflateParser {
         // our first checkpoint is right at the beginning so that if we get to the
         // end of the stream before seeing a whole block, we just revert back to
         // the beginning to try again with more data.
-        let mut checkpoint = self.checkpoint(&mut cursor);
+        let mut checkpoint = self.checkpoint(cursor);
 
         let bits_left = self.bit_reader.bits_left();
         if bits_left > 0 {
@@ -103,38 +103,35 @@ impl DeflateParser {
             self.bit_reader.get(8 - bits_left, cursor)?;
         }
 
-        match self.read_blocks_internal(&mut cursor, &mut blocks, &mut checkpoint) {
-            Err(e) => {
-                // reset back to known good checkpoint before returning the error.
-                // this allows callers to try again once they have more data
-                self.bit_reader = checkpoint.bit_reader;
-                self.plain_text.truncate(checkpoint.plain_text);
+        if let Err(e) = self.read_blocks_internal(cursor, &mut blocks, &mut checkpoint) {
+            // reset back to known good checkpoint before returning the error.
+            // this allows callers to try again once they have more data
+            self.bit_reader = checkpoint.bit_reader;
+            self.plain_text.truncate(checkpoint.plain_text);
 
-                // if nothing was successfully read or we didn't
-                // get the out-of-data error, then just exit
-                // if we get a plain-text too big error, also checkpoint back
-                // to how far we got and the next part of the plaintext will be put in the next chunk
-                if checkpoint.position == 0
-                    || (e.exit_code() != ExitCode::ShortRead
-                        && e.exit_code() != ExitCode::PlainTextLimit)
-                {
-                    return Err(e);
-                }
-
-                // if we had bits left to read, then we didn't compress the entire
-                // block, and save the bits for later
-                let compressed_size = if (self.bit_reader.bits_left() & 0x7) > 0 {
-                    (checkpoint.position - 1) as usize
-                } else {
-                    checkpoint.position as usize
-                };
-
-                return Ok(DeflateContents {
-                    compressed_size,
-                    blocks,
-                });
+            // if nothing was successfully read or we didn't
+            // get the out-of-data error, then just exit
+            // if we get a plain-text too big error, also checkpoint back
+            // to how far we got and the next part of the plaintext will be put in the next chunk
+            if checkpoint.position == 0
+                || (e.exit_code() != ExitCode::ShortRead
+                    && e.exit_code() != ExitCode::PlainTextLimit)
+            {
+                return Err(e);
             }
-            Ok(()) => {}
+
+            // if we had bits left to read, then we didn't compress the entire
+            // block, and save the bits for later
+            let compressed_size = if (self.bit_reader.bits_left() & 0x7) > 0 {
+                (checkpoint.position - 1) as usize
+            } else {
+                checkpoint.position as usize
+            };
+
+            return Ok(DeflateContents {
+                compressed_size,
+                blocks,
+            });
         }
 
         self.bit_reader.undo_read_ahead(&mut cursor);
@@ -386,13 +383,13 @@ fn test_partial_read_plaintext() {
 pub fn test_partial_read_for_buffer(d: &[u8]) {
     use crate::utils::{assert_block_eq, assert_eq_array};
 
-    let (complete, _plain_text_complete) = parse_deflate_whole(&d).unwrap();
+    let (complete, _plain_text_complete) = parse_deflate_whole(d).unwrap();
 
     let mut start_offset = 0;
     let mut end_offset = 1;
     let mut allblocks = Vec::new();
 
-    let mut deflate_parser = DeflateParser::new(1 * 1024 * 1024);
+    let mut deflate_parser = DeflateParser::new(1024 * 1024);
 
     while !deflate_parser.is_done() {
         match deflate_parser.parse(&d[start_offset..end_offset]) {
@@ -429,8 +426,8 @@ pub fn test_partial_read_for_buffer(d: &[u8]) {
     }
 
     assert_eq!(allblocks.len(), complete.blocks.len());
-    for i in 0..allblocks.len() {
-        assert_block_eq(&allblocks[i], &complete.blocks[i]);
+    for (actual, expected) in allblocks.iter().zip(&complete.blocks) {
+        assert_block_eq(actual, expected);
     }
 
     let reconstruct = crate::deflate::deflate_writer::write_deflate_blocks(&allblocks);

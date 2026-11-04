@@ -4,6 +4,30 @@
  *  This software incorporates material from third parties. See NOTICE.txt for details.
  *--------------------------------------------------------------------------------------------*/
 
+//! Split a DEFLATE stream into plaintext and corrections, then reconstruct its exact bytes.
+//!
+//! ```
+//! use preflate_rs::{
+//!     PreflateConfig, preflate_whole_deflate_stream, recreate_whole_deflate_stream,
+//! };
+//!
+//! // A final stored block containing "abc".
+//! let compressed = b"\x01\x03\x00\xfc\xffabc";
+//! let (chunk, plaintext) = preflate_whole_deflate_stream(
+//!     compressed, &PreflateConfig::default(),
+//! )?;
+//! assert_eq!(plaintext.text(), b"abc");
+//! assert_eq!(chunk.compressed_size, compressed.len());
+//! assert_eq!(
+//!     recreate_whole_deflate_stream(plaintext.text(), &chunk.corrections)?,
+//!     compressed,
+//! );
+//! # Ok::<(), preflate_rs::PreflateError>(())
+//! ```
+//!
+//! The convenience helper analyzes one plaintext-limited chunk. For larger streams,
+//! retain a [`PreflateStreamProcessor`] and [`RecreateStreamProcessor`] across chunks.
+
 // forbid lints that we already have eliminated from the codebase so they don't show up in the future
 #![forbid(unsafe_code)]
 #![forbid(trivial_casts)]
@@ -28,19 +52,22 @@ mod hash_algorithm;
 mod hash_chain;
 mod hash_chain_holder;
 mod models;
+mod parameters;
 
 mod preflate_error;
 mod preflate_input;
 
 mod block_predictor;
+mod prediction_state;
+mod reconstruction_parameters;
 mod statistical_codec;
 mod stream_processor;
 mod token_predictor;
 mod tree_predictor;
 mod utils;
 
-pub use estimator::preflate_parameter_estimator::TokenPredictorParameters;
-pub use estimator::preflate_parse_config::{LazyBehavior, MatchingType};
+pub use crate::parameters::TokenPredictorParameters;
+pub use crate::parameters::{LazyBehavior, MatchingType};
 pub use hash_algorithm::HashAlgorithm;
 pub use preflate_error::ExitCode;
 pub use preflate_error::{AddContext, PreflateError, Result, err_exit_code};
@@ -49,6 +76,8 @@ pub use preflate_input::{PlainText, PreflateInput};
 #[cfg(feature = "diagnostics")]
 pub use deflate::deflate_token::{DeflateHuffmanType, DeflateToken, DeflateTokenBlockType};
 pub use statistical_codec::{CodecCorrection, CountNonDefaultActions};
+#[cfg(feature = "diagnostics")]
+pub use stream_processor::estimate_first_chunk_parameters;
 pub use stream_processor::{
     PreflateStreamChunkResult, PreflateStreamProcessor, RecreateStreamProcessor,
     preflate_whole_deflate_stream, recreate_whole_deflate_stream,
@@ -69,7 +98,7 @@ pub struct PreflateConfig {
     pub plain_text_limit: usize,
 
     /// Decompress the data and verify that it can be recompressed to exactly the same bytes.
-    /// This will slow down processing is isn't necessary if you are already doing end-to-end
+    /// This will slow down processing and isn't necessary if you are already doing end-to-end
     /// verification of the data.
     pub verify_compression: bool,
 }

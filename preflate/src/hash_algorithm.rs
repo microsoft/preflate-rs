@@ -27,7 +27,7 @@ pub enum HashAlgorithm {
     /// Considered when no three-byte references were observed; the build determines the hash.
     ZlibNG,
     /// Windows built-in PNG/ZIP DEFLATE fingerprint: a three-byte, 15-bit table-XOR hash.
-    /// Considered alongside the other hashes that can explain three-byte references.
+    /// Also considered with its complete lazy profile when no short references occur.
     RandomVector,
     /// Zlib-ng's CRC32C-based four-byte hash, observed in our level 1-4 fixtures.
     /// Replayed portably here, independent of the decoding machine's CPU capabilities.

@@ -68,18 +68,13 @@ pub const BT_STORED: u32 = 1;
 pub const BT_DYNAMICHUFF: u32 = 0;
 pub const BT_STATICHUFF: u32 = 2;
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Default)]
 pub enum DeflateHuffmanType {
+    #[default]
     Static,
     Dynamic {
         huffman_encoding: HuffmanOriginalEncoding,
     },
-}
-
-impl Default for DeflateHuffmanType {
-    fn default() -> Self {
-        DeflateHuffmanType::Static
-    }
 }
 
 #[derive(PartialEq)]
@@ -99,7 +94,7 @@ impl std::fmt::Debug for DeflateTokenBlockType {
         match self {
             DeflateTokenBlockType::Huffman {
                 tokens,
-                huffman_type: DeflateHuffmanType::Static { .. },
+                huffman_type: DeflateHuffmanType::Static,
             } => {
                 write!(f, "StaticHuffman {{ tokens: len={} }}", tokens.len(),)
             }

@@ -71,7 +71,7 @@ const fn problookup() -> [NonZeroU8; 65536] {
         i += 1;
     }
 
-    return retval;
+    retval
 }
 
 static PROB_LOOKUP: [NonZeroU8; 65536] = problookup();
@@ -170,7 +170,7 @@ impl<R: Read> CabacReader<VP8Context> for VP8Reader<R> {
         self.value = tmp_value << shift;
         self.range = tmp_range << shift;
         self.count = tmp_count - shift;
-        return Ok(bit);
+        Ok(bit)
     }
 
     #[inline(always)]
@@ -213,7 +213,7 @@ impl<R: Read> CabacReader<VP8Context> for VP8Reader<R> {
         self.value = tmp_value << shift;
         self.range = tmp_range << shift;
         self.count = tmp_count - shift;
-        return Ok(bit);
+        Ok(bit)
     }
 }
 
@@ -231,7 +231,7 @@ impl<R: Read> VP8Reader<R> {
         let mut dummy_branch = VP8Context::new();
         let _ = r.get(&mut dummy_branch)?; // marker bit
 
-        return Ok(r);
+        Ok(r)
     }
 
     #[cold]
@@ -256,7 +256,7 @@ impl<R: Read> VP8Reader<R> {
             *tmp_count += BITS_IN_BYTE;
         }
 
-        return Ok(());
+        Ok(())
     }
 }
 
@@ -276,7 +276,7 @@ impl<W: Write> VP8Writer<W> {
             low_value: 0,
             range: 255,
             bits_left: -24,
-            writer: writer,
+            writer,
             num_buffered_bytes: 0,
             buffered_byte: 0,
         };
@@ -441,24 +441,24 @@ fn test_all_contexts() {
 
     let mut buffer: Vec<_> = Vec::new();
     let mut writer = VP8Writer::new(&mut buffer).unwrap();
-    for i in 0..=65535 {
-        writer.put(true, &mut contexts[i]).unwrap();
-        writer.put(false, &mut contexts[i]).unwrap();
+    for context in &mut contexts {
+        writer.put(true, context).unwrap();
+        writer.put(false, context).unwrap();
         writer.put_bypass(true).unwrap();
         writer.put_bypass(false).unwrap();
     }
     writer.finish().unwrap();
 
-    for i in 0..=65535 {
-        contexts[i] = VP8Context { counts: i as u16 };
+    for (i, context) in contexts.iter_mut().enumerate() {
+        *context = VP8Context { counts: i as u16 };
     }
 
     let mut reader = VP8Reader::new(Cursor::new(&buffer[..])).unwrap();
-    for i in 0..=65535 {
-        assert_eq!(reader.get(&mut contexts[i]).unwrap(), true, "i = {}", i);
-        assert_eq!(reader.get(&mut contexts[i]).unwrap(), false, "i = {}", i);
-        assert_eq!(reader.get_bypass().unwrap(), true, "i = {}", i);
-        assert_eq!(reader.get_bypass().unwrap(), false, "i = {}", i);
+    for (i, context) in contexts.iter_mut().enumerate() {
+        assert!(reader.get(context).unwrap(), "i = {}", i);
+        assert!(!reader.get(context).unwrap(), "i = {}", i);
+        assert!(reader.get_bypass().unwrap(), "i = {}", i);
+        assert!(!reader.get_bypass().unwrap(), "i = {}", i);
     }
 }
 
@@ -473,10 +473,10 @@ fn test_all_probabilities() {
 
     impl OriginalImplForTest {
         fn true_count(&self) -> u32 {
-            return self.counts[1] as u32;
+            self.counts[1] as u32
         }
         fn false_count(&self) -> u32 {
-            return self.counts[0] as u32;
+            self.counts[0] as u32
         }
 
         fn record_obs_and_update(&mut self, obs: bool) {

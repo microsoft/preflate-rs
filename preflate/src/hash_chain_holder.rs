@@ -7,21 +7,31 @@
 use crate::bit_helper::DebugHash;
 use crate::deflate::deflate_constants::{MAX_MATCH, MIN_MATCH};
 use crate::deflate::deflate_token::DeflateTokenReference;
-use crate::estimator::preflate_parameter_estimator::{PreflateStrategy, TokenPredictorParameters};
-use crate::estimator::preflate_parse_config::MatchingType;
 use crate::hash_algorithm::{
     ChromiumHash, Crc32cHash, HashAlgorithm, LibdeflateHash4Fast, LibdeflateHash4Fast15, MiniZHash,
     RandomVectorHash, ZlibNGHash, ZlibRotatingHash, ZlibRotatingHashFixed,
 };
 use crate::hash_chain::{HashChain, HashChainDefault, HashChainLibflate4, MAX_UPDATE_HASH_BATCH};
-use crate::models::{libdeflate, miniz, zlib};
+use crate::models::{libdeflate, miniz, windows, zlib};
+#[cfg(test)]
+use crate::parameters::{MatchingType, PreflateStrategy, TokenPredictorParameters};
 use crate::preflate_error::{ExitCode, Result, err_exit_code};
 use crate::preflate_input::PreflateInput;
+#[cfg(test)]
+use crate::reconstruction_parameters::ReconstructionParameters;
+use {
+    crate::reconstruction_parameters::BehaviorSettings,
+    crate::reconstruction_parameters::ChainDistancePolicy,
+    crate::reconstruction_parameters::ChainMatchSettings,
+    crate::reconstruction_parameters::DictionarySettings,
+    crate::reconstruction_parameters::MiniZDistancePolicy,
+    crate::reconstruction_parameters::MiniZMatchSettings,
+    crate::reconstruction_parameters::SearchBudget,
+    crate::reconstruction_parameters::SourceHistorySettings,
+};
 
 #[cfg(test)]
 use crate::models::miniz::match_chain as match_miniz;
-
-use std::cmp;
 
 #[derive(Debug, Copy, Clone)]
 #[allow(dead_code)]
@@ -31,12 +41,61 @@ pub enum MatchResult {
     NoMoreMatchesFound,
 }
 
-/// Factory function to create a new HashChainHolder based on the parameters and returns
-/// a boxed trait object. The reason for this is that this lets the compiler inline hash
-/// implementation.
+#[cfg(test)]
 pub fn new_hash_chain_holder(params: &TokenPredictorParameters) -> Box<dyn HashChainHolder> {
-    match params.hash_algorithm {
-        HashAlgorithm::None => Box::<()>::default(),
+    new_hash_chain_holder_for_behavior(&ReconstructionParameters::from(params).behavior)
+}
+
+/// Select the concrete hash once, allowing its implementation to inline during matching.
+pub(crate) fn new_hash_chain_holder_for_behavior(
+    behavior: &BehaviorSettings,
+) -> Box<dyn HashChainHolder> {
+    match *behavior {
+        BehaviorSettings::NoDictionary { strategy: _ } => Box::<()>::default(),
+        BehaviorSettings::Greedy(settings) => {
+            new_holder_for_behavior(behavior, settings.common, 0, true)
+        }
+        BehaviorSettings::Lazy(settings) => {
+            new_holder_for_behavior(behavior, settings.common, 0, true)
+        }
+        BehaviorSettings::MiniZ(settings) => {
+            new_holder_for_behavior(behavior, settings.common, 0, false)
+        }
+        BehaviorSettings::LibdeflateGreedy(settings) => {
+            new_holder_for_behavior(behavior, settings.common, 0, false)
+        }
+        BehaviorSettings::LibdeflateLazy(settings) => {
+            new_holder_for_behavior(behavior, settings.common, 0, false)
+        }
+        BehaviorSettings::WindowsLazy(settings) => {
+            new_holder_for_behavior(behavior, settings.common, windows::TRAILING_LITERALS, false)
+        }
+    }
+}
+
+fn new_holder_for_behavior<S: SearchBehavior>(
+    behavior: &BehaviorSettings,
+    search: S,
+    trailing_literals: u32,
+    normalize_window: bool,
+) -> Box<dyn HashChainHolder> {
+    let settings = HashRuntimeSettings {
+        search_restrictions: libdeflate::search_restrictions(
+            search.dictionary().hash.into_algorithm(),
+            behavior,
+        ),
+        trailing_literals,
+        normalize_window,
+    };
+    new_typed_holder(&settings, search)
+}
+
+fn new_typed_holder<S: SearchBehavior>(
+    params: &HashRuntimeSettings,
+    search: S,
+) -> Box<dyn HashChainHolder> {
+    match search.dictionary().hash.into_algorithm() {
+        HashAlgorithm::None => unreachable!("dictionary hashes exclude None"),
 
         // most common Zlib combo, optimize with fixed parameters
         HashAlgorithm::Zlib {
@@ -44,6 +103,7 @@ pub fn new_hash_chain_holder(params: &TokenPredictorParameters) -> Box<dyn HashC
             hash_shift: 5,
         } => Box::new(HashChainHolderImpl::new(
             params,
+            search,
             HashChainDefault::new(ZlibRotatingHashFixed::<5, 0x7fff> {}),
         )),
 
@@ -52,6 +112,7 @@ pub fn new_hash_chain_holder(params: &TokenPredictorParameters) -> Box<dyn HashC
             hash_shift,
         } => Box::new(HashChainHolderImpl::new(
             params,
+            search,
             HashChainDefault::new(ZlibRotatingHash {
                 hash_mask,
                 hash_shift,
@@ -60,20 +121,27 @@ pub fn new_hash_chain_holder(params: &TokenPredictorParameters) -> Box<dyn HashC
 
         HashAlgorithm::MiniZFast => Box::new(HashChainHolderImpl::new(
             params,
+            search,
             HashChainDefault::new(MiniZHash {}),
         )),
 
         HashAlgorithm::Libdeflate4 => {
             // Only this profile combines the primary chain with a three-byte secondary slot.
-            Box::new(HashChainHolderImpl::new(params, HashChainLibflate4::new()))
+            Box::new(HashChainHolderImpl::new(
+                params,
+                search,
+                HashChainLibflate4::new(),
+            ))
         }
 
         HashAlgorithm::Libdeflate4Fast => Box::new(HashChainHolderImpl::new(
             params,
+            search,
             HashChainDefault::new(LibdeflateHash4Fast {}),
         )),
         HashAlgorithm::Libdeflate4Fast15 => Box::new(HashChainHolderImpl::new(
             params,
+            search,
             // Retain full history for correction recovery even though normal level-1
             // prediction inspects only the two newest entries in the selected bucket.
             HashChainDefault::new(LibdeflateHash4Fast15 {}),
@@ -81,20 +149,24 @@ pub fn new_hash_chain_holder(params: &TokenPredictorParameters) -> Box<dyn HashC
 
         HashAlgorithm::ZlibNG => Box::new(HashChainHolderImpl::new(
             params,
+            search,
             HashChainDefault::new(ZlibNGHash {}),
         )),
         HashAlgorithm::Chromium { hash_mask } => Box::new(HashChainHolderImpl::new(
             params,
+            search,
             HashChainDefault::new(ChromiumHash { hash_mask }),
         )),
 
         HashAlgorithm::RandomVector => Box::new(HashChainHolderImpl::new(
             params,
+            search,
             HashChainDefault::new(RandomVectorHash {}),
         )),
 
         HashAlgorithm::Crc32cHash => Box::new(HashChainHolderImpl::new(
             params,
+            search,
             HashChainDefault::new(Crc32cHash {}),
         )),
     }
@@ -103,6 +175,9 @@ pub fn new_hash_chain_holder(params: &TokenPredictorParameters) -> Box<dyn HashC
 /// trait that is not dependent on the HashImplementation so it can
 /// be used in a concrete boxed type by the TokenPredictor
 pub trait HashChainHolder {
+    /// Restrict normal predictions, keeping the complete chain for correction recovery.
+    fn set_dictionary_start(&mut self, _position: Option<u32>) {}
+
     fn enable_window_normalization(&mut self) {}
 
     fn normalized_window_bits(&self) -> Option<u32> {
@@ -205,27 +280,303 @@ impl HashChainHolder for () {
 }
 
 /// implemenation of HashChainHolder depends type of hash implemenatation
-struct HashChainHolderImpl<H: HashChain> {
-    hash: H,
-    params: TokenPredictorParameters,
-    window_bytes: u32,
-    window_constraint: zlib::WindowConstraint,
+#[derive(Copy, Clone)]
+struct HashRuntimeSettings {
     search_restrictions: libdeflate::SearchRestrictions,
+    trailing_literals: u32,
+    normalize_window: bool,
 }
 
-impl<H: HashChain + 'static> HashChainHolder for HashChainHolderImpl<H> {
+struct DistanceRequest {
+    window_bytes: u32,
+    history: u32,
+    max_len: u32,
+    normal_prediction: bool,
+    dictionary_start: bool,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct DistanceLimits {
+    history: u32,
+    head: u32,
+    chained: u32,
+}
+
+#[derive(Copy, Clone)]
+struct ChainDistanceCeilings {
+    head: u32,
+    chained: u32,
+}
+
+#[derive(Copy, Clone)]
+enum PreparedChainDistance {
+    Disabled,
+    RleOnly,
+    Bounded {
+        history: SourceHistorySettings,
+        normal: ChainDistanceCeilings,
+        expanded: ChainDistanceCeilings,
+    },
+}
+
+impl PreparedChainDistance {
+    fn new(settings: ChainMatchSettings, restrictions: libdeflate::SearchRestrictions) -> Self {
+        let window = 1 << settings.dictionary.window_bits;
+        match settings.distance {
+            ChainDistancePolicy::Disabled => Self::Disabled,
+            ChainDistancePolicy::RleOnly => Self::RleOnly,
+            ChainDistancePolicy::FullWindow(history) => Self::Bounded {
+                history,
+                normal: ChainDistanceCeilings {
+                    head: window - restrictions.window_edge_exclusion,
+                    chained: window - restrictions.window_edge_exclusion,
+                },
+                expanded: ChainDistanceCeilings {
+                    head: window,
+                    chained: window,
+                },
+            },
+            ChainDistancePolicy::HashWindow(history) => {
+                let algorithm = settings.dictionary.hash.into_algorithm();
+                let ceilings = |normal_prediction| {
+                    let (head, chained) = crate::models::hash_window_distance_limits(
+                        algorithm,
+                        normal_prediction,
+                        window,
+                        u32::MAX,
+                    );
+                    ChainDistanceCeilings { head, chained }
+                };
+                Self::Bounded {
+                    history,
+                    normal: ceilings(true),
+                    expanded: ceilings(false),
+                }
+            }
+        }
+    }
+}
+
+trait PreparedDistance {
+    fn limits(&self, request: DistanceRequest) -> Option<DistanceLimits>;
+}
+
+impl PreparedDistance for PreparedChainDistance {
+    #[inline]
+    fn limits(&self, request: DistanceRequest) -> Option<DistanceLimits> {
+        match *self {
+            Self::Disabled => None,
+            Self::RleOnly => {
+                let maximum = if request.normal_prediction && request.dictionary_start {
+                    1.min(request.history)
+                } else {
+                    1
+                };
+                Some(DistanceLimits {
+                    history: request.history,
+                    head: maximum,
+                    chained: maximum,
+                })
+            }
+            Self::Bounded {
+                history,
+                normal,
+                expanded,
+            } => {
+                let history = history.maximum_distance(request.history);
+                let ceilings = if request.normal_prediction {
+                    normal
+                } else {
+                    expanded
+                };
+                Some(DistanceLimits {
+                    history,
+                    head: history.min(ceilings.head),
+                    chained: history.min(ceilings.chained),
+                })
+            }
+        }
+    }
+}
+
+impl PreparedDistance for MiniZDistancePolicy {
+    #[inline]
+    fn limits(&self, request: DistanceRequest) -> Option<DistanceLimits> {
+        match *self {
+            Self::Disabled => None,
+            Self::Enabled(history) => {
+                let history = history.maximum_distance(request.history);
+                let maximum =
+                    miniz::maximum_distance(request.window_bytes, history, request.max_len);
+                Some(DistanceLimits {
+                    history,
+                    head: maximum,
+                    chained: maximum,
+                })
+            }
+        }
+    }
+}
+
+struct SearchRequest<'a, 'b> {
+    input: &'a PreflateInput<'b>,
+    max_len: u32,
+    head_distance: u32,
+    chain_distance: u32,
+    history_distance: u32,
+    depth: u32,
+    previous_length: u32,
+    normal_prediction: bool,
+    window_constraint: &'a zlib::WindowConstraint,
+}
+
+trait SearchBehavior: Copy + 'static {
+    type Distance: PreparedDistance;
+    fn dictionary(&self) -> DictionarySettings;
+    fn budget(&self) -> SearchBudget;
+    fn prepare_distance(self, restrictions: libdeflate::SearchRestrictions) -> Self::Distance;
+    fn enable_window_normalization(self, constraint: &mut zlib::WindowConstraint, eligible: bool);
+    fn find<const OFFSET: u32>(
+        &self,
+        request: SearchRequest<'_, '_>,
+        iter: impl Iterator<Item = u32>,
+    ) -> MatchResult;
+}
+
+impl SearchBehavior for ChainMatchSettings {
+    type Distance = PreparedChainDistance;
+
+    #[inline]
+    fn dictionary(&self) -> DictionarySettings {
+        self.dictionary
+    }
+
+    #[inline]
+    fn budget(&self) -> SearchBudget {
+        self.search.budget
+    }
+
+    fn enable_window_normalization(self, constraint: &mut zlib::WindowConstraint, eligible: bool) {
+        constraint.enable(&self.dictionary, self.distance, eligible);
+    }
+
+    fn prepare_distance(self, restrictions: libdeflate::SearchRestrictions) -> Self::Distance {
+        PreparedChainDistance::new(self, restrictions)
+    }
+
+    #[inline]
+    fn find<const OFFSET: u32>(
+        &self,
+        request: SearchRequest<'_, '_>,
+        iter: impl Iterator<Item = u32>,
+    ) -> MatchResult {
+        let nice_length = self.search.nice_length.min(request.max_len);
+        let best_len = request.previous_length.max(1);
+        if !request.window_constraint.is_enabled() {
+            return match_less3::<OFFSET>(
+                request.input,
+                request.max_len,
+                request.head_distance,
+                request.chain_distance,
+                nice_length,
+                request.depth,
+                best_len,
+                iter,
+                |_, _| {},
+            );
+        }
+        match_less3::<OFFSET>(
+            request.input,
+            request.max_len,
+            request.head_distance,
+            request.chain_distance,
+            nice_length,
+            request.depth,
+            best_len,
+            iter,
+            |distance, first_hop| {
+                if distance <= request.history_distance {
+                    request.window_constraint.exclude(distance, first_hop);
+                }
+            },
+        )
+    }
+}
+
+impl SearchBehavior for MiniZMatchSettings {
+    type Distance = MiniZDistancePolicy;
+
+    #[inline]
+    fn dictionary(&self) -> DictionarySettings {
+        self.dictionary
+    }
+
+    #[inline]
+    fn budget(&self) -> SearchBudget {
+        self.search.budget
+    }
+
+    fn enable_window_normalization(
+        self,
+        _constraint: &mut zlib::WindowConstraint,
+        _eligible: bool,
+    ) {
+    }
+
+    fn prepare_distance(self, _restrictions: libdeflate::SearchRestrictions) -> Self::Distance {
+        self.distance
+    }
+
+    #[inline]
+    fn find<const OFFSET: u32>(
+        &self,
+        request: SearchRequest<'_, '_>,
+        iter: impl Iterator<Item = u32>,
+    ) -> MatchResult {
+        let probes = miniz::probe_limit(request.depth, self.search);
+        let position = request.input.pos() + OFFSET;
+        miniz::match_chain::<OFFSET>(
+            request.input,
+            request.max_len,
+            request.head_distance,
+            probes,
+            request.previous_length.max(2),
+            iter.take_while(|&distance| {
+                !request.normal_prediction || !miniz::is_zero_chain_link(position, distance)
+            }),
+        )
+    }
+}
+
+struct HashChainHolderImpl<H: HashChain, S: SearchBehavior> {
+    hash: H,
+    params: HashRuntimeSettings,
+    search: S,
+    distance: S::Distance,
+    window_bytes: u32,
+    window_constraint: zlib::WindowConstraint,
+    dictionary_start: Option<u32>,
+}
+
+impl<H: HashChain + 'static, S: SearchBehavior> HashChainHolder for HashChainHolderImpl<H, S> {
+    fn set_dictionary_start(&mut self, position: Option<u32>) {
+        self.dictionary_start = position;
+    }
+
     fn enable_window_normalization(&mut self) {
-        self.window_constraint.enable(&self.params);
+        self.search
+            .enable_window_normalization(&mut self.window_constraint, self.params.normalize_window);
     }
 
     fn normalized_window_bits(&self) -> Option<u32> {
-        self.window_constraint.window_bits(self.params.window_bits)
+        self.window_constraint
+            .window_bits(self.search.dictionary().window_bits)
     }
 
     fn update_hash(&mut self, length: u32, input: &PreflateInput) {
         debug_assert!(length <= MAX_UPDATE_HASH_BATCH);
 
-        self.params.add_policy.update_hash(
+        self.search.dictionary().insertion.update_hash(
             input.cur_chars(0),
             input.pos(),
             length,
@@ -373,17 +724,16 @@ fn read_u32_le(slice: &[u8], pos: usize) -> u32 {
     u32::from_le_bytes((&slice[pos..pos + 4]).try_into().unwrap())
 }
 
-impl<H: HashChain> HashChainHolderImpl<H> {
-    pub fn new(params: &TokenPredictorParameters, hash: H) -> Self {
+impl<H: HashChain, S: SearchBehavior> HashChainHolderImpl<H, S> {
+    fn new(params: &HashRuntimeSettings, search: S, hash: H) -> Self {
         Self {
-            search_restrictions: libdeflate::search_restrictions(
-                hash.algorithm(),
-                params.matching_type,
-            ),
             hash,
-            window_bytes: 1 << params.window_bits,
+            window_bytes: 1 << search.dictionary().window_bits,
             params: *params,
+            search,
+            distance: search.prepare_distance(params.search_restrictions),
             window_constraint: zlib::WindowConstraint::default(),
+            dictionary_start: None,
         }
     }
 
@@ -395,11 +745,14 @@ impl<H: HashChain> HashChainHolderImpl<H> {
         input: &PreflateInput,
     ) -> MatchResult {
         let start_pos = input.pos() + OFFSET;
-        let max_len = std::cmp::min(input.total_length() - start_pos, MAX_MATCH);
         // Apply source-compressor exclusions only to normal prediction. Expanded-budget
         // correction searches must still recover references outside the selected profile.
-        let normal_prediction = max_depth <= self.params.max_chain;
-        if normal_prediction && max_len < self.search_restrictions.minimum_input {
+        let normal_prediction = max_depth <= self.search.budget().max_chain;
+        let trailing_literals = u32::from(normal_prediction) * self.params.trailing_literals;
+        let max_len = (input.total_length() - start_pos)
+            .saturating_sub(trailing_literals)
+            .min(MAX_MATCH);
+        if normal_prediction && max_len < self.params.search_restrictions.minimum_input {
             return MatchResult::NoInput;
         }
         if max_len
@@ -411,51 +764,19 @@ impl<H: HashChain> HashChainHolderImpl<H> {
             return MatchResult::NoInput;
         }
 
-        let hist_to_start = input.bytes_before() + OFFSET;
-        let max_dist_to_start = hist_to_start
-            - if self.params.matches_to_start_detected {
-                0
-            } else {
-                1
-            };
-
-        let cur_max_dist_hop0;
-        let cur_max_dist_hop1_plus;
-        if self.params.very_far_matches_detected {
-            cur_max_dist_hop0 = cmp::min(
-                max_dist_to_start,
-                self.window_bytes
-                    - if normal_prediction {
-                        self.search_restrictions.window_edge_exclusion
-                    } else {
-                        0
-                    },
-            );
-            cur_max_dist_hop1_plus = cur_max_dist_hop0;
-        } else {
-            match self.params.strategy {
-                PreflateStrategy::HuffOnly | PreflateStrategy::Store => {
-                    return MatchResult::NoMoreMatchesFound;
-                }
-                PreflateStrategy::RleOnly => {
-                    cur_max_dist_hop0 = 1;
-                    cur_max_dist_hop1_plus = 1;
-                }
-                _ => {
-                    (cur_max_dist_hop0, cur_max_dist_hop1_plus) =
-                        crate::models::chromium::distance_limits(
-                            self.hash.algorithm(),
-                            normal_prediction,
-                            self.window_bytes,
-                            max_dist_to_start,
-                        );
-                }
-            }
+        let mut hist_to_start = input.bytes_before() + OFFSET;
+        if normal_prediction && let Some(start) = self.dictionary_start {
+            hist_to_start = hist_to_start.min(start_pos.saturating_sub(start));
         }
-
-        let nice_length = std::cmp::min(self.params.nice_length, max_len);
-
-        let best_len = prev_len.max(1);
+        let Some(limits) = self.distance.limits(DistanceRequest {
+            window_bytes: self.window_bytes,
+            history: hist_to_start,
+            max_len,
+            normal_prediction,
+            dictionary_start: self.dictionary_start.is_some(),
+        }) else {
+            return MatchResult::NoMoreMatchesFound;
+        };
 
         let secondary = if OFFSET > 0 && prev_len < 3 {
             self.hash.secondary_match(input, OFFSET)
@@ -473,52 +794,29 @@ impl<H: HashChain> HashChainHolderImpl<H> {
             iter.next();
         }
 
-        if let MatchingType::MiniZ { max_probes, .. } = self.params.matching_type {
-            let max_dist = miniz::maximum_distance(self.window_bytes, max_dist_to_start, max_len);
-            let probes = miniz::probe_limit(max_depth, self.params.max_chain, max_probes);
-            return miniz::match_chain::<OFFSET>(
+        self.search.find::<OFFSET>(
+            SearchRequest {
                 input,
                 max_len,
-                max_dist,
-                probes,
-                prev_len.max(2),
-                iter,
-            );
-        }
-
-        if !self.window_constraint.is_enabled() {
-            return match_less3::<OFFSET>(
-                input,
-                max_len,
-                cur_max_dist_hop0,
-                cur_max_dist_hop1_plus,
-                nice_length,
-                max_depth,
-                best_len,
-                iter,
-                |_, _| {},
-            );
-        }
-        match_less3::<OFFSET>(
-            input,
-            max_len,
-            cur_max_dist_hop0,
-            cur_max_dist_hop1_plus,
-            nice_length,
-            max_depth,
-            best_len,
-            iter,
-            |distance, first_hop| {
-                if distance <= max_dist_to_start {
-                    self.window_constraint.exclude(distance, first_hop);
-                }
+                head_distance: limits.head,
+                chain_distance: limits.chained,
+                history_distance: limits.history,
+                depth: max_depth,
+                previous_length: prev_len,
+                normal_prediction,
+                window_constraint: &self.window_constraint,
             },
+            iter,
         )
     }
 }
 
 /// searches for a match that is at least 3 bytes long
 #[inline]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Keep independent hot-path search limits explicit."
+)]
 fn match_less3<const OFFSET: u32>(
     input: &PreflateInput<'_>,
     max_len: u32,
@@ -591,6 +889,10 @@ fn match_less3<const OFFSET: u32>(
 
 /// Once we know that we have a least a 3 byte match, we can be faster by comparing 4 bytes at a time
 #[inline]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Keep independent hot-path search limits explicit."
+)]
 fn match_4<const OFFSET: u32>(
     input: &PreflateInput<'_>,
     max_len: u32,
@@ -598,7 +900,7 @@ fn match_4<const OFFSET: u32>(
     nice_length: u32,
     mut max_chain: u32,
     mut best_len: u32,
-    mut iter: impl Iterator<Item = u32>,
+    iter: impl Iterator<Item = u32>,
     best: &mut MatchResult,
     mut excluded: impl FnMut(u32, bool),
 ) {
@@ -607,7 +909,7 @@ fn match_4<const OFFSET: u32>(
     // look at last 3 characters of best length so far + 1 because we want to improve the match
     let mut c0 = read_u32_le(input_chars, (best_len - 3) as usize);
 
-    while let Some(dist) = iter.next() {
+    for dist in iter {
         if dist > max_dist {
             excluded(dist, false);
             break;
@@ -649,6 +951,160 @@ pub(crate) fn prefix_compare(s1: &[u8], s2: &[u8], max_len: u32) -> u32 {
 }
 
 #[test]
+fn prepared_distance_ceilings_match_position_dependent_rules() {
+    use crate::reconstruction_parameters::DictionaryHash;
+
+    for hash in [
+        DictionaryHash::Zlib {
+            hash_mask: 32767,
+            hash_shift: 5,
+        },
+        DictionaryHash::MiniZFast,
+        DictionaryHash::Libdeflate4Fast,
+        DictionaryHash::Libdeflate4,
+        DictionaryHash::ZlibNG,
+        DictionaryHash::RandomVector,
+        DictionaryHash::Crc32cHash,
+        DictionaryHash::Libdeflate4Fast15,
+        DictionaryHash::Chromium { hash_mask: 32767 },
+    ] {
+        for window_bits in [9, 10, 14, 15] {
+            let window = 1 << window_bits;
+            for matches_to_start in [false, true] {
+                let source = SourceHistorySettings { matches_to_start };
+                for distance in [
+                    ChainDistancePolicy::Disabled,
+                    ChainDistancePolicy::RleOnly,
+                    ChainDistancePolicy::FullWindow(source),
+                    ChainDistancePolicy::HashWindow(source),
+                ] {
+                    for edge in [0, 1] {
+                        let BehaviorSettings::Greedy(mut settings) =
+                            ReconstructionParameters::from(
+                                &crate::token_predictor::zlib_level_1_params(),
+                            )
+                            .behavior
+                        else {
+                            panic!("fixture must use the chain matcher");
+                        };
+                        settings.common.dictionary.hash = hash;
+                        settings.common.dictionary.window_bits = window_bits;
+                        settings.common.distance = distance;
+                        let prepared = PreparedChainDistance::new(
+                            settings.common,
+                            libdeflate::SearchRestrictions {
+                                minimum_input: 0,
+                                window_edge_exclusion: edge,
+                            },
+                        );
+                        for normal_prediction in [false, true] {
+                            for dictionary_start in [false, true] {
+                                for history in [
+                                    0,
+                                    1,
+                                    2,
+                                    window - 264,
+                                    window - 263,
+                                    window - 262,
+                                    window - 261,
+                                    window - 260,
+                                    window - 1,
+                                    window,
+                                    window + 1,
+                                    u32::MAX,
+                                ] {
+                                    let expected = match distance {
+                                        ChainDistancePolicy::Disabled => None,
+                                        ChainDistancePolicy::RleOnly => {
+                                            let maximum = if normal_prediction && dictionary_start {
+                                                history.min(1)
+                                            } else {
+                                                1
+                                            };
+                                            Some(DistanceLimits {
+                                                history,
+                                                head: maximum,
+                                                chained: maximum,
+                                            })
+                                        }
+                                        ChainDistancePolicy::FullWindow(source) => {
+                                            let history = source.maximum_distance(history);
+                                            let maximum = history.min(
+                                                window - if normal_prediction { edge } else { 0 },
+                                            );
+                                            Some(DistanceLimits {
+                                                history,
+                                                head: maximum,
+                                                chained: maximum,
+                                            })
+                                        }
+                                        ChainDistancePolicy::HashWindow(source) => {
+                                            let history = source.maximum_distance(history);
+                                            let (head, chained) =
+                                                crate::models::hash_window_distance_limits(
+                                                    hash.into_algorithm(),
+                                                    normal_prediction,
+                                                    window,
+                                                    history,
+                                                );
+                                            Some(DistanceLimits {
+                                                history,
+                                                head,
+                                                chained,
+                                            })
+                                        }
+                                    };
+                                    assert_eq!(
+                                        prepared.limits(DistanceRequest {
+                                            window_bytes: window,
+                                            history,
+                                            max_len: 258,
+                                            normal_prediction,
+                                            dictionary_start,
+                                        }),
+                                        expected,
+                                        "{hash:?} {distance:?} window={window} history={history} normal={normal_prediction} reset={dictionary_start} edge={edge}"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn distance_policy_rle_preserves_reset_boundary_and_raw_recovery() {
+    use crate::parameters::PreflateStrategy;
+
+    let plain = crate::preflate_input::PlainText::new_with_data(vec![b'a'; 1024]);
+    let mut input = PreflateInput::new(&plain);
+    let parameters = TokenPredictorParameters {
+        strategy: PreflateStrategy::RleOnly,
+        very_far_matches_detected: false,
+        ..crate::token_predictor::zlib_level_1_params()
+    };
+    let mut holder = new_hash_chain_holder(&parameters);
+    holder.update_hash(3, &input);
+    input.advance(3);
+    holder.set_dictionary_start(Some(3));
+    assert!(matches!(
+        holder.match_token_0(0, parameters.max_chain, &input),
+        MatchResult::NoMoreMatchesFound
+    ));
+    assert!(matches!(
+        holder.match_token_0(0, parameters.max_chain + 1, &input),
+        MatchResult::Success(reference) if reference.dist() == 1
+    ));
+    let hops = holder
+        .calculate_hops(&DeflateTokenReference::new(3, 3), &input)
+        .unwrap();
+    assert_eq!(holder.hop_match(3, hops, &input).unwrap(), 3);
+}
+
+#[test]
 fn window_constraints_preserve_first_and_later_hop_boundaries() {
     let mut bytes = vec![b'a'; 32768];
     bytes[32600..32605].copy_from_slice(b"bcdeZ");
@@ -669,7 +1125,12 @@ fn window_constraints_preserve_first_and_later_hop_boundaries() {
             ..crate::token_predictor::zlib_level_1_params()
         };
         let mut constraint = zlib::WindowConstraint::default();
-        constraint.enable(&parameters);
+        let BehaviorSettings::Greedy(settings) =
+            ReconstructionParameters::from(&parameters).behavior
+        else {
+            panic!("window constraint fixture must use the chain matcher");
+        };
+        constraint.enable(&settings.common.dictionary, settings.common.distance, true);
         match_less3::<0>(
             &input,
             100,
@@ -703,7 +1164,7 @@ fn prefix_compare_fast(s1: &[u8], s2: &[u8]) -> u32 {
     if s1[257] != s2[257] {
         return 257;
     }
-    return 258;
+    258
 }
 
 #[inline(never)]
@@ -742,7 +1203,7 @@ fn calc_diff(diff: u64) -> u32 {
     if diff != 0 {
         return diff.trailing_zeros() / 8;
     }
-    return 8;
+    8
 }
 
 #[test]
@@ -751,7 +1212,7 @@ fn chromium_window_boundary_distinguishes_head_chained_and_recovery_matches() {
 
     let parameters = TokenPredictorParameters {
         hash_algorithm: HashAlgorithm::Chromium { hash_mask: 0x7fff },
-        add_policy: crate::estimator::add_policy_estimator::DictionaryAddPolicy::AddAll,
+        add_policy: crate::parameters::DictionaryAddPolicy::AddAll,
         window_bits: 15,
         max_chain: 128,
         nice_length: 128,
@@ -813,12 +1274,79 @@ fn missing_libdeflate_reference_returns_match_not_found() {
     assert_eq!(error.exit_code(), ExitCode::MatchNotFound);
 }
 
+#[test]
+fn distance_policy_miniz_limits_and_match_gate_apply_to_recovery() {
+    use crate::{
+        parameters::DictionaryAddPolicy, preflate_input::PlainText,
+        token_predictor::zlib_level_1_params,
+    };
+
+    for (distance, matches_to_start, full_window, strategy, normal, expanded) in [
+        (505, false, false, PreflateStrategy::Default, true, true),
+        (506, false, true, PreflateStrategy::Default, false, false),
+        (505, false, false, PreflateStrategy::RleOnly, true, true),
+        (505, false, false, PreflateStrategy::HuffOnly, false, false),
+        (505, false, false, PreflateStrategy::Store, false, false),
+        (505, false, true, PreflateStrategy::HuffOnly, true, true),
+        (505, false, true, PreflateStrategy::Store, true, true),
+        (600, false, true, PreflateStrategy::Default, false, false),
+        (20, false, false, PreflateStrategy::Default, false, false),
+        (20, true, false, PreflateStrategy::Default, false, true),
+    ] {
+        let parameters = TokenPredictorParameters {
+            matching_type: MatchingType::MiniZ {
+                max_probes: 32,
+                greedy: false,
+            },
+            window_bits: 9,
+            max_chain: 33,
+            add_policy: DictionaryAddPolicy::AddAll,
+            matches_to_start_detected: matches_to_start,
+            very_far_matches_detected: full_window,
+            strategy,
+            ..zlib_level_1_params()
+        };
+        let position = if distance == 20 { 20 } else { 600 };
+        let mut bytes = vec![b'.'; position];
+        bytes[position - distance..position - distance + 7].copy_from_slice(b"abcdefQ");
+        bytes.extend_from_slice(b"abcdefR");
+        let plain = PlainText::new_with_data(bytes);
+        let mut input = PreflateInput::new(&plain);
+        let mut holder = new_hash_chain_holder(&parameters);
+        while input.pos() < position as u32 {
+            let length = (position as u32 - input.pos()).min(MAX_UPDATE_HASH_BATCH);
+            holder.update_hash(length, &input);
+            input.advance(length);
+        }
+        let expected = DeflateTokenReference::new(6, distance as u32);
+        for (depth, allowed) in [
+            (parameters.max_chain, normal),
+            (parameters.max_chain + 1, expanded),
+        ] {
+            assert_eq!(
+                matches!(holder.match_token_0(2, depth, &input), MatchResult::Success(reference) if reference == expected),
+                allowed,
+                "distance={distance}, start={matches_to_start}, full={full_window}, strategy={strategy:?}, depth={depth}"
+            );
+        }
+        let hops = holder.calculate_hops(&expected, &input);
+        if distance > 512 {
+            assert_eq!(hops.unwrap_err().exit_code(), ExitCode::MatchNotFound);
+        } else {
+            assert_eq!(
+                holder.hop_match(6, hops.unwrap(), &input).unwrap(),
+                distance as u32
+            );
+        }
+    }
+}
+
 // Source tail/window exclusions must not prevent recovery of valid foreign references.
 // Verify normal boundary decisions and expanded-budget recovery for both low-level models.
 #[test]
 fn libdeflate_low_level_limits_preserve_correction_recovery() {
     use crate::{
-        estimator::add_policy_estimator::DictionaryAddPolicy, preflate_input::PlainText,
+        parameters::DictionaryAddPolicy, preflate_input::PlainText,
         token_predictor::zlib_level_1_params,
     };
     for (hash_algorithm, matching_type) in [
@@ -879,6 +1407,61 @@ fn libdeflate_low_level_limits_preserve_correction_recovery() {
 
 // Miniz spends one group on three failed suffix probes rather than treating each as a group.
 // Verify the fourth candidate is unreachable with one group but reachable with two.
+#[test]
+fn miniz_zero_chain_links_stop_prediction_but_preserve_correction_recovery() {
+    use crate::{
+        parameters::DictionaryAddPolicy, preflate_input::PlainText,
+        token_predictor::zlib_level_1_params,
+    };
+
+    let params = TokenPredictorParameters {
+        hash_algorithm: crate::models::zlib::DEFAULT_HASH,
+        matching_type: MatchingType::MiniZ {
+            max_probes: 3,
+            greedy: true,
+        },
+        add_policy: DictionaryAddPolicy::AddAll,
+        max_chain: 3,
+        nice_length: 258,
+        window_bits: 15,
+        ..zlib_level_1_params()
+    };
+    for (source, terminates) in [(32768, false), (65536, true), (131072, true)] {
+        let mut bytes = vec![b'X'; source + 8];
+        bytes[source - 4..source].copy_from_slice(b"abcX");
+        bytes[source..source + 4].copy_from_slice(b"`BcX");
+        bytes[source + 4..].copy_from_slice(b"abcY");
+        let plain = PlainText::new_with_data(bytes);
+        for offset in [0, 1] {
+            let mut input = PreflateInput::new(&plain);
+            let mut holder = new_hash_chain_holder(&params);
+            let position = (source + 4) as u32 - offset;
+            while input.pos() < position {
+                let length = (position - input.pos()).min(MAX_UPDATE_HASH_BATCH);
+                holder.update_hash(length, &input);
+                input.advance(length);
+            }
+            let search = |depth| {
+                if offset == 0 {
+                    holder.match_token_0(2, depth, &input)
+                } else {
+                    holder.match_token_1(2, depth, &input)
+                }
+            };
+            let expected = DeflateTokenReference::new(3, 8);
+            assert_eq!(
+                matches!(search(params.max_chain), MatchResult::Success(reference) if reference == expected),
+                !terminates,
+                "source={source}, offset={offset}",
+            );
+            assert!(matches!(
+                search(params.max_chain + 1),
+                MatchResult::Success(reference) if reference == expected
+            ));
+        }
+    }
+}
+
 #[test]
 fn miniz_probe_groups_skip_three_failed_suffixes() {
     use crate::preflate_input::PlainText;

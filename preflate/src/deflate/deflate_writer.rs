@@ -65,7 +65,7 @@ impl DeflateWriter {
                 self.output
                     .extend_from_slice(&(!uncompressed.len() as u16).to_le_bytes());
 
-                self.output.extend_from_slice(&uncompressed);
+                self.output.extend_from_slice(uncompressed);
             }
             DeflateTokenBlockType::Huffman {
                 tokens,
@@ -86,7 +86,7 @@ impl DeflateWriter {
 
                         let huffman_writer = HuffmanWriter::start_dynamic_huffman_table(
                             &mut self.bitwriter,
-                            &huffman_encoding,
+                            huffman_encoding,
                             &mut self.output,
                         )?;
 
@@ -208,8 +208,8 @@ fn roundtrip_deflate_writer() {
         },
     ];
 
-    for i in 0..blocks.len() {
-        w.encode_block(&blocks[i]).unwrap();
+    for block in &blocks {
+        w.encode_block(block).unwrap();
     }
     w.flush();
 
@@ -218,8 +218,8 @@ fn roundtrip_deflate_writer() {
     let (r, _) = parse_deflate_whole(&output).unwrap();
 
     assert_eq!(blocks.len(), r.blocks.len());
-    for i in 0..blocks.len() {
-        assert_eq!(blocks[i], r.blocks[i], "block {}", i);
+    for (i, block) in blocks.iter().enumerate() {
+        assert_eq!(*block, r.blocks[i], "block {}", i);
     }
 }
 
@@ -227,7 +227,7 @@ fn roundtrip_deflate_writer() {
 #[test]
 fn roundtrip_full_file() {
     crate::utils::test_on_all_deflate_files(|buffer| {
-        let (r, _plain_text) = super::deflate_reader::parse_deflate_whole(&buffer).unwrap();
+        let (r, _plain_text) = super::deflate_reader::parse_deflate_whole(buffer).unwrap();
 
         let output = write_deflate_blocks(&r.blocks);
 
@@ -242,11 +242,10 @@ fn roundtrip_full_file() {
 #[cfg(test)]
 pub fn write_deflate_blocks(blocks: &[DeflateTokenBlock]) -> Vec<u8> {
     let mut w = DeflateWriter::new();
-    for i in 0..blocks.len() {
-        w.encode_block(&blocks[i]).unwrap();
+    for block in blocks {
+        w.encode_block(block).unwrap();
     }
     w.flush();
 
-    let output = w.detach_output();
-    output
+    w.detach_output()
 }

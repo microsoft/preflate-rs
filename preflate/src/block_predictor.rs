@@ -19,6 +19,7 @@ const TAILS: &[&[u32]] = &[
     &[BT_STORED, BT_STORED, BT_STATICHUFF],
     &[BT_STORED],
     &[BT_STORED, BT_STORED],
+    &[BT_STATICHUFF, BT_STORED, BT_STATICHUFF],
 ];
 
 #[derive(Debug, Default)]
@@ -29,6 +30,9 @@ pub(crate) struct BlockPrediction {
     zero_stored: bool,
     previous_stored_length: Option<u32>,
     pub(crate) legacy: bool,
+    pub(crate) flush: bool,
+    flush_limits: Vec<(usize, u32)>,
+    block_index: usize,
 }
 
 impl BlockPrediction {
@@ -37,6 +41,55 @@ impl BlockPrediction {
         self.tail_position = 0;
         self.first_block = true;
         self.zero_stored = false;
+        self.flush = false;
+        self.flush_limits.clear();
+        self.block_index = 0;
+        if !self.legacy {
+            let last_data = blocks.iter().rposition(|block| match &block.block_type {
+                DeflateTokenBlockType::Stored { uncompressed } => !uncompressed.is_empty(),
+                DeflateTokenBlockType::Huffman { tokens, .. } => !tokens.is_empty(),
+            });
+            let flush_count = blocks
+                .iter()
+                .enumerate()
+                .filter(|(index, block)| {
+                    last_data.is_some_and(|last| *index < last)
+                        && matches!(&block.block_type, DeflateTokenBlockType::Stored { uncompressed } if uncompressed.is_empty())
+                })
+                .take(65)
+                .count();
+            // Bound metadata even for adversarial streams with many empty blocks.
+            for (index, pair) in blocks.windows(2).enumerate() {
+                if let DeflateTokenBlockType::Huffman { tokens, .. } = &pair[0].block_type
+                    && !tokens.is_empty()
+                    && matches!(&pair[1].block_type,
+                        DeflateTokenBlockType::Stored { uncompressed } if uncompressed.is_empty())
+                    && !pair[0].last
+                    && last_data.is_some_and(|last| index + 1 < last)
+                {
+                    if self.flush_limits.len() == 64 {
+                        self.flush_limits.clear();
+                        break;
+                    }
+                    self.flush_limits.push((
+                        index,
+                        tokens
+                            .iter()
+                            .map(|t| match t {
+                                crate::deflate::deflate_token::DeflateToken::Literal(_) => 1,
+                                crate::deflate::deflate_token::DeflateToken::Reference(r) => {
+                                    r.len()
+                                }
+                            })
+                            .sum(),
+                    ));
+                }
+            }
+            self.flush = (1..=64).contains(&flush_count);
+            if !self.flush {
+                self.flush_limits.clear();
+            }
+        }
         if !self.legacy {
             let last_data = blocks.iter().rposition(|block| match &block.block_type {
                 DeflateTokenBlockType::Stored { uncompressed } => !uncompressed.is_empty(),
@@ -85,6 +138,9 @@ impl BlockPrediction {
 
     #[cfg(any(test, feature = "diagnostics"))]
     pub(crate) fn profile_name(&self) -> &'static str {
+        if self.flush {
+            return "Flush";
+        }
         match (self.zero_stored, self.profile) {
             (false, 0) => "Default",
             (false, 1) => "Fixed",
@@ -93,6 +149,7 @@ impl BlockPrediction {
             (false, 4) => "StoredStoredFixed",
             (false, 5) => "Stored",
             (false, 6) => "StoredStored",
+            (false, 7) => "FixedStoredFixed",
             (true, 0) => "ZeroStored",
             (true, 1) => "Fixed+ZeroStored",
             (true, 2) => "FixedFixed+ZeroStored",
@@ -100,6 +157,7 @@ impl BlockPrediction {
             (true, 4) => "StoredStoredFixed+ZeroStored",
             (true, 5) => "Stored+ZeroStored",
             (true, 6) => "StoredStored+ZeroStored",
+            (true, 7) => "FixedStoredFixed+ZeroStored",
             _ => unreachable!(),
         }
     }
@@ -142,7 +200,9 @@ impl BlockPrediction {
         if self.first_block {
             // Ordinary block-type differences occupy 0..=5. Tag the first one with
             // a tail profile without adding a CABAC channel or changing default chunks.
-            let profile = self.profile + if self.zero_stored { TAILS.len() } else { 0 };
+            let profile = self.profile
+                + if self.zero_stored { TAILS.len() } else { 0 }
+                + if self.flush { 2 * TAILS.len() } else { 0 };
             correction += 6 * profile as u32;
             self.first_block = false;
         }
@@ -157,11 +217,12 @@ impl BlockPrediction {
     ) -> Result<u32> {
         if self.first_block {
             let profile = (correction / 6) as usize;
-            if profile >= 2 * TAILS.len() || (self.legacy && profile != 0) {
+            if profile >= 4 * TAILS.len() || (self.legacy && profile != 0) {
                 return err_exit_code(ExitCode::InvalidDeflate, "Invalid block prediction profile");
             }
             self.profile = profile % TAILS.len();
-            self.zero_stored = profile >= TAILS.len();
+            self.zero_stored = profile % (2 * TAILS.len()) >= TAILS.len();
+            self.flush = profile >= 2 * TAILS.len();
             correction %= 6;
             self.first_block = false;
         }
@@ -174,9 +235,16 @@ impl BlockPrediction {
     }
 
     pub(crate) fn finish_block(&mut self, started_empty: bool) {
+        self.block_index += 1;
         if started_empty && self.tail_position < TAILS[self.profile].len() {
             self.tail_position += 1;
         }
+    }
+
+    pub(crate) fn flush_limit(&self) -> Option<u32> {
+        self.flush_limits
+            .iter()
+            .find_map(|&(index, length)| (index == self.block_index).then_some(length))
     }
 
     pub(crate) fn end_of_chunk(&self, remaining: u32) -> bool {
@@ -189,15 +257,108 @@ mod tests {
     use super::*;
 
     #[test]
+    fn fixed_stored_fixed_tail_requires_empty_blocks_after_data() {
+        use crate::deflate::deflate_token::DeflateToken;
+        let fixed = |tokens, last| DeflateTokenBlock {
+            block_type: DeflateTokenBlockType::Huffman {
+                tokens,
+                huffman_type: DeflateHuffmanType::Static,
+            },
+            last,
+        };
+        let mut blocks = [
+            fixed(vec![DeflateToken::Literal(b'x')], false),
+            fixed(vec![], false),
+            DeflateTokenBlock {
+                block_type: DeflateTokenBlockType::Stored {
+                    uncompressed: vec![],
+                },
+                last: false,
+            },
+            fixed(vec![], true),
+        ];
+        let mut encoder = BlockPrediction::default();
+        assert_eq!(encoder.begin_chunk(&blocks), 3);
+        assert_eq!(encoder.profile_name(), "FixedStoredFixed");
+        let mut decoder = BlockPrediction::default();
+        decoder.begin_chunk(&[]);
+        let tag = encoder.encode_type(BT_STATICHUFF, BT_STATICHUFF, 1);
+        assert_eq!(
+            decoder.decode_type(tag, BT_STATICHUFF, 1).unwrap(),
+            BT_STATICHUFF
+        );
+        encoder.finish_block(false);
+        decoder.finish_block(false);
+        for (index, actual) in [BT_STATICHUFF, BT_STORED, BT_STATICHUFF]
+            .into_iter()
+            .enumerate()
+        {
+            assert!(!encoder.end_of_chunk(0));
+            assert!(!decoder.end_of_chunk(0));
+            assert_eq!(encoder.token_count(0, 16383), 0);
+            let correction = encoder.encode_type(actual, 2, 0);
+            assert_eq!(correction, 0);
+            assert_eq!(decoder.decode_type(correction, 2, 0).unwrap(), actual);
+            encoder.finish_block(true);
+            decoder.finish_block(true);
+            assert_eq!(encoder.end_of_chunk(0), index == 2);
+            assert_eq!(decoder.end_of_chunk(0), index == 2);
+        }
+        blocks[3].last = false;
+        encoder.begin_chunk(&blocks);
+        assert_eq!(encoder.profile_name(), "Default");
+        blocks[3].last = true;
+        blocks[1] = fixed(vec![DeflateToken::Literal(b'y')], false);
+        encoder.begin_chunk(&blocks);
+        assert_eq!(encoder.profile_name(), "StoredFixed");
+    }
+
+    #[test]
+    fn flush_profiles_are_bounded_and_do_not_change_empty_tails() {
+        use crate::deflate::deflate_token::DeflateToken;
+        let data = || DeflateTokenBlock {
+            block_type: DeflateTokenBlockType::Huffman {
+                tokens: vec![DeflateToken::Literal(b'x')],
+                huffman_type: DeflateHuffmanType::Static,
+            },
+            last: false,
+        };
+        let stored = || DeflateTokenBlock {
+            block_type: DeflateTokenBlockType::Stored {
+                uncompressed: vec![],
+            },
+            last: false,
+        };
+        let mut predictor = BlockPrediction::default();
+        predictor.begin_chunk(&[data(), stored()]);
+        assert!(!predictor.flush);
+        assert_eq!(predictor.flush_limit(), None);
+        let mut blocks = vec![];
+        for _ in 0..65 {
+            blocks.push(data());
+            blocks.push(stored());
+        }
+        blocks.push(data());
+        predictor.begin_chunk(&blocks);
+        assert!(!predictor.flush);
+        assert!(predictor.flush_limits.is_empty());
+        blocks.truncate(127);
+        predictor.begin_chunk(&blocks);
+        assert!(predictor.flush);
+        assert_eq!(predictor.flush_limit(), Some(1));
+    }
+
+    #[test]
     fn block_type_profiles_roundtrip_and_reject_invalid_values() {
-        for profile in 0..2 * TAILS.len() {
+        for profile in 0..4 * TAILS.len() {
             for remaining in [0, 100] {
                 for fallback in 0..=2 {
                     for actual in 0..=2 {
                         let mut encoder = BlockPrediction::default();
                         encoder.begin_chunk(&[]);
                         encoder.profile = profile % TAILS.len();
-                        encoder.zero_stored = profile >= TAILS.len();
+                        encoder.zero_stored = profile % (2 * TAILS.len()) >= TAILS.len();
+                        encoder.flush = profile >= 2 * TAILS.len();
                         let mut decoder = BlockPrediction::default();
                         decoder.begin_chunk(&[]);
                         let value = encoder.encode_type(actual, fallback, remaining);
@@ -207,6 +368,7 @@ mod tests {
                         );
                         assert_eq!(decoder.profile, encoder.profile);
                         assert_eq!(decoder.zero_stored, encoder.zero_stored);
+                        assert_eq!(decoder.flush, encoder.flush);
                         let next = encoder.encode_type(actual, fallback, remaining);
                         assert_eq!(
                             decoder.decode_type(next, fallback, remaining).unwrap(),
@@ -216,7 +378,7 @@ mod tests {
                 }
             }
         }
-        for invalid in [12 * TAILS.len() as u32, 255, u32::MAX] {
+        for invalid in [24 * TAILS.len() as u32, 255, u32::MAX] {
             let mut prediction = BlockPrediction::default();
             prediction.begin_chunk(&[]);
             assert!(prediction.decode_type(invalid, 0, 100).is_err());

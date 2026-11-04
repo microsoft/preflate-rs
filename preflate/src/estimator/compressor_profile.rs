@@ -4,15 +4,17 @@
  *  This software incorporates material from third parties. See NOTICE.txt for details.
  *--------------------------------------------------------------------------------------------*/
 
-use super::{
-    add_policy_estimator::DictionaryAddPolicy,
-    complevel_estimator::CandidateEvidence,
-    parser_estimator::{InsertionConstraint, ParserInference},
-    preflate_parameter_estimator::TokenPredictorParameters,
+use {
+    super::{
+        complevel_estimator::CandidateEvidence,
+        parser_estimator::{InsertionConstraint, ParserInference},
+    },
+    crate::parameters::TokenPredictorParameters,
 };
 
-use crate::models;
+#[cfg(test)]
 pub(crate) use crate::models::zlib::compatible as zlib_compatible;
+use crate::models::{self, CompressorProfile};
 
 #[derive(Clone, Copy)]
 pub(crate) struct ParserContext {
@@ -24,39 +26,53 @@ pub(crate) struct ParserContext {
 /// Prefix validation establishes a bounded token fit, not full-stream optimality.
 pub(crate) enum ParameterEstimate {
     Inferred {
-        parameters: TokenPredictorParameters,
+        profile: CompressorProfile,
         parser: ParserContext,
     },
-    Fingerprinted(TokenPredictorParameters),
-    PrefixValidated(TokenPredictorParameters),
+    Fingerprinted(CompressorProfile),
+    PrefixValidated(CompressorProfile),
 }
 
 impl ParameterEstimate {
     pub fn parameters(&self) -> TokenPredictorParameters {
         match self {
-            Self::Inferred { parameters, .. }
-            | Self::Fingerprinted(parameters)
-            | Self::PrefixValidated(parameters) => *parameters,
+            Self::Inferred { profile, .. }
+            | Self::Fingerprinted(profile)
+            | Self::PrefixValidated(profile) => profile.parameters(),
         }
     }
 
+    pub fn resolve_profile(
+        self,
+        inference: ParserInference,
+        longest_match: u32,
+    ) -> CompressorProfile {
+        match self {
+            Self::Fingerprinted(profile) | Self::PrefixValidated(profile) => profile,
+            Self::Inferred { profile, parser } => {
+                let parameters = profile.parameters();
+                CompressorProfile::inferred(
+                    TokenPredictorParameters {
+                        matching_type: models::generic::resolve_matching_policy(
+                            parameters.matching_type,
+                            InsertionConstraint::observe(parameters.add_policy, longest_match),
+                            inference,
+                        ),
+                        ..parameters
+                    }
+                    .with_lazy_behavior(parser.zlib_compatible, parser.observed_min_len),
+                )
+            }
+        }
+    }
+
+    #[cfg(test)]
     pub fn resolve_parser(
         self,
         inference: ParserInference,
         longest_match: u32,
     ) -> TokenPredictorParameters {
-        match self {
-            Self::Fingerprinted(parameters) | Self::PrefixValidated(parameters) => parameters,
-            Self::Inferred { parameters, parser } => TokenPredictorParameters {
-                matching_type: models::generic::resolve_matching_policy(
-                    parameters.matching_type,
-                    InsertionConstraint::observe(parameters.add_policy, longest_match),
-                    inference,
-                ),
-                ..parameters
-            }
-            .with_lazy_behavior(parser.zlib_compatible, parser.observed_min_len),
-        }
+        self.resolve_profile(inference, longest_match).parameters()
     }
 }
 
@@ -66,39 +82,18 @@ pub(super) fn select_compressor_profile(
     evidence: &CandidateEvidence,
     observed_min_len: u32,
 ) -> ParameterEstimate {
-    if let Some(parameters) = models::chromium::profile(parameters, evidence) {
-        return ParameterEstimate::Fingerprinted(parameters);
-    }
-    let parser = ParserContext {
-        zlib_compatible: zlib_compatible(&parameters),
-        observed_min_len,
-    };
-    let parameters = models::generic::apply_defaults(
-        parameters,
-        evidence,
-        parser.zlib_compatible,
-        observed_min_len,
-    );
-
-    if parameters.add_policy != DictionaryAddPolicy::AddAll || parser.zlib_compatible {
-        return ParameterEstimate::Inferred { parameters, parser };
-    }
-
-    match models::fingerprint(parameters, evidence) {
-        Some(parameters) => ParameterEstimate::Fingerprinted(parameters),
-        None => ParameterEstimate::Inferred { parameters, parser },
-    }
+    models::select_profile(parameters, evidence, observed_min_len)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::estimator::depth_estimator::DistancePolicy;
+    use crate::parameters::DictionaryAddPolicy;
     use crate::{
-        estimator::preflate_parse_config::{
-            MatchingType, SLOW_PREFLATE_PARSER_SETTINGS, ZLIB_PREFLATE_PARSER_SETTINGS,
-        },
         hash_algorithm::HashAlgorithm,
+        models::zlib::{SLOW_PREFLATE_PARSER_SETTINGS, ZLIB_PREFLATE_PARSER_SETTINGS},
+        parameters::MatchingType,
     };
 
     fn parameters(evidence: &CandidateEvidence) -> TokenPredictorParameters {
@@ -142,7 +137,7 @@ mod tests {
     }
 
     #[test]
-    fn generic_profile_defaults_preserve_observed_search_budget() {
+    fn generic_profile_defaults_preserve_budgets_and_family_settings() {
         for required_chain in 1..=4096 {
             let evidence = CandidateEvidence {
                 hash_algorithm: HashAlgorithm::Zlib {
@@ -152,6 +147,8 @@ mod tests {
                 required_chain,
                 distance_policy: DistancePolicy::ZlibWindow,
                 parser: ParserInference::Unresolved,
+                shallow_miniz_greedy: false,
+                minimum_nice_length: 0,
             };
             for add_policy in [
                 DictionaryAddPolicy::AddAll,
@@ -174,7 +171,17 @@ mod tests {
                     .find(|config| required_chain <= config.max_chain);
                 let expected = TokenPredictorParameters {
                     matching_type: config.map_or(MatchingType::Greedy, |config| config.match_type),
-                    nice_length: config.map_or(258, |config| config.nice_length),
+                    nice_length: config
+                        .filter(|config| {
+                            matches!(config.match_type, MatchingType::Lazy { .. })
+                                || matches!(
+                                    add_policy,
+                                    DictionaryAddPolicy::AddFirst(4)
+                                        | DictionaryAddPolicy::AddFirstAndLast(4)
+                                        | DictionaryAddPolicy::AddFirstWith32KBoundary
+                                )
+                        })
+                        .map_or(base.nice_length, |config| config.nice_length),
                     ..base
                 };
                 let selection = select_compressor_profile(base, &evidence, 3);
@@ -308,6 +315,8 @@ mod tests {
                 hash_algorithm: HashAlgorithm::Libdeflate4,
                 required_chain,
                 distance_policy: DistancePolicy::FullWindow,
+                shallow_miniz_greedy: false,
+                minimum_nice_length: 0,
                 parser: if greedy {
                     ParserInference::Greedy
                 } else {
@@ -352,6 +361,8 @@ mod tests {
                 },
                 required_chain,
                 distance_policy: DistancePolicy::ZlibWindow,
+                shallow_miniz_greedy: false,
+                minimum_nice_length: 0,
                 parser: if greedy {
                     ParserInference::Greedy
                 } else {
@@ -387,6 +398,8 @@ mod tests {
                 required_chain: 1,
                 distance_policy: DistancePolicy::FullWindow,
                 parser: ParserInference::Unresolved,
+                shallow_miniz_greedy: false,
+                minimum_nice_length: 0,
             };
             let base = parameters(&evidence);
             let fastest = hash == HashAlgorithm::Libdeflate4Fast15;

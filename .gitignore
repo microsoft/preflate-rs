@@ -14,3 +14,14 @@ target/
 
 # Unreferenced / scratch files
 .unref/
+
+# Private corpus databases and Python bytecode
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite-journal
+/corpus/generated/
+__pycache__/
+.venv/
+.venv-wsl/
+corpus.local.toml

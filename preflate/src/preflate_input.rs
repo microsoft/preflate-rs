@@ -77,6 +77,10 @@ impl PlainText {
         self.data.len() - (self.prefix_length as usize)
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
     /// the total length of the data from the beginning
     pub fn total_length(&self) -> u32 {
         self.pos_offset as u32 + self.len() as u32
@@ -140,10 +144,17 @@ impl PlainText {
     }
 }
 
+impl Default for PlainText {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct PreflateInput<'a> {
     data: &'a PlainText,
     pos: i32,
+    end: Option<i32>,
 }
 
 impl<'a> PreflateInput<'a> {
@@ -151,6 +162,7 @@ impl<'a> PreflateInput<'a> {
         PreflateInput {
             data: v,
             pos: v.prefix_length,
+            end: None,
         }
     }
 
@@ -162,12 +174,13 @@ impl<'a> PreflateInput<'a> {
     /// total length of the data all the way back to the beginning
     #[inline(always)]
     pub fn total_length(&self) -> u32 {
-        self.data.total_length()
+        self.pos() + self.remaining()
     }
 
     #[inline(always)]
     pub fn cur_chars(&self, offset: i32) -> &[u8] {
-        &self.data.data[(self.pos + offset) as usize..]
+        &self.data.data
+            [(self.pos + offset) as usize..self.end.unwrap_or(self.data.data.len() as i32) as usize]
     }
 
     #[inline(always)]
@@ -183,7 +196,19 @@ impl<'a> PreflateInput<'a> {
 
     #[inline(always)]
     pub fn remaining(&self) -> u32 {
-        (self.data.data.len() as i32 - self.pos) as u32
+        (self.end.unwrap_or(self.data.data.len() as i32) - self.pos) as u32
+    }
+
+    pub(crate) fn limit(&mut self, length: u32) -> Result<()> {
+        if self.end.is_some() || length > self.remaining() {
+            return err_exit_code(ExitCode::InvalidDeflate, "Invalid flush lookahead limit");
+        }
+        self.end = Some(self.pos + length as i32);
+        Ok(())
+    }
+
+    pub(crate) fn clear_limit(&mut self) {
+        self.end = None;
     }
 
     #[inline(always)]
@@ -229,4 +254,30 @@ fn test_length_behavior() {
 
     assert_eq!(input.cur_char(-1), 1);
     assert_eq!(input.cur_char(-1000), 1);
+}
+
+#[test]
+fn flush_limits_preserve_positions_and_prefix_history() {
+    let mut plain = PlainText::new_with_data(b"history".to_vec());
+    plain.shrink_to_dictionary();
+    plain.append(b"abcdef");
+    let mut input = PreflateInput::new(&plain);
+    assert!(input.limit(7).is_err());
+    input.limit(3).unwrap();
+    assert_eq!(input.pos(), 7);
+    assert_eq!(input.total_length(), 10);
+    assert_eq!(input.remaining(), 3);
+    assert_eq!(input.cur_chars(0), b"abc");
+    assert_eq!(input.cur_chars(-7), b"historyabc");
+    assert!(input.limit(1).is_err());
+    input.advance(3);
+    assert_eq!(input.remaining(), 0);
+    input.clear_limit();
+    assert_eq!(input.pos(), 10);
+    assert_eq!(input.total_length(), 13);
+    assert_eq!(input.cur_chars(0), b"def");
+    input.limit(0).unwrap();
+    assert_eq!(input.remaining(), 0);
+    input.clear_limit();
+    assert_eq!(input.remaining(), 3);
 }

@@ -102,7 +102,6 @@ pub fn quantize_distance(dist: u32) -> DistCode {
     } else {
         256 + ((dist - 1) >> 7)
     } as usize]
-        .into()
 }
 pub fn quantize_length(len: u32) -> LengthCode {
     LENGTH_CODE_TABLE[len as usize - MIN_MATCH as usize]

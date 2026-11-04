@@ -198,7 +198,7 @@ pub trait ProcessBuffer {
                 buffer = &[];
             } else {
                 buffer = input.fill_buf().context()?;
-                if buffer.len() == 0 {
+                if buffer.is_empty() {
                     input_complete = true
                 }
             };
@@ -458,7 +458,7 @@ pub(crate) mod test {
     }
 
     /// The combined (compression | kind) wire bytes must match the expected values
-    /// documented in CLAUDE.md. This catches accidental constant drift.
+    /// documented in AGENTS.md. This catches accidental constant drift.
     #[test]
     fn test_combined_wire_values() {
         assert_eq!(BLOCK_COMPRESSION_ZSTD | BLOCK_TYPE_LITERAL, 0x40);
@@ -750,14 +750,6 @@ pub(crate) mod test {
         (compressed, blocks)
     }
 
-    /// Helper: full roundtrip assertion — compress then decompress, check byte equality.
-    fn assert_roundtrip(original: &[u8]) {
-        let (compressed, _) = compress_default(original);
-        let mut dec = RecreateContainerProcessor::new(usize::MAX);
-        let recreated = dec.process_vec(&compressed).unwrap();
-        crate::utils::assert_eq_array(original, &recreated);
-    }
-
     /// Count how many blocks have a given block-type kind.
     fn count_block_type(blocks: &[(u8, u8)], kind: u8) -> usize {
         blocks.iter().filter(|&&(_, t)| t == kind).count()
@@ -856,7 +848,7 @@ pub(crate) mod test {
 
     /// A file containing padding bytes, then two zlib streams (each with plaintext
     /// > MIN_BLOCKSIZE), then more padding.  The scanner must find both zlib headers
-    /// and emit exactly two DEFLATE blocks.
+    /// > and emit exactly two DEFLATE blocks.
     ///
     /// Fixture: `test_two_zlib_streams.bin`
     ///   layout: 100 × `\xDE\xAD` | zlib(EEEE×6000) | 100 × `\xDE\xAD` | zlib(FFFF×6000) | 100 × `\xDE\xAD`

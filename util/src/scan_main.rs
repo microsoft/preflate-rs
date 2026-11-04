@@ -1,5 +1,12 @@
 #![forbid(unsafe_code)]
 
+mod scan_database;
+mod scan_fs;
+mod scan_perf;
+#[cfg(test)]
+use scan_fs::cloud_attributes;
+use scan_fs::cloud_only;
+
 use std::{
     collections::BTreeMap,
     fs::{self, File, Metadata, OpenOptions},
@@ -28,8 +35,33 @@ struct Cli {
     input: PathBuf,
 
     /// New JSON report to create (an existing file is never overwritten).
-    #[arg(short, long)]
-    output: PathBuf,
+    #[arg(
+        short,
+        long,
+        required_unless_present = "database",
+        conflicts_with = "database"
+    )]
+    output: Option<PathBuf>,
+
+    /// Write directly to a corpus SQLite database (existing databases are preserved).
+    #[arg(long, requires = "label")]
+    database: Option<PathBuf>,
+
+    /// Unique run label for --database.
+    #[arg(long, requires = "database")]
+    label: Option<String>,
+
+    /// Also write streaming JSONL whole-file CPU/wall measurements (no Zstd).
+    #[arg(long, conflicts_with = "database")]
+    perf_output: Option<PathBuf>,
+
+    /// Attempts per regular file for --perf-output (first attempt plus warm repetitions).
+    #[arg(long, default_value_t = 1, requires = "perf_output", value_parser = clap::value_parser!(u32).range(1..=1000))]
+    perf_iterations: u32,
+
+    /// Explicit binary/build label for performance provenance; never inferred from package version.
+    #[arg(long)]
+    build_identity: Option<String>,
 
     #[arg(long, default_value_t = 4096)]
     max_chain: u32,
@@ -242,23 +274,6 @@ impl Summary {
     }
 }
 
-#[cfg(windows)]
-fn cloud_only(metadata: &Metadata) -> bool {
-    use std::os::windows::fs::MetadataExt;
-    cloud_attributes(metadata.file_attributes())
-}
-
-#[cfg(any(windows, test))]
-fn cloud_attributes(attributes: u32) -> bool {
-    // OFFLINE, RECALL_ON_OPEN, RECALL_ON_DATA_ACCESS.
-    attributes & (0x1000 | 0x40000 | 0x400000) != 0
-}
-
-#[cfg(not(windows))]
-fn cloud_only(_metadata: &Metadata) -> bool {
-    false
-}
-
 fn inspect_file(path: PathBuf, metadata: &Metadata, cli: &Cli) -> FileReport {
     let start = Instant::now();
     let mut report = FileReport::new(path);
@@ -393,15 +408,28 @@ fn rejected_signature(diagnostic: &DeflateDiagnostic) -> bool {
         )
 }
 
+fn is_scan_output(path: &Path, output: &Path, cli: &Cli) -> bool {
+    path == output
+        || (cli.database.is_some()
+            && ["-wal", "-shm", "-journal"].iter().any(|suffix| {
+                let mut sidecar = output.as_os_str().to_os_string();
+                sidecar.push(suffix);
+                path == Path::new(&sidecar)
+            }))
+}
+
 fn walk(
     root: &Path,
     output: &Path,
     cli: &Cli,
+    mut perf: Option<&mut scan_perf::PerformanceWriter>,
     mut emit: impl FnMut(FileReport) -> Result<()>,
 ) -> Result<()> {
     let mut directories = vec![root.to_path_buf()];
     while let Some(path) = directories.pop() {
-        if path == output {
+        if is_scan_output(&path, output, cli)
+            || perf.as_ref().is_some_and(|writer| path == writer.path)
+        {
             continue;
         }
         let metadata = match fs::symlink_metadata(&path) {
@@ -437,7 +465,9 @@ fn walk(
                             }
                             Ok(_) => {
                                 let child = entry.path();
-                                if child == output {
+                                if is_scan_output(&child, output, cli)
+                                    || perf.as_ref().is_some_and(|writer| child == writer.path)
+                                {
                                     continue;
                                 }
                                 match fs::symlink_metadata(&child) {
@@ -445,7 +475,12 @@ fn walk(
                                         if metadata.is_file()
                                             && !metadata.file_type().is_symlink() =>
                                     {
-                                        emit(inspect_file(child, &metadata, cli))?
+                                        emit(match perf.as_deref_mut() {
+                                            Some(writer) => {
+                                                writer.inspect(child, &metadata, cli)?
+                                            }
+                                            None => inspect_file(child, &metadata, cli),
+                                        })?
                                     }
                                     Ok(_) => {
                                         let mut report = FileReport::new(child);
@@ -467,7 +502,10 @@ fn walk(
                 }
             }
         } else {
-            emit(inspect_file(path, &metadata, cli))?;
+            emit(match perf.as_deref_mut() {
+                Some(writer) => writer.inspect(path, &metadata, cli)?,
+                None => inspect_file(path, &metadata, cli),
+            })?;
         }
     }
     Ok(())
@@ -479,11 +517,32 @@ fn run(cli: &Cli) -> Result<Summary> {
         return Err("--trace requires a single file, not a directory".into());
     }
     let start = Instant::now();
+    if let Some(path) = &cli.database {
+        let label = cli.label.as_deref().ok_or("--database requires --label")?;
+        let mut database = scan_database::ScanDatabase::create(path, label, cli)?;
+        let output_path = fs::canonicalize(path)?;
+        let mut summary = Summary::default();
+        walk(&root, &output_path, cli, None, |report| {
+            eprintln!("{}: {}", report.status, report.path.display());
+            database.record(&report)?;
+            summary.record(&report);
+            Ok(())
+        })?;
+        finish_summary(&mut summary, start);
+        database.finish(&summary)?;
+        return Ok(summary);
+    }
+    let output_name = cli.output.as_ref().ok_or("missing report output")?;
     let output_file = OpenOptions::new()
         .write(true)
         .create_new(true)
-        .open(&cli.output)?;
-    let output_path = fs::canonicalize(&cli.output)?;
+        .open(output_name)?;
+    let output_path = fs::canonicalize(output_name)?;
+    let mut perf = cli
+        .perf_output
+        .as_ref()
+        .map(|path| scan_perf::PerformanceWriter::create(path, &output_path, cli))
+        .transpose()?;
     let mut output = BufWriter::new(output_file);
     write!(output, "{{\"schema_version\":1,\"tool_version\":")?;
     serde_json::to_writer(&mut output, env!("CARGO_PKG_VERSION"))?;
@@ -498,7 +557,7 @@ fn run(cli: &Cli) -> Result<Summary> {
     writeln!(output, ",\"files\":[")?;
     let mut first = true;
     let mut summary = Summary::default();
-    walk(&root, &output_path, cli, |report| {
+    walk(&root, &output_path, cli, perf.as_mut(), |report| {
         eprintln!("{}: {}", report.status, report.path.display());
         if !first {
             writeln!(output, ",")?;
@@ -509,18 +568,25 @@ fn run(cli: &Cli) -> Result<Summary> {
         summary.record(&report);
         Ok(())
     })?;
+    finish_summary(&mut summary, start);
+    write!(output, "\n],\"summary\":")?;
+    serde_json::to_writer(&mut output, &summary)?;
+    writeln!(output, "}}")?;
+    output.flush()?;
+    output.get_ref().sync_all()?;
+    if let Some(writer) = &mut perf {
+        writer.finish()?;
+    }
+    Ok(summary)
+}
+
+fn finish_summary(summary: &mut Summary, start: Instant) {
     summary.elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
     if summary.successful_deflate_bytes != 0 {
         summary.weighted_correction_ratio = Some(
             summary.successful_correction_bytes as f64 / summary.successful_deflate_bytes as f64,
         );
     }
-    write!(output, "\n],\"summary\":")?;
-    serde_json::to_writer(&mut output, &summary)?;
-    writeln!(output, "}}")?;
-    output.flush()?;
-    output.get_ref().sync_all()?;
-    Ok(summary)
 }
 
 fn main() -> std::process::ExitCode {
@@ -529,7 +595,11 @@ fn main() -> std::process::ExitCode {
         Ok(summary) => {
             eprintln!(
                 "Report: {} | {} files read, {} streams OK, {} failed candidates, {} limited, {} poor models, {} filesystem errors",
-                cli.output.display(),
+                cli.database
+                    .as_ref()
+                    .or(cli.output.as_ref())
+                    .expect("validated output")
+                    .display(),
                 summary.files_read,
                 summary.successful_streams,
                 summary.failed_candidates,
@@ -558,6 +628,92 @@ mod tests {
     use super::*;
     use miniz_oxide::deflate::compress_to_vec;
     use serde_json::Value;
+
+    #[test]
+    fn performance_jsonl_repeats_files_and_excludes_both_reports() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        fs::write(
+            root.join("good.deflate"),
+            compress_to_vec(&b"benchmark benchmark ".repeat(1000), 6),
+        )
+        .unwrap();
+        fs::write(root.join("plain.txt"), b"plain text").unwrap();
+        File::create(root.join("large.bin"))
+            .unwrap()
+            .set_len(2 * MIB)
+            .unwrap();
+        let output = root.join("scan.json");
+        let perf = root.join("perf.jsonl");
+        let cli = Cli::try_parse_from([
+            "preflate_scan",
+            root.to_str().unwrap(),
+            "--output",
+            output.to_str().unwrap(),
+            "--perf-output",
+            perf.to_str().unwrap(),
+            "--perf-iterations",
+            "2",
+            "--max-file-mib",
+            "1",
+            "--build-identity",
+            "synthetic-test-build",
+        ])
+        .unwrap();
+        let summary = run(&cli).unwrap();
+        assert_eq!(summary.entries, 3);
+        assert_eq!(summary.successful_streams, 1);
+        let records: Vec<Value> = fs::read_to_string(&perf)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(records.len(), 7);
+        assert_eq!(records[0]["schema"], "preflate_perf");
+        assert_eq!(records[0]["verification_enabled"], true);
+        assert_eq!(records[0]["build_identity"], "synthetic-test-build");
+        for (index, record) in records[1..6].iter().enumerate() {
+            assert_eq!(record["record"], "sample");
+            assert_eq!(record["index"], index);
+            assert!(record["cpu_seconds"].as_f64().unwrap() >= 0.0);
+            assert!(record["wall_seconds"].as_f64().unwrap() >= 0.0);
+            assert_eq!(record["successful_streams"], record["verified_streams"]);
+        }
+        assert_eq!(records[6]["samples"], 5);
+        assert_eq!(records[6]["failed_samples"], 0);
+        assert_eq!(records[6]["skipped_samples"], 1);
+        let original = fs::read(&perf).unwrap();
+        assert!(run(&cli).is_err());
+        assert_eq!(fs::read(&perf).unwrap(), original);
+    }
+
+    #[test]
+    fn performance_encode_only_is_explicit() {
+        let directory = tempfile::tempdir().unwrap();
+        let input = directory.path().join("good.deflate");
+        fs::write(&input, compress_to_vec(&b"benchmark ".repeat(1000), 6)).unwrap();
+        let output = directory.path().join("scan.json");
+        let perf = directory.path().join("perf.jsonl");
+        let cli = Cli::try_parse_from([
+            "preflate_scan",
+            input.to_str().unwrap(),
+            "--output",
+            output.to_str().unwrap(),
+            "--perf-output",
+            perf.to_str().unwrap(),
+            "--no-verify",
+        ])
+        .unwrap();
+        run(&cli).unwrap();
+        let records: Vec<Value> = fs::read_to_string(perf)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(records[0]["verification_enabled"], false);
+        assert_eq!(records[1]["successful_streams"], 1);
+        assert_eq!(records[1]["verified_streams"], 0);
+    }
 
     #[test]
     fn recursive_report_includes_failures_and_excludes_itself() {

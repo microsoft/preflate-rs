@@ -11,15 +11,9 @@ use super::traits::{CabacReader, CabacWriter};
 
 // we make sure that every context has a different value so that we can detect when we've made
 // a mistake and are using the wrong context
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Default)]
 pub struct DebugContext {
     value: u32,
-}
-
-impl Default for DebugContext {
-    fn default() -> Self {
-        DebugContext { value: 0 }
-    }
 }
 
 /// Decoder for debugging purposes only. It will check that the correct context is passed in the same order.
@@ -31,7 +25,7 @@ pub struct DebugReader<R> {
 impl<R: Read> DebugReader<R> {
     pub fn new(reader: R) -> Result<Self> {
         Ok(DebugReader {
-            reader: reader,
+            reader,
             counter: 100,
         })
     }
@@ -69,7 +63,7 @@ pub struct DebugWriter<W> {
 impl<W: Write> DebugWriter<W> {
     pub fn new(writer: W) -> Result<Self> {
         Ok(DebugWriter {
-            writer: writer,
+            writer,
             counter: 100,
         })
     }

@@ -31,10 +31,11 @@ static void write_file(const char *path, const unsigned char *data, size_t size)
 
 int main(int argc, char **argv) {
     enum { INPUT_SIZE = 262144, PREFIX_SIZE = 131072 };
-    if (argc != 3) {
-        fprintf(stderr, "Usage: generator <plaintext-file> <compressed-output-prefix>\n");
+    if (argc < 3 || argc > 4 || (argc == 4 && strcmp(argv[3], "no-short") != 0)) {
+        fprintf(stderr, "Usage: generator <plaintext-file> <compressed-output-prefix> [no-short]\n");
         return 1;
     }
+    int no_short = argc == 4;
     unsigned char *input = (unsigned char *)malloc(INPUT_SIZE);
     if (!input) {
         fprintf(stderr, "Allocation failed\n");
@@ -51,8 +52,37 @@ int main(int argc, char **argv) {
         if (i % 37 == 0)
             input[i] ^= next_byte() & 15;
     }
+    if (no_short) {
+        for (size_t i = 0; i < INPUT_SIZE; ++i)
+            input[i] = next_byte() & 15;
+        for (size_t i = 8192; i + 768 < INPUT_SIZE; i += 4096)
+            memcpy(input + i, input + i - 4096 + 128, 512);
+        /* Bury a repeated prefix beyond both native chain budgets without
+           introducing the fourth-byte aliases needed for three-byte matches. */
+        for (size_t start = 64; start < 8192; start += 1024) {
+            uint32_t target = 0;
+            for (size_t j = 0; j < 4; ++j)
+                target |= (uint32_t)input[start + j] << (8 * j);
+            uint32_t hash = ((target * 66521u + 66521u) >> 16) & 32767u;
+            size_t collisions = (start / 1024) % 2 == 0 ? 8 : 129;
+            for (size_t collision = 0; collision < collisions; ++collision) {
+                uint32_t word;
+                do {
+                    word = 0;
+                    for (size_t j = 0; j < 4; ++j)
+                        word |= (uint32_t)(next_byte() & 127) << (8 * j);
+                } while ((((word * 66521u + 66521u) >> 16) & 32767u) != hash
+                    || (word & 65535u) == (target & 65535u));
+                for (size_t j = 0; j < 4; ++j)
+                    input[start + 32 + collision * 4 + j] = (unsigned char)(word >> (8 * j));
+            }
+            memcpy(input + start + 580, input + start, 16);
+        }
+    }
     write_file(argv[1], input, INPUT_SIZE);
     for (int level = 0; level <= 9; ++level) {
+        if (no_short && level != 1 && level != 6)
+            continue;
         z_stream stream = {0};
         if (deflateInit2(&stream, level, Z_DEFLATED, -15, 8, Z_DEFAULT_STRATEGY) != Z_OK) {
             fprintf(stderr, "deflateInit2 failed for level %d\n", level);

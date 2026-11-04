@@ -11,6 +11,9 @@ use std::io::{BufRead, Cursor};
 use crate::cabac::vp8::{VP8Reader, VP8Writer};
 use bitcode::{Decode, Encode};
 
+#[cfg(any(test, feature = "diagnostics"))]
+use crate::estimator::preflate_parameter_estimator::estimate_preflate_parameters;
+
 use crate::{
     PreflateConfig, Result,
     cabac_codec::{PredictionDecoderCabac, PredictionEncoderCabac},
@@ -18,11 +21,10 @@ use crate::{
         deflate_reader::DeflateParser, deflate_token::DeflateTokenBlock,
         deflate_writer::DeflateWriter,
     },
-    estimator::preflate_parameter_estimator::{
-        TokenPredictorParameters, estimate_preflate_parameters,
-    },
+    parameters::TokenPredictorParameters,
     preflate_error::{AddContext, ExitCode, PreflateError},
     preflate_input::{PlainText, PreflateInput},
+    reconstruction_parameters::ReconstructionParameters,
     statistical_codec::{CodecCorrection, PredictionDecoder, PredictionEncoder},
     token_predictor::TokenPredictor,
 };
@@ -42,16 +44,42 @@ struct ReconstructionData {
     pub corrections: Vec<u8>,
 }
 
+#[derive(Encode, Decode)]
+struct EncodedReconstructionData {
+    parameters: ReconstructionParameters,
+    corrections: Vec<u8>,
+}
+
 impl ReconstructionData {
-    pub fn write(&self) -> Vec<u8> {
+    pub fn write(self) -> Vec<u8> {
         let mut data = vec![RECONSTRUCTION_DATA_VERSION];
+        data.extend_from_slice(&bitcode::encode(&EncodedReconstructionData {
+            parameters: ReconstructionParameters::from(&self.parameters),
+            corrections: self.corrections,
+        }));
+        data
+    }
+
+    #[cfg(test)]
+    fn write_legacy(&self) -> Vec<u8> {
+        let mut data = vec![LEGACY_RECONSTRUCTION_DATA_VERSION];
         data.extend_from_slice(&bitcode::encode(self));
         data
     }
 
     pub fn read(data: &[u8]) -> Result<Self> {
         match data.split_first() {
-            Some((&RECONSTRUCTION_DATA_VERSION | &LEGACY_RECONSTRUCTION_DATA_VERSION, payload)) => {
+            Some((&RECONSTRUCTION_DATA_VERSION, payload)) => {
+                bitcode::decode::<EncodedReconstructionData>(payload)
+                    .map(|encoded| Self {
+                        parameters: encoded.parameters.into_runtime(),
+                        corrections: encoded.corrections,
+                    })
+                    .map_err(|e| {
+                        PreflateError::new(ExitCode::InvalidCompressedWrapper, format!("{e:?}"))
+                    })
+            }
+            Some((&LEGACY_RECONSTRUCTION_DATA_VERSION, payload)) => {
                 bitcode::decode(payload).map_err(|e| {
                     PreflateError::new(
                         ExitCode::InvalidCompressedWrapper,
@@ -103,9 +131,7 @@ pub struct PreflateStreamProcessor {
 }
 
 impl PreflateStreamProcessor {
-    /// Creates a new PreflateStreamProcessor
-    /// plain_text_limit: the maximum size of the plain text that will decompressed to memory
-    /// verify: if true, the decompressed data will be recompressed and compared to the original as it is run
+    /// Creates a processor with the plaintext, chain-depth and verification limits in `config`.
     pub fn new(config: &PreflateConfig) -> Self {
         Self {
             predictor: None,
@@ -140,7 +166,7 @@ impl PreflateStreamProcessor {
     }
 
     pub fn plain_text(&self) -> &PlainText {
-        &self.parser.plain_text()
+        self.parser.plain_text()
     }
 
     pub fn shrink_to_dictionary(&mut self) {
@@ -151,7 +177,11 @@ impl PreflateStreamProcessor {
         self.parser.detach_plain_text()
     }
 
-    /// decompresses a deflate stream and returns the plaintext and cabac_encoded data that can be used to reconstruct it
+    /// Analyzes the next plaintext-limited chunk of a DEFLATE stream.
+    ///
+    /// Advance the compressed input by the returned `compressed_size`, consume the
+    /// new plaintext through [`Self::plain_text`], then call [`Self::shrink_to_dictionary`]
+    /// before the next chunk. Retain the processor until [`Self::is_done`] is true.
     pub fn decompress(&mut self, compressed_data: &[u8]) -> Result<PreflateStreamChunkResult> {
         self.decompress_counted(compressed_data, ())
     }
@@ -186,7 +216,7 @@ impl PreflateStreamProcessor {
         );
 
         if let Some(predictor) = &mut self.predictor {
-            let mut input = PreflateInput::new(&self.parser.plain_text());
+            let mut input = PreflateInput::new(self.parser.plain_text());
 
             // we are missing the last couple hashes in the dictionary since we didn't
             // have the full plaintext yet.
@@ -220,8 +250,8 @@ impl PreflateStreamProcessor {
                 )?;
 
                 #[cfg(test)]
-                for i in 0..contents.blocks.len() {
-                    crate::utils::assert_block_eq(&contents.blocks[i], &_rec_blocks[i]);
+                for (i, block) in contents.blocks.iter().enumerate() {
+                    crate::utils::assert_block_eq(block, &_rec_blocks[i]);
                 }
 
                 // we should always succeed here in test code
@@ -254,8 +284,13 @@ impl PreflateStreamProcessor {
             if let Some(trace) = &mut self.trace {
                 trace.stage = "estimate";
             }
-            let params =
-                estimate_preflate_parameters(&contents, &self.parser.plain_text()).context()?;
+            let profile =
+                crate::estimator::preflate_parameter_estimator::estimate_preflate_profile(
+                    &contents,
+                    self.parser.plain_text(),
+                )
+                .context()?;
+            let params = profile.parameters();
 
             #[cfg(any(test, feature = "diagnostics"))]
             if let Some(trace) = &mut self.trace {
@@ -272,9 +307,9 @@ impl PreflateStreamProcessor {
                 ));
             }
 
-            let mut input = PreflateInput::new(&self.parser.plain_text());
+            let mut input = PreflateInput::new(self.parser.plain_text());
 
-            let mut token_predictor = TokenPredictor::new(&params);
+            let mut token_predictor = TokenPredictor::new_profile(profile);
             token_predictor
                 .enable_parameter_normalization(contents.compressed_size, self.parser.is_done());
 
@@ -323,8 +358,8 @@ impl PreflateStreamProcessor {
                 )?;
 
                 #[cfg(test)]
-                for i in 0..contents.blocks.len() {
-                    crate::utils::assert_block_eq(&contents.blocks[i], &_rec_blocks[i]);
+                for (i, block) in contents.blocks.iter().enumerate() {
+                    crate::utils::assert_block_eq(block, &_rec_blocks[i]);
                 }
 
                 // we should always succeed here in test code
@@ -356,8 +391,25 @@ impl PreflateStreamProcessor {
     }
 }
 
-/// Decompresses a deflate stream and returns the plaintext and diff data that can be used to reconstruct it
-/// via recreate_whole_deflate_stream
+/// Parse and estimate the first chunk without correction coding or reconstruction.
+/// Estimation may perform bounded candidate prediction scoring, not full-stream replay.
+/// Tiny complete streams may normalize window/cutoff parameters during prediction;
+/// this returns the estimator's original parameters, not those normalized values.
+#[cfg(feature = "diagnostics")]
+pub fn estimate_first_chunk_parameters(
+    compressed_data: &[u8],
+    plain_text_limit: usize,
+) -> Result<TokenPredictorParameters> {
+    let mut parser = DeflateParser::new(plain_text_limit);
+    let contents = parser.parse(compressed_data)?;
+    estimate_preflate_parameters(&contents, parser.plain_text())
+}
+
+/// Analyzes one plaintext-limited chunk and returns its plaintext and corrections.
+///
+/// If `compressed_size` is smaller than the supplied input, the remainder may be
+/// another chunk or trailing wrapper data. Use [`PreflateStreamProcessor`] and its
+/// completion state when processing streams larger than the configured plaintext limit.
 pub fn preflate_whole_deflate_stream(
     compressed_data: &[u8],
     config: &PreflateConfig,
@@ -397,7 +449,7 @@ impl RecreateStreamProcessor {
                 break;
             }
 
-            self.plain_text.append(&buf);
+            self.plain_text.append(buf);
 
             plain_text.consume(buf_len);
         }
@@ -450,6 +502,12 @@ impl RecreateStreamProcessor {
     }
 }
 
+impl Default for RecreateStreamProcessor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// recompresses a deflate stream using the cabac_encoded data that was returned from decompress_deflate_stream
 pub fn recreate_whole_deflate_stream(
     plain_text: &[u8],
@@ -474,7 +532,7 @@ fn encode_mispredictions(
 ) -> Result<()> {
     let mut input = PreflateInput::new(plain_text);
 
-    let mut token_predictor = TokenPredictor::new(&params);
+    let mut token_predictor = TokenPredictor::new(params);
 
     predict_blocks(&deflate.blocks, &mut token_predictor, encoder, &mut input)?;
 
@@ -512,7 +570,7 @@ fn decode_mispredictions(
     decoder: &mut impl crate::statistical_codec::PredictionDecoder,
 ) -> Result<(Vec<u8>, Vec<DeflateTokenBlock>)> {
     let mut deflate_writer: DeflateWriter = DeflateWriter::new();
-    let mut predictor = TokenPredictor::new(&params);
+    let mut predictor = TokenPredictor::new(params);
 
     let output_blocks = recreate_blocks(&mut predictor, decoder, &mut deflate_writer, input)?;
 
@@ -684,6 +742,19 @@ fn reconstruction_data_version() {
     }
 }
 
+#[test]
+fn truncated_nested_reconstruction_parameters_are_rejected() {
+    let compressed = crate::utils::read_file("compressed_zlib_level1.deflate");
+    let (record, _) =
+        preflate_whole_deflate_stream(&compressed, &PreflateConfig::default()).unwrap();
+    for length in 0..record.corrections.len() {
+        let error = ReconstructionData::read(&record.corrections[..length])
+            .err()
+            .unwrap();
+        assert_eq!(error.exit_code(), ExitCode::InvalidCompressedWrapper);
+    }
+}
+
 /// Adobe PDF Library 25/26 emits libdeflate-style streams whose final token is a
 /// length 3 match covering the last 3 bytes of the plaintext. Stock libdeflate never
 /// matches in the last 4 bytes, but the libdeflate model's length 3 hash table can
@@ -759,7 +830,7 @@ fn analyze_compressed_data_fast(
     encode_mispredictions(&contents, &plain_text, &params, &mut cabac_encoder).unwrap();
 
     if let Some(crc) = header_crc32 {
-        let result_crc = crc32fast::hash(&plain_text.text());
+        let result_crc = crc32fast::hash(plain_text.text());
         assert_eq!(result_crc, crc);
     }
 
@@ -874,7 +945,7 @@ fn analyze_compressed_data_verify(
         "re-compressed version should be same (content)"
     );
 
-    let result_crc = crc32fast::hash(&plain_text.text());
+    let result_crc = crc32fast::hash(plain_text.text());
 
     if let Some(crc) = header_crc32 {
         assert_eq!(crc, result_crc, "crc mismatch");
@@ -906,8 +977,6 @@ fn verify_zlib_perfect_compression() {
         let compressed_data: &[u8] =
             &read_file(format!("compressed_zlib_level{i}.deflate").as_str());
 
-        let compressed_data = compressed_data;
-
         let (contents, plain_text) = parse_deflate_whole(compressed_data).unwrap();
 
         let params = estimate_preflate_parameters(&contents, &plain_text).unwrap();
@@ -918,7 +987,7 @@ fn verify_zlib_perfect_compression() {
         let mut verify_encoder = crate::statistical_codec::AssertDefaultOnlyEncoder {};
         encode_mispredictions(&contents, &plain_text, &params, &mut verify_encoder).unwrap();
 
-        println!("params buffer length {}", bitcode::encode(&params).len());
+        println!("params buffer length {}", params.serialized_size());
     }
 }
 
@@ -969,7 +1038,7 @@ pub fn analyze_compressed_data_verify_incremental(compressed_data: &[u8], config
     let mut start_offset = 0;
     let mut end_offset = compressed_data.len().min(100001);
 
-    let mut stream = PreflateStreamProcessor::new(&config);
+    let mut stream = PreflateStreamProcessor::new(config);
 
     let mut plain_text_offset = 0;
 
@@ -1018,19 +1087,16 @@ pub fn analyze_compressed_data_verify_incremental(compressed_data: &[u8], config
     let mut reconstructed_blocks = Vec::new();
 
     let mut reconstruct = RecreateStreamProcessor::new();
-    for i in 0..expanded_contents.len() {
+    for (i, (corrections, plaintext)) in expanded_contents.iter().enumerate() {
         let (mut r, mut b) = reconstruct
-            .recompress(
-                &mut Cursor::new(&expanded_contents[i].1),
-                &expanded_contents[i].0,
-            )
+            .recompress(&mut Cursor::new(plaintext), corrections)
             .unwrap();
 
         println!(
             "reconstruct block offset={} blocks={} pt={}",
             i,
             b.len(),
-            expanded_contents[i].1.len()
+            plaintext.len()
         );
 
         recompressed.append(&mut r);
@@ -1038,9 +1104,9 @@ pub fn analyze_compressed_data_verify_incremental(compressed_data: &[u8], config
     }
 
     //assert_eq!(original_con.blocks.len(), reconstructed_blocks.len());
-    for i in 0..original_con.blocks.len() {
+    for (i, block) in original_con.blocks.iter().enumerate() {
         println!("block {}", i);
-        crate::utils::assert_block_eq(&original_con.blocks[i], &reconstructed_blocks[i]);
+        crate::utils::assert_block_eq(block, &reconstructed_blocks[i]);
     }
 
     assert_eq_array(compressed_data, &recompressed);
@@ -1053,7 +1119,7 @@ fn verify_plain_text_limit() {
     analyze_compressed_data_verify_incremental(
         &crate::utils::read_file("compressed_zlib_level3.deflate"),
         &PreflateConfig {
-            plain_text_limit: 1 * 1024 * 1024,
+            plain_text_limit: 1024 * 1024,
             ..Default::default()
         },
     );

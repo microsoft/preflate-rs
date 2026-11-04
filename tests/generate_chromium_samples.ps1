@@ -33,6 +33,18 @@ if ($LASTEXITCODE -ne 0) { throw 'Fixture generator build failed' }
 $inputFile = Join-Path $samples 'chromium_model_input.bin'
 & $executable $inputFile (Join-Path $samples 'compressed_chromium_level')
 if ($LASTEXITCODE -ne 0) { throw 'Fixture generation failed' }
+$noShortInput = Join-Path $samples 'chromium_no_short_input.bin'
+& $executable $noShortInput (Join-Path $samples 'compressed_chromium_no_short_level') no-short
+if ($LASTEXITCODE -ne 0) { throw 'No-short-match fixture generation failed' }
+$noShortFixtures = foreach ($level in @(1, 6)) {
+    $file = Get-Item -LiteralPath (Join-Path $samples "compressed_chromium_no_short_level$level.deflate")
+    [ordered]@{
+        level = $level
+        file = $file.Name
+        bytes = $file.Length
+        sha256 = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash
+    }
+}
 $fixtures = foreach ($level in 0..9) {
     $file = Get-Item -LiteralPath (Join-Path $samples "compressed_chromium_level$level.deflate")
     [ordered]@{
@@ -53,4 +65,7 @@ $fixtures = foreach ($level in 0..9) {
     input_file = 'chromium_model_input.bin'
     input_sha256 = (Get-FileHash -LiteralPath $inputFile -Algorithm SHA256).Hash
     fixtures = @($fixtures)
+    no_short_input_file = 'chromium_no_short_input.bin'
+    no_short_input_sha256 = (Get-FileHash -LiteralPath $noShortInput -Algorithm SHA256).Hash
+    no_short_fixtures = @($noShortFixtures)
 } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $samples 'chromium_samples.json') -Encoding utf8

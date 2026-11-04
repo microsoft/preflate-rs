@@ -257,7 +257,7 @@ impl PredictionDecoder for VerifyPredictionDecoder {
         match x {
             CodecAction::Correction(c, value) => {
                 assert_eq!(correction, c);
-                return value;
+                value
             }
             CodecAction::VerifyState(s, _h) => {
                 panic!("found VerifyState {}, expected {:?}", s, correction);
@@ -269,11 +269,11 @@ impl PredictionDecoder for VerifyPredictionDecoder {
 #[cfg(test)]
 pub fn drive_encoder<T: PredictionEncoder>(encoder: &mut T, actions: &[CodecAction]) {
     for action in actions {
-        match action {
-            &CodecAction::Correction(correction, value) => {
+        match *action {
+            CodecAction::Correction(correction, value) => {
                 encoder.encode_correction(correction, value);
             }
-            &CodecAction::VerifyState(message, checksum) => {
+            CodecAction::VerifyState(message, checksum) => {
                 encoder.encode_verify_state(message, checksum);
             }
         }
@@ -283,12 +283,12 @@ pub fn drive_encoder<T: PredictionEncoder>(encoder: &mut T, actions: &[CodecActi
 #[cfg(test)]
 pub fn verify_decoder<T: PredictionDecoder>(decoder: &mut T, actions: &[CodecAction]) {
     for action in actions {
-        match action {
-            &CodecAction::Correction(correction, value) => {
+        match *action {
+            CodecAction::Correction(correction, value) => {
                 let x = decoder.decode_correction(correction);
                 assert_eq!(x, value);
             }
-            &CodecAction::VerifyState(message, checksum) => {
+            CodecAction::VerifyState(message, checksum) => {
                 decoder.decode_verify_state(message, checksum);
             }
         }
