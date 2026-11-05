@@ -9,14 +9,20 @@
 use crate::{
     deflate::deflate_constants::MIN_LOOKAHEAD,
     estimator::{
+        compressor_profile::{CompressorProfile, RefinementContext},
+        estimation_result::EstimationResult,
         initial_estimate::InitialEstimate,
-        parser_estimator::{InsertionConstraint, ParserInference},
+        parser_estimator::ParserInference,
         preflate_stream_info::PreflateStreamInfo,
     },
     hash_algorithm::HashAlgorithm,
     parameters::DictionaryAddPolicy,
     preflate_input::PlainText,
-    reconstruction_parameters::ReconstructionParameters,
+    reconstruction_parameters::{
+        BehaviorSettings, ChainDistancePolicy, ChainMatchSettings, ChainSettings, DictionaryIndex,
+        DictionarySettings, HashFunction, InputTailPolicy, MiniZDistancePolicy,
+        ReconstructionParameters, SearchBudget, WindowBounds,
+    },
 };
 
 #[derive(Default, Debug)]
@@ -71,7 +77,7 @@ pub fn add_policy(
     longest_match: u32,
 ) -> DictionaryAddPolicy {
     if matches!(hash, HashAlgorithm::Chromium { .. })
-        && InsertionConstraint::observe(policy, longest_match) == InsertionConstraint::Unresolved
+        && policy.has_unobserved_first_only_cutoff(longest_match)
     {
         DictionaryAddPolicy::AddAll
     } else {
@@ -90,6 +96,18 @@ pub fn depth_add_policy(hash: HashAlgorithm, policy: DictionaryAddPolicy) -> Dic
     }
 }
 
+pub fn append_alternatives(
+    context: &RefinementContext<'_>,
+    candidates: &mut Vec<EstimationResult>,
+) {
+    candidates.extend(
+        alternatives(context.parameters, context.info)
+            .into_iter()
+            .flatten()
+            .map(|parameters| CompressorProfile::Chromium.with_parameters(parameters)),
+    );
+}
+
 pub fn alternatives(
     parameters: ReconstructionParameters,
     info: &PreflateStreamInfo,
@@ -100,11 +118,30 @@ pub fn alternatives(
     {
         return [None, None];
     }
-    let fast = &super::zlib::ZLIB_PREFLATE_PARSER_SETTINGS[match parameters
-        .dictionary()
-        .expect("dictionary candidate")
-        .insertion
-    {
+    let (dictionary, distance) = match parameters.behavior {
+        BehaviorSettings::Chain { common, .. } => {
+            let distance = match common.distance {
+                ChainDistancePolicy::Window { history, .. } => ChainDistancePolicy::Window {
+                    history,
+                    bounds: WindowBounds::LookaheadMinusOne,
+                },
+                other => other,
+            };
+            (common.dictionary, distance)
+        }
+        BehaviorSettings::MiniZ { common, .. } => {
+            let distance = match common.distance {
+                MiniZDistancePolicy::Disabled => ChainDistancePolicy::Disabled,
+                MiniZDistancePolicy::Enabled(history) => ChainDistancePolicy::Window {
+                    history,
+                    bounds: WindowBounds::LookaheadMinusOne,
+                },
+            };
+            (common.dictionary, distance)
+        }
+        BehaviorSettings::NoDictionary { .. } => return [None, None],
+    };
+    let fast = &super::zlib::ZLIB_PREFLATE_PARSER_SETTINGS[match dictionary.insertion {
         DictionaryAddPolicy::AddFirst(5) => 1,
         DictionaryAddPolicy::AddFirst(6) => 2,
         _ => 0,
@@ -115,22 +152,6 @@ pub fn alternatives(
         if is_slow && info.max_dist_3_matches > crate::compressors::zlib::SHORT_MATCH_CUTOFF {
             return None;
         }
-        use crate::reconstruction_parameters::{
-            BehaviorSettings, ChainDistancePolicy, ChainMatchSettings, ChainSettings,
-            DictionaryIndex, DictionarySettings, HashFunction, InputTailPolicy,
-            MiniZDistancePolicy, SearchBudget, WindowBounds,
-        };
-        let distance = match parameters.behavior {
-            BehaviorSettings::Chain { common, .. } => common.distance,
-            BehaviorSettings::MiniZ { common, .. } => match common.distance {
-                MiniZDistancePolicy::Disabled => ChainDistancePolicy::Disabled,
-                MiniZDistancePolicy::Enabled(history) => ChainDistancePolicy::Window {
-                    history,
-                    bounds: WindowBounds::Lookahead,
-                },
-            },
-            BehaviorSettings::NoDictionary { .. } => unreachable!("dictionary candidate"),
-        };
         let short_match_cutoff = if info.short_reference_count == 0 {
             0
         } else if is_slow {
@@ -148,15 +169,7 @@ pub fn alternatives(
                         window_bits: 15,
                         insertion: config.dictionary_add_policy,
                     },
-                    distance: match distance {
-                        ChainDistancePolicy::Window { history, .. } => {
-                            ChainDistancePolicy::Window {
-                                history,
-                                bounds: WindowBounds::LookaheadMinusOne,
-                            }
-                        }
-                        other => other,
-                    },
+                    distance,
                     search: ChainSettings {
                         input_tail: InputTailPolicy::HashMinimum,
                         budget: SearchBudget {

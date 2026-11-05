@@ -75,7 +75,7 @@ pub fn refine_profile(
         info,
         zlib_candidates,
     );
-    if candidates.iter().all(Option::is_none) {
+    if candidates.is_empty() {
         return profile;
     }
     let score = |parameters: &ReconstructionParameters| {
@@ -96,7 +96,7 @@ pub fn refine_profile(
         .then(|| models::generic::primary_only_greedy(parameters, info))
         .flatten();
     let mut improved_greedy = None;
-    for candidate in candidates.into_iter().flatten() {
+    for candidate in candidates {
         let proposed = candidate.reconstruction;
         if proposed == parameters {
             continue;

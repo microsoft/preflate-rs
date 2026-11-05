@@ -13,11 +13,9 @@ use crate::{
 };
 
 pub fn inferred(parameters: ReconstructionParameters) -> Option<ReconstructionParameters> {
+    let dictionary = parameters.dictionary()?;
     if !matches!(
-        parameters
-            .dictionary()
-            .expect("dictionary candidate")
-            .insertion,
+        dictionary.insertion,
         DictionaryAddPolicy::AddAll
             | DictionaryAddPolicy::AddFirstAndLast(_)
             | DictionaryAddPolicy::AddFirstWith32KBoundary

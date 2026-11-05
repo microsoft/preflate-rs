@@ -22,7 +22,10 @@ use crate::{
     },
     deflate::deflate_token::DeflateTokenReference,
     estimator::{
-        initial_estimate::InitialEstimate, parser_estimator::ParserInference,
+        compressor_profile::{CompressorProfile, RefinementContext},
+        estimation_result::EstimationResult,
+        initial_estimate::InitialEstimate,
+        parser_estimator::ParserInference,
         preflate_stream_info::PreflateStreamInfo,
     },
     hash_algorithm::HashAlgorithm,
@@ -155,6 +158,16 @@ pub fn vetoes_rotating_hash(hash: HashAlgorithm) -> bool {
     hash == crate::compressors::libdeflate::CHAIN_HASH
 }
 
+pub fn append_alternatives(
+    context: &RefinementContext<'_>,
+    candidates: &mut Vec<EstimationResult>,
+) {
+    candidates.extend(
+        shallow_alternative(context.parameters, context.info)
+            .map(|parameters| CompressorProfile::MiniZ.with_parameters(parameters)),
+    );
+}
+
 pub fn shallow_alternative(
     parameters: ReconstructionParameters,
     info: &PreflateStreamInfo,
@@ -162,39 +175,39 @@ pub fn shallow_alternative(
     if info.min_len != 3
         || !(4097..8192).contains(&info.max_dist_3_matches)
         || info.matches_to_start_detected
-        || matches!(
-            parameters.behavior,
-            BehaviorSettings::MiniZ {
-                common: MiniZMatchSettings {
-                    search: MiniZSearchSettings { max_probes: 3, .. },
-                    ..
-                },
-                greedy: true,
-                ..
-            }
-        )
     {
         return None;
     }
-    let mut dictionary = *parameters.dictionary().expect("dictionary candidate");
+    let (mut dictionary, distance) = match parameters.behavior {
+        BehaviorSettings::MiniZ {
+            common:
+                MiniZMatchSettings {
+                    search: MiniZSearchSettings { max_probes: 3, .. },
+                    ..
+                },
+            greedy: true,
+            ..
+        } => return None,
+        BehaviorSettings::Chain { common, .. } => {
+            let distance = match common.distance {
+                ChainDistancePolicy::Disabled => MiniZDistancePolicy::Disabled,
+                ChainDistancePolicy::Window { history, .. } => {
+                    MiniZDistancePolicy::Enabled(history)
+                }
+                ChainDistancePolicy::RleOnly => {
+                    MiniZDistancePolicy::Enabled(SourceHistorySettings {
+                        matches_to_start: false,
+                    })
+                }
+            };
+            (common.dictionary, distance)
+        }
+        BehaviorSettings::MiniZ { common, .. } => (common.dictionary, common.distance),
+        BehaviorSettings::NoDictionary { .. } => return None,
+    };
     dictionary.index = DictionaryIndex::from_algorithm(DEFAULT_HASH).expect("dictionary hash");
     dictionary.window_bits = 15;
     dictionary.insertion = DictionaryAddPolicy::AddAll;
-    let distance = match parameters.behavior {
-        BehaviorSettings::Chain { common, .. }
-            if common.distance == ChainDistancePolicy::Disabled =>
-        {
-            MiniZDistancePolicy::Disabled
-        }
-        BehaviorSettings::MiniZ { common, .. }
-            if common.distance == MiniZDistancePolicy::Disabled =>
-        {
-            MiniZDistancePolicy::Disabled
-        }
-        _ => MiniZDistancePolicy::Enabled(SourceHistorySettings {
-            matches_to_start: parameters.behavior.permits_position_zero(),
-        }),
-    };
     Some(ReconstructionParameters {
         behavior: parser_behavior(
             dictionary,
@@ -247,13 +260,9 @@ pub fn fingerprint(initial: &InitialEstimate<'_>) -> Option<ReconstructionParame
             },
         )));
     }
-    let mut parameters = generic::candidate(initial, zlib::compatible_initial(initial));
-    parameters
-        .chain_common_mut()
-        .expect("chain candidate")
-        .search
-        .nice_length = 258;
-    Some(parameters)
+    let (mut common, parser) = generic::chain_settings(initial, zlib::compatible_initial(initial));
+    common.search.nice_length = 258;
+    Some(initial.parameters(BehaviorSettings::Chain { common, parser }))
 }
 
 fn parser_behavior(
@@ -294,6 +303,45 @@ mod tests {
         },
         parameters::{PreflateStrategy, tests::MatchingType},
     };
+
+    #[test]
+    fn probe_budget_overflow_preserves_the_generic_fallback() {
+        for (inference, required_chain, fallback) in [
+            (ParserInference::Greedy, 33, false),
+            (ParserInference::Greedy, 34, true),
+            (ParserInference::Unresolved, 1500, false),
+            (ParserInference::Unresolved, 1501, true),
+        ] {
+            for minimum in [3, 6] {
+                for distance_policy in [DistancePolicy::ZlibWindow, DistancePolicy::FullWindow] {
+                    let mut info = initial_stream_info();
+                    info.min_len = minimum;
+                    info.max_dist_3_matches = 8191;
+                    let evidence = CandidateEvidence {
+                        hash_algorithm: DEFAULT_HASH,
+                        required_chain,
+                        distance_policy,
+                        parser: inference,
+                        shallow_miniz_greedy: false,
+                        minimum_nice_length: 0,
+                    };
+                    let mut initial = InitialEstimate::test_fixture(&info, evidence);
+                    initial.insertion = DictionaryAddPolicy::AddAll;
+                    let actual = fingerprint(&initial).unwrap();
+                    if fallback {
+                        let mut expected =
+                            generic::candidate(&initial, zlib::compatible_initial(&initial));
+                        expected.chain_common_mut().unwrap().search.nice_length = 258;
+                        assert_eq!(actual, expected);
+                        assert_eq!(bitcode::encode(&actual), bitcode::encode(&expected));
+                        assert!(matches!(actual.behavior, BehaviorSettings::Chain { .. }));
+                    } else {
+                        assert!(matches!(actual.behavior, BehaviorSettings::MiniZ { .. }));
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn initial_and_refinement_paths_share_complete_miniz_settings() {

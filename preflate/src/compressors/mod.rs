@@ -21,7 +21,11 @@ pub use windows::{
 };
 pub use zlib::{DeferredCutoff, WindowConstraint, predict_lazy as predict_zlib_lazy};
 
-use crate::parameters::DictionaryAddPolicy;
+use crate::{
+    deflate::deflate_constants::MIN_MATCH,
+    parameters::DictionaryAddPolicy,
+    reconstruction_parameters::{BehaviorSettings, ChainParser, LazyMinimum as ParserMinimum},
+};
 
 pub enum MatchPrediction {
     Reference,
@@ -31,29 +35,33 @@ pub enum MatchPrediction {
     },
 }
 
-pub fn block_minimum_match_length(
-    parameters: &crate::reconstruction_parameters::BehaviorSettings,
-    bytes: &[u8],
-) -> u32 {
-    use crate::reconstruction_parameters::{BehaviorSettings, ChainParser, LazyMinimum};
-    match parameters {
-        BehaviorSettings::Chain { common, parser } => match parser {
-            ChainParser::LibdeflateGreedy { .. } | ChainParser::LibdeflateLazy { .. } => {
-                libdeflate::minimum_match_length(
-                    bytes,
-                    common.search.budget.max_chain.saturating_sub(1),
-                )
-            }
-            ChainParser::Lazy {
-                minimum: LazyMinimum::FilteredSix,
+impl BehaviorSettings {
+    pub(crate) fn block_minimum_match_length(&self, bytes: &[u8]) -> u32 {
+        match self {
+            Self::Chain {
+                common,
+                parser: ChainParser::LibdeflateGreedy { .. } | ChainParser::LibdeflateLazy { .. },
+            } => libdeflate::minimum_match_length(
+                bytes,
+                common.search.budget.max_chain.saturating_sub(1),
+            ),
+            Self::Chain {
+                parser:
+                    ChainParser::Lazy {
+                        minimum: ParserMinimum::FilteredSix,
+                        ..
+                    },
                 ..
             } => zlib::FILTERED_MIN_MATCH_LENGTH,
-            ChainParser::Greedy { .. }
-            | ChainParser::WindowsLazy { .. }
-            | ChainParser::Lazy { .. } => crate::deflate::deflate_constants::MIN_MATCH,
-        },
-        BehaviorSettings::NoDictionary { strategy: _ } | BehaviorSettings::MiniZ { .. } => {
-            crate::deflate::deflate_constants::MIN_MATCH
+            Self::Chain {
+                parser:
+                    ChainParser::Greedy { .. }
+                    | ChainParser::WindowsLazy { .. }
+                    | ChainParser::Lazy { .. },
+                ..
+            }
+            | Self::NoDictionary { .. }
+            | Self::MiniZ { .. } => MIN_MATCH,
         }
     }
 }

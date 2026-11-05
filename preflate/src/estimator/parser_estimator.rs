@@ -7,8 +7,6 @@
 //! Greedy and lazy parser inference from bounded match observations.
 //! Interprets repeated deferred matches and insertion constraints for profile selection.
 
-use crate::parameters::DictionaryAddPolicy;
-
 // Confidence thresholds for inference, not constraints imposed by DEFLATE.
 const MIN_LAZY_OBSERVATIONS: u16 = 4;
 
@@ -45,32 +43,12 @@ impl ParserEvidence {
     }
 }
 
-/// Whether insertion evidence permits reconsidering the default matching policy.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum InsertionConstraint {
-    /// The observed cutoff never excludes a match, so it does not establish greedy parsing.
-    Unresolved,
-    /// Retain the existing interpretation of the inferred insertion policy.
-    Constrained,
-}
-
-impl InsertionConstraint {
-    pub fn observe(policy: DictionaryAddPolicy, longest_match: u32) -> Self {
-        match policy {
-            DictionaryAddPolicy::AddFirst(limit) if u32::from(limit) >= longest_match => {
-                // This stream cannot distinguish the inferred cutoff from full insertion.
-                Self::Unresolved
-            }
-            _ => Self::Constrained,
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{
-        estimator::models::generic::resolve_matching_policy, reconstruction_parameters::ChainParser,
+        estimator::models::generic::resolve_matching_policy, parameters::DictionaryAddPolicy,
+        reconstruction_parameters::ChainParser,
     };
 
     #[test]
@@ -97,35 +75,28 @@ mod tests {
     }
 
     #[test]
-    fn insertion_cutoff_is_unresolved_until_it_excludes_an_observed_match() {
-        for (policy, longest, expected) in [
-            (
-                DictionaryAddPolicy::AddFirst(6),
-                5,
-                InsertionConstraint::Unresolved,
-            ),
-            (
-                DictionaryAddPolicy::AddFirst(6),
-                6,
-                InsertionConstraint::Unresolved,
-            ),
-            (
-                DictionaryAddPolicy::AddFirst(6),
-                7,
-                InsertionConstraint::Constrained,
-            ),
-            (
-                DictionaryAddPolicy::AddAll,
-                6,
-                InsertionConstraint::Constrained,
-            ),
-            (
-                DictionaryAddPolicy::AddFirstAndLast(6),
-                6,
-                InsertionConstraint::Constrained,
-            ),
+    fn constrained_insertion_preserves_the_greedy_parser() {
+        let current = ChainParser::Greedy {
+            short_match_cutoff: 4096,
+        };
+        for policy in [
+            DictionaryAddPolicy::AddFirst(5),
+            DictionaryAddPolicy::AddAll,
+            DictionaryAddPolicy::AddFirstAndLast(258),
+            DictionaryAddPolicy::AddFirstExcept4kBoundary,
+            DictionaryAddPolicy::AddFirstWith32KBoundary,
         ] {
-            assert_eq!(InsertionConstraint::observe(policy, longest), expected);
+            assert_eq!(
+                resolve_matching_policy(
+                    current,
+                    policy,
+                    258,
+                    ParserInference::Lazy {
+                        longest_deferred_match: 6
+                    },
+                ),
+                current,
+            );
         }
     }
 
@@ -143,7 +114,8 @@ mod tests {
                 ChainParser::Greedy {
                     short_match_cutoff: 0,
                 },
-                InsertionConstraint::Unresolved,
+                DictionaryAddPolicy::AddFirst(258),
+                258,
                 ParserInference::Lazy {
                     longest_deferred_match: length,
                 },

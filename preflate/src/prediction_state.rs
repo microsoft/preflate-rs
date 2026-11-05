@@ -22,9 +22,8 @@ use crate::{
     bit_helper::DebugHash,
     block_predictor::BlockPrediction,
     compressors::{
-        DeferredCutoff, LazyMinimum, MatchPrediction, block_minimum_match_length,
-        cross_4k_boundary, literal_at_buffer_edge, predict_libdeflate_lazy, predict_miniz_token,
-        predict_windows_lazy, predict_zlib_lazy,
+        DeferredCutoff, LazyMinimum, MatchPrediction, cross_4k_boundary, literal_at_buffer_edge,
+        predict_libdeflate_lazy, predict_miniz_token, predict_windows_lazy, predict_zlib_lazy,
     },
     deflate::{
         deflate_constants::{MAX_MATCH, MIN_MATCH},
@@ -51,7 +50,11 @@ struct BlockContext {
     start_position: u32,
     huffman: bool,
     limit: Option<u32>,
-    reset_tag: Option<bool>,
+}
+
+pub(crate) struct HuffmanBlockFraming {
+    pub limit: Option<u32>,
+    pub reset_tag: Option<bool>,
 }
 
 /// Codec-free state shared by candidate scoring, encoding, and reconstruction.
@@ -178,18 +181,13 @@ impl PredictionState {
         self.lazy_minimum.is_some()
     }
 
-    pub fn enable_parameter_normalization(
-        &mut self,
-        short_match_cutoff: u32,
-        lazy_cutoff_equivalence: bool,
-        compressed_size: usize,
-        complete: bool,
-    ) {
+    pub fn enable_parameter_normalization(&mut self, compressed_size: usize, complete: bool) {
         // Partial chunks cannot certify the history required by subsequent chunks.
         if complete && compressed_size < 1024 {
             self.state.enable_window_normalization();
-            self.short_match_distance_bounds = Some((0, short_match_cutoff.max(32768)));
-            self.lazy_cutoff_equivalence = lazy_cutoff_equivalence;
+            self.short_match_distance_bounds =
+                Some((0, self.settings.behavior.short_match_cutoff().max(32768)));
+            self.lazy_cutoff_equivalence = self.settings.behavior.supports_deferred_cutoff();
             if !matches!(
                 self.settings.behavior,
                 BehaviorSettings::Chain {
@@ -311,27 +309,11 @@ impl PredictionState {
         &mut self,
         tokens: &[DeflateToken],
         input: &mut PreflateInput,
-    ) -> Result<()> {
+    ) -> Result<HuffmanBlockFraming> {
         self.require_idle_block()?;
         let limit = self.select_flush_limit(tokens, input);
         let reset = self.block_prediction.flush && self.select_flush_reset(tokens, input);
-        self.begin_decoded_huffman_block(input, limit, reset)
-    }
-
-    pub fn block_lookahead_limit(&self) -> Result<Option<u32>> {
-        self.active_huffman_context().map(|context| context.limit)
-    }
-
-    pub fn block_reset_tag(&self) -> Result<Option<bool>> {
-        self.active_huffman_context()
-            .map(|context| context.reset_tag)
-    }
-
-    fn active_huffman_context(&self) -> Result<&BlockContext> {
-        match &self.block_context {
-            Some(context) if context.huffman => Ok(context),
-            _ => err_exit_code(ExitCode::PredictionFailure, "No active Huffman block"),
-        }
+        self.begin_huffman_block(input, limit, reset)
     }
 
     fn require_idle_block(&self) -> Result<()> {
@@ -348,7 +330,6 @@ impl PredictionState {
             start_position: input.pos(),
             huffman: false,
             limit: None,
-            reset_tag: None,
         };
         self.start_block(input);
         self.block_context = Some(context);
@@ -360,14 +341,24 @@ impl PredictionState {
         input: &mut PreflateInput,
         limit: Option<u32>,
         reset: bool,
-    ) -> Result<()> {
+    ) -> Result<HuffmanBlockFraming> {
         self.require_idle_block()?;
+        self.begin_huffman_block(input, limit, reset)
+    }
+
+    fn begin_huffman_block(
+        &mut self,
+        input: &mut PreflateInput,
+        limit: Option<u32>,
+        reset: bool,
+    ) -> Result<HuffmanBlockFraming> {
+        let reset_tag =
+            (self.block_prediction.flush && self.previous_empty_stored).then_some(reset);
         let context = BlockContext {
             started_empty: input.remaining() == 0,
             start_position: input.pos(),
             huffman: true,
             limit,
-            reset_tag: (self.block_prediction.flush && self.previous_empty_stored).then_some(reset),
         };
         if let Some(length) = limit {
             input.limit(length)?;
@@ -377,7 +368,7 @@ impl PredictionState {
         }
         self.start_block(input);
         self.block_context = Some(context);
-        Ok(())
+        Ok(HuffmanBlockFraming { limit, reset_tag })
     }
 
     fn start_block(&mut self, input: &PreflateInput) {
@@ -387,8 +378,10 @@ impl PredictionState {
         self.pending_reference = None;
         self.pending_literals = 0;
         self.block_token_count = 0;
-        self.min_match_length =
-            block_minimum_match_length(&self.settings.behavior, input.cur_chars(0));
+        self.min_match_length = self
+            .settings
+            .behavior
+            .block_minimum_match_length(input.cur_chars(0));
         self.lazy_minimum = matches!(
             self.settings.behavior,
             BehaviorSettings::Chain {
@@ -440,8 +433,10 @@ impl PredictionState {
             self.short_match_distance_bounds,
             self.deferred_cutoff,
         );
-        self.min_match_length =
-            block_minimum_match_length(&self.settings.behavior, input.cur_chars(0));
+        self.min_match_length = self
+            .settings
+            .behavior
+            .block_minimum_match_length(input.cur_chars(0));
         let mut probe = input.clone();
         let mut reset = false;
         for (offset, token) in tokens.iter().take(32).enumerate() {
@@ -744,6 +739,43 @@ mod tests {
     };
 
     #[test]
+    fn normalization_setup_uses_its_own_behavior_and_preserves_size_limits() {
+        for (parser, lazy_equivalence, token_bounds) in [
+            (MatchingType::Greedy, false, true),
+            (
+                MatchingType::Lazy {
+                    max_lazy: 16,
+                    filtered_matching: false,
+                    behavior: LazyBehavior::Zlib { good_length: 8 },
+                },
+                true,
+                true,
+            ),
+            (MatchingType::WindowsLazy { max_lazy: 128 }, false, false),
+        ] {
+            let mut parameters = zlib_level_1_params();
+            parameters.set_matching_type(parser);
+            for (size, complete, enabled) in [
+                (1023, false, false),
+                (1023, true, true),
+                (1024, true, false),
+            ] {
+                let mut state = PredictionState::from_reconstruction_parameters(parameters);
+                state.enable_parameter_normalization(size, complete);
+                assert_eq!(
+                    state.short_match_distance_bounds(),
+                    enabled.then_some((0, 32768))
+                );
+                assert_eq!(state.lazy_cutoff_equivalence, enabled && lazy_equivalence);
+                assert_eq!(
+                    state.token_limit_bounds(),
+                    (enabled && token_bounds).then_some((0, u32::from(u16::MAX))),
+                );
+            }
+        }
+    }
+
+    #[test]
     fn token_count_observation_uses_its_own_prediction() {
         let parameters = {
             let mut canonical_configuration = zlib_level_1_params();
@@ -771,31 +803,84 @@ mod tests {
     }
 
     #[test]
+    fn known_and_decoded_huffman_setup_return_identical_framing() {
+        let plain = PlainText::new_with_data(vec![b'a'; 8]);
+        for (seed, flush, previous_empty, expected_reset) in [
+            (0, false, false, None),
+            (0, true, true, Some(false)),
+            (4, true, true, Some(true)),
+        ] {
+            let mut known = PredictionState::from_reconstruction_parameters(zlib_level_1_params());
+            let mut decoded =
+                PredictionState::from_reconstruction_parameters(zlib_level_1_params());
+            let mut known_input = PreflateInput::new(&plain);
+            let mut decoded_input = PreflateInput::new(&plain);
+            for prediction in [&mut known, &mut decoded] {
+                prediction.block_prediction.flush = flush;
+                prediction.previous_empty_stored = previous_empty;
+            }
+            for _ in 0..seed {
+                known.advance_stored_byte(&mut known_input);
+                decoded.advance_stored_byte(&mut decoded_input);
+            }
+            let tokens = vec![DeflateToken::Literal(b'a'); (8 - seed) as usize];
+            let framing = known
+                .begin_known_huffman_block(&tokens, &mut known_input)
+                .unwrap();
+            assert_eq!(framing.limit, None);
+            assert_eq!(framing.reset_tag, expected_reset);
+            let applied = decoded
+                .begin_decoded_huffman_block(
+                    &mut decoded_input,
+                    framing.limit,
+                    framing.reset_tag.unwrap_or(false),
+                )
+                .unwrap();
+            assert_eq!(applied.limit, framing.limit);
+            assert_eq!(applied.reset_tag, framing.reset_tag);
+            let frequency = TokenFrequency::default();
+            for actual in tokens {
+                let expected = known.predict(&known_input, &frequency);
+                let predicted = decoded.predict(&decoded_input, &frequency);
+                assert_eq!(predicted, expected);
+                known.accept_token(&actual, expected, &mut known_input);
+                decoded.accept_token(&actual, predicted, &mut decoded_input);
+            }
+            known.finish_block(&mut known_input).unwrap();
+            decoded.finish_block(&mut decoded_input).unwrap();
+            assert!(known.block_context.is_none());
+            assert!(decoded.block_context.is_none());
+            assert_eq!(known_input.pos(), decoded_input.pos());
+            assert_eq!(known.previous_empty_stored, decoded.previous_empty_stored);
+        }
+    }
+
+    #[test]
     fn block_context_preserves_framing_decisions_until_finish() {
         let plain = PlainText::new_with_data(vec![b'a'; 8]);
         let mut input = PreflateInput::new(&plain);
         let mut prediction =
             PredictionState::from_reconstruction_parameters((&zlib_level_1_params()).into());
-        assert!(prediction.block_reset_tag().is_err());
+        assert!(prediction.block_context.is_none());
         prediction.block_prediction.flush = true;
         prediction.previous_empty_stored = true;
-        prediction
+        let framing = prediction
             .begin_decoded_huffman_block(&mut input, Some(3), true)
             .unwrap();
-        assert_eq!(prediction.block_lookahead_limit().unwrap(), Some(3));
-        assert_eq!(prediction.block_reset_tag().unwrap(), Some(true));
+        assert_eq!(framing.limit, Some(3));
+        assert_eq!(framing.reset_tag, Some(true));
         for _ in 0..3 {
             let actual = DeflateToken::Literal(b'a');
             let predicted = prediction.predict(&input, &TokenFrequency::default());
             prediction.accept_token(&actual, predicted, &mut input);
         }
         prediction.finish_block(&mut input).unwrap();
-        assert!(prediction.block_reset_tag().is_err());
+        assert!(prediction.block_context.is_none());
         assert!(!prediction.follows_empty_stored());
-        prediction
+        let framing = prediction
             .begin_decoded_huffman_block(&mut input, None, false)
             .unwrap();
-        assert_eq!(prediction.block_reset_tag().unwrap(), None);
+        assert_eq!(framing.reset_tag, None);
         prediction.finish_block(&mut input).unwrap();
     }
 

@@ -4,30 +4,11 @@
 use crate::{hash_algorithm::HashAlgorithm, reconstruction_parameters::*};
 
 impl ReconstructionParameters {
-    pub(crate) fn chain_common(&self) -> Option<&ChainMatchSettings> {
-        match &self.behavior {
-            BehaviorSettings::Chain { common, .. } => Some(common),
-            _ => None,
-        }
-    }
-
-    pub(crate) fn chain_common_mut(&mut self) -> Option<&mut ChainMatchSettings> {
-        match &mut self.behavior {
-            BehaviorSettings::Chain { common, .. } => Some(common),
-            _ => None,
-        }
-    }
-
     pub(crate) fn chain_parser(&self) -> Option<ChainParser> {
         match self.behavior {
             BehaviorSettings::Chain { parser, .. } => Some(parser),
             _ => None,
         }
-    }
-
-    pub(crate) fn has_chain_parser(&self, proposed: ChainParser) -> bool {
-        self.chain_parser()
-            .is_some_and(|parser| parser.with_cutoff(0) == proposed.with_cutoff(0))
     }
 
     pub(crate) fn hash_algorithm(self) -> HashAlgorithm {
@@ -41,23 +22,8 @@ impl ReconstructionParameters {
 
 impl ChainParser {
     pub(crate) fn with_cutoff(mut self, cutoff: u32) -> Self {
-        match &mut self {
-            Self::Greedy { short_match_cutoff }
-            | Self::LibdeflateGreedy { short_match_cutoff }
-            | Self::LibdeflateLazy {
-                short_match_cutoff, ..
-            }
-            | Self::WindowsLazy {
-                short_match_cutoff, ..
-            }
-            | Self::Lazy {
-                minimum: LazyMinimum::Three { short_match_cutoff },
-                ..
-            } => *short_match_cutoff = cutoff,
-            Self::Lazy {
-                minimum: LazyMinimum::FilteredSix,
-                ..
-            } => {}
+        if let Some(current) = self.short_match_cutoff_mut() {
+            *current = cutoff;
         }
         self
     }
@@ -82,27 +48,23 @@ impl BehaviorSettings {
 
     pub(crate) fn permits_position_zero(self) -> bool {
         match self {
-            Self::Chain { common, .. } => match common.distance {
-                ChainDistancePolicy::Window { history, .. } => history.matches_to_start,
-                _ => false,
-            },
-            Self::MiniZ { common, .. } => match common.distance {
-                MiniZDistancePolicy::Enabled(history) => history.matches_to_start,
-                _ => false,
-            },
+            Self::Chain {
+                common:
+                    ChainMatchSettings {
+                        distance: ChainDistancePolicy::Window { history, .. },
+                        ..
+                    },
+                ..
+            }
+            | Self::MiniZ {
+                common:
+                    MiniZMatchSettings {
+                        distance: MiniZDistancePolicy::Enabled(history),
+                        ..
+                    },
+                ..
+            } => history.matches_to_start,
             _ => false,
-        }
-    }
-
-    pub(crate) fn uses_general_distances(self) -> bool {
-        match self {
-            Self::NoDictionary { .. } => false,
-            Self::Chain { common, .. } => {
-                matches!(common.distance, ChainDistancePolicy::Window { .. })
-            }
-            Self::MiniZ { common, .. } => {
-                matches!(common.distance, MiniZDistancePolicy::Enabled(_))
-            }
         }
     }
 
@@ -138,14 +100,6 @@ impl ReconstructionParameters {
         self.behavior
             .dictionary_and_budget()
             .map(|(_, budget)| budget)
-    }
-
-    pub(crate) fn budget_mut(&mut self) -> Option<&mut SearchBudget> {
-        match &mut self.behavior {
-            BehaviorSettings::NoDictionary { .. } => None,
-            BehaviorSettings::Chain { common, .. } => Some(&mut common.search.budget),
-            BehaviorSettings::MiniZ { common, .. } => Some(&mut common.search.budget),
-        }
     }
 
     pub(crate) fn to_json(self) -> crate::Result<String> {

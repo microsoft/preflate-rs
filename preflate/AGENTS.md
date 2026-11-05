@@ -124,10 +124,12 @@ src/
 - Family recognition, evidence interpretation, and candidate proposals belong in
   `estimator/models/`. Deterministic matching, lookahead, and insertion rules
   belong in the peer `compressors/` module and must not import estimator internals.
-  The profile coordinator owns candidate ordering, refinement slots, and
+  The profile coordinator owns candidate ordering, cross-family fallback precedence, and
   inferred/fingerprinted/prefix-validated provenance. Hash identity alone is not
   compressor identity. Keep candidate ordering and existing observation/refinement
-  bounds stable when relocating policy.
+  bounds stable when relocating policy. Family append helpers emit complete labelled
+  proposals into the ordered refinement list; omit unavailable candidates without
+  adding trials for the remaining fallbacks. Keep the existing eleven-candidate bound.
 - Runtime callers import helpers directly from `compressors`, never through
   `estimator/mod.rs`. Use aliases to disambiguate family-specific helpers.
   Profiles, candidate evidence, and selection/scoring policy stay private to estimation.
@@ -143,6 +145,9 @@ src/
   deriving one engine's behavior through another engine's configuration.
   Initial test fixtures supply observations and evidence directly; do not
   reverse-project runtime parameters into supposed observations.
+  Refinements narrow behavior at their boundary and carry the captured common/parser
+  settings downward, rather than repeatedly projecting and unwrapping the whole
+  configuration. Attach coupled chain policies after assembling the final candidate.
 - Block-size estimation retains all-block maxima as lower bounds and separately
   tracks nonterminal Huffman boundaries without intervening stored/flush blocks.
   Empty fixed blocks must not hide a subsequent flush marker; trailing data in
@@ -256,7 +261,8 @@ src/
   not mutable hash/lookahead access. Tests inspecting internals belong with the state.
   Pair block setup with finishing through one internal active context. Known-token
   Huffman setup infers limit/reset decisions; decoded setup applies them. Retain
-  framing decisions and pre-setup reset-tag presence in that context.
+  the internal context needed for finishing, and return framing decisions
+  (including pre-setup reset-tag presence) directly from successful setup.
   Keep limit cleanup and stored/
   empty-block history in common finishing, not in the codec or estimator callers.
   Reject nested setup and unmatched finishing; clear the context only after

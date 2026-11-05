@@ -129,13 +129,8 @@ impl TokenPredictor {
         compressed_size: usize,
         complete: bool,
     ) {
-        let parameters = self.prediction.reconstruction_parameters();
-        self.prediction.enable_parameter_normalization(
-            parameters.behavior.short_match_cutoff(),
-            parameters.behavior.supports_deferred_cutoff(),
-            compressed_size,
-            complete,
-        );
+        self.prediction
+            .enable_parameter_normalization(compressed_size, complete);
     }
 
     pub(crate) fn reconstruction_parameters(&self) -> ReconstructionParameters {
@@ -200,7 +195,7 @@ impl TokenPredictor {
         }
         codec.encode_verify_state("blocktypestart", 0);
 
-        let (tokens, huffman_encoding) = match &block.block_type {
+        match &block.block_type {
             DeflateTokenBlockType::Stored { uncompressed } => {
                 self.prediction.begin_stored_block(input)?;
                 self.encode_block_type(codec, BT_STORED, input);
@@ -214,54 +209,64 @@ impl TokenPredictor {
                 for _i in 0..uncompressed.len() {
                     self.prediction.advance_stored_byte(input);
                 }
-
-                self.prediction.finish_block(input)?;
-                codec.encode_correction_bool(
-                    CodecCorrection::Last,
-                    block.last,
-                    self.predict_end_of_chunk(input),
-                );
-
-                codec.encode_verify_state("done", if VERIFY { self.checksum().hash() } else { 0 });
-                return Ok(());
             }
 
             DeflateTokenBlockType::Huffman {
-                tokens: t,
+                tokens,
                 huffman_type,
                 ..
             } => {
-                let encoding = match huffman_type {
-                    DeflateHuffmanType::Static => {
-                        self.encode_block_type(codec, BT_STATICHUFF, input);
-                        None
-                    }
-                    DeflateHuffmanType::Dynamic {
-                        huffman_encoding: h,
-                        ..
-                    } => {
-                        self.encode_block_type(codec, BT_DYNAMICHUFF, input);
-                        Some(h)
-                    }
-                };
-                (t, encoding)
+                self.predict_huffman_block(
+                    tokens,
+                    huffman_type,
+                    codec,
+                    input,
+                    final_block_in_chunk,
+                )?;
+            }
+        }
+
+        self.prediction.finish_block(input)?;
+        codec.encode_correction_bool(
+            CodecCorrection::Last,
+            block.last,
+            self.predict_end_of_chunk(input),
+        );
+        codec.encode_verify_state("done", if VERIFY { self.checksum().hash() } else { 0 });
+        Ok(())
+    }
+
+    fn predict_huffman_block(
+        &mut self,
+        tokens: &[DeflateToken],
+        huffman_type: &DeflateHuffmanType,
+        codec: &mut impl PredictionEncoder,
+        input: &mut PreflateInput,
+        final_block_in_chunk: bool,
+    ) -> Result<()> {
+        let huffman_encoding = match huffman_type {
+            DeflateHuffmanType::Static => {
+                self.encode_block_type(codec, BT_STATICHUFF, input);
+                None
+            }
+            DeflateHuffmanType::Dynamic { huffman_encoding } => {
+                self.encode_block_type(codec, BT_DYNAMICHUFF, input);
+                Some(huffman_encoding)
             }
         };
 
-        self.prediction.begin_known_huffman_block(tokens, input)?;
+        let framing = self.prediction.begin_known_huffman_block(tokens, input)?;
         #[cfg(any(test, feature = "diagnostics"))]
         if let Some(trace) = &mut self.trace {
-            trace.block_limit = self.prediction.block_lookahead_limit()?;
-            trace.dictionary_reset = self.prediction.block_reset_tag()?;
+            trace.block_limit = framing.limit;
+            trace.dictionary_reset = framing.reset_tag;
         }
         if self.prediction.flush_enabled() {
             codec.encode_correction(
                 CodecCorrection::UncompressBlockLenCorrection,
-                self.prediction
-                    .block_lookahead_limit()?
-                    .map_or(0, |length| length + 1),
+                framing.limit.map_or(0, |length| length + 1),
             );
-            if let Some(reset) = self.prediction.block_reset_tag()? {
+            if let Some(reset) = framing.reset_tag {
                 codec.encode_correction(
                     CodecCorrection::UncompressBlockLenCorrection,
                     u32::from(reset),
@@ -383,28 +388,25 @@ impl TokenPredictor {
                         predicted_ref.len(),
                     );
 
-                    if predicted_ref.len() != target_ref.len() {
-                        let rematch = self
-                            .prediction
+                    let length_changed = predicted_ref.len() != target_ref.len();
+                    let hops = if length_changed || target_ref.dist() != predicted_ref.dist() {
+                        self.prediction
                             .calculate_hops(target_ref, input)
                             .with_context(|| {
                                 format!("calculate_hops p={:?}, t={:?}", predicted_ref, target_ref)
-                            })?;
-                        codec.encode_correction(
-                            CodecCorrection::DistAfterLenCorrection,
-                            rematch - 1,
-                        );
-                    } else if target_ref.dist() != predicted_ref.dist() {
-                        let rematch = self
-                            .prediction
-                            .calculate_hops(target_ref, input)
-                            .with_context(|| {
-                                format!("calculate_hops p={:?}, t={:?}", predicted_ref, target_ref)
-                            })?;
-                        codec.encode_correction(CodecCorrection::DistOnlyCorrection, rematch);
+                            })?
+                            - u32::from(length_changed)
                     } else {
-                        codec.encode_correction(CodecCorrection::DistOnlyCorrection, 0);
-                    }
+                        0
+                    };
+                    codec.encode_correction(
+                        if length_changed {
+                            CodecCorrection::DistAfterLenCorrection
+                        } else {
+                            CodecCorrection::DistOnlyCorrection
+                        },
+                        hops,
+                    );
                 }
             }
 
@@ -416,15 +418,6 @@ impl TokenPredictor {
         if let Some(huffman_encoding) = huffman_encoding {
             predict_tree_for_block(huffman_encoding, &freq, codec, HufftreeBitCalc::Zlib)?;
         }
-
-        self.prediction.finish_block(input)?;
-        codec.encode_correction_bool(
-            CodecCorrection::Last,
-            block.last,
-            self.predict_end_of_chunk(input),
-        );
-
-        codec.encode_verify_state("done", if VERIFY { self.checksum().hash() } else { 0 });
 
         Ok(())
     }
@@ -442,7 +435,7 @@ impl TokenPredictor {
             input.remaining(),
         )?;
 
-        match bt {
+        let block_type = match bt {
             BT_STORED => {
                 self.prediction.begin_stored_block(input)?;
                 let uncompressed_len = codec.decode_correction_diff(
@@ -461,27 +454,30 @@ impl TokenPredictor {
                     self.prediction.advance_stored_byte(input);
                 }
 
-                self.prediction.finish_block(input)?;
-                let last = codec.decode_correction_bool(
-                    CodecCorrection::Last,
-                    self.predict_end_of_chunk(input),
-                );
-
-                codec.decode_verify_state("done", if VERIFY { self.checksum().hash() } else { 0 });
-                return Ok(DeflateTokenBlock {
-                    block_type: DeflateTokenBlockType::Stored { uncompressed },
-                    last,
-                });
+                DeflateTokenBlockType::Stored { uncompressed }
             }
 
             BT_STATICHUFF | BT_DYNAMICHUFF => {
-                // continue
+                self.recreate_huffman_block(codec, input, bt == BT_STATICHUFF)?
             }
             _ => {
                 return err_exit_code(ExitCode::InvalidDeflate, "Invalid block type");
             }
-        }
+        };
 
+        self.prediction.finish_block(input)?;
+        let last =
+            codec.decode_correction_bool(CodecCorrection::Last, self.predict_end_of_chunk(input));
+        codec.decode_verify_state("done", if VERIFY { self.checksum().hash() } else { 0 });
+        Ok(DeflateTokenBlock { block_type, last })
+    }
+
+    fn recreate_huffman_block(
+        &mut self,
+        codec: &mut impl PredictionDecoder,
+        input: &mut PreflateInput,
+        static_tree: bool,
+    ) -> Result<DeflateTokenBlockType> {
         let (limit, reset) = if self.prediction.flush_enabled() {
             let length = codec.decode_correction(CodecCorrection::UncompressBlockLenCorrection);
             let reset = if self.prediction.follows_empty_stored() {
@@ -533,87 +529,15 @@ impl TokenPredictor {
                 },
             );
 
-            let mut predicted_ref: DeflateTokenReference;
             let predicted_token = self.prediction.predict(input, &freq);
-            match predicted_token {
-                DeflateToken::Literal(l) => {
-                    let not_ok =
-                        codec.decode_misprediction(CodecCorrection::LiteralPredictionWrong);
-                    if !not_ok {
-                        self.prediction.accept_token(
-                            &DeflateToken::Literal(l),
-                            predicted_token,
-                            input,
-                        );
-                        freq.commit_token(&DeflateToken::Literal(l));
-
-                        tokens.push(DeflateToken::Literal(l));
-                        continue;
-                    }
-
-                    predicted_ref =
-                        self.prediction
-                            .repredict_reference(input)
-                            .with_context(|| {
-                                format!("repredict_reference token_count={:?}", tokens.len())
-                            })?;
-                }
-                DeflateToken::Reference(r) => {
-                    let not_ok =
-                        codec.decode_misprediction(CodecCorrection::ReferencePredictionWrong);
-                    if not_ok {
-                        let c = input.cur_char(0);
-                        self.prediction.accept_token(
-                            &DeflateToken::Literal(c),
-                            predicted_token,
-                            input,
-                        );
-                        freq.commit_token(&DeflateToken::Literal(c));
-
-                        tokens.push(DeflateToken::Literal(c));
-                        continue;
-                    }
-
-                    predicted_ref = r;
-                }
-            }
-
-            let new_len =
-                codec.decode_correction_diff(CodecCorrection::LenCorrection, predicted_ref.len());
-            if !(MIN_MATCH..=258).contains(&new_len) || new_len > input.remaining() {
-                return err_exit_code(ExitCode::InvalidDeflate, "Invalid reference length");
-            }
-
-            if new_len != predicted_ref.len() {
-                let hops = codec.decode_correction(CodecCorrection::DistAfterLenCorrection) + 1;
-
-                predicted_ref = DeflateTokenReference::new(
-                    new_len,
-                    self.prediction
-                        .hop_match(new_len, hops, input)
-                        .with_context(|| format!("hop_match l={} {:?}", new_len, predicted_ref))?,
-                );
-            } else {
-                let hops = codec.decode_correction(CodecCorrection::DistOnlyCorrection);
-                if hops != 0 {
-                    let new_dist = self
-                        .prediction
-                        .hop_match(predicted_ref.len(), hops, input)
-                        .with_context(|| format!("recalculate_distance token {}", tokens.len()))?;
-                    predicted_ref = DeflateTokenReference::new(new_len, new_dist);
-                }
-            }
-
-            self.prediction.accept_token(
-                &DeflateToken::Reference(predicted_ref),
-                predicted_token,
-                input,
-            );
-            freq.commit_token(&DeflateToken::Reference(predicted_ref));
-            tokens.push(DeflateToken::Reference(predicted_ref));
+            let actual_token = self.recreate_token(codec, input, predicted_token, tokens.len())?;
+            self.prediction
+                .accept_token(&actual_token, predicted_token, input);
+            freq.commit_token(&actual_token);
+            tokens.push(actual_token);
         }
 
-        let huffman_type = if bt == BT_STATICHUFF {
+        let huffman_type = if static_tree {
             DeflateHuffmanType::Static
         } else {
             DeflateHuffmanType::Dynamic {
@@ -621,21 +545,59 @@ impl TokenPredictor {
             }
         };
 
-        self.prediction.finish_block(input)?;
-        let last =
-            codec.decode_correction_bool(CodecCorrection::Last, self.predict_end_of_chunk(input));
+        Ok(DeflateTokenBlockType::Huffman {
+            tokens,
+            huffman_type,
+        })
+    }
 
-        let b = DeflateTokenBlock {
-            last,
-            block_type: DeflateTokenBlockType::Huffman {
-                tokens,
-                huffman_type,
-            },
+    fn recreate_token(
+        &mut self,
+        codec: &mut impl PredictionDecoder,
+        input: &mut PreflateInput,
+        predicted_token: DeflateToken,
+        token_index: usize,
+    ) -> Result<DeflateToken> {
+        let mut predicted_ref = match predicted_token {
+            DeflateToken::Literal(literal) => {
+                if !codec.decode_misprediction(CodecCorrection::LiteralPredictionWrong) {
+                    return Ok(DeflateToken::Literal(literal));
+                }
+                self.prediction
+                    .repredict_reference(input)
+                    .with_context(|| format!("repredict_reference token_count={:?}", token_index))?
+            }
+            DeflateToken::Reference(reference) => {
+                if codec.decode_misprediction(CodecCorrection::ReferencePredictionWrong) {
+                    return Ok(DeflateToken::Literal(input.cur_char(0)));
+                }
+                reference
+            }
         };
-
-        codec.decode_verify_state("done", if VERIFY { self.checksum().hash() } else { 0 });
-
-        Ok(b)
+        let new_len =
+            codec.decode_correction_diff(CodecCorrection::LenCorrection, predicted_ref.len());
+        if !(MIN_MATCH..=258).contains(&new_len) || new_len > input.remaining() {
+            return err_exit_code(ExitCode::InvalidDeflate, "Invalid reference length");
+        }
+        if new_len != predicted_ref.len() {
+            let hops = codec.decode_correction(CodecCorrection::DistAfterLenCorrection) + 1;
+            predicted_ref = DeflateTokenReference::new(
+                new_len,
+                self.prediction
+                    .hop_match(new_len, hops, input)
+                    .with_context(|| format!("hop_match l={} {:?}", new_len, predicted_ref))?,
+            );
+        } else {
+            let hops = codec.decode_correction(CodecCorrection::DistOnlyCorrection);
+            if hops != 0 {
+                let new_dist = self
+                    .prediction
+                    .hop_match(predicted_ref.len(), hops, input)
+                    .with_context(|| format!("recalculate_distance token {}", token_index))?;
+                predicted_ref = DeflateTokenReference::new(new_len, new_dist);
+            }
+        }
+        Ok(DeflateToken::Reference(predicted_ref))
     }
 }
 
@@ -645,8 +607,87 @@ pub(crate) mod tests {
     use crate::{
         cabac::vp8::{VP8Reader, VP8Writer},
         cabac_codec::{PredictionDecoderCabac, PredictionEncoderCabac},
+        deflate::deflate_reader::tests::parse_deflate_whole,
         statistical_codec::{CodecAction, VerifyPredictionDecoder, VerifyPredictionEncoder},
+        utils::read_file,
     };
+
+    #[test]
+    fn correction_action_sequences_stay_stable() {
+        let mixed = [
+            huffman(repeated_segment(), false),
+            empty_stored(),
+            DeflateTokenBlock {
+                block_type: DeflateTokenBlockType::Stored {
+                    uncompressed: b"stored payload".to_vec(),
+                },
+                last: false,
+            },
+            huffman(repeated_segment(), true),
+        ];
+        let mixed_plain = plaintext(&mixed);
+        let (contents, plain) =
+            parse_deflate_whole(&read_file("compressed_zlib_level1.deflate")).unwrap();
+        let mut lazy = params();
+        lazy.set_matching_type(MatchingType::Lazy {
+            max_lazy: 16,
+            filtered_matching: false,
+            behavior: LazyBehavior::Zlib { good_length: 8 },
+        });
+        let mut fingerprints = Vec::new();
+        for (blocks, plain) in [(&mixed[..], &mixed_plain), (&contents.blocks[..], &plain)] {
+            for parameters in [zlib_level_1_params(), params(), lazy] {
+                let mut encoder = TokenPredictor::from_parameters(&parameters);
+                encoder.begin_chunk(blocks);
+                let mut input = PreflateInput::new(plain);
+                let mut codec = VerifyPredictionEncoder::default();
+                for (index, block) in blocks.iter().enumerate() {
+                    encoder
+                        .predict_block(block, &mut codec, &mut input, index + 1 == blocks.len())
+                        .unwrap();
+                }
+                assert_eq!(input.remaining(), 0);
+                let actions = codec.actions();
+                let mut hash = DebugHash::default();
+                for action in &actions {
+                    match *action {
+                        CodecAction::Correction(kind, value) => {
+                            hash.update(kind as u32);
+                            hash.update(value);
+                        }
+                        CodecAction::VerifyState(message, checksum) => {
+                            hash.update(u32::MAX);
+                            hash.update_slice(message.as_bytes());
+                            hash.update(checksum as i64);
+                        }
+                    }
+                }
+                fingerprints.push((actions.len(), hash.hash()));
+                let mut decoder = TokenPredictor::from_parameters(&parameters);
+                decoder.begin_chunk(&[]);
+                let mut input = PreflateInput::new(plain);
+                let mut codec = VerifyPredictionDecoder::new(actions);
+                for block in blocks {
+                    assert_eq!(
+                        decoder.recreate_block(&mut codec, &mut input).unwrap(),
+                        *block
+                    );
+                }
+                assert_eq!(input.remaining(), 0);
+            }
+        }
+        assert_eq!(
+            fingerprints,
+            [
+                (60, 13110893448946189819),
+                (60, 13110893448946189819),
+                (60, 13110893448946189819),
+                (427943, 6927682031219319390),
+                (427943, 12399391804390563902),
+                (427943, 12124121112545641092),
+            ]
+        );
+    }
 
     fn huffman(tokens: Vec<DeflateToken>, last: bool) -> DeflateTokenBlock {
         DeflateTokenBlock {

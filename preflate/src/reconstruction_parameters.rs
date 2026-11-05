@@ -367,34 +367,7 @@ impl ReconstructionParameters {
         let (dictionary, cutoff) = match &mut self.behavior {
             BehaviorSettings::NoDictionary { .. } => return self,
             BehaviorSettings::Chain { common, parser } => {
-                let cutoff = match parser {
-                    ChainParser::Greedy {
-                        short_match_cutoff: cutoff,
-                    }
-                    | ChainParser::LibdeflateGreedy {
-                        short_match_cutoff: cutoff,
-                    }
-                    | ChainParser::LibdeflateLazy {
-                        short_match_cutoff: cutoff,
-                        ..
-                    }
-                    | ChainParser::WindowsLazy {
-                        short_match_cutoff: cutoff,
-                        ..
-                    }
-                    | ChainParser::Lazy {
-                        minimum:
-                            LazyMinimum::Three {
-                                short_match_cutoff: cutoff,
-                            },
-                        ..
-                    } => Some(cutoff),
-                    ChainParser::Lazy {
-                        minimum: LazyMinimum::FilteredSix,
-                        ..
-                    } => None,
-                };
-                (&mut common.dictionary, cutoff)
+                (&mut common.dictionary, parser.short_match_cutoff_mut())
             }
             BehaviorSettings::MiniZ {
                 common,
@@ -450,27 +423,37 @@ impl BehaviorSettings {
     pub(crate) fn short_match_cutoff(self) -> u32 {
         match self {
             Self::NoDictionary { strategy: _ } => 0,
-            Self::Chain { parser, .. } => match parser {
-                ChainParser::Greedy { short_match_cutoff }
-                | ChainParser::LibdeflateGreedy { short_match_cutoff }
-                | ChainParser::LibdeflateLazy {
-                    short_match_cutoff, ..
-                }
-                | ChainParser::WindowsLazy {
-                    short_match_cutoff, ..
-                }
-                | ChainParser::Lazy {
-                    minimum: LazyMinimum::Three { short_match_cutoff },
-                    ..
-                } => short_match_cutoff,
-                ChainParser::Lazy {
-                    minimum: LazyMinimum::FilteredSix,
-                    ..
-                } => 0,
-            },
+            Self::Chain { parser, .. } => parser.short_match_cutoff(),
             Self::MiniZ {
                 short_match_cutoff, ..
             } => short_match_cutoff,
+        }
+    }
+}
+
+impl ChainParser {
+    pub(crate) fn short_match_cutoff(mut self) -> u32 {
+        self.short_match_cutoff_mut().map_or(0, |cutoff| *cutoff)
+    }
+
+    pub(crate) fn short_match_cutoff_mut(&mut self) -> Option<&mut u32> {
+        match self {
+            Self::Greedy { short_match_cutoff }
+            | Self::LibdeflateGreedy { short_match_cutoff }
+            | Self::LibdeflateLazy {
+                short_match_cutoff, ..
+            }
+            | Self::WindowsLazy {
+                short_match_cutoff, ..
+            }
+            | Self::Lazy {
+                minimum: LazyMinimum::Three { short_match_cutoff },
+                ..
+            } => Some(short_match_cutoff),
+            Self::Lazy {
+                minimum: LazyMinimum::FilteredSix,
+                ..
+            } => None,
         }
     }
 }

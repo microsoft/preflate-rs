@@ -8,7 +8,6 @@
 //! Their acceptance uses the estimator's shared scoring policy, while the
 //! executable lazy matching and safe cutoff proofs live in `compressors::zlib`.
 
-use crate::reconstruction_parameters::{ChainParser, LazyLookaheadSettings, LazyMinimum};
 /*---------------------------------------------------------------------------------------------
  *  Copyright (c) Microsoft Corporation. All rights reserved.
  *  Licensed under the Apache License, Version 2.0. See LICENSE.txt in the project root for license information.
@@ -21,7 +20,6 @@ use crate::{
         compressor_profile::{CompressorProfile, EstimateProvenance, ParameterEstimate},
         depth_estimator::{DistancePolicy, HashTableDepthEstimator},
         initial_estimate::InitialEstimate,
-        parser_estimator::InsertionConstraint,
         prediction_scoring::{score_predictions, score_refinement},
         preflate_parameter_estimator::estimate_preflate_window_bits,
         preflate_stream_info::PreflateStreamInfo,
@@ -29,7 +27,11 @@ use crate::{
     hash_algorithm::HashAlgorithm,
     parameters::{DictionaryAddPolicy, LazyBehavior, PreflateParserConfig},
     preflate_input::{PlainText, PreflateInput},
-    reconstruction_parameters::ReconstructionParameters,
+    reconstruction_parameters::{
+        BehaviorSettings, ChainDistancePolicy, ChainMatchSettings, ChainParser, DictionaryIndex,
+        HashFunction, LazyLookaheadSettings, LazyMinimum, MiniZDistancePolicy,
+        ReconstructionParameters, WindowBounds,
+    },
 };
 
 fn distance_limits(window: u32, history: u32) -> (u32, u32) {
@@ -42,17 +44,18 @@ pub fn table_hash_fast(
     info: &PreflateStreamInfo,
     candidates: &[CandidateEvidence],
 ) -> Option<ReconstructionParameters> {
-    if !table_hash_window_compatible(&parameters, info)
-        || !matches!(parameters.chain_parser(), Some(ChainParser::Greedy { .. }))
-        || info.max_dist_3_matches <= SHORT_MATCH_CUTOFF
+    let BehaviorSettings::Chain {
+        mut common,
+        parser: ChainParser::Greedy { short_match_cutoff },
+    } = parameters.behavior
+    else {
+        return None;
+    };
+    if !table_hash_window_compatible(common, info) || info.max_dist_3_matches <= SHORT_MATCH_CUTOFF
     {
         return None;
     }
-    let index = match parameters
-        .dictionary()
-        .expect("dictionary candidate")
-        .insertion
-    {
+    let index = match common.dictionary.insertion {
         DictionaryAddPolicy::AddFirst(0..=4) | DictionaryAddPolicy::AddFirstAndLast(0..=3) => 0,
         DictionaryAddPolicy::AddFirst(5) => 1,
         DictionaryAddPolicy::AddFirst(6) => 2,
@@ -62,31 +65,16 @@ pub fn table_hash_fast(
     let hash_algorithm = canonical_token_capacity(&parameters, info)
         .map(|capacity| memory_hash(capacity.ilog2() - 6))
         .unwrap_or(DEFAULT_HASH);
-    supported_table_hash(hash_algorithm, candidates).then_some({
-        let mut canonical_configuration = parameters;
-        canonical_configuration.replace_chain_parser(
-            settings
-                .parser
-                .with_cutoff(canonical_configuration.behavior.short_match_cutoff()),
-        );
-        canonical_configuration.set_estimated_hash(hash_algorithm);
-        canonical_configuration.behavior.set_full_window(false);
-        canonical_configuration
-            .dictionary_mut()
-            .expect("dictionary candidate")
-            .insertion = settings.dictionary_add_policy;
-        canonical_configuration
-            .chain_common_mut()
-            .expect("chain candidate")
-            .search
-            .nice_length = settings.nice_length;
-        canonical_configuration
-            .budget_mut()
-            .expect("dictionary candidate")
-            .max_chain = settings.max_chain;
-
-        canonical_configuration
-    })
+    if !supported_table_hash(hash_algorithm, candidates) {
+        return None;
+    }
+    common.dictionary.index =
+        DictionaryIndex::from_algorithm(hash_algorithm).expect("dictionary hash");
+    common.set_full_window(false);
+    common.dictionary.insertion = settings.dictionary_add_policy;
+    common.search.nice_length = settings.nice_length;
+    common.search.budget.max_chain = settings.max_chain;
+    Some(parameters.with_estimated_chain(common, settings.parser.with_cutoff(short_match_cutoff)))
 }
 
 pub fn table_hash_slow(
@@ -94,23 +82,20 @@ pub fn table_hash_slow(
     info: &PreflateStreamInfo,
     candidates: &[CandidateEvidence],
 ) -> Option<ReconstructionParameters> {
-    if !table_hash_window_compatible(&parameters, info)
+    let BehaviorSettings::Chain { mut common, parser } = parameters.behavior else {
+        return None;
+    };
+    if !table_hash_window_compatible(common, info)
         || info.max_dist_3_matches > SHORT_MATCH_CUTOFF
-        || !(parameters
-            .dictionary()
-            .expect("dictionary candidate")
-            .insertion
-            == DictionaryAddPolicy::AddAll
-            || matches!(parameters.dictionary().expect("dictionary candidate").insertion, DictionaryAddPolicy::AddFirst(limit) if limit > 6))
+        || !(common.dictionary.insertion == DictionaryAddPolicy::AddAll
+            || matches!(common.dictionary.insertion, DictionaryAddPolicy::AddFirst(limit) if limit > 6))
         || !matches!(
-            parameters.chain_parser(),
-            Some(
-                ChainParser::Greedy { .. }
-                    | ChainParser::Lazy {
-                        minimum: LazyMinimum::Three { .. },
-                        ..
-                    }
-            )
+            parser,
+            ChainParser::Greedy { .. }
+                | ChainParser::Lazy {
+                    minimum: LazyMinimum::Three { .. },
+                    ..
+                }
         )
     {
         return None;
@@ -118,34 +103,16 @@ pub fn table_hash_slow(
     let capacity = canonical_token_capacity(&parameters, info)?;
     let hash_algorithm = memory_hash(capacity.ilog2() - 6);
     let settings = &SLOW_PREFLATE_PARSER_SETTINGS[2];
-    supported_table_hash(hash_algorithm, candidates).then_some({
-        let mut canonical_configuration = parameters;
-        canonical_configuration.replace_chain_parser(
-            settings
-                .parser
-                .with_cutoff(canonical_configuration.behavior.short_match_cutoff()),
-        );
-        canonical_configuration.set_estimated_hash(hash_algorithm);
-        canonical_configuration.behavior.set_full_window(false);
-        canonical_configuration
-            .dictionary_mut()
-            .expect("dictionary candidate")
-            .insertion = settings.dictionary_add_policy;
-        canonical_configuration
-            .chain_common_mut()
-            .expect("chain candidate")
-            .search
-            .nice_length = settings.nice_length;
-        canonical_configuration
-            .budget_mut()
-            .expect("dictionary candidate")
-            .max_chain = settings.max_chain;
-        canonical_configuration
-            .behavior
-            .set_short_match_cutoff(SHORT_MATCH_CUTOFF);
-
-        canonical_configuration
-    })
+    if !supported_table_hash(hash_algorithm, candidates) {
+        return None;
+    }
+    common.dictionary.index =
+        DictionaryIndex::from_algorithm(hash_algorithm).expect("dictionary hash");
+    common.set_full_window(false);
+    common.dictionary.insertion = settings.dictionary_add_policy;
+    common.search.nice_length = settings.nice_length;
+    common.search.budget.max_chain = settings.max_chain;
+    Some(parameters.with_estimated_chain(common, settings.parser.with_cutoff(SHORT_MATCH_CUTOFF)))
 }
 
 fn supported_table_hash(hash: HashAlgorithm, candidates: &[CandidateEvidence]) -> bool {
@@ -158,24 +125,29 @@ pub fn ambiguous_fast_hash(
     parameters: ReconstructionParameters,
     info: &PreflateStreamInfo,
 ) -> Option<ReconstructionParameters> {
-    if !matches!(parameters.hash_algorithm(), HashAlgorithm::Zlib { .. })
-        || !matches!(parameters.chain_parser(), Some(ChainParser::Greedy { .. }))
-        || !parameters.behavior.uses_general_distances()
-    {
+    let BehaviorSettings::Chain {
+        mut common,
+        parser: parser @ ChainParser::Greedy { .. },
+    } = parameters.behavior
+    else {
+        return None;
+    };
+    let DictionaryIndex::Chain {
+        hash: HashFunction::Zlib { .. },
+    } = common.dictionary.index
+    else {
+        return None;
+    };
+    let ChainDistancePolicy::Window { .. } = common.distance else {
+        return None;
+    };
+    let hash_algorithm = adjacent_memory_hash(info, common.dictionary.insertion)?;
+    if hash_algorithm == common.dictionary.index.into_algorithm() {
         return None;
     }
-    let hash_algorithm = adjacent_memory_hash(
-        info,
-        parameters
-            .dictionary()
-            .expect("dictionary candidate")
-            .insertion,
-    )?;
-    (hash_algorithm != parameters.hash_algorithm()).then_some({
-        let mut canonical_configuration = parameters;
-        canonical_configuration.set_estimated_hash(hash_algorithm);
-        canonical_configuration
-    })
+    common.dictionary.index =
+        DictionaryIndex::from_algorithm(hash_algorithm).expect("dictionary hash");
+    Some(parameters.with_estimated_chain(common, parser))
 }
 
 pub fn flush(
@@ -189,153 +161,136 @@ pub fn memory_hash_alternative(
     parameters: ReconstructionParameters,
     info: &PreflateStreamInfo,
 ) -> Option<ReconstructionParameters> {
-    if parameters.hash_algorithm() != crate::compressors::windows::HASH
-        || parameters
-            .dictionary()
-            .expect("dictionary candidate")
-            .insertion
-            != DictionaryAddPolicy::AddAll
-        || !compatible(&parameters)
+    let mut behavior = parameters.behavior;
+    let (dictionary, matches_to_start, full_window, cutoff) = match &mut behavior {
+        BehaviorSettings::Chain { common, parser } => {
+            let (matches_to_start, full_window) = match common.distance {
+                ChainDistancePolicy::Window { history, bounds } => (
+                    history.matches_to_start,
+                    matches!(bounds, WindowBounds::Full | WindowBounds::ExcludeOldest),
+                ),
+                ChainDistancePolicy::Disabled | ChainDistancePolicy::RleOnly => (false, false),
+            };
+            (
+                &mut common.dictionary,
+                matches_to_start,
+                full_window,
+                parser.short_match_cutoff(),
+            )
+        }
+        BehaviorSettings::MiniZ {
+            common,
+            short_match_cutoff,
+            ..
+        } => (
+            &mut common.dictionary,
+            matches!(common.distance, MiniZDistancePolicy::Enabled(history) if history.matches_to_start),
+            false,
+            *short_match_cutoff,
+        ),
+        BehaviorSettings::NoDictionary { .. } => return None,
+    };
+    if dictionary.index
+        != (DictionaryIndex::Chain {
+            hash: HashFunction::RandomVector,
+        })
+        || dictionary.insertion != DictionaryAddPolicy::AddAll
+        || !compatible_constraints(matches_to_start, full_window, cutoff, true)
     {
         return None;
     }
     let capacity = canonical_token_capacity(&parameters, info)?;
-    let hash_algorithm = memory_hash(capacity.ilog2() - 6);
-    Some({
-        let mut canonical_configuration = parameters;
-        canonical_configuration.set_estimated_hash(hash_algorithm);
-        canonical_configuration
-    })
+    dictionary.index = DictionaryIndex::from_algorithm(memory_hash(capacity.ilog2() - 6))
+        .expect("dictionary hash");
+    let mut candidate = ReconstructionParameters {
+        behavior,
+        ..parameters
+    };
+    candidate.configure_estimated_match_policies();
+    Some(candidate)
 }
 
 pub fn filtered_hash(
     parameters: ReconstructionParameters,
     info: &PreflateStreamInfo,
 ) -> Option<ReconstructionParameters> {
+    let BehaviorSettings::Chain { mut common, parser } = parameters.behavior else {
+        return None;
+    };
     let settings = &SLOW_PREFLATE_PARSER_SETTINGS[2];
-    if parameters.hash_algorithm() != HashAlgorithm::Libdeflate4Fast
-        || parameters
-            .dictionary()
-            .expect("dictionary candidate")
-            .insertion
-            != DictionaryAddPolicy::AddAll
-        || !parameters.has_chain_parser(settings.parser)
-        || parameters
-            .chain_common()
-            .expect("chain candidate")
-            .search
-            .nice_length
-            != settings.nice_length
-        || parameters.budget().expect("dictionary candidate").max_chain
-            <= SLOW_PREFLATE_PARSER_SETTINGS[1].max_chain
-        || parameters.budget().expect("dictionary candidate").max_chain > settings.max_chain
+    if common.dictionary.index.into_algorithm() != HashAlgorithm::Libdeflate4Fast
+        || common.dictionary.insertion != DictionaryAddPolicy::AddAll
+        || parser.with_cutoff(0) != settings.parser.with_cutoff(0)
+        || common.search.nice_length != settings.nice_length
+        || common.search.budget.max_chain <= SLOW_PREFLATE_PARSER_SETTINGS[1].max_chain
+        || common.search.budget.max_chain > settings.max_chain
         || info.min_len < FILTERED_MIN_MATCH_LENGTH
         || !compatible(&parameters)
     {
         return None;
     }
     canonical_token_capacity(&parameters, info)?;
-    Some(
-        {
-            let mut canonical_configuration = parameters;
-            canonical_configuration.replace_chain_parser(
-                settings
-                    .parser
-                    .with_cutoff(canonical_configuration.behavior.short_match_cutoff()),
-            );
-            canonical_configuration.set_estimated_hash(DEFAULT_HASH);
-            canonical_configuration
-                .chain_common_mut()
-                .expect("chain candidate")
-                .search
-                .nice_length = settings.nice_length;
-            canonical_configuration
-                .budget_mut()
-                .expect("dictionary candidate")
-                .max_chain = settings.max_chain;
-            canonical_configuration.behavior.set_short_match_cutoff(0);
-
-            canonical_configuration
-        }
-        .with_lazy_behavior(true, info.min_len),
-    )
+    common.dictionary.index =
+        DictionaryIndex::from_algorithm(DEFAULT_HASH).expect("dictionary hash");
+    common.search.nice_length = settings.nice_length;
+    common.search.budget.max_chain = settings.max_chain;
+    let parser = project_lazy_parser(
+        settings.parser.with_cutoff(0),
+        common.dictionary.index,
+        true,
+        info.min_len,
+    );
+    Some(parameters.with_estimated_chain(common, parser))
 }
 
 pub fn noncanonical_insertion(
     parameters: ReconstructionParameters,
     info: &PreflateStreamInfo,
 ) -> Option<ReconstructionParameters> {
-    if !matches!(parameters.dictionary().expect("dictionary candidate").insertion, DictionaryAddPolicy::AddFirst(limit) if limit > 6)
+    let BehaviorSettings::Chain { mut common, parser } = parameters.behavior else {
+        return None;
+    };
+    if !matches!(common.dictionary.insertion, DictionaryAddPolicy::AddFirst(limit) if limit > 6)
         || !matches!(
-            parameters.hash_algorithm(),
+            common.dictionary.index.into_algorithm(),
             HashAlgorithm::Zlib { .. } | HashAlgorithm::RandomVector | HashAlgorithm::Libdeflate4
         )
         || !matches!(
-            parameters.chain_parser(),
-            Some(ChainParser::Greedy { .. } | ChainParser::Lazy { .. })
+            parser,
+            ChainParser::Greedy { .. } | ChainParser::Lazy { .. }
         )
-        || !parameters.behavior.uses_general_distances()
-        || parameters
-            .dictionary()
-            .expect("dictionary candidate")
-            .window_bits
-            != 15
-        || parameters.behavior.permits_position_zero()
+        || !matches!(common.distance, ChainDistancePolicy::Window { history, .. } if !history.matches_to_start)
+        || common.dictionary.window_bits != 15
         || info.min_len != 3
         || info.max_tokens_per_block < 64
     {
         return None;
     }
     let settings = &SLOW_PREFLATE_PARSER_SETTINGS[2];
-    Some({
-        let mut canonical_configuration = parameters;
-        canonical_configuration.replace_chain_parser(
-            settings
-                .parser
-                .with_cutoff(canonical_configuration.behavior.short_match_cutoff()),
-        );
-        canonical_configuration.set_estimated_hash(DEFAULT_HASH);
-        canonical_configuration.behavior.set_full_window(false);
-        canonical_configuration
-            .dictionary_mut()
-            .expect("dictionary candidate")
-            .insertion = settings.dictionary_add_policy;
-        canonical_configuration
-            .chain_common_mut()
-            .expect("chain candidate")
-            .search
-            .nice_length = settings.nice_length;
-        canonical_configuration
-            .budget_mut()
-            .expect("dictionary candidate")
-            .max_chain = settings.max_chain;
-        canonical_configuration
-            .behavior
-            .set_short_match_cutoff(SHORT_MATCH_CUTOFF);
-
-        canonical_configuration
-    })
+    common.dictionary.index =
+        DictionaryIndex::from_algorithm(DEFAULT_HASH).expect("dictionary hash");
+    common.set_full_window(false);
+    common.dictionary.insertion = settings.dictionary_add_policy;
+    common.search.nice_length = settings.nice_length;
+    common.search.budget.max_chain = settings.max_chain;
+    Some(parameters.with_estimated_chain(common, settings.parser.with_cutoff(SHORT_MATCH_CUTOFF)))
 }
 
-fn table_hash_window_compatible(
-    parameters: &ReconstructionParameters,
-    info: &PreflateStreamInfo,
-) -> bool {
-    parameters.hash_algorithm() == crate::compressors::windows::HASH
-        && parameters.behavior.uses_general_distances()
-        && !parameters.behavior.permits_position_zero()
+fn table_hash_window_compatible(common: ChainMatchSettings, info: &PreflateStreamInfo) -> bool {
+    common.dictionary.index.into_algorithm() == crate::compressors::windows::HASH
+        && matches!(common.distance, ChainDistancePolicy::Window { history, .. } if !history.matches_to_start)
         && !info.matches_to_start_detected
         && info.min_len == 3
         && info.reference_count >= 64
         && info.max_tokens_per_block >= 64
-        && info.max_dist
-            <= (1
-                << parameters
-                    .dictionary()
-                    .expect("dictionary candidate")
-                    .window_bits)
-                - MIN_LOOKAHEAD
-        && (!parameters.behavior.uses_full_window() || info.ends_with_final_block)
+        && info.max_dist <= (1 << common.dictionary.window_bits) - MIN_LOOKAHEAD
+        && (!matches!(
+            common.distance,
+            ChainDistancePolicy::Window {
+                bounds: WindowBounds::Full | WindowBounds::ExcludeOldest,
+                ..
+            }
+        ) || info.ends_with_final_block)
 }
 
 fn canonical_token_capacity(
@@ -489,26 +444,28 @@ fn compatible_constraints(
         && (short_match_cutoff <= SHORT_MATCH_CUTOFF || !full_insertion)
 }
 
-pub fn project_lazy_behavior(
-    mut parameters: ReconstructionParameters,
+pub fn project_lazy_parser(
+    mut parser: ChainParser,
+    index: DictionaryIndex,
     compatible: bool,
     observed_min_len: u32,
-) -> ReconstructionParameters {
-    let filtered = observed_min_len >= FILTERED_MIN_MATCH_LENGTH
-        && matches!(parameters.hash_algorithm(), HashAlgorithm::Zlib { .. });
-    if let crate::reconstruction_parameters::BehaviorSettings::Chain {
-        parser: crate::reconstruction_parameters::ChainParser::Lazy { lookahead, minimum },
-        ..
-    } = &mut parameters.behavior
-    {
+) -> ChainParser {
+    if let ChainParser::Lazy { lookahead, minimum } = &mut parser {
+        let filtered = observed_min_len >= FILTERED_MIN_MATCH_LENGTH
+            && matches!(
+                index,
+                DictionaryIndex::Chain {
+                    hash: HashFunction::Zlib { .. }
+                }
+            );
         if filtered {
-            *minimum = crate::reconstruction_parameters::LazyMinimum::FilteredSix;
+            *minimum = LazyMinimum::FilteredSix;
         }
         if !compatible {
             lookahead.behavior = LazyBehavior::RecomputeAfterLiteral;
         }
     }
-    parameters
+    parser
 }
 
 pub fn parser_settings(add_policy: DictionaryAddPolicy) -> &'static [PreflateParserConfig] {
@@ -573,21 +530,20 @@ pub fn refine_parameters(
     plain: &PlainText,
 ) -> ParameterEstimate {
     let parameters = estimate.parameters();
-    let ambiguous_insertion = InsertionConstraint::observe(
-        parameters
-            .dictionary()
-            .expect("dictionary candidate")
-            .insertion,
-        info.max_len,
-    ) == InsertionConstraint::Unresolved;
+    let BehaviorSettings::Chain { common, parser } = parameters.behavior else {
+        return estimate;
+    };
+    let hash = common.dictionary.index.into_algorithm();
+    let ambiguous_insertion = common
+        .dictionary
+        .insertion
+        .has_unobserved_first_only_cutoff(info.max_len);
     if depth.zlib_candidates.is_empty()
         || matches!(
-            parameters.hash_algorithm(),
+            hash,
             HashAlgorithm::Libdeflate4Fast15 | HashAlgorithm::Chromium { .. }
         )
-        || (!ambiguous_insertion
-            && info.min_len < 6
-            && matches!(parameters.hash_algorithm(), HashAlgorithm::Zlib { .. }))
+        || (!ambiguous_insertion && info.min_len < 6 && matches!(hash, HashAlgorithm::Zlib { .. }))
         || info.matches_to_start_detected
         || info.max_dist_3_matches > SHORT_MATCH_CUTOFF
     {
@@ -605,13 +561,9 @@ pub fn refine_parameters(
         });
     let adaptive = contents.compressed_size > 1024
         && extension_hash.is_some()
-        && parameters.hash_algorithm() == HashAlgorithm::RandomVector
-        && parameters
-            .dictionary()
-            .expect("dictionary candidate")
-            .insertion
-            == DictionaryAddPolicy::AddAll
-        && matches!(parameters.chain_parser(), Some(ChainParser::Lazy { .. }));
+        && hash == HashAlgorithm::RandomVector
+        && common.dictionary.insertion == DictionaryAddPolicy::AddAll
+        && matches!(parser, ChainParser::Lazy { .. });
     let score = |parameters: &ReconstructionParameters| {
         score_predictions(
             &mut crate::prediction_state::PredictionState::from_reconstruction_parameters(
@@ -649,38 +601,22 @@ pub fn refine_parameters(
             }
             let settings = &SLOW_PREFLATE_PARSER_SETTINGS[index];
             let trial = {
-                let mut canonical_configuration = parameters;
-                canonical_configuration.replace_chain_parser(
-                    settings
-                        .parser
-                        .with_cutoff(canonical_configuration.behavior.short_match_cutoff()),
+                let mut common = common;
+                common.dictionary.index = DictionaryIndex::from_algorithm(candidate.hash_algorithm)
+                    .expect("dictionary hash");
+                common.set_full_window(false);
+                common.dictionary.window_bits = estimate_preflate_window_bits(info.max_dist);
+                common.dictionary.insertion = DictionaryAddPolicy::AddAll;
+                common.search.nice_length = settings.nice_length;
+                common.search.budget.max_chain = settings.max_chain;
+                let parser = project_lazy_parser(
+                    settings.parser.with_cutoff(info.max_dist_3_matches),
+                    common.dictionary.index,
+                    true,
+                    info.min_len,
                 );
-                canonical_configuration.set_estimated_hash(candidate.hash_algorithm);
-                canonical_configuration.behavior.set_full_window(false);
-                canonical_configuration
-                    .dictionary_mut()
-                    .expect("dictionary candidate")
-                    .window_bits = estimate_preflate_window_bits(info.max_dist);
-                canonical_configuration
-                    .dictionary_mut()
-                    .expect("dictionary candidate")
-                    .insertion = DictionaryAddPolicy::AddAll;
-                canonical_configuration
-                    .chain_common_mut()
-                    .expect("chain candidate")
-                    .search
-                    .nice_length = settings.nice_length;
-                canonical_configuration
-                    .budget_mut()
-                    .expect("dictionary candidate")
-                    .max_chain = settings.max_chain;
-                canonical_configuration
-                    .behavior
-                    .set_short_match_cutoff(info.max_dist_3_matches);
-
-                canonical_configuration
-            }
-            .with_lazy_behavior(true, info.min_len);
+                parameters.with_estimated_chain(common, parser)
+            };
             if adaptive && !candidates.contains(&trial) {
                 candidates.push(trial);
             }
@@ -717,10 +653,12 @@ pub fn refine_parameters(
         .enumerate()
         .skip(1)
         .find_map(|(index, candidate)| {
-            (Some(candidate.hash_algorithm()) == extension_hash
-                && candidate.has_chain_parser(SLOW_PREFLATE_PARSER_SETTINGS[2].parser)
-                && candidate.budget().expect("dictionary candidate").max_chain
-                    == SLOW_PREFLATE_PARSER_SETTINGS[2].max_chain)
+            let BehaviorSettings::Chain { common, parser } = candidate.behavior else {
+                return None;
+            };
+            (Some(common.dictionary.index.into_algorithm()) == extension_hash
+                && parser.with_cutoff(0) == SLOW_PREFLATE_PARSER_SETTINGS[2].parser.with_cutoff(0)
+                && common.search.budget.max_chain == SLOW_PREFLATE_PARSER_SETTINGS[2].max_chain)
                 .then_some(index)
         })
         .expect("surviving memory hash has a level-six candidate");
@@ -751,82 +689,55 @@ pub fn flush_alternative(
     parameters: ReconstructionParameters,
     info: &PreflateStreamInfo,
 ) -> Option<ReconstructionParameters> {
+    let BehaviorSettings::Chain { mut common, parser } = parameters.behavior else {
+        return None;
+    };
+    let hash = common.dictionary.index.into_algorithm();
     let hash_algorithm = HashAlgorithm::Zlib {
         hash_mask: 16383,
         hash_shift: 5,
     };
-    let known_flush = parameters.hash_algorithm() == hash_algorithm
-        && parameters.budget().expect("dictionary candidate").max_chain == 32
+    let known_flush = hash == hash_algorithm
+        && common.search.budget.max_chain == 32
         && info.count_stored_blocks != 0;
     let underestimated_memory = matches!(
-        parameters.hash_algorithm(),
+        hash,
         HashAlgorithm::Zlib { .. } | HashAlgorithm::RandomVector
     ) && parameters.max_token_count < 8191
         && info.min_len == 3
         && !info.matches_to_start_detected
         && info.max_dist_3_matches <= SHORT_MATCH_CUTOFF
-        && (parameters
-            .dictionary()
-            .expect("dictionary candidate")
-            .insertion
-            == DictionaryAddPolicy::AddAll
-            || matches!(parameters.dictionary().expect("dictionary candidate").insertion, DictionaryAddPolicy::AddFirst(limit) if limit > 6));
-    if !(known_flush
-        && parameters
-            .dictionary()
-            .expect("dictionary candidate")
-            .insertion
-            == DictionaryAddPolicy::AddAll
+        && (common.dictionary.insertion == DictionaryAddPolicy::AddAll
+            || matches!(common.dictionary.insertion, DictionaryAddPolicy::AddFirst(limit) if limit > 6));
+    if !(known_flush && common.dictionary.insertion == DictionaryAddPolicy::AddAll
         || underestimated_memory)
     {
         return None;
     }
-    Some({
-        let mut canonical_configuration = parameters;
-        canonical_configuration.replace_chain_parser(ChainParser::Lazy {
+    common.dictionary.index =
+        DictionaryIndex::from_algorithm(hash_algorithm).expect("dictionary hash");
+    if !known_flush {
+        common.dictionary.window_bits = 15;
+    }
+    common.dictionary.insertion = DictionaryAddPolicy::AddAll;
+    common.search.nice_length = 258;
+    common.search.budget.max_chain = 32;
+    Some(parameters.with_estimated_chain(
+        common,
+        ChainParser::Lazy {
             lookahead: LazyLookaheadSettings {
                 max_lazy: 4,
                 behavior: LazyBehavior::Zlib { good_length: 8 },
             },
             minimum: LazyMinimum::Three {
-                short_match_cutoff: canonical_configuration.behavior.short_match_cutoff(),
+                short_match_cutoff: if known_flush {
+                    parser.short_match_cutoff()
+                } else {
+                    SHORT_MATCH_CUTOFF
+                },
             },
-        });
-        canonical_configuration.set_estimated_hash(hash_algorithm);
-        canonical_configuration
-            .dictionary_mut()
-            .expect("dictionary candidate")
-            .window_bits = if known_flush {
-            parameters
-                .dictionary()
-                .expect("dictionary candidate")
-                .window_bits
-        } else {
-            15
-        };
-        canonical_configuration
-            .dictionary_mut()
-            .expect("dictionary candidate")
-            .insertion = DictionaryAddPolicy::AddAll;
-        canonical_configuration
-            .chain_common_mut()
-            .expect("chain candidate")
-            .search
-            .nice_length = 258;
-        canonical_configuration
-            .budget_mut()
-            .expect("dictionary candidate")
-            .max_chain = 32;
-        canonical_configuration
-            .behavior
-            .set_short_match_cutoff(if known_flush {
-                parameters.behavior.short_match_cutoff()
-            } else {
-                SHORT_MATCH_CUTOFF
-            });
-
-        canonical_configuration
-    })
+        },
+    ))
 }
 
 pub const ZLIB_PREFLATE_PARSER_SETTINGS: [PreflateParserConfig; 3] = [
@@ -946,7 +857,9 @@ pub const SLOW_PREFLATE_PARSER_SETTINGS: [PreflateParserConfig; 6] = [
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::estimator::test_support::initial_stream_info;
     use crate::parameters::{PreflateStrategy, tests::MatchingType};
+    use crate::token_predictor::tests::zlib_level_1_params;
 
     #[test]
     fn table_hash_fast_uses_coupled_profiles_without_the_lazy_distance_cutoff() {
@@ -1432,6 +1345,62 @@ mod tests {
         assert_eq!(adjacent_memory_hash(&info, parameters.add_policy()), None);
         info.max_tokens_per_block = 63;
         assert_eq!(adjacent_memory_hash(&info, parameters.add_policy()), None);
+    }
+
+    #[test]
+    fn memory_hash_preserves_chain_and_miniz_compatibility() {
+        let mut info = initial_stream_info();
+        info.max_tokens_per_block = 2047;
+        for parser in [
+            MatchingType::Greedy,
+            MatchingType::MiniZ {
+                max_probes: 32,
+                greedy: false,
+            },
+        ] {
+            for insertion in [
+                DictionaryAddPolicy::AddAll,
+                DictionaryAddPolicy::AddFirst(4),
+            ] {
+                for cutoff in [0, SHORT_MATCH_CUTOFF, SHORT_MATCH_CUTOFF + 1] {
+                    for full_window in [false, true] {
+                        for matches_to_start in [false, true] {
+                            for disabled in [false, true] {
+                                let mut parameters = zlib_level_1_params();
+                                parameters.set_hash_algorithm(HashAlgorithm::RandomVector);
+                                parameters.set_matching_type(parser);
+                                parameters.set_insertion(insertion);
+                                parameters.set_short_match_cutoff(cutoff);
+                                parameters.set_full_window(full_window);
+                                parameters.set_matches_to_start(matches_to_start);
+                                parameters.max_token_count = 2047;
+                                if disabled {
+                                    match &mut parameters.behavior {
+                                        BehaviorSettings::Chain { common, .. } => {
+                                            common.distance = ChainDistancePolicy::Disabled
+                                        }
+                                        BehaviorSettings::MiniZ { common, .. } => {
+                                            common.distance = MiniZDistancePolicy::Disabled
+                                        }
+                                        BehaviorSettings::NoDictionary { .. } => unreachable!(),
+                                    }
+                                }
+                                let expected = if insertion == DictionaryAddPolicy::AddAll
+                                    && compatible(&parameters)
+                                {
+                                    let mut expected = parameters;
+                                    expected.set_estimated_hash(memory_hash(5));
+                                    Some(expected)
+                                } else {
+                                    None
+                                };
+                                assert_eq!(memory_hash_alternative(parameters, &info), expected);
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[test]

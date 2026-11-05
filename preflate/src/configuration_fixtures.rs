@@ -35,6 +35,34 @@ impl ChainParser {
 }
 
 impl ReconstructionParameters {
+    pub(crate) fn set_estimated_hash(&mut self, hash: HashAlgorithm) {
+        self.dictionary_mut().expect("dictionary candidate").index =
+            DictionaryIndex::from_algorithm(hash).expect("dictionary hash");
+        self.configure_estimated_match_policies();
+    }
+
+    pub(crate) fn chain_common_mut(&mut self) -> Option<&mut ChainMatchSettings> {
+        match &mut self.behavior {
+            BehaviorSettings::Chain { common, .. } => Some(common),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn budget_mut(&mut self) -> Option<&mut SearchBudget> {
+        match &mut self.behavior {
+            BehaviorSettings::NoDictionary { .. } => None,
+            BehaviorSettings::Chain { common, .. } => Some(&mut common.search.budget),
+            BehaviorSettings::MiniZ { common, .. } => Some(&mut common.search.budget),
+        }
+    }
+
+    pub(crate) fn chain_common(&self) -> Option<&ChainMatchSettings> {
+        match &self.behavior {
+            BehaviorSettings::Chain { common, .. } => Some(common),
+            _ => None,
+        }
+    }
+
     pub(crate) fn window_bits(self) -> u32 {
         self.dictionary()
             .map_or(0, |dictionary| dictionary.window_bits)

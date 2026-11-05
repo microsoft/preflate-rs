@@ -73,9 +73,43 @@ pub enum DictionaryAddPolicy {
     AddFirstWith32KBoundary,
 }
 
+impl DictionaryAddPolicy {
+    /// Whether an AddFirst cutoff has not excluded any observed match.
+    pub(crate) fn has_unobserved_first_only_cutoff(self, longest_match: u32) -> bool {
+        matches!(self, Self::AddFirst(limit) if u32::from(limit) >= longest_match)
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    #[test]
+    fn first_only_cutoff_is_unobserved_until_a_match_exceeds_it() {
+        for (policy, longest, expected) in [
+            (DictionaryAddPolicy::AddFirst(6), 5, true),
+            (DictionaryAddPolicy::AddFirst(6), 6, true),
+            (DictionaryAddPolicy::AddFirst(6), 7, false),
+            (DictionaryAddPolicy::AddFirst(0), 0, true),
+            (DictionaryAddPolicy::AddFirst(0), 1, false),
+            (
+                DictionaryAddPolicy::AddFirst(u16::MAX),
+                u32::from(u16::MAX),
+                true,
+            ),
+            (
+                DictionaryAddPolicy::AddFirst(u16::MAX),
+                u32::from(u16::MAX) + 1,
+                false,
+            ),
+            (DictionaryAddPolicy::AddAll, 6, false),
+            (DictionaryAddPolicy::AddFirstAndLast(6), 6, false),
+            (DictionaryAddPolicy::AddFirstExcept4kBoundary, 6, false),
+            (DictionaryAddPolicy::AddFirstWith32KBoundary, 6, false),
+        ] {
+            assert_eq!(policy.has_unobserved_first_only_cutoff(longest), expected);
+        }
+    }
 
     #[derive(
         Encode,

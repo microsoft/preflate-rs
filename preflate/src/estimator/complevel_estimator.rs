@@ -19,7 +19,7 @@ use super::{
     depth_estimator::{
         DistancePolicy, HashTableDepthEstimator, new_depth_estimator, run_depth_candidates,
     },
-    parser_estimator::{InsertionConstraint, ParserInference},
+    parser_estimator::ParserInference,
     preflate_stream_info::PreflateStreamInfo,
 };
 use crate::{
@@ -108,8 +108,7 @@ pub fn estimate_preflate_depth(
         candidates.push(new_depth_estimator(algorithm));
     }
     run_depth_candidates(
-        if InsertionConstraint::observe(add_policy, info.max_len) == InsertionConstraint::Unresolved
-        {
+        if add_policy.has_unobserved_first_only_cutoff(info.max_len) {
             DictionaryAddPolicy::AddAll
         } else {
             add_policy

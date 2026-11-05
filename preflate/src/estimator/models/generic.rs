@@ -9,8 +9,7 @@ use super::{zlib, zlib_ng};
 use crate::{
     deflate::deflate_token::DeflateTokenReference,
     estimator::{
-        initial_estimate::InitialEstimate,
-        parser_estimator::{InsertionConstraint, ParserInference},
+        initial_estimate::InitialEstimate, parser_estimator::ParserInference,
         preflate_stream_info::PreflateStreamInfo,
     },
     hash_algorithm::HashAlgorithm,
@@ -18,7 +17,8 @@ use crate::{
     parameters::{DictionaryAddPolicy, LazyBehavior},
     preflate_input::PreflateInput,
     reconstruction_parameters::{
-        ChainParser, LazyLookaheadSettings, LazyMinimum, ReconstructionParameters,
+        BehaviorSettings, ChainDistancePolicy, ChainMatchSettings, ChainParser,
+        LazyLookaheadSettings, LazyMinimum, ReconstructionParameters, WindowBounds,
     },
 };
 
@@ -26,19 +26,23 @@ pub fn primary_only_greedy(
     parameters: ReconstructionParameters,
     info: &PreflateStreamInfo,
 ) -> Option<ReconstructionParameters> {
-    if !parameters.behavior.uses_general_distances()
-        || parameters.hash_algorithm() != HashAlgorithm::Libdeflate4Fast
-        || !matches!(
-            parameters.chain_parser(),
-            Some(ChainParser::Lazy {
-                lookahead: LazyLookaheadSettings {
-                    behavior: LazyBehavior::RecomputeAfterLiteral,
-                    ..
-                },
-                minimum: LazyMinimum::Three { .. },
-                ..
-            })
-        )
+    let BehaviorSettings::Chain {
+        mut common,
+        parser:
+            ChainParser::Lazy {
+                lookahead:
+                    LazyLookaheadSettings {
+                        behavior: LazyBehavior::RecomputeAfterLiteral,
+                        ..
+                    },
+                minimum: LazyMinimum::Three { short_match_cutoff },
+            },
+    } = parameters.behavior
+    else {
+        return None;
+    };
+    if !matches!(common.distance, ChainDistancePolicy::Window { .. })
+        || common.dictionary.index.into_algorithm() != HashAlgorithm::Libdeflate4Fast
         || info.min_len < 4
         || info.reference_count < 64
         || parameters.max_token_count < 1023
@@ -50,23 +54,17 @@ pub fn primary_only_greedy(
     let bounded_window = info.ends_with_final_block
         && !info.matches_to_start_detected
         && info.max_dist
-            <= (1
-                << parameters
-                    .dictionary()
-                    .expect("dictionary candidate")
-                    .window_bits)
+            <= (1 << common.dictionary.window_bits)
                 - crate::deflate::deflate_constants::MIN_LOOKAHEAD;
-    Some({
-        let mut canonical_configuration = parameters;
-        canonical_configuration.replace_chain_parser(ChainParser::Greedy {
-            short_match_cutoff: canonical_configuration.behavior.short_match_cutoff(),
-        });
-        canonical_configuration
-            .behavior
-            .set_full_window(parameters.behavior.uses_full_window() && !bounded_window);
-
-        canonical_configuration
-    })
+    let full = matches!(
+        common.distance,
+        ChainDistancePolicy::Window {
+            bounds: WindowBounds::Full | WindowBounds::ExcludeOldest,
+            ..
+        }
+    );
+    common.set_full_window(full && !bounded_window);
+    Some(parameters.with_estimated_chain(common, ChainParser::Greedy { short_match_cutoff }))
 }
 
 #[derive(Default)]
@@ -126,142 +124,83 @@ impl GreedyNiceObservations {
 }
 
 pub fn alternatives(parameters: ReconstructionParameters) -> [Option<ReconstructionParameters>; 2] {
+    let BehaviorSettings::Chain { common, parser } = parameters.behavior else {
+        return [None, None];
+    };
+    let hash = common.dictionary.index.into_algorithm();
+    let short_match_cutoff = parser.short_match_cutoff();
     let noncanonical_greedy = matches!(
-        parameters.hash_algorithm(),
-        crate::hash_algorithm::HashAlgorithm::Zlib { .. }
-            | crate::hash_algorithm::HashAlgorithm::RandomVector
-    ) && matches!(
-        parameters.chain_parser(),
-        Some(ChainParser::Greedy { .. })
-    ) && matches!(parameters.dictionary().expect("dictionary candidate").insertion, DictionaryAddPolicy::AddFirst(limit) if limit > 6);
-    let table_lazy = parameters.hash_algorithm() == crate::compressors::windows::HASH
-        && parameters
-            .dictionary()
-            .expect("dictionary candidate")
-            .insertion
-            == DictionaryAddPolicy::AddAll
-        && matches!(parameters.chain_parser(), Some(ChainParser::Lazy { .. }));
+        hash,
+        HashAlgorithm::Zlib { .. } | HashAlgorithm::RandomVector
+    ) && matches!(parser, ChainParser::Greedy { .. })
+        && matches!(common.dictionary.insertion, DictionaryAddPolicy::AddFirst(limit) if limit > 6);
+    let table_lazy = hash == crate::compressors::windows::HASH
+        && common.dictionary.insertion == DictionaryAddPolicy::AddAll
+        && matches!(parser, ChainParser::Lazy { .. });
     let slow = &zlib::SLOW_PREFLATE_PARSER_SETTINGS[2];
     let lazy = (noncanonical_greedy || table_lazy).then(|| {
-        let mut canonical_configuration = parameters;
-        canonical_configuration.replace_chain_parser(
-            slow.parser
-                .with_cutoff(canonical_configuration.behavior.short_match_cutoff()),
-        );
-        canonical_configuration
-            .chain_common_mut()
-            .expect("chain candidate")
-            .search
-            .nice_length = slow.nice_length;
-        canonical_configuration
-            .budget_mut()
-            .expect("dictionary candidate")
-            .max_chain = slow.max_chain;
-
-        canonical_configuration
+        let mut common = common;
+        common.search.nice_length = slow.nice_length;
+        common.search.budget.max_chain = slow.max_chain;
+        parameters.with_estimated_chain(common, slow.parser.with_cutoff(short_match_cutoff))
     });
     let fast = &zlib::ZLIB_PREFLATE_PARSER_SETTINGS[0];
-    let insertion = (parameters.hash_algorithm() == crate::compressors::windows::HASH
-        && parameters
-            .dictionary()
-            .expect("dictionary candidate")
-            .insertion
-            == DictionaryAddPolicy::AddFirstAndLast(0))
+    let insertion = (hash == crate::compressors::windows::HASH
+        && common.dictionary.insertion == DictionaryAddPolicy::AddFirstAndLast(0))
     .then(|| {
-        let mut canonical_configuration = parameters;
-        canonical_configuration.replace_chain_parser(
-            fast.parser
-                .with_cutoff(canonical_configuration.behavior.short_match_cutoff()),
-        );
-        canonical_configuration
-            .dictionary_mut()
-            .expect("dictionary candidate")
-            .insertion = fast.dictionary_add_policy;
-        canonical_configuration
-            .chain_common_mut()
-            .expect("chain candidate")
-            .search
-            .nice_length = fast.nice_length;
-        canonical_configuration
-            .budget_mut()
-            .expect("dictionary candidate")
-            .max_chain = fast.max_chain;
-
-        canonical_configuration
+        let mut common = common;
+        common.dictionary.insertion = fast.dictionary_add_policy;
+        common.search.nice_length = fast.nice_length;
+        common.search.budget.max_chain = fast.max_chain;
+        parameters.with_estimated_chain(common, fast.parser.with_cutoff(short_match_cutoff))
     });
     [insertion, lazy]
 }
 
 pub fn slow_alternative(parameters: ReconstructionParameters) -> Option<ReconstructionParameters> {
+    let BehaviorSettings::Chain { mut common, parser } = parameters.behavior else {
+        return None;
+    };
     if parameters.max_token_count >= 8191
-        || !(parameters
-            .dictionary()
-            .expect("dictionary candidate")
-            .insertion
-            == DictionaryAddPolicy::AddAll
-            || matches!(parameters.dictionary().expect("dictionary candidate").insertion, DictionaryAddPolicy::AddFirst(limit) if limit > 6))
+        || !(common.dictionary.insertion == DictionaryAddPolicy::AddAll
+            || matches!(common.dictionary.insertion, DictionaryAddPolicy::AddFirst(limit) if limit > 6))
         || !matches!(
-            parameters.hash_algorithm(),
-            crate::hash_algorithm::HashAlgorithm::Zlib { .. }
-                | crate::hash_algorithm::HashAlgorithm::RandomVector
+            common.dictionary.index.into_algorithm(),
+            HashAlgorithm::Zlib { .. } | HashAlgorithm::RandomVector
         )
         || !matches!(
-            parameters.chain_parser(),
-            Some(ChainParser::Lazy { .. } | ChainParser::Greedy { .. })
+            parser,
+            ChainParser::Lazy { .. } | ChainParser::Greedy { .. }
         )
-        || parameters
-            .chain_common()
-            .expect("chain candidate")
-            .search
-            .nice_length
-            >= 258
+        || common.search.nice_length >= 258
     {
         return None;
     }
     let slow = &zlib::SLOW_PREFLATE_PARSER_SETTINGS[5];
-    Some({
-        let mut canonical_configuration = parameters;
-        canonical_configuration.replace_chain_parser(
-            slow.parser
-                .with_cutoff(canonical_configuration.behavior.short_match_cutoff()),
-        );
-        canonical_configuration
-            .dictionary_mut()
-            .expect("dictionary candidate")
-            .insertion = DictionaryAddPolicy::AddAll;
-        canonical_configuration
-            .chain_common_mut()
-            .expect("chain candidate")
-            .search
-            .nice_length = slow.nice_length;
-        canonical_configuration
-            .budget_mut()
-            .expect("dictionary candidate")
-            .max_chain = slow.max_chain;
-
-        canonical_configuration
-    })
+    common.dictionary.insertion = DictionaryAddPolicy::AddAll;
+    common.search.nice_length = slow.nice_length;
+    common.search.budget.max_chain = slow.max_chain;
+    Some(
+        parameters
+            .with_estimated_chain(common, slow.parser.with_cutoff(parser.short_match_cutoff())),
+    )
 }
 
 pub fn resolve_matching_policy(
     current: ChainParser,
-    insertion: InsertionConstraint,
+    insertion: DictionaryAddPolicy,
+    longest_match: u32,
     inference: ParserInference,
 ) -> ChainParser {
-    if matches!(current, ChainParser::Greedy { .. })
-        && insertion == InsertionConstraint::Unresolved
+    if let ChainParser::Greedy { short_match_cutoff } = current
+        && insertion.has_unobserved_first_only_cutoff(longest_match)
         && let ParserInference::Lazy {
             longest_deferred_match,
         } = inference
     {
         return zlib::SLOW_PREFLATE_PARSER_SETTINGS
             .iter()
-            .map(|config| {
-                config.parser.with_cutoff(match current {
-                    ChainParser::Greedy { short_match_cutoff } => short_match_cutoff,
-                    _ => unreachable!(),
-                })
-            })
+            .map(|config| config.parser.with_cutoff(short_match_cutoff))
             .find(|policy| {
                 matches!(policy, ChainParser::Lazy { lookahead, .. }
                     if lookahead.max_lazy > longest_deferred_match)
@@ -272,6 +211,14 @@ pub fn resolve_matching_policy(
 }
 
 pub fn candidate(initial: &InitialEstimate<'_>, compatible: bool) -> ReconstructionParameters {
+    let (common, parser) = chain_settings(initial, compatible);
+    initial.parameters(BehaviorSettings::Chain { common, parser })
+}
+
+pub fn chain_settings(
+    initial: &InitialEstimate<'_>,
+    compatible: bool,
+) -> (ChainMatchSettings, ChainParser) {
     let evidence = &initial.evidence;
     let short_match_cutoff = initial.info.max_dist_3_matches;
     let config = zlib::parser_settings(initial.insertion)
@@ -298,23 +245,113 @@ pub fn candidate(initial: &InitialEstimate<'_>, compatible: bool) -> Reconstruct
     {
         nice_length = fast_nice_length;
     }
-    zlib::project_lazy_behavior(
-        initial.chain_parameters(parser, nice_length, evidence.required_chain),
+    let common = initial.chain_match_settings(nice_length, evidence.required_chain);
+    let parser = zlib::project_lazy_parser(
+        parser,
+        common.dictionary.index,
         compatible,
         initial.info.min_len,
-    )
+    );
+    (common, parser)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{
+        compressors::zlib::DEFAULT_HASH,
         estimator::{
             complevel_estimator::CandidateEvidence, depth_estimator::DistancePolicy,
             test_support::initial_stream_info,
         },
         parameters::{PreflateStrategy, tests::MatchingType},
     };
+
+    fn reference_candidate(
+        initial: &InitialEstimate<'_>,
+        compatible: bool,
+    ) -> ReconstructionParameters {
+        let evidence = &initial.evidence;
+        let cutoff = initial.info.max_dist_3_matches;
+        let config = zlib::parser_settings(initial.insertion)
+            .iter()
+            .find(|config| evidence.required_chain <= config.max_chain);
+        let parser = config.map_or(
+            ChainParser::Greedy {
+                short_match_cutoff: cutoff,
+            },
+            |config| config.parser.with_cutoff(cutoff),
+        );
+        let mut nice_length = if evidence.required_chain == 1 {
+            u32::from(u8::MAX)
+        } else {
+            initial.info.max_len.max(u32::from(u8::MAX))
+        };
+        if let Some(config) = config
+            && matches!(config.parser, ChainParser::Lazy { .. })
+        {
+            nice_length = config.nice_length;
+        }
+        if matches!(parser, ChainParser::Greedy { .. })
+            && let Some(nice) = zlib_ng::greedy_nice_length(initial)
+                .filter(|&nice| nice >= u32::from(evidence.minimum_nice_length))
+                .or_else(|| zlib::greedy_nice_length(initial))
+        {
+            nice_length = nice;
+        }
+        initial
+            .chain_parameters(parser, nice_length, evidence.required_chain)
+            .with_lazy_behavior(compatible, initial.info.min_len)
+    }
+
+    #[test]
+    fn initial_parser_projection_preserves_complete_settings_and_wire_bytes() {
+        for hash_algorithm in [
+            DEFAULT_HASH,
+            HashAlgorithm::RandomVector,
+            HashAlgorithm::Libdeflate4,
+            HashAlgorithm::Libdeflate4Fast15,
+            HashAlgorithm::Chromium { hash_mask: 0x7fff },
+            HashAlgorithm::ZlibNG,
+        ] {
+            for insertion in [
+                DictionaryAddPolicy::AddAll,
+                DictionaryAddPolicy::AddFirst(4),
+                DictionaryAddPolicy::AddFirstAndLast(4),
+            ] {
+                for minimum in [3, 5, 6] {
+                    for required_chain in [1, 4, 32, 4096] {
+                        for distance_policy in
+                            [DistancePolicy::ZlibWindow, DistancePolicy::FullWindow]
+                        {
+                            let mut info = initial_stream_info();
+                            info.min_len = minimum;
+                            info.max_len = 258;
+                            info.max_dist_3_matches = 4096;
+                            info.matches_to_start_detected =
+                                distance_policy == DistancePolicy::FullWindow;
+                            let evidence = CandidateEvidence {
+                                hash_algorithm,
+                                required_chain,
+                                distance_policy,
+                                parser: ParserInference::Unresolved,
+                                shallow_miniz_greedy: false,
+                                minimum_nice_length: 0,
+                            };
+                            let mut initial = InitialEstimate::test_fixture(&info, evidence);
+                            initial.insertion = insertion;
+                            for compatible in [false, true] {
+                                let expected = reference_candidate(&initial, compatible);
+                                let actual = candidate(&initial, compatible);
+                                assert_eq!(actual, expected);
+                                assert_eq!(bitcode::encode(&actual), bitcode::encode(&expected));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn primary_only_greedy_preserves_evidence_and_requires_an_unrecognized_parser() {

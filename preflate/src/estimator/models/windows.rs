@@ -2,94 +2,104 @@
 //! Couples table hashing and search budgets with observed token-buffer limits;
 //! runtime lazy matching and buffer-edge decisions live in `compressors::windows`.
 
-use crate::reconstruction_parameters::{ChainParser, LazyLookaheadSettings, LazyMinimum};
 /*---------------------------------------------------------------------------------------------
  *  Copyright (c) Microsoft Corporation. All rights reserved.
  *  Licensed under the Apache License, Version 2.0. See LICENSE.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 use crate::{
     compressors::windows::HASH,
-    estimator::preflate_stream_info::PreflateStreamInfo,
+    estimator::{
+        compressor_profile::{CompressorProfile, RefinementContext},
+        estimation_result::EstimationResult,
+        preflate_stream_info::PreflateStreamInfo,
+    },
     hash_algorithm::HashAlgorithm,
     parameters::{DictionaryAddPolicy, LazyBehavior},
-    reconstruction_parameters::ReconstructionParameters,
+    reconstruction_parameters::{
+        BehaviorSettings, ChainMatchSettings, ChainParser, DictionaryIndex, HashFunction,
+        LazyLookaheadSettings, LazyMinimum, ReconstructionParameters,
+    },
 };
 
 const LAZY_MAX_CHAIN: u32 = 100;
 
-pub fn alternatives(
-    parameters: ReconstructionParameters,
-    info: &PreflateStreamInfo,
-) -> [Option<ReconstructionParameters>; 3] {
-    [
-        shallow_greedy_alternative(parameters, info),
-        alternative(parameters, info),
-        partial_slow_alternative(parameters, info),
-    ]
+pub fn append_alternatives(
+    context: &RefinementContext<'_>,
+    candidates: &mut Vec<EstimationResult>,
+) {
+    candidates.extend(
+        [
+            shallow_greedy_alternative(context.parameters, context.info),
+            alternative(context.parameters, context.info),
+            partial_slow_alternative(context.parameters, context.info),
+        ]
+        .into_iter()
+        .flatten()
+        .map(|parameters| CompressorProfile::Windows.with_parameters(parameters)),
+    );
 }
 
 pub fn without_three_byte_references(
     parameters: ReconstructionParameters,
     info: &PreflateStreamInfo,
 ) -> Option<ReconstructionParameters> {
+    let BehaviorSettings::Chain { common, parser } = parameters.behavior else {
+        return None;
+    };
     if info.min_len <= 3
         || !matches!(
-            parameters.hash_algorithm(),
+            common.dictionary.index.into_algorithm(),
             HashAlgorithm::Libdeflate4Fast | HashAlgorithm::ZlibNG | HashAlgorithm::Crc32cHash
         )
     {
         return None;
     }
     // A different hash's chain rank cannot constrain this coupled hypothesis.
-    full_buffer_lazy(parameters, info, 258)
+    full_buffer_lazy(parameters, common, parser, info, 258)
 }
 pub fn alternative(
     parameters: ReconstructionParameters,
     info: &PreflateStreamInfo,
 ) -> Option<ReconstructionParameters> {
-    if parameters.hash_algorithm() != HASH
-        || parameters.budget().expect("dictionary candidate").max_chain > LAZY_MAX_CHAIN
+    let BehaviorSettings::Chain { common, parser } = parameters.behavior else {
+        return None;
+    };
+    if common.dictionary.index.into_algorithm() != HASH
+        || common.search.budget.max_chain > LAZY_MAX_CHAIN
     {
         return None;
     }
-    full_buffer_lazy(parameters, info, 128)
+    full_buffer_lazy(parameters, common, parser, info, 128)
 }
 
 fn full_buffer_lazy(
     parameters: ReconstructionParameters,
+    mut common: ChainMatchSettings,
+    parser: ChainParser,
     info: &PreflateStreamInfo,
     max_lazy: u16,
 ) -> Option<ReconstructionParameters> {
-    if parameters
-        .dictionary()
-        .expect("dictionary candidate")
-        .insertion
-        != DictionaryAddPolicy::AddAll
-        || !matches!(parameters.chain_parser(), Some(ChainParser::Lazy { .. }))
+    if common.dictionary.insertion != DictionaryAddPolicy::AddAll
+        || !matches!(parser, ChainParser::Lazy { .. })
         || info.max_tokens_per_block < 64
         || !info.max_tokens_per_block.is_power_of_two()
     {
         return None;
     }
-    Some({
-        let mut canonical_configuration = parameters;
-        canonical_configuration.replace_chain_parser(ChainParser::WindowsLazy {
-            max_lazy,
-            short_match_cutoff: canonical_configuration.behavior.short_match_cutoff(),
-        });
-        canonical_configuration.set_estimated_hash(HASH);
-        canonical_configuration
-            .chain_common_mut()
-            .expect("chain candidate")
-            .search
-            .nice_length = 258;
-        canonical_configuration
-            .budget_mut()
-            .expect("dictionary candidate")
-            .max_chain = LAZY_MAX_CHAIN;
-
-        canonical_configuration.max_token_count = u16::try_from(info.max_tokens_per_block).ok()?;
-        canonical_configuration
+    common.dictionary.index = DictionaryIndex::Chain {
+        hash: HashFunction::RandomVector,
+    };
+    common.search.nice_length = 258;
+    common.search.budget.max_chain = LAZY_MAX_CHAIN;
+    Some(ReconstructionParameters {
+        max_token_count: u16::try_from(info.max_tokens_per_block).ok()?,
+        ..parameters.with_estimated_chain(
+            common,
+            ChainParser::WindowsLazy {
+                max_lazy,
+                short_match_cutoff: parser.short_match_cutoff(),
+            },
+        )
     })
 }
 
@@ -97,23 +107,22 @@ pub fn partial_slow_alternative(
     parameters: ReconstructionParameters,
     info: &PreflateStreamInfo,
 ) -> Option<ReconstructionParameters> {
-    if parameters.hash_algorithm() != HASH
-        || parameters
-            .dictionary()
-            .expect("dictionary candidate")
-            .insertion
-            != DictionaryAddPolicy::AddAll
-        || parameters.budget().expect("dictionary candidate").max_chain != LAZY_MAX_CHAIN
+    let BehaviorSettings::Chain { mut common, parser } = parameters.behavior else {
+        return None;
+    };
+    if common.dictionary.index.into_algorithm() != HASH
+        || common.dictionary.insertion != DictionaryAddPolicy::AddAll
+        || common.search.budget.max_chain != LAZY_MAX_CHAIN
         || !matches!(
-            parameters.chain_parser(),
-            Some(ChainParser::Lazy {
+            parser,
+            ChainParser::Lazy {
                 lookahead: LazyLookaheadSettings {
                     behavior: LazyBehavior::RecomputeAfterLiteral,
                     ..
                 },
                 minimum: LazyMinimum::Three { .. },
                 ..
-            })
+            }
         )
         || info.min_len != 3
         || info.max_dist_3_matches > crate::compressors::zlib::SHORT_MATCH_CUTOFF
@@ -122,21 +131,15 @@ pub fn partial_slow_alternative(
     {
         return None;
     }
-    Some({
-        let mut canonical_configuration = parameters;
-        canonical_configuration.replace_chain_parser(ChainParser::WindowsLazy {
+    common.set_full_window(true);
+    common.search.nice_length = 258;
+    Some(parameters.with_estimated_chain(
+        common,
+        ChainParser::WindowsLazy {
             max_lazy: 258,
-            short_match_cutoff: canonical_configuration.behavior.short_match_cutoff(),
-        });
-        canonical_configuration.behavior.set_full_window(true);
-        canonical_configuration
-            .chain_common_mut()
-            .expect("chain candidate")
-            .search
-            .nice_length = 258;
-
-        canonical_configuration
-    })
+            short_match_cutoff: parser.short_match_cutoff(),
+        },
+    ))
 }
 
 // This identifies a table-hash candidate, not the Windows-specific parser behavior.
@@ -144,72 +147,57 @@ pub fn table_hash_alternative(
     parameters: ReconstructionParameters,
     info: &PreflateStreamInfo,
 ) -> Option<ReconstructionParameters> {
-    if parameters.hash_algorithm() != HashAlgorithm::Libdeflate4
-        || !matches!(
-            parameters.chain_parser(),
-            Some(ChainParser::LibdeflateLazy { .. })
-        )
-        || parameters
-            .dictionary()
-            .expect("dictionary candidate")
-            .insertion
-            != DictionaryAddPolicy::AddAll
+    let BehaviorSettings::Chain { mut common, parser } = parameters.behavior else {
+        return None;
+    };
+    if common.dictionary.index.into_algorithm() != HashAlgorithm::Libdeflate4
+        || !matches!(parser, ChainParser::LibdeflateLazy { .. })
+        || common.dictionary.insertion != DictionaryAddPolicy::AddAll
         || info.min_len != 3
         || info.max_dist_3_matches > crate::compressors::zlib::SHORT_MATCH_CUTOFF
     {
         return None;
     }
-    Some({
-        let mut canonical_configuration = parameters;
-        canonical_configuration.replace_chain_parser(ChainParser::Lazy {
+    common.dictionary.index = DictionaryIndex::Chain {
+        hash: HashFunction::RandomVector,
+    };
+    common.search.nice_length = 128;
+    common.search.budget.max_chain = 128;
+    Some(parameters.with_estimated_chain(
+        common,
+        ChainParser::Lazy {
             lookahead: LazyLookaheadSettings {
                 max_lazy: 16,
                 behavior: LazyBehavior::RecomputeAfterLiteral,
             },
             minimum: LazyMinimum::Three {
-                short_match_cutoff: canonical_configuration.behavior.short_match_cutoff(),
+                short_match_cutoff: crate::compressors::zlib::SHORT_MATCH_CUTOFF,
             },
-        });
-        canonical_configuration.set_estimated_hash(HASH);
-        canonical_configuration
-            .chain_common_mut()
-            .expect("chain candidate")
-            .search
-            .nice_length = 128;
-        canonical_configuration
-            .budget_mut()
-            .expect("dictionary candidate")
-            .max_chain = 128;
-        canonical_configuration
-            .behavior
-            .set_short_match_cutoff(crate::compressors::zlib::SHORT_MATCH_CUTOFF);
-
-        canonical_configuration
-    })
+        },
+    ))
 }
 
 pub fn shallow_greedy_alternative(
     parameters: ReconstructionParameters,
     info: &PreflateStreamInfo,
 ) -> Option<ReconstructionParameters> {
-    if parameters.hash_algorithm() != HASH
-        || parameters
-            .dictionary()
-            .expect("dictionary candidate")
-            .insertion
-            != DictionaryAddPolicy::AddAll
-        || parameters.budget().expect("dictionary candidate").max_chain == 0
-        || parameters.budget().expect("dictionary candidate").max_chain > 8
+    let BehaviorSettings::Chain { mut common, parser } = parameters.behavior else {
+        return None;
+    };
+    if common.dictionary.index.into_algorithm() != HASH
+        || common.dictionary.insertion != DictionaryAddPolicy::AddAll
+        || common.search.budget.max_chain == 0
+        || common.search.budget.max_chain > 8
         || !matches!(
-            parameters.chain_parser(),
-            Some(ChainParser::Lazy {
+            parser,
+            ChainParser::Lazy {
                 lookahead: LazyLookaheadSettings {
                     max_lazy: 0..=4,
                     ..
                 },
                 minimum: LazyMinimum::Three { .. },
                 ..
-            })
+            }
         )
         || info.min_len != 3
         || info.max_dist_3_matches > crate::compressors::zlib::SHORT_MATCH_CUTOFF
@@ -217,24 +205,20 @@ pub fn shallow_greedy_alternative(
     {
         return None;
     }
-    Some({
-        let mut canonical_configuration = parameters;
-        canonical_configuration.replace_chain_parser(ChainParser::WindowsLazy {
-            max_lazy: 0,
-            short_match_cutoff: canonical_configuration.behavior.short_match_cutoff(),
-        });
-        canonical_configuration
-            .chain_common_mut()
-            .expect("chain candidate")
-            .search
-            .nice_length = 258;
-
-        canonical_configuration.max_token_count = if info.max_tokens_per_block.is_power_of_two() {
+    common.search.nice_length = 258;
+    Some(ReconstructionParameters {
+        max_token_count: if info.max_tokens_per_block.is_power_of_two() {
             u16::try_from(info.max_tokens_per_block).ok()?
         } else {
             parameters.max_token_count
-        };
-        canonical_configuration
+        },
+        ..parameters.with_estimated_chain(
+            common,
+            ChainParser::WindowsLazy {
+                max_lazy: 0,
+                short_match_cutoff: parser.short_match_cutoff(),
+            },
+        )
     })
 }
 

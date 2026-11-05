@@ -50,10 +50,16 @@ Feed the plaintext and corrections back into the predictor. It replays every com
 Estimation uses the same state directly through bounded replay in
 `estimator/prediction_scoring.rs`; candidate scoring and stopping remain outside
 the state. The lifecycle is predict, resolve corrections, then accept the actual
-token. Block setup/finish retain one private active context. The state reports
+token. Block setup/finish retain one private active context. Successful Huffman
+setup returns the limit/reset framing decisions directly to the encoder; finishing
+retains the internal context needed for cleanup. The state reports
 safe normalization bounds; typed reconstruction settings select canonical wire values.
+Normalization setup derives eligibility from the state's own active settings.
+Token decoding resolves corrections before one shared accept/frequency update;
+stored and Huffman payloads share the same block-finalization path.
 See [AGENTS.md](AGENTS.md) for contributor constraints.
-Shared option enums live in `parameters.rs`; executable settings live in
+Shared option enums live in `parameters.rs` and own intrinsic policy queries,
+without depending on estimator evidence types. Executable settings live in
 `reconstruction_parameters.rs`. Candidates use those authoritative typed settings;
 compressor profiles, supplementary estimation metadata and family models live
 under `estimator/`. There is no parallel flat executable parameter record.
@@ -62,9 +68,18 @@ evidence, borrowed stream observations, and inferred block/window/insertion sett
 Family models consume it to construct complete executable candidates, rather than
 using provisional reconstruction settings as estimation evidence. Scoring and
 refinement continue to operate directly on `ReconstructionParameters`.
-The generic model constructs a complete candidate rather than applying defaults
-to provisional parameters. MiniZ shares typed candidate construction between
-initial recognition and later refinements.
+Refinement helpers destructure the applicable behavior once and carry its typed
+common/parser settings through candidate construction. Coupled tail and window
+policies are attached after the final chain settings have been assembled, not
+repeatedly through setters on intermediate candidates.
+Refinement proposals form an ordered list of at most eleven applicable candidates.
+Family append helpers attach their model labels; the coordinator retains cross-family
+fallback precedence. Only the first applicable fallback in each refinement role is
+proposed, and scoring still accepts the first perfect candidate in list order.
+The generic model resolves its parser and search settings before wrapping them
+in reconstruction parameters. MiniZ's generic fallback selects its final nice
+length on those typed settings before the same wrapping step. MiniZ shares typed
+candidate construction between initial recognition and later refinements.
 `CompressorProfile` is a payload-free model enum. `EstimationResult` stores that
 typed hypothesis directly alongside the reconstruction settings; neither the
 enum nor family-specific wrappers own a second configuration.

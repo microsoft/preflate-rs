@@ -8,7 +8,7 @@
 //!
 //! Family models interpret observations and propose complete settings. This
 //! coordinator orders and deduplicates hash candidates, assigns the bounded
-//! refinement slots, and keeps each model hypothesis beside its configuration.
+//! refinement order, and keeps each model hypothesis beside its configuration.
 //! Selection provenance protects fingerprinted and prefix-validated choices
 //! while allowing inferred defaults to follow stronger parser evidence.
 
@@ -19,19 +19,14 @@ use super::{
     evidence_policy::ParserEvidencePolicy,
     initial_estimate::InitialEstimate,
     models::{self, chromium, generic, libdeflate, miniz, windows, zlib, zlib_ng},
-    parser_estimator::{InsertionConstraint, ParserInference},
+    parser_estimator::ParserInference,
     preflate_stream_info::PreflateStreamInfo,
 };
 use crate::{
-    hash_algorithm::HashAlgorithm, parameters::DictionaryAddPolicy,
-    reconstruction_parameters::ReconstructionParameters,
+    hash_algorithm::HashAlgorithm,
+    parameters::DictionaryAddPolicy,
+    reconstruction_parameters::{BehaviorSettings, ReconstructionParameters},
 };
-
-impl ReconstructionParameters {
-    pub(crate) fn with_lazy_behavior(self, compatible: bool, observed_min_len: u32) -> Self {
-        models::zlib::project_lazy_behavior(self, compatible, observed_min_len)
-    }
-}
 
 #[derive(Clone, Copy)]
 pub struct ParserContext {
@@ -66,22 +61,26 @@ impl ParameterEstimate {
             EstimateProvenance::Fingerprinted | EstimateProvenance::PrefixValidated => self.profile,
             EstimateProvenance::Inferred(parser) => {
                 let mut parameters = self.profile.reconstruction;
-                if let Some(current) = parameters.chain_parser() {
-                    parameters.replace_chain_parser(models::generic::resolve_matching_policy(
+                if let BehaviorSettings::Chain {
+                    common,
+                    parser: current,
+                } = parameters.behavior
+                {
+                    let resolved = models::generic::resolve_matching_policy(
                         current,
-                        InsertionConstraint::observe(
-                            parameters
-                                .dictionary()
-                                .expect("dictionary candidate")
-                                .insertion,
-                            longest_match,
-                        ),
+                        common.dictionary.insertion,
+                        longest_match,
                         inference,
-                    ));
+                    );
+                    let resolved = zlib::project_lazy_parser(
+                        resolved,
+                        common.dictionary.index,
+                        parser.zlib_compatible,
+                        parser.observed_min_len,
+                    );
+                    parameters = parameters.with_estimated_chain(common, resolved);
                 }
-                inferred_profile(
-                    parameters.with_lazy_behavior(parser.zlib_compatible, parser.observed_min_len),
-                )
+                inferred_profile(parameters)
             }
         }
     }
@@ -167,62 +166,100 @@ pub fn profile_alternatives(
     parameters: ReconstructionParameters,
     info: &PreflateStreamInfo,
     zlib_candidates: &[CandidateEvidence],
-) -> [Option<EstimationResult>; 11] {
-    let [insertion, lazy] = generic::alternatives(parameters);
-    let [windows_greedy, windows_lazy, windows_partial] = windows::alternatives(parameters, info);
-    let [chromium_fast, chromium_lazy] = chromium::alternatives(parameters, info);
-    let insertion = zlib::table_hash_fast(parameters, info, zlib_candidates)
-        .map(|parameters| CompressorProfile::Zlib.with_parameters(parameters))
-        .or_else(|| {
-            insertion.map(|parameters| CompressorProfile::Custom.with_parameters(parameters))
-        });
-    let lazy = zlib::table_hash_slow(parameters, info, zlib_candidates)
+) -> Vec<EstimationResult> {
+    let context = RefinementContext {
+        parameters,
+        info,
+        zlib_candidates,
+    };
+    let mut candidates = Vec::with_capacity(11);
+    miniz::append_alternatives(&context, &mut candidates);
+    windows::append_alternatives(&context, &mut candidates);
+    append_shared_refinements(&context, &mut candidates);
+    chromium::append_alternatives(&context, &mut candidates);
+    append_remaining_refinements(&context, &mut candidates);
+    candidates
+}
+
+pub struct RefinementContext<'a> {
+    pub parameters: ReconstructionParameters,
+    pub info: &'a PreflateStreamInfo,
+    pub zlib_candidates: &'a [CandidateEvidence],
+}
+
+fn append_shared_refinements(
+    context: &RefinementContext<'_>,
+    candidates: &mut Vec<EstimationResult>,
+) {
+    let [insertion, lazy] = generic::alternatives(context.parameters);
+    candidates.extend(insertion_refinement(context, insertion));
+    candidates.extend(parser_refinement(context, lazy));
+}
+
+fn insertion_refinement(
+    context: &RefinementContext<'_>,
+    generic: Option<ReconstructionParameters>,
+) -> Option<EstimationResult> {
+    if let Some(parameters) =
+        zlib::table_hash_fast(context.parameters, context.info, context.zlib_candidates)
+    {
+        return Some(CompressorProfile::Zlib.with_parameters(parameters));
+    }
+    generic.map(|parameters| CompressorProfile::Custom.with_parameters(parameters))
+}
+
+fn parser_refinement(
+    context: &RefinementContext<'_>,
+    generic: Option<ReconstructionParameters>,
+) -> Option<EstimationResult> {
+    let parameters = context.parameters;
+    let info = context.info;
+    if let Some(candidate) = zlib::table_hash_slow(parameters, info, context.zlib_candidates)
         .or_else(|| zlib::noncanonical_insertion(parameters, info))
-        .map(|parameters| CompressorProfile::Zlib.with_parameters(parameters))
-        .or_else(|| {
-            lazy.and_then(|candidate| {
-                if candidate == parameters {
-                    // Reuse the redundant slot when the shorter zlib prefix was ambiguous.
-                    zlib::memory_hash_alternative(parameters, info)
-                        .map(|parameters| CompressorProfile::Zlib.with_parameters(parameters))
-                } else {
-                    Some(CompressorProfile::Custom.with_parameters(candidate))
-                }
-            })
-            .or_else(|| {
-                zlib::filtered_hash(parameters, info)
-                    .map(|parameters| CompressorProfile::Zlib.with_parameters(parameters))
-            })
-        })
-        .or_else(|| {
-            zlib::ambiguous_fast_hash(parameters, info)
-                .map(|parameters| CompressorProfile::Zlib.with_parameters(parameters))
-        })
-        .or_else(|| {
-            generic::primary_only_greedy(parameters, info)
-                .map(|parameters| CompressorProfile::Custom.with_parameters(parameters))
-        });
-    [
-        miniz::shallow_alternative(parameters, info)
-            .map(|parameters| CompressorProfile::MiniZ.with_parameters(parameters)),
-        windows_greedy.map(|parameters| CompressorProfile::Windows.with_parameters(parameters)),
-        windows_lazy.map(|parameters| CompressorProfile::Windows.with_parameters(parameters)),
-        windows_partial.map(|parameters| CompressorProfile::Windows.with_parameters(parameters)),
-        insertion,
-        lazy,
-        chromium_fast.map(|parameters| CompressorProfile::Chromium.with_parameters(parameters)),
-        chromium_lazy.map(|parameters| CompressorProfile::Chromium.with_parameters(parameters)),
-        zlib::flush(parameters, info)
+    {
+        return Some(CompressorProfile::Zlib.with_parameters(candidate));
+    }
+    if let Some(candidate) = generic {
+        if candidate != parameters {
+            return Some(CompressorProfile::Custom.with_parameters(candidate));
+        }
+        // An identical generic proposal leaves room for the memory-hash fallback.
+        if let Some(candidate) = zlib::memory_hash_alternative(parameters, info) {
+            return Some(CompressorProfile::Zlib.with_parameters(candidate));
+        }
+    }
+    if let Some(candidate) = zlib::filtered_hash(parameters, info)
+        .or_else(|| zlib::ambiguous_fast_hash(parameters, info))
+    {
+        return Some(CompressorProfile::Zlib.with_parameters(candidate));
+    }
+    generic::primary_only_greedy(parameters, info)
+        .map(|candidate| CompressorProfile::Custom.with_parameters(candidate))
+}
+
+fn table_hash_refinement(context: &RefinementContext<'_>) -> Option<EstimationResult> {
+    if let Some(parameters) =
+        windows::without_three_byte_references(context.parameters, context.info)
+    {
+        return Some(CompressorProfile::Windows.with_parameters(parameters));
+    }
+    windows::table_hash_alternative(context.parameters, context.info)
+        .map(|parameters| CompressorProfile::Custom.with_parameters(parameters))
+}
+
+fn append_remaining_refinements(
+    context: &RefinementContext<'_>,
+    candidates: &mut Vec<EstimationResult>,
+) {
+    candidates.extend(
+        zlib::flush(context.parameters, context.info)
             .map(|parameters| CompressorProfile::Zlib.with_parameters(parameters)),
-        generic::slow_alternative(parameters)
+    );
+    candidates.extend(
+        generic::slow_alternative(context.parameters)
             .map(|parameters| CompressorProfile::Custom.with_parameters(parameters)),
-        windows::without_three_byte_references(parameters, info)
-            .map(|parameters| CompressorProfile::Windows.with_parameters(parameters))
-            .or_else(|| {
-                windows::table_hash_alternative(parameters, info)
-                    .map(|parameters| CompressorProfile::Custom.with_parameters(parameters))
-            }),
-    ]
+    );
+    candidates.extend(table_hash_refinement(context));
 }
 
 pub fn candidate_hashes(
@@ -302,7 +339,7 @@ mod tests {
     use crate::{
         compressors::{
             windows::HASH as WINDOWS_HASH,
-            zlib::{DEFAULT_HASH, SHORT_MATCH_CUTOFF},
+            zlib::{DEFAULT_HASH, SHORT_MATCH_CUTOFF, memory_hash},
         },
         estimator::{
             depth_estimator::DistancePolicy,
@@ -317,6 +354,185 @@ mod tests {
         reconstruction_parameters::BehaviorSettings,
         token_predictor::tests::zlib_level_1_params,
     };
+
+    impl ReconstructionParameters {
+        pub(crate) fn with_lazy_behavior(
+            mut self,
+            compatible: bool,
+            observed_min_len: u32,
+        ) -> Self {
+            if let BehaviorSettings::Chain { common, parser } = &mut self.behavior {
+                *parser = zlib::project_lazy_parser(
+                    *parser,
+                    common.dictionary.index,
+                    compatible,
+                    observed_min_len,
+                );
+            }
+            self
+        }
+    }
+
+    // Keep the original slot-based selection as an independent ordering/precedence oracle.
+    fn reference_profile_alternatives(
+        parameters: ReconstructionParameters,
+        info: &PreflateStreamInfo,
+        zlib_candidates: &[CandidateEvidence],
+    ) -> Vec<EstimationResult> {
+        let [insertion, lazy] = generic::alternatives(parameters);
+        let [chromium_fast, chromium_lazy] = chromium::alternatives(parameters, info);
+        let insertion = zlib::table_hash_fast(parameters, info, zlib_candidates)
+            .map(|parameters| CompressorProfile::Zlib.with_parameters(parameters))
+            .or_else(|| {
+                insertion.map(|parameters| CompressorProfile::Custom.with_parameters(parameters))
+            });
+        let lazy = zlib::table_hash_slow(parameters, info, zlib_candidates)
+            .or_else(|| zlib::noncanonical_insertion(parameters, info))
+            .map(|parameters| CompressorProfile::Zlib.with_parameters(parameters))
+            .or_else(|| {
+                lazy.and_then(|candidate| {
+                    if candidate == parameters {
+                        zlib::memory_hash_alternative(parameters, info)
+                            .map(|parameters| CompressorProfile::Zlib.with_parameters(parameters))
+                    } else {
+                        Some(CompressorProfile::Custom.with_parameters(candidate))
+                    }
+                })
+                .or_else(|| {
+                    zlib::filtered_hash(parameters, info)
+                        .map(|parameters| CompressorProfile::Zlib.with_parameters(parameters))
+                })
+            })
+            .or_else(|| {
+                zlib::ambiguous_fast_hash(parameters, info)
+                    .map(|parameters| CompressorProfile::Zlib.with_parameters(parameters))
+            })
+            .or_else(|| {
+                generic::primary_only_greedy(parameters, info)
+                    .map(|parameters| CompressorProfile::Custom.with_parameters(parameters))
+            });
+        [
+            miniz::shallow_alternative(parameters, info)
+                .map(|parameters| CompressorProfile::MiniZ.with_parameters(parameters)),
+            windows::shallow_greedy_alternative(parameters, info)
+                .map(|parameters| CompressorProfile::Windows.with_parameters(parameters)),
+            windows::alternative(parameters, info)
+                .map(|parameters| CompressorProfile::Windows.with_parameters(parameters)),
+            windows::partial_slow_alternative(parameters, info)
+                .map(|parameters| CompressorProfile::Windows.with_parameters(parameters)),
+            insertion,
+            lazy,
+            chromium_fast.map(|parameters| CompressorProfile::Chromium.with_parameters(parameters)),
+            chromium_lazy.map(|parameters| CompressorProfile::Chromium.with_parameters(parameters)),
+            zlib::flush(parameters, info)
+                .map(|parameters| CompressorProfile::Zlib.with_parameters(parameters)),
+            generic::slow_alternative(parameters)
+                .map(|parameters| CompressorProfile::Custom.with_parameters(parameters)),
+            windows::without_three_byte_references(parameters, info)
+                .map(|parameters| CompressorProfile::Windows.with_parameters(parameters))
+                .or_else(|| {
+                    windows::table_hash_alternative(parameters, info)
+                        .map(|parameters| CompressorProfile::Custom.with_parameters(parameters))
+                }),
+        ]
+        .into_iter()
+        .flatten()
+        .collect()
+    }
+
+    #[test]
+    fn compact_refinement_list_preserves_candidates_models_and_order() {
+        let evidence =
+            [DEFAULT_HASH, memory_hash(5), memory_hash(8), memory_hash(9)].map(|hash_algorithm| {
+                CandidateEvidence {
+                    hash_algorithm,
+                    required_chain: 3,
+                    distance_policy: DistancePolicy::ZlibWindow,
+                    parser: ParserInference::Unresolved,
+                    shallow_miniz_greedy: false,
+                    minimum_nice_length: 0,
+                }
+            });
+        for hash in [
+            DEFAULT_HASH,
+            WINDOWS_HASH,
+            HashAlgorithm::Libdeflate4,
+            HashAlgorithm::Libdeflate4Fast,
+            HashAlgorithm::Libdeflate4Fast15,
+            HashAlgorithm::Chromium { hash_mask: 0x7fff },
+            HashAlgorithm::ZlibNG,
+            HashAlgorithm::MiniZFast,
+        ] {
+            for insertion in [
+                DictionaryAddPolicy::AddAll,
+                DictionaryAddPolicy::AddFirst(4),
+                DictionaryAddPolicy::AddFirst(32),
+                DictionaryAddPolicy::AddFirst(147),
+                DictionaryAddPolicy::AddFirstAndLast(0),
+            ] {
+                for parser in [
+                    MatchingType::Greedy,
+                    SLOW_PREFLATE_PARSER_SETTINGS[0].parser.matching_type(),
+                    SLOW_PREFLATE_PARSER_SETTINGS[2].parser.matching_type(),
+                    MatchingType::LibdeflateGreedy,
+                    MatchingType::WindowsLazy { max_lazy: 128 },
+                    MatchingType::MiniZ {
+                        max_probes: 32,
+                        greedy: false,
+                    },
+                ] {
+                    for (minimum, distance, tokens) in [
+                        (3, 0, 128),
+                        (3, 4096, 2047),
+                        (3, 4097, 16384),
+                        (3, 8191, 16384),
+                        (4, 0, 16384),
+                        (6, 4096, 16384),
+                    ] {
+                        let mut parameters = zlib_level_1_params();
+                        parameters.set_hash_algorithm(hash);
+                        parameters.set_insertion(insertion);
+                        parameters.set_matching_type(parser);
+                        parameters.max_token_count = 1023;
+                        let mut info = initial_stream_info();
+                        info.min_len = minimum;
+                        info.max_len = 258;
+                        info.max_dist = 32506;
+                        info.max_dist_3_matches = distance;
+                        info.max_tokens_per_block = tokens;
+                        info.reference_count = 128;
+                        info.short_reference_count = if minimum == 3 { 64 } else { 0 };
+                        info.ends_with_final_block = true;
+                        for zlib_candidates in [&[][..], &evidence[..]] {
+                            let actual = profile_alternatives(parameters, &info, zlib_candidates);
+                            assert!(actual.len() <= 11);
+                            assert_eq!(
+                                actual,
+                                reference_profile_alternatives(parameters, &info, zlib_candidates),
+                                "{hash:?} {insertion:?} {parser:?} min={minimum} distance={distance} tokens={tokens}",
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn parser_alternative(
+        parameters: ReconstructionParameters,
+        info: &PreflateStreamInfo,
+    ) -> Option<EstimationResult> {
+        let context = RefinementContext {
+            parameters,
+            info,
+            zlib_candidates: &[],
+        };
+        let result = parser_refinement(&context, generic::alternatives(parameters)[1]);
+        if let Some(result) = result {
+            assert!(profile_alternatives(parameters, info, &[]).contains(&result));
+        }
+        result
+    }
 
     fn stream_info() -> PreflateStreamInfo {
         let mut info = initial_stream_info();
@@ -723,15 +939,14 @@ mod tests {
         };
         let mut info = crate::estimator::preflate_stream_info::tests::extract_preflate_info(&[]);
         info.max_tokens_per_block = 2047;
-        let candidates = profile_alternatives(baseline, &info, &[]);
-        assert_eq!(candidates.len(), 11);
+        let candidate = parser_alternative(baseline, &info);
         assert_eq!(
-            candidates[5],
+            candidate,
             zlib::memory_hash_alternative(baseline, &info)
                 .map(|parameters| CompressorProfile::Zlib.with_parameters(parameters))
         );
         assert!(matches!(
-            candidates[5],
+            candidate,
             Some(EstimationResult {
                 model: CompressorProfile::Zlib,
                 ..
@@ -761,7 +976,7 @@ mod tests {
             },
         ] {
             assert_eq!(
-                profile_alternatives(parameters, &info, &[])[5],
+                parser_alternative(parameters, &info),
                 generic::alternatives(parameters)[1]
                     .map(|parameters| CompressorProfile::Custom.with_parameters(parameters))
             );
@@ -786,22 +1001,21 @@ mod tests {
         info.min_len = 6;
         info.max_tokens_per_block = u32::from(baseline.max_token_count);
         assert_eq!(generic::alternatives(baseline)[1], None);
-        let candidates = profile_alternatives(baseline, &info, &[]);
-        assert_eq!(candidates.len(), 11);
+        let candidate = parser_alternative(baseline, &info);
         assert_eq!(
-            candidates[5],
+            candidate,
             zlib::filtered_hash(baseline, &info)
                 .map(|parameters| CompressorProfile::Zlib.with_parameters(parameters)),
         );
         assert!(matches!(
-            candidates[5],
+            candidate,
             Some(EstimationResult {
                 model: CompressorProfile::Zlib,
                 ..
             })
         ));
         info.min_len = 5;
-        assert_eq!(profile_alternatives(baseline, &info, &[])[5], None);
+        assert_eq!(parser_alternative(baseline, &info), None);
     }
 
     #[test]
@@ -815,10 +1029,9 @@ mod tests {
         let mut info = crate::estimator::preflate_stream_info::tests::extract_preflate_info(&[]);
         info.min_len = 3;
         info.max_tokens_per_block = 12288;
-        let candidates = profile_alternatives(parameters, &info, &[]);
-        assert_eq!(candidates.len(), 11);
+        let candidate = parser_alternative(parameters, &info);
         assert_eq!(
-            candidates[5],
+            candidate,
             zlib::noncanonical_insertion(parameters, &info)
                 .map(|parameters| CompressorProfile::Zlib.with_parameters(parameters))
         );
@@ -1084,8 +1297,10 @@ mod tests {
                         ];
                         assert_eq!(
                             profile_alternatives(parameters, &info, &[])
-                                .map(|candidate| candidate.map(|result| result.reconstruction)),
-                            expected
+                                .into_iter()
+                                .map(|result| result.reconstruction)
+                                .collect::<Vec<_>>(),
+                            expected.into_iter().flatten().collect::<Vec<_>>()
                         );
                     }
                 }
@@ -1109,7 +1324,13 @@ mod tests {
         let mut info = crate::estimator::preflate_stream_info::tests::extract_preflate_info(&[]);
         info.min_len = 3;
         info.max_dist_3_matches = 4096;
-        let candidate = profile_alternatives(parameters, &info, &[])[10].unwrap();
+        let context = RefinementContext {
+            parameters,
+            info: &info,
+            zlib_candidates: &[],
+        };
+        let candidate = table_hash_refinement(&context).unwrap();
+        assert!(profile_alternatives(parameters, &info, &[]).contains(&candidate));
         assert!(matches!(
             candidate,
             EstimationResult {
@@ -1145,17 +1366,22 @@ mod tests {
         let mut info = crate::estimator::preflate_stream_info::tests::extract_preflate_info(&[]);
         info.min_len = 5;
         info.max_tokens_per_block = 16384;
-        let alternatives = profile_alternatives(parameters, &info, &[]);
-        assert_eq!(alternatives.len(), 11);
+        let context = RefinementContext {
+            parameters,
+            info: &info,
+            zlib_candidates: &[],
+        };
+        let candidate = table_hash_refinement(&context).unwrap();
+        assert!(profile_alternatives(parameters, &info, &[]).contains(&candidate));
         assert!(windows::table_hash_alternative(parameters, &info).is_none());
         assert!(matches!(
-            alternatives[10],
-            Some(EstimationResult {
+            candidate,
+            EstimationResult {
                 model: CompressorProfile::Windows,
                 ..
-            })
+            }
         ));
-        assert_eq!(alternatives[10].unwrap().reconstruction, {
+        assert_eq!(candidate.reconstruction, {
             let mut canonical_configuration = parameters;
             canonical_configuration.set_hash_algorithm(crate::compressors::windows::HASH);
             canonical_configuration.set_nice_length(258);

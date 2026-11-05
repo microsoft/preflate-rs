@@ -85,17 +85,21 @@ impl InitialEstimate<'_> {
         max_chain: u32,
     ) -> ReconstructionParameters {
         self.parameters(BehaviorSettings::Chain {
-            common: ChainMatchSettings {
-                dictionary: self.dictionary(),
-                distance: self.distance(),
-                search: ChainSettings {
-                    input_tail: InputTailPolicy::HashMinimum,
-                    budget: SearchBudget { max_chain },
-                    nice_length,
-                },
-            },
+            common: self.chain_match_settings(nice_length, max_chain),
             parser,
         })
+    }
+
+    pub fn chain_match_settings(&self, nice_length: u32, max_chain: u32) -> ChainMatchSettings {
+        ChainMatchSettings {
+            dictionary: self.dictionary(),
+            distance: self.distance(),
+            search: ChainSettings {
+                input_tail: InputTailPolicy::HashMinimum,
+                budget: SearchBudget { max_chain },
+                nice_length,
+            },
+        }
     }
 }
 

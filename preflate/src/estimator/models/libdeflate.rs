@@ -17,16 +17,16 @@ use crate::reconstruction_parameters::ChainParser;
 use crate::{
     compressors::libdeflate::CHAIN_HASH,
     estimator::{
-        complevel_estimator::CandidateEvidence,
-        depth_estimator::DistancePolicy,
-        evidence_policy::ParserEvidencePolicy,
-        initial_estimate::InitialEstimate,
-        parser_estimator::{InsertionConstraint, ParserInference},
-        preflate_stream_info::PreflateStreamInfo,
+        complevel_estimator::CandidateEvidence, depth_estimator::DistancePolicy,
+        evidence_policy::ParserEvidencePolicy, initial_estimate::InitialEstimate,
+        parser_estimator::ParserInference, preflate_stream_info::PreflateStreamInfo,
     },
     hash_algorithm::HashAlgorithm,
     parameters::DictionaryAddPolicy,
-    reconstruction_parameters::ReconstructionParameters,
+    reconstruction_parameters::{
+        BehaviorSettings, ChainMatchSettings, ChainSettings, DictionarySettings, InputTailPolicy,
+        ReconstructionParameters, SearchBudget,
+    },
 };
 
 pub fn chain_add_policy(
@@ -34,10 +34,7 @@ pub fn chain_add_policy(
     add_policy: DictionaryAddPolicy,
     longest_match: u32,
 ) -> DictionaryAddPolicy {
-    if hash == CHAIN_HASH
-        && InsertionConstraint::observe(add_policy, longest_match)
-            == InsertionConstraint::Unresolved
-    {
+    if hash == CHAIN_HASH && add_policy.has_unobserved_first_only_cutoff(longest_match) {
         DictionaryAddPolicy::AddAll
     } else {
         add_policy
@@ -143,15 +140,22 @@ pub fn fingerprint(initial: &InitialEstimate<'_>) -> Option<ReconstructionParame
         ),
         _ => return None,
     };
-    let mut parameters = initial.chain_parameters(parser, nice_length, max_chain);
-    parameters
-        .dictionary_mut()
-        .expect("dictionary candidate")
-        .window_bits = window_bits;
+    let mut common = ChainMatchSettings {
+        dictionary: DictionarySettings {
+            window_bits,
+            ..initial.dictionary()
+        },
+        distance: initial.distance(),
+        search: ChainSettings {
+            budget: SearchBudget { max_chain },
+            nice_length,
+            input_tail: InputTailPolicy::HashMinimum,
+        },
+    };
     if full_window {
-        parameters.behavior.set_full_window(true);
+        common.set_full_window(true);
     }
-    Some(parameters)
+    Some(initial.parameters(BehaviorSettings::Chain { common, parser }))
 }
 
 #[cfg(test)]
