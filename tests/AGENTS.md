@@ -1,5 +1,7 @@
 # tests (integration tests)
 
+These instructions supplement the root [AGENTS.md](../AGENTS.md).
+
 End-to-end round-trip tests against real sample files in `samples/`.
 
 ## What Is Tested
@@ -22,7 +24,8 @@ updating the corresponding tests.
 ## Running
 
 ```bash
-cargo test --all                    # all integration tests
+cargo test --all                    # workspace unit, integration, and doc tests
+cargo test -p preflate-rs-root --test end_to_end  # root integration tests
 cargo test --package preflate-rs    # core tests only
 cargo test --package preflate-container  # container tests only
 cargo test <test_name>              # single test by name
@@ -33,5 +36,8 @@ cargo test -- --nocapture           # show println! output
 
 - Tests live in `tests/end_to_end.rs` at the workspace root.
 - Some tests use `libdeflate-sys` to generate reference compressions on the fly.
+- Native zlib helpers require valid allocation/free callbacks; never create
+  null function pointers for `zalloc`/`zfree`.
+- Use `--release` for benchmarks, corpus replays, and ignored diagnostic exports.
 - Test failures often mean a regression in the estimator or token predictor; check
   those modules first.

@@ -4,6 +4,9 @@
  *  This software incorporates material from third parties. See NOTICE.txt for details.
  *--------------------------------------------------------------------------------------------*/
 
+//! Least-significant-bit-first input for DEFLATE parsing.
+//! Buffers bits across reads and preserves padding and read-ahead state for exact stream boundaries.
+
 use std::io::{BufRead, Error, Result};
 
 use byteorder::ReadBytesExt;
@@ -76,7 +79,7 @@ impl BitReader {
             self.read_ahead -= 1;
         }
 
-        self.bits = self.bits & ((1 << self.bits_left) - 1);
+        self.bits &= (1 << self.bits_left) - 1;
 
         if self.read_ahead > 0 {
             reader.consume(self.read_ahead as usize);

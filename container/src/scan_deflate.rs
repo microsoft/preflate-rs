@@ -1,20 +1,23 @@
-use std::{io::Cursor, ops::Range};
+//! Detection of embedded DEFLATE and image payloads in binary input.
+//! Recognizes wrapper signatures and PNG chunk boundaries, then prepares supported
+//! streams for container encoding.
+
+use std::{
+    io::{Cursor, Read, Seek},
+    ops::Range,
+};
+
+use byteorder::{LittleEndian, ReadBytesExt};
+use lepton_jpeg::{DEFAULT_THREAD_POOL, EnabledFeatures};
+use preflate_rs::{
+    ExitCode, HashAlgorithm, PlainText, PreflateConfig, PreflateStreamChunkResult,
+    PreflateStreamProcessor, Result, err_exit_code,
+};
 
 use crate::{
     PreflateContainerConfig,
     idat_parse::{IdatContents, PngHeader, parse_idat, parse_ihdr},
 };
-
-use lepton_jpeg::{DEFAULT_THREAD_POOL, EnabledFeatures};
-use preflate_rs::{
-    ExitCode, PlainText, PreflateConfig, PreflateStreamChunkResult, PreflateStreamProcessor,
-    TokenPredictorParameters, err_exit_code,
-};
-
-use byteorder::{LittleEndian, ReadBytesExt};
-use std::io::{Read, Seek};
-
-use preflate_rs::Result;
 
 /// The minimum size of a block that is considered for splitting into chunks
 const MIN_BLOCKSIZE: usize = 1024;
@@ -24,33 +27,37 @@ pub struct FoundStream {
     pub corrections: Vec<u8>,
 }
 
+#[allow(
+    clippy::large_enum_variant,
+    reason = "Retain stream state inline without extra per-stream allocations."
+)]
 pub enum FoundStreamType {
     /// Deflate stream
-    DeflateStream(TokenPredictorParameters, PreflateStreamProcessor),
+    DeflateStream(HashAlgorithm, PreflateStreamProcessor),
 
     /// PNG IDAT, which is a concatenated Zlib stream of IDAT chunks. This
     /// is special since the Deflate stream is split into IDAT chunks.
-    IDATDeflate(TokenPredictorParameters, IdatContents, PlainText),
+    IDATDeflate(HashAlgorithm, IdatContents, PlainText),
 
     /// JPEG stream, which is a Lepton JPEG stream.
     JPEGLepton(Vec<u8>),
 }
 
 #[derive(Hash, Eq, PartialEq, Clone, Debug)]
-enum Signature {
+pub(crate) enum Signature {
     Zlib(u8),
     ZipLocalFileHeader,
     Gzip,
     /// PNG IHDR chunk which contains the width, height of the image and color format of the image.
     /// We keep the parsed data around so that we know the dimensions etc of the IDAT when we find it.
-    IHDR,
+    Ihdr,
     /// PNG IDAT, which is a concatenated Zlib stream of IDAT chunks, each of the size given in the Vec.
-    IDAT,
+    Idat,
     /// JPEG start marker
-    JPEG,
+    Jpeg,
 }
 
-fn next_signature(src: &[u8], index: &mut usize) -> Option<Signature> {
+pub(crate) fn next_signature(src: &[u8], index: &mut usize) -> Option<Signature> {
     if src.is_empty() {
         return None;
     }
@@ -72,7 +79,7 @@ fn next_signature(src: &[u8], index: &mut usize) -> Option<Signature> {
 
         if sig & 0x8f20 == 0x0800 {
             // possible zlib signature, check to see if it is % 31
-            if sig % 31 == 0 {
+            if sig.is_multiple_of(31) {
                 *index = i;
                 return Some(Signature::Zlib(0));
             }
@@ -81,9 +88,9 @@ fn next_signature(src: &[u8], index: &mut usize) -> Option<Signature> {
         let s = match sig {
             0x504B => Signature::ZipLocalFileHeader,
             0x1F8B => Signature::Gzip,
-            0x4944 => Signature::IDAT,
-            0x4948 => Signature::IHDR,
-            0xFFD8 => Signature::JPEG,
+            0x4944 => Signature::Idat,
+            0x4948 => Signature::Ihdr,
+            0xFFD8 => Signature::Jpeg,
             _ => continue,
         };
 
@@ -93,6 +100,10 @@ fn next_signature(src: &[u8], index: &mut usize) -> Option<Signature> {
     None
 }
 
+#[allow(
+    clippy::large_enum_variant,
+    reason = "Return discovered stream state without another allocation."
+)]
 pub enum FindStreamResult {
     None,
     Found(Range<usize>, FoundStream),
@@ -113,20 +124,20 @@ pub fn find_compressable_stream(
             Signature::Zlib(_) => {
                 let mut state = PreflateStreamProcessor::new(&config.preflate_config());
 
-                if let Ok(res) = state.decompress(&src[index + 2..]) {
-                    if state.plain_text().len() > MIN_BLOCKSIZE {
-                        index += 2;
-                        return FindStreamResult::Found(
-                            index..index + res.compressed_size,
-                            FoundStream {
-                                chunk_type: FoundStreamType::DeflateStream(
-                                    res.parameters.unwrap(),
-                                    state,
-                                ),
-                                corrections: res.corrections,
-                            },
-                        );
-                    }
+                if let Ok(res) = state.decompress(&src[index + 2..])
+                    && state.plain_text().len() > MIN_BLOCKSIZE
+                {
+                    index += 2;
+                    return FindStreamResult::Found(
+                        index..index + res.compressed_size,
+                        FoundStream {
+                            chunk_type: FoundStreamType::DeflateStream(
+                                res.hash_algorithm().unwrap(),
+                                state,
+                            ),
+                            corrections: res.corrections,
+                        },
+                    );
                 }
             }
 
@@ -136,33 +147,14 @@ pub fn find_compressable_stream(
                     let start = index + cursor.position() as usize;
 
                     let mut state = PreflateStreamProcessor::new(&config.preflate_config());
-                    if let Ok(res) = state.decompress(&src[start..]) {
-                        if state.plain_text().len() > MIN_BLOCKSIZE {
-                            return FindStreamResult::Found(
-                                start..start + res.compressed_size,
-                                FoundStream {
-                                    chunk_type: FoundStreamType::DeflateStream(
-                                        res.parameters.unwrap(),
-                                        state,
-                                    ),
-                                    corrections: res.corrections,
-                                },
-                            );
-                        }
-                    }
-                }
-            }
-
-            Signature::ZipLocalFileHeader => {
-                if let Ok((header_size, res, state)) =
-                    parse_zip_stream(&src[index..], &config.preflate_config())
-                {
-                    if state.plain_text().len() > MIN_BLOCKSIZE {
+                    if let Ok(res) = state.decompress(&src[start..])
+                        && state.plain_text().len() > MIN_BLOCKSIZE
+                    {
                         return FindStreamResult::Found(
-                            index + header_size..index + header_size + res.compressed_size,
+                            start..start + res.compressed_size,
                             FoundStream {
                                 chunk_type: FoundStreamType::DeflateStream(
-                                    res.parameters.unwrap(),
+                                    res.hash_algorithm().unwrap(),
                                     state,
                                 ),
                                 corrections: res.corrections,
@@ -172,7 +164,25 @@ pub fn find_compressable_stream(
                 }
             }
 
-            Signature::IHDR => {
+            Signature::ZipLocalFileHeader => {
+                if let Ok((header_size, res, state)) =
+                    parse_zip_stream(&src[index..], &config.preflate_config())
+                    && state.plain_text().len() > MIN_BLOCKSIZE
+                {
+                    return FindStreamResult::Found(
+                        index + header_size..index + header_size + res.compressed_size,
+                        FoundStream {
+                            chunk_type: FoundStreamType::DeflateStream(
+                                res.hash_algorithm().unwrap(),
+                                state,
+                            ),
+                            corrections: res.corrections,
+                        },
+                    );
+                }
+            }
+
+            Signature::Ihdr => {
                 if index >= 4 {
                     match parse_ihdr(&src[index - 4..]) {
                         Ok(ihdr) => {
@@ -189,7 +199,7 @@ pub fn find_compressable_stream(
                 }
             }
 
-            Signature::IDAT => {
+            Signature::Idat => {
                 if index >= 4 {
                     // idat has the length first, then the "IDAT", so we need to look back 4 bytes
                     // if we find and IDAT
@@ -206,7 +216,7 @@ pub fn find_compressable_stream(
                                         real_start..real_start + idat_contents.total_chunk_length,
                                         FoundStream {
                                             chunk_type: FoundStreamType::IDATDeflate(
-                                                res.parameters.unwrap(),
+                                                res.hash_algorithm().unwrap(),
                                                 idat_contents,
                                                 state.detach_plain_text(),
                                             ),
@@ -230,7 +240,7 @@ pub fn find_compressable_stream(
                     }
                 }
             }
-            Signature::JPEG => {
+            Signature::Jpeg => {
                 let mut output = Vec::new();
 
                 // only required feature is that we can stop reading at the EOI marker
@@ -294,7 +304,7 @@ pub fn find_compressable_stream(
     FindStreamResult::None
 }
 
-fn skip_gzip_header<R: Read>(reader: &mut R) -> Result<()> {
+pub(crate) fn skip_gzip_header<R: Read>(reader: &mut R) -> Result<()> {
     let mut buffer = [0; 10];
     reader.read_exact(&mut buffer)?; // Read past the fixed 10-byte GZIP header
 
@@ -406,154 +416,163 @@ fn parse_zip_stream(
 }
 
 #[cfg(test)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ChunkTypes {
-    DeflateStream,
-    DeflateStreamContinue,
-    IDATDeflate,
-    JPEGLepton,
-}
+mod tests {
+    use super::*;
 
-#[cfg(test)]
-fn find_streams(f: &[u8], chunk_size_limit: usize) -> Vec<(Range<usize>, ChunkTypes)> {
-    let mut offset: usize = 0;
-    let maxlen = f.len();
-    let mut locations_found = Vec::new();
-    while let FindStreamResult::Found(loc, res) = find_compressable_stream(
-        &f[offset..maxlen.min(offset.saturating_add(chunk_size_limit))],
-        &mut None,
-        true,
-        &PreflateContainerConfig::default(),
-    ) {
-        let r = offset + loc.start..offset + loc.end;
-
-        match res.chunk_type {
-            FoundStreamType::DeflateStream(_, mut state) => {
-                println!(
-                    "Deflate stream at {:?}",
-                    offset + loc.start..offset + loc.end
-                );
-
-                let start = offset + loc.start;
-
-                state.shrink_to_dictionary();
-
-                // continue decompressing the compressed stream until we are done
-                offset += loc.end;
-                locations_found.push((start..offset, ChunkTypes::DeflateStream));
-
-                while !state.is_done() {
-                    let res = state.decompress(&f[offset..]).unwrap();
-                    println!("continue at {}..{}", offset, offset + res.compressed_size);
-
-                    locations_found.push((
-                        offset..offset + res.compressed_size,
-                        ChunkTypes::DeflateStreamContinue,
-                    ));
-
-                    offset += res.compressed_size;
-
-                    state.shrink_to_dictionary();
-                }
-            }
-            FoundStreamType::IDATDeflate(_, idat, _) => {
-                println!("IDAT stream at {:?} with chunks: {:?}", r, idat.chunk_sizes);
-                locations_found.push((r, ChunkTypes::IDATDeflate));
-                offset += loc.end;
-            }
-            FoundStreamType::JPEGLepton(_) => {
-                println!("JPEG stream at {:?}", r);
-                locations_found.push((r, ChunkTypes::JPEGLepton));
-                offset += loc.end;
-            }
-        }
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum ChunkTypes {
+        DeflateStream,
+        DeflateStreamContinue,
+        IDATDeflate,
+        JPEGLepton,
     }
 
-    locations_found
-}
+    fn find_streams(f: &[u8], chunk_size_limit: usize) -> Vec<(Range<usize>, ChunkTypes)> {
+        let mut offset: usize = 0;
+        let maxlen = f.len();
+        let mut locations_found = Vec::new();
+        while let FindStreamResult::Found(loc, res) = find_compressable_stream(
+            &f[offset..maxlen.min(offset.saturating_add(chunk_size_limit))],
+            &mut None,
+            true,
+            &PreflateContainerConfig::default(),
+        ) {
+            let r = offset + loc.start..offset + loc.end;
 
-/// tests with a PDF that has some embedded JPEG images and zlib deflate streams.
-#[test]
-fn parse_pdf_with_jpeg() {
-    let r = find_streams(&crate::utils::read_file("embedded-images.pdf"), usize::MAX);
+            match res.chunk_type {
+                FoundStreamType::DeflateStream(_, mut state) => {
+                    println!(
+                        "Deflate stream at {:?}",
+                        offset + loc.start..offset + loc.end
+                    );
 
-    use ChunkTypes::*;
+                    let start = offset + loc.start;
 
-    assert_eq!(
-        r,
-        [
-            (1324..3485, DeflateStream),
-            (7291..16098, JPEGLepton),
-            (16317..22841, JPEGLepton),
-            (23060..31468, JPEGLepton),
-            (32970..33566, DeflateStream),
-            (33919..34492, DeflateStream),
-            (54130..99878, DeflateStream),
-            (99973..135119, DeflateStream),
-            (135214..165568, DeflateStream),
-        ]
-    );
-}
+                    state.shrink_to_dictionary();
 
-/// parses zip file with limit on chunk size, which should mean that we get an inital deflate stream
-/// and then a continuation stream for the rest of the data.
-#[test]
-fn parse_zip() {
-    let r = find_streams(&crate::utils::read_file("pptxplaintext.zip"), 128_000);
+                    // continue decompressing the compressed stream until we are done
+                    offset += loc.end;
+                    locations_found.push((start..offset, ChunkTypes::DeflateStream));
 
-    use ChunkTypes::*;
-    assert_eq!(
-        r,
-        [
-            (79..126087, DeflateStream),
-            (126087..279012, DeflateStreamContinue)
-        ]
-    );
-}
+                    while !state.is_done() {
+                        let res = state.decompress(&f[offset..]).unwrap();
+                        println!("continue at {}..{}", offset, offset + res.compressed_size);
 
-/// should have a single IDAT stream
-#[test]
-fn parse_png() {
-    let f = crate::utils::read_file("treegdi.png");
+                        locations_found.push((
+                            offset..offset + res.compressed_size,
+                            ChunkTypes::DeflateStreamContinue,
+                        ));
 
-    let r = find_streams(&f, usize::MAX);
+                        offset += res.compressed_size;
 
-    use ChunkTypes::*;
-    assert_eq!(r, [(83..171252, IDATDeflate)]);
-}
+                        state.shrink_to_dictionary();
+                    }
+                }
+                FoundStreamType::IDATDeflate(_, idat, _) => {
+                    println!("IDAT stream at {:?} with chunks: {:?}", r, idat.chunk_sizes);
+                    locations_found.push((r, ChunkTypes::IDATDeflate));
+                    offset += loc.end;
+                }
+                FoundStreamType::JPEGLepton(_) => {
+                    println!("JPEG stream at {:?}", r);
+                    locations_found.push((r, ChunkTypes::JPEGLepton));
+                    offset += loc.end;
+                }
+            }
+        }
 
-/// parses a gzipped file, which should have a single deflate stream
-#[test]
-fn parse_gz() {
-    let f = crate::utils::read_file("sample1.bin.gz");
+        locations_found
+    }
 
-    let r = find_streams(&f, usize::MAX);
+    /// tests with a PDF that has some embedded JPEG images and zlib deflate streams.
+    #[test]
+    fn parse_pdf_with_jpeg() {
+        let r = find_streams(
+            &crate::utils::tests::read_file("embedded-images.pdf"),
+            usize::MAX,
+        );
 
-    // gz has 10 byte header, so first byte is at 10
+        use ChunkTypes::*;
 
-    use ChunkTypes::*;
-    assert_eq!(r, [(10..263964, DeflateStream)]);
-}
+        assert_eq!(
+            r,
+            [
+                (1324..3485, DeflateStream),
+                (7291..16098, JPEGLepton),
+                (16317..22841, JPEGLepton),
+                (23060..31468, JPEGLepton),
+                (32970..33566, DeflateStream),
+                (33919..34492, DeflateStream),
+                (54130..99878, DeflateStream),
+                (99973..135119, DeflateStream),
+                (135214..165568, DeflateStream),
+            ]
+        );
+    }
 
-/// parses DOCX file that has multiple deflate streams
-#[test]
-fn parse_docx() {
-    let f = crate::utils::read_file("file-sample_1MB.docx");
+    /// parses zip file with limit on chunk size, which should mean that we get an inital deflate stream
+    /// and then a continuation stream for the rest of the data.
+    #[test]
+    fn parse_zip() {
+        let r = find_streams(
+            &crate::utils::tests::read_file("pptxplaintext.zip"),
+            128_000,
+        );
 
-    let r = find_streams(&f, usize::MAX);
+        use ChunkTypes::*;
+        assert_eq!(
+            r,
+            [
+                (79..126087, DeflateStream),
+                (126087..279012, DeflateStreamContinue)
+            ]
+        );
+    }
 
-    use ChunkTypes::*;
-    assert_eq!(
-        r,
-        [
-            (581..883, DeflateStream),
-            (947..1297, DeflateStream),
-            (1361..2171, DeflateStream),
-            (2239..1018008, DeflateStream),
-            (1018076..1018905, DeflateStream),
-            (1018966..1020070, DeflateStream),
-            (1020133..1024933, DeflateStream),
-            (1025579..1025926, DeflateStream)
-        ]
-    );
+    /// should have a single IDAT stream
+    #[test]
+    fn parse_png() {
+        let f = crate::utils::tests::read_file("treegdi.png");
+
+        let r = find_streams(&f, usize::MAX);
+
+        use ChunkTypes::*;
+        assert_eq!(r, [(83..171252, IDATDeflate)]);
+    }
+
+    /// parses a gzipped file, which should have a single deflate stream
+    #[test]
+    fn parse_gz() {
+        let f = crate::utils::tests::read_file("sample1.bin.gz");
+
+        let r = find_streams(&f, usize::MAX);
+
+        // gz has 10 byte header, so first byte is at 10
+
+        use ChunkTypes::*;
+        assert_eq!(r, [(10..263964, DeflateStream)]);
+    }
+
+    /// parses DOCX file that has multiple deflate streams
+    #[test]
+    fn parse_docx() {
+        let f = crate::utils::tests::read_file("file-sample_1MB.docx");
+
+        let r = find_streams(&f, usize::MAX);
+
+        use ChunkTypes::*;
+        assert_eq!(
+            r,
+            [
+                (581..883, DeflateStream),
+                (947..1297, DeflateStream),
+                (1361..2171, DeflateStream),
+                (2239..1018008, DeflateStream),
+                (1018076..1018905, DeflateStream),
+                (1018966..1020070, DeflateStream),
+                (1020133..1024933, DeflateStream),
+                (1025579..1025926, DeflateStream)
+            ]
+        );
+    }
 }

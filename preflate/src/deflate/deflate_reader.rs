@@ -4,25 +4,23 @@
  *  This software incorporates material from third parties. See NOTICE.txt for details.
  *--------------------------------------------------------------------------------------------*/
 
+//! Incremental parsing of DEFLATE blocks into tokens and plaintext.
+//! Preserves tree encodings and padding for reconstruction while bounding plaintext growth.
+
+use std::io::Cursor;
+
 use byteorder::{LittleEndian, ReadBytesExt};
 
+use super::{
+    bit_reader::{BitReader, ReadBits},
+    deflate_constants,
+    deflate_token::{DeflateTokenBlock, DeflateTokenBlockType},
+    huffman_encoding::{HuffmanOriginalEncoding, HuffmanReader},
+};
 use crate::{
     deflate::deflate_token::{DeflateHuffmanType, DeflateToken, DeflateTokenReference},
     preflate_error::{AddContext, ExitCode, Result, err_exit_code},
     preflate_input::PlainText,
-};
-
-use std::io::Cursor;
-
-use super::{
-    bit_reader::ReadBits,
-    deflate_constants,
-    deflate_token::{DeflateTokenBlock, DeflateTokenBlockType},
-};
-
-use super::{
-    bit_reader::BitReader,
-    huffman_encoding::{HuffmanOriginalEncoding, HuffmanReader},
 };
 
 struct Checkpoint {
@@ -85,6 +83,25 @@ impl DeflateParser {
     }
 
     pub fn parse(&mut self, compressed_data: &[u8]) -> Result<DeflateContents> {
+        self.parse_internal::<false>(compressed_data, usize::MAX, usize::MAX)
+    }
+
+    #[cfg(feature = "diagnostics")]
+    pub fn parse_limited(
+        &mut self,
+        compressed_data: &[u8],
+        max_tokens: usize,
+        max_blocks: usize,
+    ) -> Result<DeflateContents> {
+        self.parse_internal::<true>(compressed_data, max_tokens, max_blocks)
+    }
+
+    fn parse_internal<const LIMITED: bool>(
+        &mut self,
+        compressed_data: &[u8],
+        max_tokens: usize,
+        max_blocks: usize,
+    ) -> Result<DeflateContents> {
         let mut blocks = Vec::new();
 
         let mut cursor = &mut Cursor::new(compressed_data);
@@ -92,7 +109,7 @@ impl DeflateParser {
         // our first checkpoint is right at the beginning so that if we get to the
         // end of the stream before seeing a whole block, we just revert back to
         // the beginning to try again with more data.
-        let mut checkpoint = self.checkpoint(&mut cursor);
+        let mut checkpoint = self.checkpoint(cursor);
 
         let bits_left = self.bit_reader.bits_left();
         if bits_left > 0 {
@@ -103,38 +120,41 @@ impl DeflateParser {
             self.bit_reader.get(8 - bits_left, cursor)?;
         }
 
-        match self.read_blocks_internal(&mut cursor, &mut blocks, &mut checkpoint) {
-            Err(e) => {
-                // reset back to known good checkpoint before returning the error.
-                // this allows callers to try again once they have more data
-                self.bit_reader = checkpoint.bit_reader;
-                self.plain_text.truncate(checkpoint.plain_text);
+        if let Err(e) = self.read_blocks_internal::<LIMITED>(
+            cursor,
+            &mut blocks,
+            &mut checkpoint,
+            max_tokens,
+            max_blocks,
+        ) {
+            // reset back to known good checkpoint before returning the error.
+            // this allows callers to try again once they have more data
+            self.bit_reader = checkpoint.bit_reader;
+            self.plain_text.truncate(checkpoint.plain_text);
 
-                // if nothing was successfully read or we didn't
-                // get the out-of-data error, then just exit
-                // if we get a plain-text too big error, also checkpoint back
-                // to how far we got and the next part of the plaintext will be put in the next chunk
-                if checkpoint.position == 0
-                    || (e.exit_code() != ExitCode::ShortRead
-                        && e.exit_code() != ExitCode::PlainTextLimit)
-                {
-                    return Err(e);
-                }
-
-                // if we had bits left to read, then we didn't compress the entire
-                // block, and save the bits for later
-                let compressed_size = if (self.bit_reader.bits_left() & 0x7) > 0 {
-                    (checkpoint.position - 1) as usize
-                } else {
-                    checkpoint.position as usize
-                };
-
-                return Ok(DeflateContents {
-                    compressed_size,
-                    blocks,
-                });
+            // if nothing was successfully read or we didn't
+            // get the out-of-data error, then just exit
+            // if we get a plain-text too big error, also checkpoint back
+            // to how far we got and the next part of the plaintext will be put in the next chunk
+            if checkpoint.position == 0
+                || (e.exit_code() != ExitCode::ShortRead
+                    && e.exit_code() != ExitCode::PlainTextLimit)
+            {
+                return Err(e);
             }
-            Ok(()) => {}
+
+            // if we had bits left to read, then we didn't compress the entire
+            // block, and save the bits for later
+            let compressed_size = if (self.bit_reader.bits_left() & 0x7) > 0 {
+                (checkpoint.position - 1) as usize
+            } else {
+                checkpoint.position as usize
+            };
+
+            return Ok(DeflateContents {
+                compressed_size,
+                blocks,
+            });
         }
 
         self.bit_reader.undo_read_ahead(&mut cursor);
@@ -145,13 +165,21 @@ impl DeflateParser {
         })
     }
 
-    fn read_blocks_internal(
+    fn read_blocks_internal<const LIMITED: bool>(
         &mut self,
         reader: &mut Cursor<&[u8]>,
         blocks: &mut Vec<DeflateTokenBlock>,
         checkpoint: &mut Checkpoint,
+        mut remaining_tokens: usize,
+        max_blocks: usize,
     ) -> Result<()> {
         loop {
+            if LIMITED && self.state != DeflateParserState::Done && blocks.len() >= max_blocks {
+                return err_exit_code(
+                    ExitCode::InvalidParameter,
+                    "parsed chunk exceeds max_blocks",
+                );
+            }
             let (last, mode) = match self.state {
                 DeflateParserState::StartBlock => (
                     self.bit_reader.get(1, reader)? != 0,
@@ -183,6 +211,13 @@ impl DeflateParser {
                         return err_exit_code(ExitCode::InvalidDeflate, "Block length mismatch");
                     }
 
+                    if self.plain_text.len() + usize::from(len) > self.plain_text_limit {
+                        return err_exit_code(
+                            ExitCode::PlainTextLimit,
+                            "Plain text limit exceeded",
+                        );
+                    }
+
                     let mut uncompressed = Vec::with_capacity(len as usize);
 
                     for _i in 0..len {
@@ -202,13 +237,14 @@ impl DeflateParser {
 
                     let mut tokens = Vec::new();
                     let decoder = HuffmanReader::create_fixed()?;
-                    decode_tokens(
+                    decode_tokens::<LIMITED>(
                         &decoder,
                         &mut tokens,
                         &mut self.plain_text,
                         &mut self.bit_reader,
                         reader,
                         self.plain_text_limit,
+                        remaining_tokens,
                     )
                     .context()?;
 
@@ -231,13 +267,14 @@ impl DeflateParser {
 
                     // don't checkpoint dynamic huffman blocks since they don't get very big
                     // and it adds unnecessary complexity
-                    decode_tokens(
+                    decode_tokens::<LIMITED>(
                         &decoder,
                         &mut tokens,
                         &mut self.plain_text,
                         &mut self.bit_reader,
                         reader,
                         self.plain_text_limit,
+                        remaining_tokens,
                     )
                     .context()?;
 
@@ -251,6 +288,15 @@ impl DeflateParser {
                 }
 
                 _ => return err_exit_code(ExitCode::InvalidDeflate, "Invalid block type"),
+            }
+
+            if LIMITED
+                && let Some(DeflateTokenBlock {
+                    block_type: DeflateTokenBlockType::Huffman { tokens, .. },
+                    ..
+                }) = blocks.last()
+            {
+                remaining_tokens -= tokens.len();
             }
 
             if last {
@@ -269,13 +315,14 @@ impl DeflateParser {
     }
 }
 
-fn decode_tokens(
+fn decode_tokens<const LIMITED: bool>(
     decoder: &HuffmanReader,
     tokens: &mut Vec<DeflateToken>,
     plain_text: &mut PlainText,
     bit_reader: &mut BitReader,
     reader: &mut Cursor<&[u8]>,
     plain_text_limit: usize,
+    max_tokens: usize,
 ) -> Result<()> {
     let mut earliest_reference = i32::MAX;
     let mut cur_pos = 0;
@@ -288,6 +335,12 @@ fn decode_tokens(
         }
 
         let lit_len: u32 = decoder.fetch_next_literal_code(bit_reader, reader)?.into();
+        if LIMITED && lit_len != 256 && tokens.len() >= max_tokens {
+            return err_exit_code(
+                ExitCode::InvalidParameter,
+                "parsed chunk exceeds max_tokens",
+            );
+        }
         if lit_len < 256 {
             plain_text.push(lit_len as u8);
             tokens.push(DeflateToken::Literal(lit_len as u8));
@@ -349,86 +402,89 @@ impl std::fmt::Debug for DeflateContents {
     }
 }
 
-/// parses an entire deflate stream and asserts if it isn't complete
 #[cfg(test)]
-pub fn parse_deflate_whole(compressed_data: &[u8]) -> Result<(DeflateContents, PlainText)> {
-    let mut parse = DeflateParser::new(usize::MAX);
-    let deflate_content = parse.parse(compressed_data)?;
+pub(crate) mod tests {
+    use super::*;
 
-    match parse.state {
-        DeflateParserState::Done => (),
-        _ => panic!("Deflate stream not complete"),
+    /// parses an entire deflate stream and asserts if it isn't complete
+    pub fn parse_deflate_whole(compressed_data: &[u8]) -> Result<(DeflateContents, PlainText)> {
+        let mut parse = DeflateParser::new(usize::MAX);
+        let deflate_content = parse.parse(compressed_data)?;
+
+        match parse.state {
+            DeflateParserState::Done => (),
+            _ => panic!("Deflate stream not complete"),
+        }
+
+        Ok((deflate_content, parse.plain_text))
     }
 
-    Ok((deflate_content, parse.plain_text))
-}
+    /// tests the partial read which allows for blocks to be read incrementally
+    #[test]
+    fn test_partial_read() {
+        test_partial_read_for_buffer(&crate::utils::read_file("compressed_zlib_level1.deflate"));
+    }
 
-/// tests the partial read which allows for blocks to be read incrementally
-#[test]
-fn test_partial_read() {
-    test_partial_read_for_buffer(&crate::utils::read_file("compressed_zlib_level1.deflate"));
-}
+    /// tests the partial read which allows for blocks to be read incrementally
+    #[test]
+    fn test_partial_read_plaintext() {
+        test_partial_read_for_buffer(&crate::utils::read_file("pptxplaintext.deflate"));
+    }
 
-/// tests the partial read which allows for blocks to be read incrementally
-#[test]
-fn test_partial_read_plaintext() {
-    test_partial_read_for_buffer(&crate::utils::read_file("pptxplaintext.deflate"));
-}
+    pub fn test_partial_read_for_buffer(d: &[u8]) {
+        use crate::utils::{assert_block_eq, assert_eq_array};
 
-#[cfg(test)]
-pub fn test_partial_read_for_buffer(d: &[u8]) {
-    use crate::utils::{assert_block_eq, assert_eq_array};
+        let (complete, _plain_text_complete) = parse_deflate_whole(d).unwrap();
 
-    let (complete, _plain_text_complete) = parse_deflate_whole(&d).unwrap();
+        let mut start_offset = 0;
+        let mut end_offset = 1;
+        let mut allblocks = Vec::new();
 
-    let mut start_offset = 0;
-    let mut end_offset = 1;
-    let mut allblocks = Vec::new();
+        let mut deflate_parser = DeflateParser::new(1024 * 1024);
 
-    let mut deflate_parser = DeflateParser::new(1 * 1024 * 1024);
+        while !deflate_parser.is_done() {
+            match deflate_parser.parse(&d[start_offset..end_offset]) {
+                Ok(mut dc) => {
+                    assert!(dc.compressed_size != 0);
+                    println!(
+                        "segment blocks={} plaintext={} comp={}",
+                        dc.blocks.len(),
+                        deflate_parser.plain_text().len(),
+                        dc.compressed_size
+                    );
+                    allblocks.append(&mut dc.blocks);
 
-    while !deflate_parser.is_done() {
-        match deflate_parser.parse(&d[start_offset..end_offset]) {
-            Ok(mut dc) => {
-                assert!(dc.compressed_size != 0);
-                println!(
-                    "segment blocks={} plaintext={} comp={}",
-                    dc.blocks.len(),
-                    deflate_parser.plain_text().len(),
-                    dc.compressed_size
-                );
-                allblocks.append(&mut dc.blocks);
+                    // advance by the amount of data we just read
+                    start_offset += dc.compressed_size;
 
-                // advance by the amount of data we just read
-                start_offset += dc.compressed_size;
+                    // end offset plus a bit
+                    end_offset = (start_offset + 50977).min(d.len());
 
-                // end offset plus a bit
-                end_offset = (start_offset + 50977).min(d.len());
+                    deflate_parser.shrink_to_dictionary();
+                }
+                Err(e) => {
+                    assert!(
+                        end_offset != d.len(),
+                        "shouldnt have reached the end with an error {:?}",
+                        e
+                    );
 
-                deflate_parser.shrink_to_dictionary();
-            }
-            Err(e) => {
-                assert!(
-                    end_offset != d.len(),
-                    "shouldnt have reached the end with an error {:?}",
-                    e
-                );
-
-                assert!(e.exit_code() == ExitCode::ShortRead);
-                // get some more this buffer was readable due to lack of data
-                end_offset = (end_offset + 50997).min(d.len());
+                    assert!(e.exit_code() == ExitCode::ShortRead);
+                    // get some more this buffer was readable due to lack of data
+                    end_offset = (end_offset + 50997).min(d.len());
+                }
             }
         }
+
+        assert_eq!(allblocks.len(), complete.blocks.len());
+        for (actual, expected) in allblocks.iter().zip(&complete.blocks) {
+            assert_block_eq(actual, expected);
+        }
+
+        let reconstruct = crate::deflate::deflate_writer::tests::write_deflate_blocks(&allblocks);
+
+        // data we reconstruct should be the same, minus if there was extra data passed
+        // start_offset that we dedidn't decode
+        assert_eq_array(&reconstruct, &d[..start_offset]);
     }
-
-    assert_eq!(allblocks.len(), complete.blocks.len());
-    for i in 0..allblocks.len() {
-        assert_block_eq(&allblocks[i], &complete.blocks[i]);
-    }
-
-    let reconstruct = crate::deflate::deflate_writer::write_deflate_blocks(&allblocks);
-
-    // data we reconstruct should be the same, minus if there was extra data passed
-    // start_offset that we dedidn't decode
-    assert_eq_array(&reconstruct, &d[..start_offset]);
 }

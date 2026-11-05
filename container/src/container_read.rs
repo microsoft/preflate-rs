@@ -1,10 +1,26 @@
-use byteorder::ReadBytesExt;
-use crc32fast::Hasher as CrcHasher;
-use lepton_jpeg::{DEFAULT_THREAD_POOL, EnabledFeatures};
+//! Decodes framed preflate blocks and restores the original file contents.
+//!
+//! The input state machine accumulates headers and payloads across arbitrary
+//! buffer boundaries. Zstd payloads share one decoder because they are successive
+//! flush segments with common history, not independent compressed frames.
+//!
+//! Decoded payloads are dispatched as literal bytes, DEFLATE reconstruction data,
+//! or image data. Embedded DEFLATE streams retain their reconstruction state
+//! across continuation blocks, and PNG payloads recover their IDAT framing.
+//! A running CRC covers every output byte and is checked against the final
+//! container marker.
 
 use std::{
     collections::VecDeque,
     io::{Cursor, Read, Write},
+};
+
+use byteorder::ReadBytesExt;
+use crc32fast::Hasher as CrcHasher;
+use lepton_jpeg::{DEFAULT_THREAD_POOL, EnabledFeatures};
+use preflate_rs::{
+    AddContext, ExitCode, PreflateError, RecreateStreamProcessor, Result, err_exit_code,
+    recreate_whole_deflate_stream,
 };
 
 use crate::{
@@ -15,11 +31,6 @@ use crate::{
     },
     idat_parse::{IdatContents, recreate_idat},
     scoped_read::ScopedRead,
-};
-
-use preflate_rs::{
-    AddContext, ExitCode, PreflateError, RecreateStreamProcessor, Result, err_exit_code,
-    recreate_whole_deflate_stream,
 };
 
 /// Write wrapper that computes a running CRC-32 of every byte written.
@@ -100,7 +111,7 @@ impl ProcessBuffer for RecreateContainerProcessor {
         input_complete: bool,
         writer: &mut impl Write,
     ) -> Result<()> {
-        if self.input_complete && (input.len() > 0 || !input_complete) {
+        if self.input_complete && (!input.is_empty() || !input_complete) {
             return Err(PreflateError::new(
                 ExitCode::InvalidParameter,
                 "more data provided after input_complete signaled",
@@ -176,7 +187,7 @@ impl RecreateContainerProcessor {
         loop {
             match &mut self.state {
                 DecompressionState::Start => {
-                    if !self.input_complete && self.input.len() == 0 {
+                    if !self.input_complete && self.input.is_empty() {
                         break;
                     }
 
@@ -196,7 +207,7 @@ impl RecreateContainerProcessor {
                 }
                 DecompressionState::StartSegment => {
                     // here's a good place to stop if we run out of input
-                    if self.input.len() == 0 {
+                    if self.input.is_empty() {
                         break;
                     }
 
@@ -292,19 +303,16 @@ impl RecreateContainerProcessor {
                     }
 
                     let lepton_bytes: Vec<u8> = self.input.drain(0..*lepton_length).collect();
-                    match lepton_jpeg::decode_lepton(
+                    if let Err(e) = lepton_jpeg::decode_lepton(
                         &mut Cursor::new(&lepton_bytes),
                         writer,
                         &EnabledFeatures::compat_lepton_vector_read(),
                         &DEFAULT_THREAD_POOL,
                     ) {
-                        Err(e) => {
-                            return Err(PreflateError::new(
-                                ExitCode::InvalidCompressedWrapper,
-                                format!("JPEG Lepton decode failed: {}", e),
-                            ));
-                        }
-                        Ok(_) => {}
+                        return Err(PreflateError::new(
+                            ExitCode::InvalidCompressedWrapper,
+                            format!("JPEG Lepton decode failed: {}", e),
+                        ));
                     }
                     self.state = DecompressionState::StartSegment;
                 }
@@ -512,24 +520,25 @@ fn webp_decompress(
     webp: Vec<u8>,
     header: &crate::idat_parse::PngHeader,
 ) -> Result<Vec<u8>> {
+    #[cfg(not(feature = "webp"))]
+    let _ = (filters, webp, header);
+
     #[cfg(feature = "webp")]
-    match webp::Decoder::new(webp.as_slice()).decode() {
-        Some(result) => {
-            use crate::idat_parse::apply_png_filters_with_types;
-            use std::ops::Deref;
+    if let Some(result) = webp::Decoder::new(webp.as_slice()).decode() {
+        use std::ops::Deref;
 
-            let m = result.deref();
+        use crate::idat_parse::apply_png_filters_with_types;
 
-            return Ok(apply_png_filters_with_types(
-                m,
-                header.width as usize,
-                header.height as usize,
-                if result.is_alpha() { 4 } else { 3 },
-                header.color_type.bytes_per_pixel(),
-                &filters,
-            ));
-        }
-        _ => {}
+        let m = result.deref();
+
+        return Ok(apply_png_filters_with_types(
+            m,
+            header.width as usize,
+            header.height as usize,
+            if result.is_alpha() { 4 } else { 3 },
+            header.color_type.bytes_per_pixel(),
+            filters,
+        ));
     }
-    return err_exit_code(ExitCode::InvalidCompressedWrapper, "Webp decode failed");
+    err_exit_code(ExitCode::InvalidCompressedWrapper, "Webp decode failed")
 }

@@ -4,9 +4,11 @@
  *  This software incorporates material from third parties. See NOTICE.txt for details.
  *--------------------------------------------------------------------------------------------*/
 
-use std::fmt::Display;
-use std::io::ErrorKind;
-use std::num::TryFromIntError;
+//! Defines shared status codes and errors with contextual messages.
+//! Adds operation context to failures while preserving their status codes for
+//! Rust callers and C bindings.
+
+use std::{fmt::Display, io::ErrorKind, num::TryFromIntError};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[non_exhaustive]
@@ -139,7 +141,7 @@ impl PreflateError {
 pub fn err_exit_code<T>(error_code: ExitCode, message: impl AsRef<str>) -> Result<T> {
     let mut e = PreflateError::new(error_code, message.as_ref());
     e.add_context();
-    return Err(e);
+    Err(e)
 }
 
 pub trait AddContext<T> {
@@ -199,9 +201,7 @@ impl From<std::io::Error> for PreflateError {
     #[track_caller]
     fn from(e: std::io::Error) -> Self {
         match e.downcast::<PreflateError>() {
-            Ok(le) => {
-                return le;
-            }
+            Ok(le) => le,
             Err(e) => {
                 let mut e = PreflateError::new(get_io_error_exit_code(&e), e.to_string().as_str());
                 e.add_context();
@@ -214,23 +214,28 @@ impl From<std::io::Error> for PreflateError {
 /// translates PreflateError into std::io::Error, which involves putting into a Box and using Other
 impl From<PreflateError> for std::io::Error {
     fn from(e: PreflateError) -> Self {
-        return std::io::Error::new(std::io::ErrorKind::Other, e);
+        std::io::Error::other(e)
     }
 }
 
-#[test]
-fn test_error_translation() {
-    // test wrapping inside an io error
-    fn my_std_error() -> core::result::Result<(), std::io::Error> {
-        Err(PreflateError::new(ExitCode::AnalyzeFailed, "test error").into())
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_error_translation() {
+        // test wrapping inside an io error
+        fn my_std_error() -> core::result::Result<(), std::io::Error> {
+            Err(PreflateError::new(ExitCode::AnalyzeFailed, "test error").into())
+        }
+
+        let e: PreflateError = my_std_error().unwrap_err().into();
+        assert_eq!(e.exit_code(), ExitCode::AnalyzeFailed);
+        assert_eq!(e.message(), "test error");
+
+        // an IO error should be translated into an OsError
+        let e: PreflateError =
+            std::io::Error::new(std::io::ErrorKind::NotFound, "file not found").into();
+        assert_eq!(e.exit_code(), ExitCode::OsError);
     }
-
-    let e: PreflateError = my_std_error().unwrap_err().into();
-    assert_eq!(e.exit_code(), ExitCode::AnalyzeFailed);
-    assert_eq!(e.message(), "test error");
-
-    // an IO error should be translated into an OsError
-    let e: PreflateError =
-        std::io::Error::new(std::io::ErrorKind::NotFound, "file not found").into();
-    assert_eq!(e.exit_code(), ExitCode::OsError);
 }

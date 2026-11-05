@@ -1,6 +1,21 @@
-use crc32fast::Hasher as CrcHasher;
+//! Encodes files as framed literal, DEFLATE, and image blocks.
+//!
+//! Scanning separates ordinary bytes from embedded streams. DEFLATE payloads
+//! become plaintext plus reconstruction data; surrounding bytes remain literal
+//! payloads, and PNG/JPEG data can use specialized encodings.
+//!
+//! One persistent Zstd encoder compresses successive payloads as flush segments,
+//! preserving history between blocks. Outer type/length headers and Lepton/WebP
+//! payloads are written outside that Zstd stream.
+//!
+//! The state machine retains partial input and active DEFLATE processors between
+//! calls, allowing large embedded streams to span continuation blocks rather
+//! than requiring the entire stream to fit in one input buffer.
 
 use std::io::Write;
+
+use crc32fast::Hasher as CrcHasher;
+use preflate_rs::{AddContext, ExitCode, PreflateError, PreflateStreamProcessor, Result};
 
 use crate::{
     container_common::{
@@ -11,8 +26,6 @@ use crate::{
     idat_parse::{IdatContents, PngHeader},
     scan_deflate::{FindStreamResult, FoundStream, FoundStreamType, find_compressable_stream},
 };
-
-use preflate_rs::{AddContext, ExitCode, PreflateError, PreflateStreamProcessor, Result};
 
 /// used to measure the length of the output without storing it
 pub(crate) struct MeasureWriteSink {
@@ -31,6 +44,10 @@ impl Write for MeasureWriteSink {
 }
 
 #[derive(Debug)]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "Retain stream state inline without extra per-stream allocations."
+)]
 pub(crate) enum ChunkParseState {
     Start,
     /// we are looking for a deflate stream or PNG chunk. The data of the PNG file
@@ -51,11 +68,11 @@ pub(crate) fn write_chunk_block_v2(
     stats: &mut PreflateStats,
 ) -> Result<(usize, Option<PreflateStreamProcessor>)> {
     match chunk.chunk_type {
-        FoundStreamType::DeflateStream(parameters, state) => {
+        FoundStreamType::DeflateStream(hash_algorithm, state) => {
             write_varint(encoder, chunk.corrections.len() as u32)?;
             write_varint(encoder, state.plain_text().text().len() as u32)?;
             encoder.write_all(&chunk.corrections)?;
-            encoder.write_all(&state.plain_text().text())?;
+            encoder.write_all(state.plain_text().text())?;
 
             let compressed_size = emit_compressed_block(
                 BLOCK_COMPRESSION_ZSTD | BLOCK_TYPE_DEFLATE,
@@ -65,7 +82,7 @@ pub(crate) fn write_chunk_block_v2(
 
             stats.overhead_bytes += chunk.corrections.len() as u64;
             stats.uncompressed_size += state.plain_text().len() as u64;
-            stats.hash_algorithm = parameters.hash_algorithm;
+            stats.hash_algorithm = hash_algorithm;
 
             if !state.is_done() {
                 return Ok((compressed_size, Some(state)));
@@ -73,10 +90,10 @@ pub(crate) fn write_chunk_block_v2(
             Ok((compressed_size, None))
         }
 
-        FoundStreamType::IDATDeflate(parameters, mut idat, plain_text) => {
+        FoundStreamType::IDATDeflate(hash_algorithm, mut idat, plain_text) => {
             log::debug!(
-                "IDATDeflate param {:?} corrections {}",
-                parameters,
+                "IDATDeflate hash {:?} corrections {}",
+                hash_algorithm,
                 chunk.corrections.len()
             );
 
@@ -91,7 +108,7 @@ pub(crate) fn write_chunk_block_v2(
                 writer.write_all(payload)?;
 
                 stats.uncompressed_size += plain_text.len() as u64;
-                stats.hash_algorithm = parameters.hash_algorithm;
+                stats.hash_algorithm = hash_algorithm;
                 stats.overhead_bytes += chunk.corrections.len() as u64;
 
                 Ok((payload.len(), None))
@@ -112,7 +129,7 @@ pub(crate) fn write_chunk_block_v2(
                 )?;
 
                 stats.uncompressed_size += plain_text.len() as u64;
-                stats.hash_algorithm = parameters.hash_algorithm;
+                stats.hash_algorithm = hash_algorithm;
                 stats.overhead_bytes += chunk.corrections.len() as u64;
 
                 Ok((compressed_size, None))
@@ -198,14 +215,14 @@ impl ProcessBuffer for PreflateContainerProcessor {
     ) -> Result<()> {
         use crate::container_common::COMPRESSED_WRAPPER_VERSION_3;
 
-        if self.input_complete && (input.len() > 0 || !input_complete) {
+        if self.input_complete && (!input.is_empty() || !input_complete) {
             return Err(PreflateError::new(
                 ExitCode::InvalidParameter,
                 "more data provided after input_complete signaled",
             ));
         }
 
-        if input.len() > 0 {
+        if !input.is_empty() {
             self.compression_stats.deflate_compressed_size += input.len() as u64;
             self.input_crc.update(input);
             self.content.extend_from_slice(input);
@@ -359,7 +376,7 @@ impl ProcessBuffer for PreflateContainerProcessor {
                             write_varint(encoder, res.corrections.len() as u32)?;
                             write_varint(encoder, state.plain_text().len() as u32)?;
                             encoder.write_all(&res.corrections)?;
-                            encoder.write_all(&state.plain_text().text())?;
+                            encoder.write_all(state.plain_text().text())?;
                             let sz = emit_compressed_block(
                                 BLOCK_COMPRESSION_ZSTD | BLOCK_TYPE_DEFLATE_CONTINUE,
                                 encoder,
@@ -389,7 +406,7 @@ impl ProcessBuffer for PreflateContainerProcessor {
         if input_complete && !self.input_complete {
             self.input_complete = true;
 
-            if self.content.len() > 0 {
+            if !self.content.is_empty() {
                 let encoder = self.encoder.as_mut().unwrap();
                 write_varint(encoder, self.content.len() as u32)?;
                 encoder.write_all(&self.content)?;
@@ -428,7 +445,7 @@ impl ProcessBuffer for PreflateContainerProcessor {
     }
 }
 
-/// Flushes the encoder, writes [block_type][varint(compressed_size)][compressed_bytes] to
+/// Flushes the encoder and writes `[block_type][varint(compressed_size)][compressed_bytes]` to
 /// destination, clears the encoder's inner buffer, and returns the compressed byte count.
 fn emit_compressed_block(
     block_type: u8,
@@ -451,13 +468,19 @@ fn webp_compress(
     corrections: &[u8],
     idat: &IdatContents,
 ) -> Result<()> {
-    use crate::container_common::BLOCK_TYPE_PNG;
     log::debug!("{:?}", idat);
+
+    #[cfg(not(feature = "webp"))]
+    let _ = (result, plain_text, corrections);
 
     #[cfg(feature = "webp")]
     if let Some(png_header) = idat.png_header {
-        use crate::idat_parse::{PngColorType, undo_png_filters};
         use std::ops::Deref;
+
+        use crate::{
+            container_common::BLOCK_TYPE_PNG,
+            idat_parse::{PngColorType, undo_png_filters},
+        };
 
         let bbp = png_header.color_type.bytes_per_pixel();
         let w = png_header.width as usize;
@@ -478,8 +501,8 @@ fn webp_compress(
             let enc = webp::Encoder::new(
                 &bitmap,
                 match png_header.color_type {
-                    PngColorType::RGB => webp::PixelLayout::Rgb,
-                    PngColorType::RGBA => webp::PixelLayout::Rgba,
+                    PngColorType::Rgb => webp::PixelLayout::Rgb,
+                    PngColorType::Rgba => webp::PixelLayout::Rgba,
                 },
                 png_header.width,
                 png_header.height,
@@ -520,15 +543,15 @@ fn webp_compress(
             idat.write_to_bytestream(result)?;
             result.write_all(&filters)?;
 
-            result.write_all(&corrections)?;
+            result.write_all(corrections)?;
             result.write_all(comp.deref())?;
 
             return Ok(());
         }
     }
 
-    return preflate_rs::err_exit_code(
+    preflate_rs::err_exit_code(
         ExitCode::InvalidCompressedWrapper,
         "Webp compression not supported",
-    );
+    )
 }

@@ -1,7 +1,5 @@
-use clap::Parser;
-use cpu_time::ProcessTime;
-use env_logger::Builder;
-use log::LevelFilter;
+//! Command-line compression and round-trip verification of files and directories.
+//! Reports container sizes, reconstruction overhead, and optional Zstd-only baselines.
 
 use std::{
     fs,
@@ -9,6 +7,10 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use clap::Parser;
+use cpu_time::ProcessTime;
+use env_logger::Builder;
+use log::LevelFilter;
 use preflate_container::{
     PreflateContainerConfig, PreflateContainerProcessor, ProcessBuffer, RecreateContainerProcessor,
 };
@@ -121,9 +123,9 @@ fn main() {
             compress_start.elapsed()
         );
 
-        totalseen += stats.deflate_compressed_size as u64;
-        totalbaseline += stats.zstd_baseline_size as u64;
-        totalzstd += stats.zstd_compressed_size as u64;
+        totalseen += stats.deflate_compressed_size;
+        totalbaseline += stats.zstd_baseline_size;
+        totalzstd += stats.zstd_compressed_size;
 
         println!(
             "total seen ratio {totalzstd}:{totalbaseline}:{totalseen} {:.1}",

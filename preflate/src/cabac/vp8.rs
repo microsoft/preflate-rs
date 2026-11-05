@@ -1,6 +1,12 @@
-//! Based on the Google VP8 codec as used by the JPEG Lepton compressor.
+//! VP8-style binary arithmetic encoder, decoder, and adaptive probability contexts.
 //!
-//! It uses a 16 bit state for the probability of the next bit being 0.
+//! The coder encodes bits by subdividing an arithmetic-coding interval according
+//! to a context's estimated probability. Each context holds counts for zero and one;
+//! a lookup table converts those counts into the probability used by the coder.
+//!
+//! Encoding and decoding update contexts after the same bits, keeping their
+//! probability estimates synchronized. Range normalization and buffered byte
+//! handling turn those decisions into the correction bitstream.
 /*
  *  Copyright (c) 2010 The WebM project authors. All Rights Reserved.
  *
@@ -71,7 +77,7 @@ const fn problookup() -> [NonZeroU8; 65536] {
         i += 1;
     }
 
-    return retval;
+    retval
 }
 
 static PROB_LOOKUP: [NonZeroU8; 65536] = problookup();
@@ -170,7 +176,7 @@ impl<R: Read> CabacReader<VP8Context> for VP8Reader<R> {
         self.value = tmp_value << shift;
         self.range = tmp_range << shift;
         self.count = tmp_count - shift;
-        return Ok(bit);
+        Ok(bit)
     }
 
     #[inline(always)]
@@ -213,7 +219,7 @@ impl<R: Read> CabacReader<VP8Context> for VP8Reader<R> {
         self.value = tmp_value << shift;
         self.range = tmp_range << shift;
         self.count = tmp_count - shift;
-        return Ok(bit);
+        Ok(bit)
     }
 }
 
@@ -231,7 +237,7 @@ impl<R: Read> VP8Reader<R> {
         let mut dummy_branch = VP8Context::new();
         let _ = r.get(&mut dummy_branch)?; // marker bit
 
-        return Ok(r);
+        Ok(r)
     }
 
     #[cold]
@@ -256,7 +262,7 @@ impl<R: Read> VP8Reader<R> {
             *tmp_count += BITS_IN_BYTE;
         }
 
-        return Ok(());
+        Ok(())
     }
 }
 
@@ -276,7 +282,7 @@ impl<W: Write> VP8Writer<W> {
             low_value: 0,
             range: 255,
             bits_left: -24,
-            writer: writer,
+            writer,
             num_buffered_bytes: 0,
             buffered_byte: 0,
         };
@@ -430,123 +436,129 @@ impl<W: Write> CabacWriter<VP8Context> for VP8Writer<W> {
     }
 }
 
-#[test]
-fn test_all_contexts() {
-    use std::io::Cursor;
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    let mut contexts = Vec::new();
-    for i in 0..=65535 {
-        contexts.push(VP8Context { counts: i });
-    }
+    #[test]
+    fn test_all_contexts() {
+        use std::io::Cursor;
 
-    let mut buffer: Vec<_> = Vec::new();
-    let mut writer = VP8Writer::new(&mut buffer).unwrap();
-    for i in 0..=65535 {
-        writer.put(true, &mut contexts[i]).unwrap();
-        writer.put(false, &mut contexts[i]).unwrap();
-        writer.put_bypass(true).unwrap();
-        writer.put_bypass(false).unwrap();
-    }
-    writer.finish().unwrap();
-
-    for i in 0..=65535 {
-        contexts[i] = VP8Context { counts: i as u16 };
-    }
-
-    let mut reader = VP8Reader::new(Cursor::new(&buffer[..])).unwrap();
-    for i in 0..=65535 {
-        assert_eq!(reader.get(&mut contexts[i]).unwrap(), true, "i = {}", i);
-        assert_eq!(reader.get(&mut contexts[i]).unwrap(), false, "i = {}", i);
-        assert_eq!(reader.get_bypass().unwrap(), true, "i = {}", i);
-        assert_eq!(reader.get_bypass().unwrap(), false, "i = {}", i);
-    }
-}
-
-/// run through all the possible combinations of counts and ensure that the probability is the same
-#[test]
-fn test_all_probabilities() {
-    /// This is copied from the C++ implementation to ensure that the behavior is the same
-    struct OriginalImplForTest {
-        counts: [u8; 2],
-        probability: u8,
-    }
-
-    impl OriginalImplForTest {
-        fn true_count(&self) -> u32 {
-            return self.counts[1] as u32;
-        }
-        fn false_count(&self) -> u32 {
-            return self.counts[0] as u32;
+        let mut contexts = Vec::new();
+        for i in 0..=65535 {
+            contexts.push(VP8Context { counts: i });
         }
 
-        fn record_obs_and_update(&mut self, obs: bool) {
-            let fcount = self.counts[0] as u32;
-            let tcount = self.counts[1] as u32;
+        let mut buffer: Vec<_> = Vec::new();
+        let mut writer = VP8Writer::new(&mut buffer).unwrap();
+        for context in &mut contexts {
+            writer.put(true, context).unwrap();
+            writer.put(false, context).unwrap();
+            writer.put_bypass(true).unwrap();
+            writer.put_bypass(false).unwrap();
+        }
+        writer.finish().unwrap();
 
-            let overflow = self.counts[obs as usize] == 0xff;
+        for (i, context) in contexts.iter_mut().enumerate() {
+            *context = VP8Context { counts: i as u16 };
+        }
 
-            if overflow {
-                // check less than 512
-                let neverseen = self.counts[!obs as usize] == 1;
-                if neverseen {
-                    self.counts[obs as usize] = 0xff;
-                    self.probability = if obs { 0 } else { 255 };
+        let mut reader = VP8Reader::new(Cursor::new(&buffer[..])).unwrap();
+        for (i, context) in contexts.iter_mut().enumerate() {
+            assert!(reader.get(context).unwrap(), "i = {}", i);
+            assert!(!reader.get(context).unwrap(), "i = {}", i);
+            assert!(reader.get_bypass().unwrap(), "i = {}", i);
+            assert!(!reader.get_bypass().unwrap(), "i = {}", i);
+        }
+    }
+
+    /// run through all the possible combinations of counts and ensure that the probability is the same
+    #[test]
+    fn test_all_probabilities() {
+        /// This is copied from the C++ implementation to ensure that the behavior is the same
+        struct OriginalImplForTest {
+            counts: [u8; 2],
+            probability: u8,
+        }
+
+        impl OriginalImplForTest {
+            fn true_count(&self) -> u32 {
+                self.counts[1] as u32
+            }
+            fn false_count(&self) -> u32 {
+                self.counts[0] as u32
+            }
+
+            fn record_obs_and_update(&mut self, obs: bool) {
+                let fcount = self.counts[0] as u32;
+                let tcount = self.counts[1] as u32;
+
+                let overflow = self.counts[obs as usize] == 0xff;
+
+                if overflow {
+                    // check less than 512
+                    let neverseen = self.counts[!obs as usize] == 1;
+                    if neverseen {
+                        self.counts[obs as usize] = 0xff;
+                        self.probability = if obs { 0 } else { 255 };
+                    } else {
+                        self.counts[0] = ((1 + fcount) >> 1) as u8;
+                        self.counts[1] = ((1 + tcount) >> 1) as u8;
+                        self.counts[obs as usize] = 129;
+                        self.probability =
+                            self.optimize(self.counts[0] as u32 + self.counts[1] as u32);
+                    }
                 } else {
-                    self.counts[0] = ((1 + fcount) >> 1) as u8;
-                    self.counts[1] = ((1 + tcount) >> 1) as u8;
-                    self.counts[obs as usize] = 129;
-                    self.probability = self.optimize(self.counts[0] as u32 + self.counts[1] as u32);
+                    self.counts[obs as usize] += 1;
+                    self.probability = self.optimize(fcount + tcount + 1);
                 }
-            } else {
-                self.counts[obs as usize] += 1;
-                self.probability = self.optimize(fcount + tcount + 1);
+            }
+
+            fn optimize(&self, sum: u32) -> u8 {
+                let prob = (self.false_count() << 8) / sum;
+
+                prob as u8
             }
         }
 
-        fn optimize(&self, sum: u32) -> u8 {
-            let prob = (self.false_count() << 8) / sum;
+        for i in 0u16..=65535 {
+            let mut old_f = OriginalImplForTest {
+                counts: [(i >> 8) as u8, i as u8],
+                probability: 0,
+            };
 
-            prob as u8
-        }
-    }
+            if old_f.true_count() == 0 || old_f.false_count() == 0 {
+                // starting counts can't be zero (we use 0 as an internal special value for the new implementation for the edge case of many trues in a row)
+                continue;
+            }
 
-    for i in 0u16..=65535 {
-        let mut old_f = OriginalImplForTest {
-            counts: [(i >> 8) as u8, i as u8],
-            probability: 0,
-        };
+            let mut new_f = VP8Context { counts: i };
 
-        if old_f.true_count() == 0 || old_f.false_count() == 0 {
-            // starting counts can't be zero (we use 0 as an internal special value for the new implementation for the edge case of many trues in a row)
-            continue;
-        }
+            for _k in 0..10 {
+                old_f.record_obs_and_update(false);
+                new_f = new_f.record_and_update_bit(false);
+                assert_eq!(old_f.probability, new_f.get_probability().get());
+            }
 
-        let mut new_f = VP8Context { counts: i };
+            let mut old_t = OriginalImplForTest {
+                counts: [(i >> 8) as u8, i as u8],
+                probability: 0,
+            };
+            let mut new_t = VP8Context { counts: i };
 
-        for _k in 0..10 {
-            old_f.record_obs_and_update(false);
-            new_f = new_f.record_and_update_bit(false);
-            assert_eq!(old_f.probability, new_f.get_probability().get());
-        }
+            for _k in 0..10 {
+                old_t.record_obs_and_update(true);
+                new_t = new_t.record_and_update_bit(true);
 
-        let mut old_t = OriginalImplForTest {
-            counts: [(i >> 8) as u8, i as u8],
-            probability: 0,
-        };
-        let mut new_t = VP8Context { counts: i };
-
-        for _k in 0..10 {
-            old_t.record_obs_and_update(true);
-            new_t = new_t.record_and_update_bit(true);
-
-            if old_t.probability == 0 {
-                // there is a change of behavior here compared to the C++ version,
-                // but because of the way split is calculated it doesn't result in an
-                // overall change in the way that encoding is done, but it does simplify
-                // one of the corner cases.
-                assert_eq!(new_t.get_probability(), NonZeroU8::new(1).unwrap());
-            } else {
-                assert_eq!(old_t.probability, new_t.get_probability().get());
+                if old_t.probability == 0 {
+                    // there is a change of behavior here compared to the C++ version,
+                    // but because of the way split is calculated it doesn't result in an
+                    // overall change in the way that encoding is done, but it does simplify
+                    // one of the corner cases.
+                    assert_eq!(new_t.get_probability(), NonZeroU8::new(1).unwrap());
+                } else {
+                    assert_eq!(old_t.probability, new_t.get_probability().get());
+                }
             }
         }
     }

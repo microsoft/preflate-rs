@@ -4,19 +4,19 @@
  *  This software incorporates material from third parties. See NOTICE.txt for details.
  *--------------------------------------------------------------------------------------------*/
 
-use crate::preflate_error::Result;
+//! Reconstruction of DEFLATE bytes from tokenized blocks.
+//! Writes stored, fixed-tree, and dynamic-tree blocks using their preserved encoding details.
 
-use super::deflate_token::{DeflateHuffmanType, DeflateTokenBlockType};
 use super::{
+    bit_writer::BitWriter,
     deflate_constants::{
         DIST_BASE_TABLE, DIST_EXTRA_TABLE, LENGTH_BASE_TABLE, LENGTH_EXTRA_TABLE, MIN_MATCH,
         NONLEN_CODE_COUNT, quantize_distance, quantize_length,
     },
-    deflate_token::{DeflateToken, DeflateTokenBlock},
+    deflate_token::{DeflateHuffmanType, DeflateToken, DeflateTokenBlock, DeflateTokenBlockType},
+    huffman_encoding::HuffmanWriter,
 };
-
-use super::bit_writer::BitWriter;
-use super::huffman_encoding::HuffmanWriter;
+use crate::preflate_error::Result;
 
 /// Takes a tokenized block and writes it to the original compressed output.
 pub struct DeflateWriter {
@@ -65,7 +65,7 @@ impl DeflateWriter {
                 self.output
                     .extend_from_slice(&(!uncompressed.len() as u16).to_le_bytes());
 
-                self.output.extend_from_slice(&uncompressed);
+                self.output.extend_from_slice(uncompressed);
             }
             DeflateTokenBlockType::Huffman {
                 tokens,
@@ -86,7 +86,7 @@ impl DeflateWriter {
 
                         let huffman_writer = HuffmanWriter::start_dynamic_huffman_table(
                             &mut self.bitwriter,
-                            &huffman_encoding,
+                            huffman_encoding,
                             &mut self.output,
                         )?;
 
@@ -157,96 +157,100 @@ impl DeflateWriter {
     }
 }
 
-/// Create a set of blocks and read them back to see if they are identical
-#[test]
-fn roundtrip_deflate_writer() {
-    use super::deflate_reader::parse_deflate_whole;
-
-    let mut w = DeflateWriter::new();
-
-    let blocks = [
-        DeflateTokenBlock {
-            block_type: DeflateTokenBlockType::Huffman {
-                tokens: vec![
-                    DeflateToken::Literal(0),
-                    DeflateToken::Literal(2),
-                    DeflateToken::Literal(3),
-                ],
-                huffman_type: DeflateHuffmanType::Static,
-            },
-            last: false,
-        },
-        DeflateTokenBlock {
-            block_type: DeflateTokenBlockType::Huffman {
-                tokens: vec![
-                    DeflateToken::Literal(0),
-                    DeflateToken::Literal(2),
-                    DeflateToken::Literal(3),
-                ],
-                huffman_type: DeflateHuffmanType::Static,
-            },
-            last: false,
-        },
-        DeflateTokenBlock {
-            block_type: DeflateTokenBlockType::Stored {
-                uncompressed: vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
-            },
-            last: false,
-        },
-        DeflateTokenBlock {
-            block_type: DeflateTokenBlockType::Huffman {
-                tokens: vec![
-                    DeflateToken::Literal(0),
-                    DeflateToken::Literal(1),
-                    DeflateToken::new_ref(100, 1),
-                    DeflateToken::new_ref(258, 1),
-                    DeflateToken::Literal(3),
-                ],
-                huffman_type: DeflateHuffmanType::Static,
-            },
-            last: true,
-        },
-    ];
-
-    for i in 0..blocks.len() {
-        w.encode_block(&blocks[i]).unwrap();
-    }
-    w.flush();
-
-    let output = w.detach_output();
-
-    let (r, _) = parse_deflate_whole(&output).unwrap();
-
-    assert_eq!(blocks.len(), r.blocks.len());
-    for i in 0..blocks.len() {
-        assert_eq!(blocks[i], r.blocks[i], "block {}", i);
-    }
-}
-
-/// rountrips all deflate files in the sample directory
-#[test]
-fn roundtrip_full_file() {
-    crate::utils::test_on_all_deflate_files(|buffer| {
-        let (r, _plain_text) = super::deflate_reader::parse_deflate_whole(&buffer).unwrap();
-
-        let output = write_deflate_blocks(&r.blocks);
-
-        if r.compressed_size != output.len() || buffer[0..r.compressed_size] != output[..] {
-            println!("mismatch");
-        }
-        //assert_eq!(buffer.len(), output.len());
-        //assert_eq!(buffer, output);
-    });
-}
-
 #[cfg(test)]
-pub fn write_deflate_blocks(blocks: &[DeflateTokenBlock]) -> Vec<u8> {
-    let mut w = DeflateWriter::new();
-    for i in 0..blocks.len() {
-        w.encode_block(&blocks[i]).unwrap();
-    }
-    w.flush();
+pub(crate) mod tests {
+    use super::*;
 
-    let output = w.detach_output();
-    output
+    /// Create a set of blocks and read them back to see if they are identical
+    #[test]
+    fn roundtrip_deflate_writer() {
+        use super::super::deflate_reader::tests::parse_deflate_whole;
+
+        let mut w = DeflateWriter::new();
+
+        let blocks = [
+            DeflateTokenBlock {
+                block_type: DeflateTokenBlockType::Huffman {
+                    tokens: vec![
+                        DeflateToken::Literal(0),
+                        DeflateToken::Literal(2),
+                        DeflateToken::Literal(3),
+                    ],
+                    huffman_type: DeflateHuffmanType::Static,
+                },
+                last: false,
+            },
+            DeflateTokenBlock {
+                block_type: DeflateTokenBlockType::Huffman {
+                    tokens: vec![
+                        DeflateToken::Literal(0),
+                        DeflateToken::Literal(2),
+                        DeflateToken::Literal(3),
+                    ],
+                    huffman_type: DeflateHuffmanType::Static,
+                },
+                last: false,
+            },
+            DeflateTokenBlock {
+                block_type: DeflateTokenBlockType::Stored {
+                    uncompressed: vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+                },
+                last: false,
+            },
+            DeflateTokenBlock {
+                block_type: DeflateTokenBlockType::Huffman {
+                    tokens: vec![
+                        DeflateToken::Literal(0),
+                        DeflateToken::Literal(1),
+                        DeflateToken::new_ref(100, 1),
+                        DeflateToken::new_ref(258, 1),
+                        DeflateToken::Literal(3),
+                    ],
+                    huffman_type: DeflateHuffmanType::Static,
+                },
+                last: true,
+            },
+        ];
+
+        for block in &blocks {
+            w.encode_block(block).unwrap();
+        }
+        w.flush();
+
+        let output = w.detach_output();
+
+        let (r, _) = parse_deflate_whole(&output).unwrap();
+
+        assert_eq!(blocks.len(), r.blocks.len());
+        for (i, block) in blocks.iter().enumerate() {
+            assert_eq!(*block, r.blocks[i], "block {}", i);
+        }
+    }
+
+    /// rountrips all deflate files in the sample directory
+    #[test]
+    fn roundtrip_full_file() {
+        crate::utils::test_on_all_deflate_files(|buffer| {
+            let (r, _plain_text) =
+                crate::deflate::deflate_reader::tests::parse_deflate_whole(buffer).unwrap();
+
+            let output = write_deflate_blocks(&r.blocks);
+
+            if r.compressed_size != output.len() || buffer[0..r.compressed_size] != output[..] {
+                println!("mismatch");
+            }
+            //assert_eq!(buffer.len(), output.len());
+            //assert_eq!(buffer, output);
+        });
+    }
+
+    pub fn write_deflate_blocks(blocks: &[DeflateTokenBlock]) -> Vec<u8> {
+        let mut w = DeflateWriter::new();
+        for block in blocks {
+            w.encode_block(block).unwrap();
+        }
+        w.flush();
+
+        w.detach_output()
+    }
 }

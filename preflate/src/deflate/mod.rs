@@ -1,5 +1,6 @@
-//! Module for reading and writing DEFLATE streams. Streams are read in as a vector of blocks containing tokens
-//! can which can be written back out as an identical DEFLATE stream.
+//! DEFLATE parsing, token representation, and bitstream writing.
+//! Retains block framing and Huffman encoding details so parsed streams can be
+//! written back byte for byte.
 
 mod bit_reader;
 mod bit_writer;

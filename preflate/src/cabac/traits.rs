@@ -1,3 +1,7 @@
+//! Interfaces for context-adaptive binary arithmetic readers and writers.
+//! Supplies shared integer-coding operations so correction codecs can use
+//! either the arithmetic backend or a diagnostic implementation.
+
 use std::{cmp, io::Result};
 
 /// implementation of a context aware binary arithmetic encoder
@@ -73,7 +77,7 @@ pub trait CabacReader<Context> {
             value += 1;
         }
 
-        return Ok(value);
+        Ok(value)
     }
 
     /// reads num_bits of the lower bits of a known size
@@ -87,6 +91,6 @@ pub trait CabacReader<Context> {
             coef |= (self.get(&mut contexts[cmp::min(A - 1, i)])? as u64) << i;
         }
 
-        return Ok(coef);
+        Ok(coef)
     }
 }
