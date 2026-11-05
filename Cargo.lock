@@ -637,12 +637,12 @@ dependencies = [
  "adler32",
  "byteorder",
  "crc32fast",
- "env_logger",
  "lepton_jpeg",
  "log",
  "miniz_oxide 0.9.0",
  "preflate-rs",
  "serde",
+ "serde_json",
  "webp",
  "zstd",
 ]
@@ -672,6 +672,7 @@ dependencies = [
  "miniz_oxide 0.9.0",
  "preflate-container",
  "preflate-rs",
+ "serde_json",
 ]
 
 [[package]]

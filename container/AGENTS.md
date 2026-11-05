@@ -197,11 +197,19 @@ src/
 - `webp` (default-enabled) — stores eligible PNG images as lossless WebP.
 - `diagnostics` — enables core diagnostics, bounded traces and saved-payload extraction.
 
+Diagnostic `parameters` contain a `reconstruction` object and a `model` string:
+authoritative executable settings and a supplementary model hypothesis.
+Preserve the structured enum layout; do not generate old flat/debug-string
+reports. Ordinary container compression reads only the hash statistic and never
+serializes or parses these JSON reports.
+
 ## Dependencies of Note
 
 - `lepton_jpeg` (0.5.1) — JPEG blocks are recompressed with Lepton, bypassing Zstd entirely.
 - `zstd` (0.13) — single persistent encoder across all non-JPEG/WebP blocks.
 - `preflate-rs` — core analysis/reconstruction (path dependency).
+- `serde_json` — on-demand core parameter reports; scanner enum strings retain
+  their existing representation. Normal container compression carries only the hash statistic.
 - `webp` (0.3, optional, default-enabled) — PNG images can be stored as WebP lossless.
 
 ## Constraints

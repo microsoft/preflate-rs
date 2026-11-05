@@ -3,19 +3,22 @@
  *  Licensed under the Apache License, Version 2.0. See LICENSE.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-//! Offline diagnostics only: sweeps do not affect production parameter selection.
-//! Baselines and improving candidates are checked by exact bitstream reconstruction.
+//! Streaming reconstruction tests, prediction regressions, and offline diagnostics.
+//! Measures token and tree mismatches, compares parameter variants, and verifies
+//! correction data through exact bitstream reconstruction.
+
+use crate::hash_chain_holder::SearchPurpose;
 
 use super::*;
 use crate::{
     HashAlgorithm,
     deflate::{
-        deflate_reader::{DeflateContents, parse_deflate_whole},
+        deflate_reader::{DeflateContents, tests::parse_deflate_whole},
         deflate_token::{DeflateHuffmanType, DeflateToken, DeflateTokenBlockType},
     },
-    estimator::{extract_preflate_info, zlib_compatible},
-    models::zlib::SLOW_PREFLATE_PARSER_SETTINGS,
-    parameters::{BlockTypeStrategy, DictionaryAddPolicy, LazyBehavior, MatchingType},
+    estimator::test_support::zlib::SLOW_PREFLATE_PARSER_SETTINGS,
+    estimator::test_support::{extract_preflate_info, zlib_compatible},
+    parameters::{BlockTypeStrategy, DictionaryAddPolicy, LazyBehavior, tests::MatchingType},
     statistical_codec::CountNonDefaultActions,
     token_predictor::TokenPredictionTrace,
 };
@@ -31,25 +34,27 @@ fn filtered_six_table_hash_parameters_and_corrections_roundtrip() {
     tokens.push(DeflateToken::new_ref(6, 7));
     tokens.extend([DeflateToken::Literal(b'!'), DeflateToken::Literal(b'$')]);
     let (compressed, contents, plain) = synthetic_stream(tokens);
-    let filtered = TokenPredictorParameters {
-        hash_algorithm: HashAlgorithm::RandomVector,
-        matching_type: MatchingType::Lazy {
+    let filtered = {
+        let mut canonical_configuration = synthetic_params();
+        canonical_configuration.set_hash_algorithm(HashAlgorithm::RandomVector);
+        canonical_configuration.set_nice_length(128);
+        canonical_configuration.set_max_chain(128);
+        canonical_configuration.set_matching_type(MatchingType::Lazy {
             max_lazy: 16,
             filtered_matching: true,
             behavior: LazyBehavior::Zlib { good_length: 8 },
-        },
-        nice_length: 128,
-        max_chain: 128,
-        max_token_count: 16383,
-        ..synthetic_params()
+        });
+        canonical_configuration.max_token_count = 16383;
+        canonical_configuration
     };
-    let unfiltered = TokenPredictorParameters {
-        matching_type: MatchingType::Lazy {
+    let unfiltered = {
+        let mut canonical_configuration = filtered;
+        canonical_configuration.set_matching_type(MatchingType::Lazy {
             max_lazy: 16,
             filtered_matching: false,
             behavior: LazyBehavior::Zlib { good_length: 8 },
-        },
-        ..filtered
+        });
+        canonical_configuration
     };
     assert!(
         measure(&contents, &plain, &unfiltered)
@@ -73,16 +78,18 @@ fn sparse_first_only_insertion_does_not_invent_slide_boundary_matches() {
     tokens.push(DeflateToken::new_ref(258, 1));
     tokens.extend(std::iter::repeat_n(DeflateToken::new_ref(258, 258), 299));
     let (compressed, contents, plain) = synthetic_stream(tokens);
-    let parameters = TokenPredictorParameters {
-        add_policy: DictionaryAddPolicy::AddFirst(0),
-        hash_algorithm: HashAlgorithm::RandomVector,
-        matching_type: MatchingType::Greedy,
-        max_chain: 4,
-        ..synthetic_params()
+    let parameters = {
+        let mut canonical_configuration = synthetic_params();
+        canonical_configuration.set_hash_algorithm(HashAlgorithm::RandomVector);
+        canonical_configuration.set_insertion(DictionaryAddPolicy::AddFirst(0));
+        canonical_configuration.set_max_chain(4);
+        canonical_configuration.set_matching_type(MatchingType::Greedy);
+        canonical_configuration
     };
-    let unsupported_boundary = TokenPredictorParameters {
-        add_policy: DictionaryAddPolicy::AddFirstWith32KBoundary,
-        ..parameters
+    let unsupported_boundary = {
+        let mut canonical_configuration = parameters;
+        canonical_configuration.set_insertion(DictionaryAddPolicy::AddFirstWith32KBoundary);
+        canonical_configuration
     };
     let before = measure(&contents, &plain, &unsupported_boundary).unwrap();
     assert!(before.trace.mismatch_count >= 2);
@@ -108,9 +115,9 @@ fn generic_search_depth_does_not_imply_a_short_nice_length() {
     tokens.push(DeflateToken::new_ref(21, prefix.len() as u32 + 16));
     let (compressed, contents, plain) = synthetic_stream(tokens);
     let parameters = estimate_preflate_parameters(&contents, &plain).unwrap();
-    assert_eq!(parameters.matching_type, MatchingType::Greedy);
-    assert_eq!(parameters.max_chain, 3);
-    assert_eq!(parameters.nice_length, 255);
+    assert_eq!(parameters.matching_type(), MatchingType::Greedy);
+    assert_eq!(parameters.max_chain(), 3);
+    assert_eq!(parameters.nice_length(), 255);
     let measured = measure(&contents, &plain, &parameters).unwrap();
     verify(&measured, &plain, &compressed);
     assert_eq!(measured.trace.mismatch_count, 0);
@@ -130,7 +137,7 @@ fn ambiguous_prefix_insertion_keeps_later_four_byte_match_interiors() {
         prefix.blocks.last_mut().unwrap().last = false;
         let policy = estimate_preflate_parameters(&prefix, &prefix_plain)
             .unwrap()
-            .add_policy;
+            .add_policy();
         assert_eq!(policy, DictionaryAddPolicy::AddFirst(4));
         tokens.push(DeflateToken::new_ref(
             3,
@@ -145,11 +152,12 @@ fn ambiguous_prefix_insertion_keeps_later_four_byte_match_interiors() {
                 hash_shift: 5,
             },
         ] {
-            let parameters = TokenPredictorParameters {
-                add_policy: policy,
-                hash_algorithm: hash,
-                matching_type: MatchingType::Greedy,
-                ..synthetic_params()
+            let parameters = {
+                let mut canonical_configuration = synthetic_params();
+                canonical_configuration.set_hash_algorithm(hash);
+                canonical_configuration.set_insertion(policy);
+                canonical_configuration.set_matching_type(MatchingType::Greedy);
+                canonical_configuration
             };
             let measured = measure(&contents, &plain, &parameters).unwrap();
             verify(&measured, &plain, &compressed);
@@ -170,8 +178,10 @@ fn bounded_parameter_scores_match_full_prediction_traces() {
         let params = estimate_preflate_parameters(&contents, &plain).unwrap();
         let measurement =
             measure_with_tracking(&contents, &plain, &params, false, false, 32768).unwrap();
-        let score = crate::estimator::prediction_scoring::score_predictions(
-            &mut crate::prediction_state::PredictionState::new(&params),
+        let score = crate::estimator::test_support::score_predictions(
+            &mut crate::prediction_state::PredictionState::from_reconstruction_parameters(
+                (&params).into(),
+            ),
             &contents.blocks,
             &plain,
             usize::MAX,
@@ -214,8 +224,10 @@ fn bounded_parameter_scores_match_full_prediction_traces() {
             assert_eq!(score.0, measurement.trace.mismatch_count, "{name}");
         }
         for limit in [0, 1, 257, 1024] {
-            let (mismatches, tokens) = crate::estimator::prediction_scoring::score_predictions(
-                &mut crate::prediction_state::PredictionState::new(&params),
+            let (mismatches, tokens) = crate::estimator::test_support::score_predictions(
+                &mut crate::prediction_state::PredictionState::from_reconstruction_parameters(
+                    (&params).into(),
+                ),
                 &contents.blocks,
                 &plain,
                 limit,
@@ -236,8 +248,10 @@ fn bounded_parameter_scores_match_full_prediction_traces() {
             assert!(mismatches <= tokens);
         }
         assert_eq!(
-            crate::estimator::prediction_scoring::score_predictions(
-                &mut crate::prediction_state::PredictionState::new(&params),
+            crate::estimator::test_support::score_predictions(
+                &mut crate::prediction_state::PredictionState::from_reconstruction_parameters(
+                    (&params).into()
+                ),
                 &contents.blocks,
                 &plain,
                 1024,
@@ -271,18 +285,22 @@ fn chromium_three_byte_matches_round_trip_without_a_secondary_hash() {
                 behavior: LazyBehavior::Zlib { good_length: 8 },
             },
         ] {
-            let params = TokenPredictorParameters {
-                hash_algorithm: HashAlgorithm::Chromium { hash_mask: 0x7fff },
-                matching_type,
-                max_dist_3_matches: 4096,
-                ..synthetic_params()
+            let params = {
+                let mut canonical_configuration = synthetic_params();
+                canonical_configuration
+                    .set_hash_algorithm(HashAlgorithm::Chromium { hash_mask: 0x7fff });
+                canonical_configuration.set_short_match_cutoff(4096);
+                canonical_configuration.set_matching_type(matching_type);
+                canonical_configuration
             };
             let measured = measure(&contents, &plain, &params).unwrap();
             verify(&measured, &plain, &compressed);
             assert_eq!(measured.trace.mismatch_count, 0);
             assert_eq!(
-                crate::estimator::prediction_scoring::score_predictions(
-                    &mut crate::prediction_state::PredictionState::new(&params),
+                crate::estimator::test_support::score_predictions(
+                    &mut crate::prediction_state::PredictionState::from_reconstruction_parameters(
+                        (&params).into()
+                    ),
                     &contents.blocks,
                     &plain,
                     usize::MAX,
@@ -296,7 +314,7 @@ fn chromium_three_byte_matches_round_trip_without_a_secondary_hash() {
 
 #[test]
 fn native_chromium_without_three_byte_aliases_is_considered() {
-    use crate::{estimator::extract_preflate_info, utils::read_file};
+    use crate::{estimator::test_support::extract_preflate_info, utils::read_file};
 
     let expected_plain = read_file("chromium_no_short_input.bin");
     for level in [1, 6] {
@@ -309,21 +327,24 @@ fn native_chromium_without_three_byte_aliases_is_considered() {
         assert_eq!(info.short_reference_count, 0);
         let parameters = estimate_preflate_parameters(&contents, &plain).unwrap();
         assert_eq!(
-            parameters.hash_algorithm,
+            parameters.hash_algorithm(),
             HashAlgorithm::Chromium { hash_mask: 0x7fff },
             "level={level}"
         );
-        let ambiguous = TokenPredictorParameters {
-            hash_algorithm: HashAlgorithm::Libdeflate4Fast,
-            matching_type: MatchingType::Greedy,
-            add_policy: DictionaryAddPolicy::AddFirst(4),
-            nice_length: 16,
-            max_chain: 6,
-            ..parameters
+        let ambiguous = {
+            let mut canonical_configuration = parameters;
+            canonical_configuration.set_hash_algorithm(HashAlgorithm::Libdeflate4Fast);
+            canonical_configuration.set_insertion(DictionaryAddPolicy::AddFirst(4));
+            canonical_configuration.set_nice_length(16);
+            canonical_configuration.set_max_chain(6);
+            canonical_configuration.set_matching_type(MatchingType::Greedy);
+            canonical_configuration
         };
         assert!(
-            crate::estimator::prediction_scoring::score_predictions(
-                &mut crate::prediction_state::PredictionState::new(&ambiguous),
+            crate::estimator::test_support::score_predictions(
+                &mut crate::prediction_state::PredictionState::from_reconstruction_parameters(
+                    (&ambiguous).into()
+                ),
                 &contents.blocks,
                 &plain,
                 4096,
@@ -332,7 +353,7 @@ fn native_chromium_without_three_byte_aliases_is_considered() {
             .0 >= 2
         );
         assert_eq!(
-            crate::estimator::prediction_scoring::refine_ambiguous_profile(
+            crate::estimator::test_support::refine_ambiguous_profile(
                 ambiguous, &info, &contents, &plain
             ),
             parameters
@@ -342,7 +363,7 @@ fn native_chromium_without_three_byte_aliases_is_considered() {
         assert_eq!(measured.trace.mismatch_count, 0, "level={level}");
         assert!(measured.corrections.len() <= 32, "level={level}");
         assert_eq!(
-            crate::estimator::prediction_scoring::refine_ambiguous_profile(
+            crate::estimator::test_support::refine_ambiguous_profile(
                 parameters, &info, &contents, &plain
             ),
             parameters
@@ -369,29 +390,36 @@ fn native_chromium_all_levels_select_and_reconstruct() {
             measured.trace.mismatch_count
         );
         assert_eq!(measured.trace.mismatch_count, 0, "automatic level={level}");
-        assert!(measured.corrections.len() <= 32, "automatic level={level}");
+        // Explicit lazy/window settings need one more header byte at levels 8 and 9.
+        let max_correction_bytes = if level >= 8 { 33 } else { 32 };
+        assert!(
+            measured.corrections.len() <= max_correction_bytes,
+            "automatic level={level}: {} correction bytes",
+            measured.corrections.len()
+        );
         if level == 0 {
-            assert_eq!(automatic.strategy, PreflateStrategy::Store);
+            assert_eq!(automatic.strategy(), PreflateStrategy::Store);
             continue;
         }
         assert_eq!(
-            automatic.hash_algorithm,
+            automatic.hash_algorithm(),
             HashAlgorithm::Chromium { hash_mask: 0x7fff }
         );
         let config = if level < 4 {
-            &crate::models::zlib::ZLIB_PREFLATE_PARSER_SETTINGS[level - 1]
+            &crate::estimator::test_support::zlib::ZLIB_PREFLATE_PARSER_SETTINGS[level - 1]
         } else {
             &SLOW_PREFLATE_PARSER_SETTINGS[level - 4]
         };
-        let canonical = TokenPredictorParameters {
-            matching_type: config.match_type,
-            add_policy: config.dictionary_add_policy,
-            nice_length: config.nice_length,
-            max_chain: config.max_chain,
-            max_dist_3_matches: if level < 4 { 32768 } else { 4096 },
-            window_bits: 15,
-            very_far_matches_detected: false,
-            ..automatic
+        let canonical = {
+            let mut canonical_configuration = automatic;
+            canonical_configuration.set_full_window(false);
+            canonical_configuration.set_window_bits(15);
+            canonical_configuration.set_insertion(config.dictionary_add_policy);
+            canonical_configuration.set_nice_length(config.nice_length);
+            canonical_configuration.set_max_chain(config.max_chain);
+            canonical_configuration.set_short_match_cutoff(if level < 4 { 32768 } else { 4096 });
+            canonical_configuration.set_matching_type(config.parser.matching_type());
+            canonical_configuration
         };
         let known = measure(&contents, &plain, &canonical).unwrap();
         verify(&known, &plain, &compressed);
@@ -411,17 +439,21 @@ fn adaptive_libdeflate_scores_match_encoding_and_reconstruction() {
         .collect();
     let (compressed, contents, plain) = synthetic_stream(tokens);
     for two_positions in [false, true] {
-        let params = TokenPredictorParameters {
-            hash_algorithm: HashAlgorithm::Libdeflate4,
-            matching_type: MatchingType::LibdeflateLazy { two_positions },
-            max_chain: 101,
-            ..synthetic_params()
+        let params = {
+            let mut canonical_configuration = synthetic_params();
+            canonical_configuration.set_hash_algorithm(HashAlgorithm::Libdeflate4);
+            canonical_configuration.set_max_chain(101);
+            canonical_configuration
+                .set_matching_type(MatchingType::LibdeflateLazy { two_positions });
+            canonical_configuration
         };
         let measurement = measure(&contents, &plain, &params).unwrap();
         verify(&measurement, &plain, &compressed);
         assert_eq!(
-            crate::estimator::prediction_scoring::score_predictions(
-                &mut crate::prediction_state::PredictionState::new(&params),
+            crate::estimator::test_support::score_predictions(
+                &mut crate::prediction_state::PredictionState::from_reconstruction_parameters(
+                    (&params).into()
+                ),
                 &contents.blocks,
                 &plain,
                 usize::MAX,
@@ -443,11 +475,11 @@ fn match_length_filter_projects_evidence_without_changing_other_parsers() {
         behavior: LazyBehavior::Zlib { good_length: 8 },
     };
     for (matching_type, hash_algorithm, accepts_filter, compatible) in [
-        (lazy, synthetic_params().hash_algorithm, true, true),
-        (lazy, synthetic_params().hash_algorithm, true, false),
+        (lazy, synthetic_params().hash_algorithm(), true, true),
+        (lazy, synthetic_params().hash_algorithm(), true, false),
         (
             MatchingType::Greedy,
-            synthetic_params().hash_algorithm,
+            synthetic_params().hash_algorithm(),
             false,
             true,
         ),
@@ -463,10 +495,11 @@ fn match_length_filter_projects_evidence_without_changing_other_parsers() {
             text.push(b'Y');
             let (compressed, contents, plain) =
                 synthetic_stream(text.into_iter().map(DeflateToken::Literal).collect());
-            let base = TokenPredictorParameters {
-                matching_type,
-                hash_algorithm,
-                ..synthetic_params()
+            let base = {
+                let mut canonical_configuration = synthetic_params();
+                canonical_configuration.set_hash_algorithm(hash_algorithm);
+                canonical_configuration.set_matching_type(matching_type);
+                canonical_configuration
             };
             let mut records: [Option<Vec<u8>>; 2] = [None, None];
             for (observed_min_len, selects_filter) in [
@@ -513,48 +546,27 @@ fn match_length_filter_projects_evidence_without_changing_other_parsers() {
 }
 
 #[test]
-fn legacy_filtered_parameters_keep_original_predictions() {
+fn filtered_parameters_roundtrip_across_chunks() {
     let tokens = b"@abcdXabcdYabcdZabcdW"
         .iter()
         .copied()
         .map(DeflateToken::Literal)
         .collect();
     let (compressed, contents, plain) = synthetic_stream(tokens);
-    let params = TokenPredictorParameters {
-        matching_type: MatchingType::Lazy {
+    let params = {
+        let mut canonical_configuration = synthetic_params();
+        canonical_configuration.set_matching_type(MatchingType::Lazy {
             max_lazy: 16,
             filtered_matching: true,
             behavior: LazyBehavior::Zlib { good_length: 8 },
-        },
-        ..synthetic_params()
+        });
+        canonical_configuration
     };
-    let mut buffer = Vec::new();
-    let mut encoder = PredictionEncoderCabac::new(VP8Writer::new(&mut buffer).unwrap());
-    let mut predictor = TokenPredictor::new_legacy(&params);
-    predict_blocks(
-        &contents.blocks,
-        &mut predictor,
-        &mut encoder,
-        &mut PreflateInput::new(&plain),
-    )
-    .unwrap();
-    encoder.finish();
-    drop(encoder);
-    let legacy = ReconstructionData {
-        parameters: params,
-        corrections: buffer,
-    }
-    .write_legacy();
-    assert_eq!(
-        recreate_whole_deflate_stream(plain.text(), &legacy).unwrap(),
-        compressed
-    );
     let modern = measure(&contents, &plain, &params).unwrap();
     verify(&modern, &plain, &compressed);
-    assert_ne!(&legacy[1..], &modern.corrections[1..]);
     assert_eq!(modern.trace.mismatch_count, 0);
 
-    let mut predictor = TokenPredictor::new_legacy(&params);
+    let mut predictor = TokenPredictor::from_parameters(&params);
     let mut plain = PlainText::new();
     let mut writer = DeflateWriter::new();
     let mut decoder = RecreateStreamProcessor::new();
@@ -587,10 +599,10 @@ fn legacy_filtered_parameters_keep_original_predictions() {
         drop(encoder);
         let corrections = if index == 0 {
             ReconstructionData {
-                parameters: params,
+                parameters: predictor.finalize_reconstruction_parameters(),
                 corrections: buffer,
             }
-            .write_legacy()
+            .write()
         } else {
             buffer
         };
@@ -628,7 +640,7 @@ struct Measurement {
 fn measure(
     contents: &DeflateContents,
     plain_text: &PlainText,
-    params: &TokenPredictorParameters,
+    params: &ReconstructionParameters,
 ) -> Result<Measurement> {
     measure_with_short_match_bounds(contents, plain_text, params, false)
 }
@@ -636,7 +648,7 @@ fn measure(
 fn measure_with_short_match_bounds(
     contents: &DeflateContents,
     plain_text: &PlainText,
-    params: &TokenPredictorParameters,
+    params: &ReconstructionParameters,
     track_bounds: bool,
 ) -> Result<Measurement> {
     measure_with_tracking(contents, plain_text, params, track_bounds, false, 8)
@@ -645,7 +657,7 @@ fn measure_with_short_match_bounds(
 fn measure_normalized(
     contents: &DeflateContents,
     plain_text: &PlainText,
-    params: &TokenPredictorParameters,
+    params: &ReconstructionParameters,
 ) -> Result<Measurement> {
     measure_with_tracking(contents, plain_text, params, false, true, 8)
 }
@@ -653,7 +665,7 @@ fn measure_normalized(
 fn measure_with_tracking(
     contents: &DeflateContents,
     plain_text: &PlainText,
-    params: &TokenPredictorParameters,
+    params: &ReconstructionParameters,
     track_bounds: bool,
     normalize_parameters: bool,
     trace_limit: usize,
@@ -663,7 +675,7 @@ fn measure_with_tracking(
         CorrectionCounter::default(),
         PredictionEncoderCabac::new(VP8Writer::new(&mut buffer).unwrap()),
     );
-    let mut predictor = TokenPredictor::new(params);
+    let mut predictor = TokenPredictor::from_parameters(params);
     if normalize_parameters {
         predictor.enable_parameter_normalization(
             contents.compressed_size,
@@ -690,7 +702,7 @@ fn measure_with_tracking(
     let short_match_distance_bounds = predictor.short_match_distance_bounds();
     let corrections = ReconstructionData {
         parameters: if normalize_parameters {
-            predictor.reconstruction_parameters()
+            predictor.finalize_reconstruction_parameters()
         } else {
             *params
         },
@@ -716,9 +728,9 @@ fn canonical_short_match_limits(bounds: (u32, u32), original: u32) -> impl Itera
 }
 
 fn standard_short_match_cutoff(
-    params: TokenPredictorParameters,
-) -> (&'static str, Option<u32>, TokenPredictorParameters) {
-    let (profile, default) = match (params.hash_algorithm, params.matching_type) {
+    params: ReconstructionParameters,
+) -> (&'static str, Option<u32>, ReconstructionParameters) {
+    let (profile, default) = match (params.hash_algorithm(), params.matching_type()) {
         (
             HashAlgorithm::Zlib { .. },
             MatchingType::Lazy {
@@ -729,11 +741,14 @@ fn standard_short_match_cutoff(
         (HashAlgorithm::Zlib { .. }, MatchingType::Greedy) => ("zlib_style_greedy", Some(32768)),
         _ => ("unclassified_unchanged", None),
     };
-    let candidate = TokenPredictorParameters {
-        max_dist_3_matches: default.map_or(params.max_dist_3_matches, |limit| {
-            limit.max(params.max_dist_3_matches)
-        }),
-        ..params
+    let candidate = {
+        let mut canonical_configuration = params;
+        canonical_configuration.set_short_match_cutoff(
+            default.map_or(params.max_dist_3_matches(), |limit| {
+                limit.max(params.max_dist_3_matches())
+            }),
+        );
+        canonical_configuration
     };
     (profile, default, candidate)
 }
@@ -748,12 +763,13 @@ fn standard_short_match_cutoff_exposes_extra_candidates_without_breaking_recover
     let (compressed, contents, plain) = synthetic_stream(tokens);
     for matching_type in [
         MatchingType::Greedy,
-        SLOW_PREFLATE_PARSER_SETTINGS[2].match_type,
+        SLOW_PREFLATE_PARSER_SETTINGS[2].parser.matching_type(),
     ] {
-        let params = TokenPredictorParameters {
-            max_dist_3_matches: 0,
-            matching_type,
-            ..synthetic_params()
+        let params = {
+            let mut canonical_configuration = synthetic_params();
+            canonical_configuration.set_short_match_cutoff(0);
+            canonical_configuration.set_matching_type(matching_type);
+            canonical_configuration
         };
         let baseline = measure(&contents, &plain, &params).unwrap();
         verify(&baseline, &plain, &compressed);
@@ -773,10 +789,12 @@ fn standard_short_match_cutoff_exposes_extra_candidates_without_breaking_recover
     tokens.push(DeflateToken::new_ref(3, 4));
     tokens.push(DeflateToken::Literal(b'Y'));
     let (compressed, contents, plain) = synthetic_stream(tokens);
-    let params = TokenPredictorParameters {
-        max_dist_3_matches: 4,
-        matching_type: SLOW_PREFLATE_PARSER_SETTINGS[2].match_type,
-        ..synthetic_params()
+    let params = {
+        let mut canonical_configuration = synthetic_params();
+        canonical_configuration.set_short_match_cutoff(4);
+        canonical_configuration
+            .set_matching_type(SLOW_PREFLATE_PARSER_SETTINGS[2].parser.matching_type());
+        canonical_configuration
     };
     let baseline = measure(&contents, &plain, &params).unwrap();
     let (_, _, candidate) = standard_short_match_cutoff(params);
@@ -786,10 +804,10 @@ fn standard_short_match_cutoff_exposes_extra_candidates_without_breaking_recover
     assert_eq!(baseline.trace.mismatch_count, 0);
     assert_eq!(measurement.trace.mismatch_count, 0);
     assert_eq!(
-        ReconstructionData::read(&baseline.corrections)
+        InspectedReconstructionData::read(&baseline.corrections)
             .unwrap()
             .corrections,
-        ReconstructionData::read(&measurement.corrections)
+        InspectedReconstructionData::read(&measurement.corrections)
             .unwrap()
             .corrections,
     );
@@ -815,32 +833,33 @@ fn standard_short_match_cutoff_retains_emitted_matches_beyond_the_default() {
         extract_preflate_info(&contents.blocks).max_dist_3_matches,
         4097
     );
-    let params = TokenPredictorParameters {
-        max_dist_3_matches: 4097,
-        matching_type: SLOW_PREFLATE_PARSER_SETTINGS[2].match_type,
-        ..synthetic_params()
+    let params = {
+        let mut canonical_configuration = synthetic_params();
+        canonical_configuration.set_short_match_cutoff(4097);
+        canonical_configuration
+            .set_matching_type(SLOW_PREFLATE_PARSER_SETTINGS[2].parser.matching_type());
+        canonical_configuration
     };
     let (_, default, candidate) = standard_short_match_cutoff(params);
     assert_eq!(default, Some(4096));
     let normalized = measure_normalized(&contents, &plain, &params).unwrap();
     verify(&normalized, &plain, &compressed);
-    let normalized_record = ReconstructionData::read(&normalized.corrections).unwrap();
-    assert!(normalized_record.parameters.max_dist_3_matches >= 4097);
+    let normalized_record = InspectedReconstructionData::read(&normalized.corrections).unwrap();
+    assert!(normalized_record.parameters.max_dist_3_matches() >= 4097);
     assert_eq!(
         normalized_record.corrections,
-        ReconstructionData::read(&measure(&contents, &plain, &params).unwrap().corrections)
-            .unwrap()
-            .corrections,
+        InspectedReconstructionData::read(
+            &measure(&contents, &plain, &params).unwrap().corrections
+        )
+        .unwrap()
+        .corrections,
     );
     let retained = measure(&contents, &plain, &candidate).unwrap();
-    let clamped = measure(
-        &contents,
-        &plain,
-        &TokenPredictorParameters {
-            max_dist_3_matches: 4096,
-            ..params
-        },
-    )
+    let clamped = measure(&contents, &plain, &{
+        let mut canonical_configuration = params;
+        canonical_configuration.set_short_match_cutoff(4096);
+        canonical_configuration
+    })
     .unwrap();
     verify(&retained, &plain, &compressed);
     verify(&clamped, &plain, &compressed);
@@ -863,22 +882,23 @@ fn lazy_cutoff_equivalence_reuses_the_next_fresh_search() {
             hash_mask: 2047,
             hash_shift: 4,
         },
-        crate::models::zlib::DEFAULT_HASH,
+        crate::estimator::test_support::zlib::DEFAULT_HASH,
         HashAlgorithm::RandomVector,
     ] {
         for behavior in [
             LazyBehavior::Zlib { good_length: 8 },
             LazyBehavior::RecomputeAfterLiteral,
         ] {
-            let parameters = TokenPredictorParameters {
-                hash_algorithm,
-                max_dist_3_matches: 4,
-                matching_type: MatchingType::Lazy {
+            let parameters = {
+                let mut canonical_configuration = synthetic_params();
+                canonical_configuration.set_hash_algorithm(hash_algorithm);
+                canonical_configuration.set_short_match_cutoff(4);
+                canonical_configuration.set_matching_type(MatchingType::Lazy {
                     max_lazy: 16,
                     filtered_matching: false,
                     behavior,
-                },
-                ..synthetic_params()
+                });
+                canonical_configuration
             };
             let before =
                 measure_with_short_match_bounds(&contents, &plain, &parameters, true).unwrap();
@@ -886,22 +906,23 @@ fn lazy_cutoff_equivalence_reuses_the_next_fresh_search() {
             let after = measure_normalized(&contents, &plain, &parameters).unwrap();
             verify(&after, &plain, &compressed);
             assert_eq!(after.short_match_distance_bounds, Some((4, 32768)));
-            let record = ReconstructionData::read(&after.corrections).unwrap();
-            assert_eq!(record.parameters.max_dist_3_matches, 128);
-            let original = ReconstructionData::read(&before.corrections)
+            let record = InspectedReconstructionData::read(&after.corrections).unwrap();
+            assert_eq!(record.parameters.max_dist_3_matches(), 128);
+            let original = InspectedReconstructionData::read(&before.corrections)
                 .unwrap()
                 .corrections;
             assert_eq!(record.corrections, original);
             assert!(after.corrections.len() <= before.corrections.len());
             for cutoff in 4..=255 {
-                let candidate = TokenPredictorParameters {
-                    max_dist_3_matches: cutoff,
-                    ..parameters
+                let candidate = {
+                    let mut canonical_configuration = parameters;
+                    canonical_configuration.set_short_match_cutoff(cutoff);
+                    canonical_configuration
                 };
                 let measured = measure(&contents, &plain, &candidate).unwrap();
                 verify(&measured, &plain, &compressed);
                 assert_eq!(
-                    ReconstructionData::read(&measured.corrections)
+                    InspectedReconstructionData::read(&measured.corrections)
                         .unwrap()
                         .corrections,
                     original
@@ -942,7 +963,7 @@ fn lazy_cutoff_equivalence_preserves_randomized_collision_streams() {
                 hash_mask: 15,
                 hash_shift: 2,
             },
-            crate::models::zlib::DEFAULT_HASH,
+            crate::estimator::test_support::zlib::DEFAULT_HASH,
             HashAlgorithm::RandomVector,
         ] {
             for cutoff in [0, 4, 128] {
@@ -950,24 +971,25 @@ fn lazy_cutoff_equivalence_preserves_randomized_collision_streams() {
                     LazyBehavior::Zlib { good_length: 4 },
                     LazyBehavior::RecomputeAfterLiteral,
                 ] {
-                    let parameters = TokenPredictorParameters {
-                        hash_algorithm,
-                        max_dist_3_matches: cutoff,
-                        window_bits: 9,
-                        nice_length: [3, 4, 128][seed as usize % 3],
-                        max_chain: [1, 4, 128][seed as usize % 3],
-                        matching_type: MatchingType::Lazy {
+                    let parameters = {
+                        let mut canonical_configuration = synthetic_params();
+                        canonical_configuration.set_hash_algorithm(hash_algorithm);
+                        canonical_configuration.set_window_bits(9);
+                        canonical_configuration.set_nice_length([3, 4, 128][seed as usize % 3]);
+                        canonical_configuration.set_max_chain([1, 4, 128][seed as usize % 3]);
+                        canonical_configuration.set_short_match_cutoff(cutoff);
+                        canonical_configuration.set_matching_type(MatchingType::Lazy {
                             max_lazy: 16,
                             filtered_matching: false,
                             behavior,
-                        },
-                        ..synthetic_params()
+                        });
+                        canonical_configuration
                     };
                     let before = measure(&contents, &plain, &parameters).unwrap();
                     let after = measure_normalized(&contents, &plain, &parameters).unwrap();
                     verify(&after, &plain, &compressed);
-                    let before = ReconstructionData::read(&before.corrections).unwrap();
-                    let record = ReconstructionData::read(&after.corrections).unwrap();
+                    let before = InspectedReconstructionData::read(&before.corrections).unwrap();
+                    let record = InspectedReconstructionData::read(&after.corrections).unwrap();
                     assert_eq!(record.corrections, before.corrections);
                     let repeated =
                         measure_normalized(&contents, &plain, &record.parameters).unwrap();
@@ -1003,20 +1025,22 @@ fn lazy_cutoff_equivalence_retains_constraints_at_block_boundaries() {
     writer.flush();
     let compressed = writer.detach_output();
     let (contents, plain) = parse_deflate_whole(&compressed).unwrap();
-    let parameters = TokenPredictorParameters {
-        max_dist_3_matches: 4,
-        matching_type: SLOW_PREFLATE_PARSER_SETTINGS[2].match_type,
-        ..synthetic_params()
+    let parameters = {
+        let mut canonical_configuration = synthetic_params();
+        canonical_configuration.set_short_match_cutoff(4);
+        canonical_configuration
+            .set_matching_type(SLOW_PREFLATE_PARSER_SETTINGS[2].parser.matching_type());
+        canonical_configuration
     };
     let before = measure(&contents, &plain, &parameters).unwrap();
     let after = measure_normalized(&contents, &plain, &parameters).unwrap();
     verify(&after, &plain, &compressed);
     assert_eq!(after.short_match_distance_bounds, Some((4, 13)));
     assert_eq!(
-        ReconstructionData::read(&before.corrections)
+        InspectedReconstructionData::read(&before.corrections)
             .unwrap()
             .corrections,
-        ReconstructionData::read(&after.corrections)
+        InspectedReconstructionData::read(&after.corrections)
             .unwrap()
             .corrections
     );
@@ -1030,9 +1054,10 @@ fn short_match_distance_bounds_preserve_decisions_and_exclude_counterexamples() 
         .map(DeflateToken::Literal)
         .collect();
     let (compressed, contents, plain) = synthetic_stream(tokens);
-    let params = TokenPredictorParameters {
-        max_dist_3_matches: 4,
-        ..synthetic_params()
+    let params = {
+        let mut canonical_configuration = synthetic_params();
+        canonical_configuration.set_short_match_cutoff(4);
+        canonical_configuration
     };
     let baseline = measure_with_short_match_bounds(&contents, &plain, &params, true).unwrap();
     verify(&baseline, &plain, &compressed);
@@ -1040,30 +1065,31 @@ fn short_match_distance_bounds_preserve_decisions_and_exclude_counterexamples() 
     assert_eq!(bounds, (4, 8));
     let normalized = measure_normalized(&contents, &plain, &params).unwrap();
     verify(&normalized, &plain, &compressed);
-    let normalized_record = ReconstructionData::read(&normalized.corrections).unwrap();
-    assert_eq!(normalized_record.parameters.max_dist_3_matches, 8);
+    let normalized_record = InspectedReconstructionData::read(&normalized.corrections).unwrap();
+    assert_eq!(normalized_record.parameters.max_dist_3_matches(), 8);
     assert_eq!(
         normalized_record.corrections,
-        ReconstructionData::read(&baseline.corrections)
+        InspectedReconstructionData::read(&baseline.corrections)
             .unwrap()
             .corrections,
     );
     let canonical = params.canonical_short_match_cutoff(bounds);
     assert_eq!(canonical, 8);
     for (limit, expected_mismatches) in [(canonical, 1), (3, 0), (9, 2)] {
-        let candidate = TokenPredictorParameters {
-            max_dist_3_matches: limit,
-            ..params
+        let candidate = {
+            let mut canonical_configuration = params;
+            canonical_configuration.set_short_match_cutoff(limit);
+            canonical_configuration
         };
         let measurement = measure(&contents, &plain, &candidate).unwrap();
         verify(&measurement, &plain, &compressed);
         assert_eq!(measurement.trace.mismatch_count, expected_mismatches);
         if limit == canonical {
             assert_eq!(
-                ReconstructionData::read(&measurement.corrections)
+                InspectedReconstructionData::read(&measurement.corrections)
                     .unwrap()
                     .corrections,
-                ReconstructionData::read(&baseline.corrections)
+                InspectedReconstructionData::read(&baseline.corrections)
                     .unwrap()
                     .corrections,
             );
@@ -1079,10 +1105,13 @@ fn cutoff_normalization_preserves_decisions_across_families_and_deferred_matches
         .map(DeflateToken::Literal)
         .collect();
     let (compressed, contents, plain) = synthetic_stream(tokens);
-    let zlib = synthetic_params().hash_algorithm;
+    let zlib = synthetic_params().hash_algorithm();
     for (hash_algorithm, matching_type) in [
         (zlib, MatchingType::Greedy),
-        (zlib, SLOW_PREFLATE_PARSER_SETTINGS[2].match_type),
+        (
+            zlib,
+            SLOW_PREFLATE_PARSER_SETTINGS[2].parser.matching_type(),
+        ),
         (
             zlib,
             MatchingType::Lazy {
@@ -1094,7 +1123,7 @@ fn cutoff_normalization_preserves_decisions_across_families_and_deferred_matches
         (HashAlgorithm::RandomVector, MatchingType::Greedy),
         (
             HashAlgorithm::RandomVector,
-            SLOW_PREFLATE_PARSER_SETTINGS[2].match_type,
+            SLOW_PREFLATE_PARSER_SETTINGS[2].parser.matching_type(),
         ),
         (HashAlgorithm::Libdeflate4, MatchingType::Greedy),
         (HashAlgorithm::Libdeflate4, MatchingType::LibdeflateGreedy),
@@ -1119,20 +1148,21 @@ fn cutoff_normalization_preserves_decisions_across_families_and_deferred_matches
         ),
     ] {
         for cutoff in [0, 4, 8, 255, 256, 4096, 8192, 32768] {
-            let params = TokenPredictorParameters {
-                hash_algorithm,
-                matching_type,
-                max_dist_3_matches: cutoff,
-                ..synthetic_params()
+            let params = {
+                let mut canonical_configuration = synthetic_params();
+                canonical_configuration.set_hash_algorithm(hash_algorithm);
+                canonical_configuration.set_short_match_cutoff(cutoff);
+                canonical_configuration.set_matching_type(matching_type);
+                canonical_configuration
             };
             let baseline = measure(&contents, &plain, &params).unwrap();
             let normalized = measure_normalized(&contents, &plain, &params).unwrap();
             verify(&baseline, &plain, &compressed);
             verify(&normalized, &plain, &compressed);
-            let after = ReconstructionData::read(&normalized.corrections).unwrap();
+            let after = InspectedReconstructionData::read(&normalized.corrections).unwrap();
             assert_eq!(
                 after.corrections,
-                ReconstructionData::read(&baseline.corrections)
+                InspectedReconstructionData::read(&baseline.corrections)
                     .unwrap()
                     .corrections
             );
@@ -1146,9 +1176,9 @@ fn cutoff_normalization_preserves_decisions_across_families_and_deferred_matches
             );
             assert!(normalized.corrections.len() <= baseline.corrections.len());
             let bounds = normalized.short_match_distance_bounds.unwrap();
-            assert!((bounds.0..=bounds.1).contains(&after.parameters.max_dist_3_matches));
+            assert!((bounds.0..=bounds.1).contains(&after.parameters.max_dist_3_matches()));
             if cutoff == 0 {
-                assert_eq!(after.parameters.max_dist_3_matches, 0);
+                assert_eq!(after.parameters.max_dist_3_matches(), 0);
             }
         }
     }
@@ -1258,7 +1288,7 @@ fn overhead_attribution_matches_real_encoder_and_isolates_a_tree_profile() {
     let mut actions = RecordedCorrections::default();
     predict_blocks(
         &contents.blocks,
-        &mut TokenPredictor::new(&params),
+        &mut TokenPredictor::from_parameters(&params),
         &mut actions,
         &mut PreflateInput::new(&plain),
     )
@@ -1266,7 +1296,7 @@ fn overhead_attribution_matches_real_encoder_and_isolates_a_tree_profile() {
     let (replayed, _, _) = overhead_contributions(&actions);
     assert_eq!(
         replayed,
-        ReconstructionData::read(&actual.corrections)
+        InspectedReconstructionData::read(&actual.corrections)
             .unwrap()
             .corrections
     );
@@ -1328,7 +1358,7 @@ fn profile_tiny_overhead() {
         let mut actions = RecordedCorrections::default();
         predict_blocks(
             &contents.blocks,
-            &mut TokenPredictor::new(&params),
+            &mut TokenPredictor::from_parameters(&params),
             &mut actions,
             &mut PreflateInput::new(&plain),
         )
@@ -1336,7 +1366,7 @@ fn profile_tiny_overhead() {
         let (replayed, zero_cabac, components) = overhead_contributions(&actions);
         assert_eq!(
             replayed,
-            ReconstructionData::read(&baseline.corrections)
+            InspectedReconstructionData::read(&baseline.corrections)
                 .unwrap()
                 .corrections,
             "{name}"
@@ -1389,17 +1419,18 @@ fn profile_tiny_state_collapse() {
         let perfect = baseline.count.total_non_default == 0;
         let bounds = baseline.short_match_distance_bounds.unwrap();
         let canonical_limit = params.canonical_short_match_cutoff(bounds);
-        let canonical = TokenPredictorParameters {
-            max_dist_3_matches: canonical_limit,
-            ..params
+        let canonical = {
+            let mut canonical_configuration = params;
+            canonical_configuration.set_short_match_cutoff(canonical_limit);
+            canonical_configuration
         };
         let canonical_measurement = measure(&contents, &plain, &canonical).unwrap();
         verify(&canonical_measurement, &plain, &compressed);
-        let baseline_cabac = ReconstructionData::read(&baseline.corrections)
+        let baseline_cabac = InspectedReconstructionData::read(&baseline.corrections)
             .unwrap()
             .corrections;
         assert_eq!(
-            ReconstructionData::read(&canonical_measurement.corrections)
+            InspectedReconstructionData::read(&canonical_measurement.corrections)
                 .unwrap()
                 .corrections,
             baseline_cabac,
@@ -1411,10 +1442,11 @@ fn profile_tiny_state_collapse() {
         );
         let mut nongrowing = params;
         let mut nongrowing_bytes = baseline.corrections.len();
-        for limit in canonical_short_match_limits(bounds, params.max_dist_3_matches) {
-            let candidate = TokenPredictorParameters {
-                max_dist_3_matches: limit,
-                ..params
+        for limit in canonical_short_match_limits(bounds, params.max_dist_3_matches()) {
+            let candidate = {
+                let mut canonical_configuration = params;
+                canonical_configuration.set_short_match_cutoff(limit);
+                canonical_configuration
             };
             if candidate.serialized_size() > params.serialized_size() {
                 continue;
@@ -1422,7 +1454,7 @@ fn profile_tiny_state_collapse() {
             let measurement = measure(&contents, &plain, &candidate).unwrap();
             verify(&measurement, &plain, &compressed);
             assert_eq!(
-                ReconstructionData::read(&measurement.corrections)
+                InspectedReconstructionData::read(&measurement.corrections)
                     .unwrap()
                     .corrections,
                 baseline_cabac,
@@ -1434,20 +1466,22 @@ fn profile_tiny_state_collapse() {
                 break;
             }
         }
-        let common = TokenPredictorParameters {
-            matches_to_start_detected: false,
-            very_far_matches_detected: false,
-            window_bits: 15,
-            nice_length: 128,
-            add_policy: DictionaryAddPolicy::AddAll,
-            max_dist_3_matches: 4096,
-            matching_type: SLOW_PREFLATE_PARSER_SETTINGS[2].match_type,
-            max_chain: 128,
-            hash_algorithm: HashAlgorithm::Zlib {
+        let common = {
+            let mut canonical_configuration = params;
+            canonical_configuration.set_hash_algorithm(HashAlgorithm::Zlib {
                 hash_mask: 32767,
                 hash_shift: 5,
-            },
-            ..params
+            });
+            canonical_configuration.set_full_window(false);
+            canonical_configuration.set_matches_to_start(false);
+            canonical_configuration.set_window_bits(15);
+            canonical_configuration.set_insertion(DictionaryAddPolicy::AddAll);
+            canonical_configuration.set_nice_length(128);
+            canonical_configuration.set_max_chain(128);
+            canonical_configuration.set_short_match_cutoff(4096);
+            canonical_configuration
+                .set_matching_type(SLOW_PREFLATE_PARSER_SETTINGS[2].parser.matching_type());
+            canonical_configuration
         }
         .with_lazy_behavior(true, extract_preflate_info(&contents.blocks).min_len);
         let (common_perfect, common_bytes, common_error) = match measure(&contents, &plain, &common)
@@ -1466,8 +1500,8 @@ fn profile_tiny_state_collapse() {
             output,
             "{name}\t{}\t{}\t{perfect}\t{}\t{}\t{}\t{}\t{canonical_limit}\t{}\t{}\t{nongrowing_bytes}\t{params:?}\t{canonical:?}\t{nongrowing:?}\t{common_perfect}\t{common_bytes}\t{common_error}\t{common:?}",
             compressed.len(), plain.len(), baseline.corrections.len(),
-            params.max_dist_3_matches, bounds.0, bounds.1,
-            canonical_measurement.corrections.len(), nongrowing.max_dist_3_matches,
+            params.max_dist_3_matches(), bounds.0, bounds.1,
+            canonical_measurement.corrections.len(), nongrowing.max_dist_3_matches(),
         ).unwrap();
         output.flush().unwrap();
     }
@@ -1511,7 +1545,7 @@ fn profile_tiny_standard_cutoffs() {
             compressed.len(), plain.len(), contents.blocks.len(),
             baseline.count.total_non_default == 0, baseline.corrections.len(),
             baseline.cabac_size, baseline.count.total_non_default,
-            baseline.trace.mismatch_count, params.max_dist_3_matches,
+            baseline.trace.mismatch_count, params.max_dist_3_matches(),
             default.map_or(String::new(), |limit| limit.to_string()),
         ).unwrap();
         match measure(&contents, &plain, &candidate) {
@@ -1537,39 +1571,42 @@ fn profile_tiny_standard_cutoffs() {
 }
 
 fn distance_window_variants(
-    params: TokenPredictorParameters,
+    params: ReconstructionParameters,
     plaintext_length: usize,
-) -> Vec<(&'static str, TokenPredictorParameters)> {
+) -> Vec<(&'static str, ReconstructionParameters)> {
     let mut control = standard_short_match_cutoff(params).2;
-    if params.max_dist_3_matches == 0 {
-        control.max_dist_3_matches = 0;
+    if params.max_dist_3_matches() == 0 {
+        control.set_short_match_cutoff(0);
     }
     let mut libdeflate = control;
-    if params.hash_algorithm == HashAlgorithm::Libdeflate4 && params.max_dist_3_matches != 0 {
-        let cutoff = match params.matching_type {
+    if params.hash_algorithm() == HashAlgorithm::Libdeflate4 && params.max_dist_3_matches() != 0 {
+        let cutoff = match params.matching_type() {
             MatchingType::Greedy | MatchingType::LibdeflateGreedy => 4096,
             _ => 8192,
         };
-        libdeflate.max_dist_3_matches = params.max_dist_3_matches.max(cutoff);
+        libdeflate.set_short_match_cutoff(params.max_dist_3_matches().max(cutoff));
     }
-    let windows = |cutoff| TokenPredictorParameters {
-        max_dist_3_matches: if params.hash_algorithm == HashAlgorithm::RandomVector
-            && params.max_dist_3_matches != 0
-        {
-            params.max_dist_3_matches.max(cutoff)
-        } else {
-            libdeflate.max_dist_3_matches
-        },
-        ..libdeflate
+    let windows = |cutoff| {
+        let mut canonical_configuration = libdeflate;
+        canonical_configuration.set_short_match_cutoff(
+            if params.hash_algorithm() == HashAlgorithm::RandomVector
+                && params.max_dist_3_matches() != 0
+            {
+                params.max_dist_3_matches().max(cutoff)
+            } else {
+                libdeflate.max_dist_3_matches()
+            },
+        );
+        canonical_configuration
     };
-    let window = |mut candidate: TokenPredictorParameters, inert_only: bool| {
-        if candidate.window_bits != 0
+    let window = |mut candidate: ReconstructionParameters, inert_only: bool| {
+        if candidate.window_bits() != 0
             && (!inert_only
                 || plaintext_length
-                    <= ((1usize << candidate.window_bits)
+                    <= ((1usize << candidate.window_bits())
                         .saturating_sub(crate::deflate::deflate_constants::MIN_LOOKAHEAD as usize)))
         {
-            candidate.window_bits = 15;
+            candidate.set_window_bits(15);
         }
         candidate
     };
@@ -1605,31 +1642,32 @@ fn distance_window_normalization_exposes_unobserved_history() {
     tokens.extend(b"abcdefY".iter().copied().map(DeflateToken::Literal));
     let (compressed, contents, plain) = synthetic_stream(tokens);
     for hash_algorithm in [
-        synthetic_params().hash_algorithm,
+        synthetic_params().hash_algorithm(),
         HashAlgorithm::RandomVector,
     ] {
-        let params = TokenPredictorParameters {
-            hash_algorithm,
-            window_bits: 9,
-            max_dist_3_matches: 0,
-            ..synthetic_params()
+        let params = {
+            let mut canonical_configuration = synthetic_params();
+            canonical_configuration.set_hash_algorithm(hash_algorithm);
+            canonical_configuration.set_window_bits(9);
+            canonical_configuration.set_short_match_cutoff(0);
+            canonical_configuration
         };
         let baseline = measure(&contents, &plain, &params).unwrap();
         verify(&baseline, &plain, &compressed);
         let normalized = measure_normalized(&contents, &plain, &params).unwrap();
         verify(&normalized, &plain, &compressed);
         assert_eq!(
-            ReconstructionData::read(&normalized.corrections)
+            InspectedReconstructionData::read(&normalized.corrections)
                 .unwrap()
                 .corrections,
-            ReconstructionData::read(&baseline.corrections)
+            InspectedReconstructionData::read(&baseline.corrections)
                 .unwrap()
                 .corrections,
         );
         for (name, candidate) in distance_window_variants(params, plain.len()) {
             let measurement = measure(&contents, &plain, &candidate).unwrap();
             verify(&measurement, &plain, &compressed);
-            assert_eq!(candidate.max_dist_3_matches, 0, "{name}");
+            assert_eq!(candidate.max_dist_3_matches(), 0, "{name}");
             if name == "window15" {
                 assert!(measurement.trace.mismatch_count > baseline.trace.mismatch_count);
             } else if name == "window15_inert_only" {
@@ -1647,22 +1685,23 @@ fn distance_window_normalization_preserves_inert_windows_and_above_default_refer
             .map(|value| DeflateToken::Literal(value as u8))
             .collect();
         let (compressed, contents, plain) = synthetic_stream(tokens);
-        let params = TokenPredictorParameters {
-            window_bits: 9,
-            max_dist_3_matches: 0,
-            ..synthetic_params()
+        let params = {
+            let mut canonical_configuration = synthetic_params();
+            canonical_configuration.set_window_bits(9);
+            canonical_configuration.set_short_match_cutoff(0);
+            canonical_configuration
         };
         let candidate = distance_window_variants(params, plain.len())[7].1;
-        assert_eq!(candidate.window_bits, expected_bits);
+        assert_eq!(candidate.window_bits(), expected_bits);
         let baseline = measure(&contents, &plain, &params).unwrap();
         let measurement = measure(&contents, &plain, &candidate).unwrap();
         verify(&baseline, &plain, &compressed);
         verify(&measurement, &plain, &compressed);
         assert_eq!(
-            ReconstructionData::read(&measurement.corrections)
+            InspectedReconstructionData::read(&measurement.corrections)
                 .unwrap()
                 .corrections,
-            ReconstructionData::read(&baseline.corrections)
+            InspectedReconstructionData::read(&baseline.corrections)
                 .unwrap()
                 .corrections,
         );
@@ -1676,15 +1715,16 @@ fn distance_window_normalization_preserves_inert_windows_and_above_default_refer
     tokens.push(DeflateToken::Literal(b'Y'));
     let (compressed, contents, plain) = synthetic_stream(tokens);
     for hash_algorithm in [
-        synthetic_params().hash_algorithm,
+        synthetic_params().hash_algorithm(),
         HashAlgorithm::RandomVector,
         HashAlgorithm::Libdeflate4,
     ] {
-        let params = TokenPredictorParameters {
-            hash_algorithm,
-            window_bits: 9,
-            max_dist_3_matches: 4,
-            ..synthetic_params()
+        let params = {
+            let mut canonical_configuration = synthetic_params();
+            canonical_configuration.set_hash_algorithm(hash_algorithm);
+            canonical_configuration.set_window_bits(9);
+            canonical_configuration.set_short_match_cutoff(4);
+            canonical_configuration
         };
         let baseline = measure(&contents, &plain, &params).unwrap();
         let candidate = distance_window_variants(params, plain.len())
@@ -1692,26 +1732,27 @@ fn distance_window_normalization_preserves_inert_windows_and_above_default_refer
             .find(|(name, _)| *name == "window15_inert_only")
             .unwrap()
             .1;
-        assert_eq!(candidate.window_bits, 15);
+        assert_eq!(candidate.window_bits(), 15);
         let measurement = measure(&contents, &plain, &candidate).unwrap();
         verify(&baseline, &plain, &compressed);
         verify(&measurement, &plain, &compressed);
         assert_eq!(
-            ReconstructionData::read(&measurement.corrections)
+            InspectedReconstructionData::read(&measurement.corrections)
                 .unwrap()
                 .corrections,
-            ReconstructionData::read(&baseline.corrections)
+            InspectedReconstructionData::read(&baseline.corrections)
                 .unwrap()
                 .corrections,
         );
         for (_, candidate) in distance_window_variants(
-            TokenPredictorParameters {
-                max_dist_3_matches: 9000,
-                ..params
+            {
+                let mut canonical_configuration = params;
+                canonical_configuration.set_short_match_cutoff(9000);
+                canonical_configuration
             },
             plain.len(),
         ) {
-            assert!(candidate.max_dist_3_matches >= 9000);
+            assert!(candidate.max_dist_3_matches() >= 9000);
         }
     }
 }
@@ -1747,7 +1788,7 @@ fn profile_tiny_distance_windows() {
         let params = estimate_preflate_parameters(&contents, &plain).unwrap();
         let baseline = measure(&contents, &plain, &params).unwrap();
         verify(&baseline, &plain, &compressed);
-        let baseline_cabac = ReconstructionData::read(&baseline.corrections)
+        let baseline_cabac = InspectedReconstructionData::read(&baseline.corrections)
             .unwrap()
             .corrections;
         for (variant, candidate) in distance_window_variants(params, plain.len()) {
@@ -1762,7 +1803,7 @@ fn profile_tiny_distance_windows() {
             match measure(&contents, &plain, &candidate) {
                 Ok(measurement) => {
                     verify(&measurement, &plain, &compressed);
-                    let unchanged = ReconstructionData::read(&measurement.corrections)
+                    let unchanged = InspectedReconstructionData::read(&measurement.corrections)
                         .unwrap()
                         .corrections
                         == baseline_cabac;
@@ -1770,10 +1811,10 @@ fn profile_tiny_distance_windows() {
                         let control = distance_window_variants(params, plain.len())[1].1;
                         let control_measurement = measure(&contents, &plain, &control).unwrap();
                         assert_eq!(
-                            ReconstructionData::read(&control_measurement.corrections)
+                            InspectedReconstructionData::read(&control_measurement.corrections)
                                 .unwrap()
                                 .corrections,
-                            ReconstructionData::read(&measurement.corrections)
+                            InspectedReconstructionData::read(&measurement.corrections)
                                 .unwrap()
                                 .corrections,
                             "{name}: inert window changed prediction",
@@ -1811,7 +1852,7 @@ fn unobserved_insertion_normalization_preserves_predictions_across_parsers() {
     let (compressed, contents, plain) = synthetic_stream(tokens);
     for matching_type in [
         MatchingType::Greedy,
-        SLOW_PREFLATE_PARSER_SETTINGS[2].match_type,
+        SLOW_PREFLATE_PARSER_SETTINGS[2].parser.matching_type(),
         MatchingType::MiniZ {
             max_probes: 3,
             greedy: true,
@@ -1828,23 +1869,27 @@ fn unobserved_insertion_normalization_preserves_predictions_across_parsers() {
             DictionaryAddPolicy::AddFirstAndLast(2),
             DictionaryAddPolicy::AddFirstAndLast(3),
         ] {
-            let parameters = TokenPredictorParameters {
-                matching_type,
-                add_policy,
-                max_dist_3_matches: 4,
-                ..synthetic_params()
+            let parameters = {
+                let mut canonical_configuration = synthetic_params();
+                canonical_configuration.set_insertion(add_policy);
+                canonical_configuration.set_short_match_cutoff(4);
+                canonical_configuration.set_matching_type(matching_type);
+                canonical_configuration
             };
-            let mut profile = crate::models::CompressorProfile::Custom(parameters);
-            profile
-                .canonicalize_unobserved_insertion(extract_preflate_info(&contents.blocks).max_len);
+            let mut profile = crate::estimator::test_support::CompressorProfile::Custom
+                .with_parameters(parameters);
+            crate::estimator::test_support::canonicalize_unobserved_insertion(
+                &mut profile.reconstruction,
+                extract_preflate_info(&contents.blocks).max_len,
+            );
             let before = measure(&contents, &plain, &parameters).unwrap();
-            let after = measure_normalized(&contents, &plain, &profile.parameters()).unwrap();
+            let after = measure_normalized(&contents, &plain, &profile.reconstruction).unwrap();
             verify(&after, &plain, &compressed);
             assert_eq!(
-                ReconstructionData::read(&before.corrections)
+                InspectedReconstructionData::read(&before.corrections)
                     .unwrap()
                     .corrections,
-                ReconstructionData::read(&after.corrections)
+                InspectedReconstructionData::read(&after.corrections)
                     .unwrap()
                     .corrections
             );
@@ -1856,12 +1901,13 @@ fn unobserved_insertion_normalization_preserves_predictions_across_parsers() {
 #[test]
 fn reconstruction_token_reservation_is_bounded_by_available_plaintext() {
     let (compressed, contents, plain) = synthetic_stream(vec![DeflateToken::Literal(b'a'); 127]);
-    let parameters = TokenPredictorParameters {
-        max_token_count: u16::MAX,
-        ..synthetic_params()
+    let parameters = {
+        let mut canonical_configuration = synthetic_params();
+        canonical_configuration.max_token_count = u16::MAX;
+        canonical_configuration
     };
     let measured = measure(&contents, &plain, &parameters).unwrap();
-    let record = ReconstructionData::read(&measured.corrections).unwrap();
+    let record = InspectedReconstructionData::read(&measured.corrections).unwrap();
     let mut decoder =
         PredictionDecoderCabac::new(VP8Reader::new(Cursor::new(&record.corrections)).unwrap());
     let (recreated, blocks) = decode_mispredictions(
@@ -1883,18 +1929,19 @@ fn token_limit_normalization_merges_equivalent_final_block_profiles() {
     let (compressed, contents, plain) = synthetic_stream(vec![DeflateToken::Literal(b'a'); 127]);
     let mut shared = None;
     for max_token_count in [511, 1023, 2047, 8191, 16383] {
-        let parameters = TokenPredictorParameters {
-            max_token_count,
-            ..synthetic_params()
+        let parameters = {
+            let mut canonical_configuration = synthetic_params();
+            canonical_configuration.max_token_count = max_token_count;
+            canonical_configuration
         };
         let before = measure(&contents, &plain, &parameters).unwrap();
         let after = measure_normalized(&contents, &plain, &parameters).unwrap();
         verify(&after, &plain, &compressed);
-        let normalized = ReconstructionData::read(&after.corrections).unwrap();
+        let normalized = InspectedReconstructionData::read(&after.corrections).unwrap();
         assert_eq!(normalized.parameters.max_token_count, 1023);
         assert_eq!(
             normalized.corrections,
-            ReconstructionData::read(&before.corrections)
+            InspectedReconstructionData::read(&before.corrections)
                 .unwrap()
                 .corrections
         );
@@ -1941,19 +1988,20 @@ fn token_limit_normalization_preserves_nonfinal_boundaries_and_windows_parsing()
         writer.flush();
         let compressed = writer.detach_output();
         let (contents, plain) = parse_deflate_whole(&compressed).unwrap();
-        let parameters = TokenPredictorParameters {
-            max_token_count: 127,
-            matching_type,
-            ..synthetic_params()
+        let parameters = {
+            let mut canonical_configuration = synthetic_params();
+            canonical_configuration.set_matching_type(matching_type);
+            canonical_configuration.max_token_count = 127;
+            canonical_configuration
         };
         let before = measure(&contents, &plain, &parameters).unwrap();
         let after = measure_normalized(&contents, &plain, &parameters).unwrap();
         verify(&after, &plain, &compressed);
-        let normalized = ReconstructionData::read(&after.corrections).unwrap();
+        let normalized = InspectedReconstructionData::read(&after.corrections).unwrap();
         assert_eq!(normalized.parameters.max_token_count, expected);
         assert_eq!(
             normalized.corrections,
-            ReconstructionData::read(&before.corrections)
+            InspectedReconstructionData::read(&before.corrections)
                 .unwrap()
                 .corrections
         );
@@ -1971,19 +2019,20 @@ fn admissible_window_normalization_preserves_records_and_skips_partial_streams()
     tokens.push(DeflateToken::new_ref(3, 4));
     tokens.push(DeflateToken::Literal(b'Y'));
     let (compressed, mut contents, plain) = synthetic_stream(tokens);
-    let params = TokenPredictorParameters {
-        window_bits: 9,
-        max_dist_3_matches: 4,
-        ..synthetic_params()
+    let params = {
+        let mut canonical_configuration = synthetic_params();
+        canonical_configuration.set_window_bits(9);
+        canonical_configuration.set_short_match_cutoff(4);
+        canonical_configuration
     };
     let baseline = measure(&contents, &plain, &params).unwrap();
     let normalized = measure_normalized(&contents, &plain, &params).unwrap();
     verify(&normalized, &plain, &compressed);
     assert_eq!(
-        ReconstructionData::read(&normalized.corrections)
+        InspectedReconstructionData::read(&normalized.corrections)
             .unwrap()
             .parameters
-            .window_bits,
+            .window_bits(),
         15
     );
     assert_eq!(baseline.cabac_size, normalized.cabac_size);
@@ -2001,7 +2050,7 @@ fn admissible_window_normalization_preserves_records_and_skips_partial_streams()
     let partial = measure_normalized(&contents, &plain, &params).unwrap();
     verify(&partial, &plain, &writer.detach_output());
     assert_eq!(
-        ReconstructionData::read(&partial.corrections)
+        InspectedReconstructionData::read(&partial.corrections)
             .unwrap()
             .parameters,
         params
@@ -2046,8 +2095,8 @@ fn profile_tiny_parameter_normalization() {
             let normalized = measure_normalized(&contents, &plain, &params).unwrap();
             verify(&baseline, &plain, &compressed);
             verify(&normalized, &plain, &compressed);
-            let before = ReconstructionData::read(&baseline.corrections).unwrap();
-            let after = ReconstructionData::read(&normalized.corrections).unwrap();
+            let before = InspectedReconstructionData::read(&baseline.corrections).unwrap();
+            let after = InspectedReconstructionData::read(&normalized.corrections).unwrap();
             assert_eq!(
                 before.corrections, after.corrections,
                 "{name}/{policy}: CABAC changed"
@@ -2061,14 +2110,18 @@ fn profile_tiny_parameter_normalization() {
                 "{name}"
             );
             assert_eq!(
-                TokenPredictorParameters {
-                    window_bits: params.window_bits,
-                    max_dist_3_matches: params.max_dist_3_matches,
-                    ..after.parameters
+                {
+                    let mut canonical_configuration = after.parameters;
+                    canonical_configuration.set_window_bits(params.window_bits());
+                    canonical_configuration.set_short_match_cutoff(params.max_dist_3_matches());
+                    canonical_configuration
                 },
                 params
             );
-            assert!(after.parameters.window_bits >= params.window_bits, "{name}");
+            assert!(
+                after.parameters.window_bits() >= params.window_bits(),
+                "{name}"
+            );
             assert!(
                 normalized.corrections.len() <= baseline.corrections.len(),
                 "{name}"
@@ -2080,7 +2133,11 @@ fn profile_tiny_parameter_normalization() {
                     production.corrections, normalized.corrections,
                     "{name}: production differs"
                 );
-                assert_eq!(production.parameters, Some(after.parameters), "{name}");
+                assert_eq!(
+                    production.parameters.map(|report| report.reconstruction),
+                    Some(after.parameters),
+                    "{name}"
+                );
             }
             writeln!(
                 output,
@@ -2119,13 +2176,13 @@ fn print_details(measurement: &Measurement) {
 }
 
 fn parameter_variants(
-    params: TokenPredictorParameters,
+    params: ReconstructionParameters,
     observed_min_len: u32,
     combined: bool,
-) -> Vec<TokenPredictorParameters> {
+) -> Vec<ReconstructionParameters> {
     let mut variants = Vec::new();
     let compatible = zlib_compatible(&params);
-    let mut add = |candidate: TokenPredictorParameters| {
+    let mut add = |candidate: ReconstructionParameters| {
         let candidate = candidate.with_lazy_behavior(compatible, observed_min_len);
         if candidate != params && !variants.contains(&candidate) {
             variants.push(candidate);
@@ -2134,44 +2191,48 @@ fn parameter_variants(
     let matching_types = std::iter::once(MatchingType::Greedy).chain(
         SLOW_PREFLATE_PARSER_SETTINGS
             .iter()
-            .map(|config| config.match_type),
+            .map(|config| config.parser.matching_type()),
     );
     for matching_type in matching_types {
-        add(TokenPredictorParameters {
-            matching_type,
-            ..params
+        add({
+            let mut canonical_configuration = params;
+            canonical_configuration.set_matching_type(matching_type);
+            canonical_configuration
         });
         if combined {
             for nice_length in [8, 10, 14, 16, 30, 32, 64, 65, 128, 130, 258] {
                 for max_chain in [
-                    params.max_chain,
-                    params.max_chain.saturating_sub(1).max(1),
-                    params.max_chain.next_power_of_two(),
+                    params.max_chain(),
+                    params.max_chain().saturating_sub(1).max(1),
+                    params.max_chain().next_power_of_two(),
                 ] {
-                    add(TokenPredictorParameters {
-                        matching_type,
-                        nice_length,
-                        max_chain,
-                        ..params
+                    add({
+                        let mut canonical_configuration = params;
+                        canonical_configuration.set_nice_length(nice_length);
+                        canonical_configuration.set_max_chain(max_chain);
+                        canonical_configuration.set_matching_type(matching_type);
+                        canonical_configuration
                     });
                 }
             }
         }
     }
     for nice_length in [8, 10, 14, 16, 30, 32, 64, 65, 128, 130, 258] {
-        add(TokenPredictorParameters {
-            nice_length,
-            ..params
+        add({
+            let mut canonical_configuration = params;
+            canonical_configuration.set_nice_length(nice_length);
+            canonical_configuration
         });
     }
     // A chain depth inferred from observed matches is a lower bound, not a search budget.
     for max_chain in [
-        params.max_chain.saturating_sub(1).max(1),
-        params.max_chain.next_power_of_two(),
+        params.max_chain().saturating_sub(1).max(1),
+        params.max_chain().next_power_of_two(),
     ] {
-        add(TokenPredictorParameters {
-            max_chain,
-            ..params
+        add({
+            let mut canonical_configuration = params;
+            canonical_configuration.set_max_chain(max_chain);
+            canonical_configuration
         });
     }
     variants
@@ -2204,7 +2265,7 @@ impl PredictionDecoder for DefaultPredictionDecoder {
 fn reconstruct_with_empty_tail(
     contents: &DeflateContents,
     plain: &PlainText,
-    params: &TokenPredictorParameters,
+    params: &ReconstructionParameters,
 ) -> Result<Option<Vec<u8>>> {
     if !(2..=4).contains(&contents.blocks.len()) {
         return Ok(None);
@@ -2238,12 +2299,13 @@ fn reconstruct_with_empty_tail(
     {
         return Ok(None);
     }
-    let parameters = TokenPredictorParameters {
-        block_type_strategy: first_type,
-        ..*params
+    let parameters = {
+        let mut canonical_configuration = *params;
+        canonical_configuration.block_type_strategy = first_type;
+        canonical_configuration
     };
     let mut input = PreflateInput::new(plain);
-    let mut first = TokenPredictor::new(&parameters)
+    let mut first = TokenPredictor::from_parameters(&parameters)
         .recreate_block(&mut DefaultPredictionDecoder, &mut input)?;
     if input.remaining() != 0 {
         return Ok(None);
@@ -2337,7 +2399,7 @@ fn verify_huffman_profile_selection() {
 fn selected_huffman_profiles_survive_block_and_chunk_boundaries() {
     use crate::{
         deflate::{deflate_token::TokenFrequency, huffman_calc::HufftreeBitCalc},
-        statistical_codec::AssertDefaultOnlyDecoder,
+        statistical_codec::tests::AssertDefaultOnlyDecoder,
         tree_predictor::recreate_tree_with_rules,
     };
 
@@ -2445,7 +2507,7 @@ fn block_tails_roundtrip_across_chunk_boundaries_and_fallback_layouts() {
                                 DeflateHuffmanType::Dynamic {
                                 huffman_encoding: crate::tree_predictor::recreate_tree_with_rules(
                                     &freq,
-                                    &mut crate::statistical_codec::AssertDefaultOnlyDecoder {},
+                                    &mut crate::statistical_codec::tests::AssertDefaultOnlyDecoder {},
                                     crate::deflate::huffman_calc::HufftreeBitCalc::ZlibCorrected,
                                     true,
                                 )
@@ -2530,12 +2592,12 @@ fn block_tails_roundtrip_across_chunk_boundaries_and_fallback_layouts() {
 }
 
 #[test]
-fn legacy_stored_block_lengths_remain_readable() {
+fn stored_block_lengths_roundtrip() {
     let mut writer = DeflateWriter::new();
     writer
         .encode_block(&DeflateTokenBlock {
             block_type: DeflateTokenBlockType::Stored {
-                uncompressed: b"legacy stored block".to_vec(),
+                uncompressed: b"stored block".to_vec(),
             },
             last: true,
         })
@@ -2544,11 +2606,12 @@ fn legacy_stored_block_lengths_remain_readable() {
     let compressed = writer.detach_output();
     let (contents, plain) = parse_deflate_whole(&compressed).unwrap();
     let params = estimate_preflate_parameters(&contents, &plain).unwrap();
+    let mut predictor = TokenPredictor::from_parameters(&params);
     let mut bytes = Vec::new();
     let mut encoder = PredictionEncoderCabac::new(VP8Writer::new(&mut bytes).unwrap());
     predict_blocks(
         &contents.blocks,
-        &mut TokenPredictor::new_legacy(&params),
+        &mut predictor,
         &mut encoder,
         &mut PreflateInput::new(&plain),
     )
@@ -2556,10 +2619,10 @@ fn legacy_stored_block_lengths_remain_readable() {
     encoder.finish();
     drop(encoder);
     let corrections = ReconstructionData {
-        parameters: params,
+        parameters: predictor.finalize_reconstruction_parameters(),
         corrections: bytes,
     }
-    .write_legacy();
+    .write();
     assert_eq!(
         recreate_whole_deflate_stream(plain.text(), &corrections).unwrap(),
         compressed
@@ -2872,23 +2935,25 @@ fn diagnose_tiny_streams() {
             let observed_min_len = extract_preflate_info(&contents.blocks).min_len;
             candidates = parameter_variants(params, observed_min_len, false);
             for (hash_mask, hash_shift) in [(511, 3), (2047, 4), (32767, 5)] {
-                for settings in crate::models::zlib::ZLIB_PREFLATE_PARSER_SETTINGS
+                for settings in crate::estimator::test_support::zlib::ZLIB_PREFLATE_PARSER_SETTINGS
                     .iter()
                     .chain(SLOW_PREFLATE_PARSER_SETTINGS.iter())
                 {
                     for min_len in [3, observed_min_len] {
-                        let candidate = TokenPredictorParameters {
-                            hash_algorithm: HashAlgorithm::Zlib {
+                        let candidate = {
+                            let mut canonical_configuration = params;
+                            canonical_configuration.set_hash_algorithm(HashAlgorithm::Zlib {
                                 hash_mask,
                                 hash_shift,
-                            },
-                            matching_type: settings.match_type,
-                            add_policy: settings.dictionary_add_policy,
-                            nice_length: settings.nice_length,
-                            max_chain: settings.max_chain,
-                            window_bits: 15,
-                            very_far_matches_detected: false,
-                            ..params
+                            });
+                            canonical_configuration.set_full_window(false);
+                            canonical_configuration.set_window_bits(15);
+                            canonical_configuration.set_insertion(settings.dictionary_add_policy);
+                            canonical_configuration.set_nice_length(settings.nice_length);
+                            canonical_configuration.set_max_chain(settings.max_chain);
+                            canonical_configuration
+                                .set_matching_type(settings.parser.matching_type());
+                            canonical_configuration
                         }
                         .with_lazy_behavior(true, min_len);
                         if candidate != params && !candidates.contains(&candidate) {
@@ -3004,8 +3069,10 @@ fn diagnose_pdf_overhead() {
         let mut best = None;
         let mut best_params = params;
         if remaining_probes.remove(name.as_ref()) {
-            let baseline_score = crate::estimator::prediction_scoring::score_predictions(
-                &mut crate::prediction_state::PredictionState::new(&params),
+            let baseline_score = crate::estimator::test_support::score_predictions(
+                &mut crate::prediction_state::PredictionState::from_reconstruction_parameters(
+                    (&params).into(),
+                ),
                 &contents.blocks,
                 &plain,
                 4096,
@@ -3016,8 +3083,8 @@ fn diagnose_pdf_overhead() {
             let mut candidates: Vec<_> = pdf_parameter_variants(params, observed_min_len)
                 .into_iter()
                 .map(|candidate| {
-                    let score = crate::estimator::prediction_scoring::score_predictions(
-                        &mut crate::prediction_state::PredictionState::new(&candidate),
+                    let score = crate::estimator::test_support::score_predictions(
+                        &mut crate::prediction_state::PredictionState::from_reconstruction_parameters((&candidate).into()),
                         &contents.blocks,
                         &plain,
                         4096,
@@ -3031,7 +3098,7 @@ fn diagnose_pdf_overhead() {
             candidates.sort_by_key(|(score, _)| *score);
             let mut families = Vec::new();
             for (_, candidate) in candidates {
-                let family = (candidate.hash_algorithm, candidate.matching_type);
+                let family = (candidate.hash_algorithm(), candidate.matching_type());
                 if families.contains(&family) {
                     continue;
                 }
@@ -3134,56 +3201,63 @@ fn diagnose_fixed_family_profiles() {
         }
         println!("{name}: reference_lengths={lengths:?}");
         let mut candidates = vec![params];
-        if matches!(params.hash_algorithm, HashAlgorithm::Zlib { .. }) {
+        if matches!(params.hash_algorithm(), HashAlgorithm::Zlib { .. }) {
             for config in SLOW_PREFLATE_PARSER_SETTINGS {
                 for filtered in [false, true] {
-                    let mut matching_type = config.match_type;
+                    let mut matching_type = config.parser.matching_type();
                     if let MatchingType::Lazy {
                         filtered_matching, ..
                     } = &mut matching_type
                     {
                         *filtered_matching = filtered;
                     }
-                    candidates.push(TokenPredictorParameters {
-                        matching_type,
-                        nice_length: config.nice_length,
-                        max_chain: config.max_chain,
-                        ..params
+                    candidates.push({
+                        let mut canonical_configuration = params;
+                        canonical_configuration.set_nice_length(config.nice_length);
+                        canonical_configuration.set_max_chain(config.max_chain);
+                        canonical_configuration.set_matching_type(matching_type);
+                        canonical_configuration
                     });
                 }
             }
-            candidates.push(TokenPredictorParameters {
-                matching_type: MatchingType::Greedy,
-                ..params
+            candidates.push({
+                let mut canonical_configuration = params;
+                canonical_configuration.set_matching_type(MatchingType::Greedy);
+                canonical_configuration
             });
-            candidates.push(TokenPredictorParameters {
-                matching_type: MatchingType::Lazy {
+            candidates.push({
+                let mut canonical_configuration = params;
+                canonical_configuration.set_matching_type(MatchingType::Lazy {
                     max_lazy: 258,
                     filtered_matching: false,
                     behavior: LazyBehavior::RecomputeAfterLiteral,
-                },
-                ..params
+                });
+                canonical_configuration
             });
             for max_probes in [32, 128, 512, 1500] {
                 for greedy in [false, true] {
-                    candidates.push(TokenPredictorParameters {
-                        matching_type: MatchingType::MiniZ { max_probes, greedy },
-                        max_chain: u32::from(max_probes).div_ceil(3) * 3,
-                        ..params
+                    candidates.push({
+                        let mut canonical_configuration = params;
+                        canonical_configuration
+                            .set_max_chain(u32::from(max_probes).div_ceil(3) * 3);
+                        canonical_configuration
+                            .set_matching_type(MatchingType::MiniZ { max_probes, greedy });
+                        canonical_configuration
                     });
                 }
             }
         } else {
-            for hash_algorithm in [params.hash_algorithm, HashAlgorithm::RandomVector] {
+            for hash_algorithm in [params.hash_algorithm(), HashAlgorithm::RandomVector] {
                 for filtered_matching in [false, true] {
-                    candidates.push(TokenPredictorParameters {
-                        hash_algorithm,
-                        matching_type: MatchingType::Lazy {
+                    candidates.push({
+                        let mut canonical_configuration = params;
+                        canonical_configuration.set_hash_algorithm(hash_algorithm);
+                        canonical_configuration.set_matching_type(MatchingType::Lazy {
                             max_lazy: 16,
                             filtered_matching,
                             behavior: LazyBehavior::RecomputeAfterLiteral,
-                        },
-                        ..params
+                        });
+                        canonical_configuration
                     });
                 }
             }
@@ -3225,13 +3299,14 @@ fn diagnose_fixed_family_profiles() {
                     },
                 ),
             ] {
-                candidates.push(TokenPredictorParameters {
-                    hash_algorithm: HashAlgorithm::Libdeflate4,
-                    matching_type,
-                    max_chain,
-                    nice_length,
-                    max_dist_3_matches: 4096,
-                    ..params
+                candidates.push({
+                    let mut canonical_configuration = params;
+                    canonical_configuration.set_hash_algorithm(HashAlgorithm::Libdeflate4);
+                    canonical_configuration.set_nice_length(nice_length);
+                    canonical_configuration.set_max_chain(max_chain);
+                    canonical_configuration.set_short_match_cutoff(4096);
+                    canonical_configuration.set_matching_type(matching_type);
+                    canonical_configuration
                 });
             }
         }
@@ -3239,14 +3314,15 @@ fn diagnose_fixed_family_profiles() {
             if candidates[..index].contains(candidate) {
                 continue;
             }
-            let (prefix_errors, prefix_tokens) =
-                crate::estimator::prediction_scoring::score_predictions(
-                    &mut crate::prediction_state::PredictionState::new(candidate),
-                    &contents.blocks,
-                    &plain,
-                    1024,
-                    262144,
-                );
+            let (prefix_errors, prefix_tokens) = crate::estimator::test_support::score_predictions(
+                &mut crate::prediction_state::PredictionState::from_reconstruction_parameters(
+                    candidate.into(),
+                ),
+                &contents.blocks,
+                &plain,
+                1024,
+                262144,
+            );
             match measure(&contents, &plain, candidate) {
                 Ok(measurement) => {
                     verify(&measurement, &plain, &compressed);
@@ -3326,18 +3402,20 @@ fn diagnose_miniz_profile_selection() {
             baseline.trace.mismatch_count,
         )
         .unwrap();
-        let shallow = TokenPredictorParameters {
-            matching_type: MatchingType::MiniZ {
+        let shallow = {
+            let mut canonical_configuration = params;
+            canonical_configuration
+                .set_hash_algorithm(crate::estimator::test_support::zlib::DEFAULT_HASH);
+            canonical_configuration.set_window_bits(15);
+            canonical_configuration.set_insertion(DictionaryAddPolicy::AddAll);
+            canonical_configuration.set_nice_length(258);
+            canonical_configuration.set_max_chain(3);
+            canonical_configuration.set_short_match_cutoff(8191);
+            canonical_configuration.set_matching_type(MatchingType::MiniZ {
                 max_probes: 3,
                 greedy: true,
-            },
-            max_chain: 3,
-            nice_length: 258,
-            max_dist_3_matches: 8191,
-            hash_algorithm: crate::models::zlib::DEFAULT_HASH,
-            add_policy: DictionaryAddPolicy::AddAll,
-            window_bits: 15,
-            ..params
+            });
+            canonical_configuration
         };
         let shallow_measurement = measure(&contents, &plain, &shallow).unwrap();
         verify(&shallow_measurement, &plain, &compressed);
@@ -3362,24 +3440,27 @@ fn diagnose_miniz_profile_selection() {
         let mut candidates = Vec::new();
         for max_probes in [1u16, 3, 6, 9, 16] {
             for greedy in [true, false] {
-                candidates.push(TokenPredictorParameters {
-                    matching_type: MatchingType::MiniZ { max_probes, greedy },
-                    max_chain: u32::from(max_probes).div_ceil(3) * 3,
-                    nice_length: 258,
-                    ..params
+                candidates.push({
+                    let mut canonical_configuration = params;
+                    canonical_configuration.set_nice_length(258);
+                    canonical_configuration.set_max_chain(u32::from(max_probes).div_ceil(3) * 3);
+                    canonical_configuration
+                        .set_matching_type(MatchingType::MiniZ { max_probes, greedy });
+                    canonical_configuration
                 });
             }
         }
         candidates.extend(pdf_parameter_variants(params, info.min_len));
-        for hash_algorithm in [params.hash_algorithm, HashAlgorithm::RandomVector] {
+        for hash_algorithm in [params.hash_algorithm(), HashAlgorithm::RandomVector] {
             for nice_length in [3, 8, 32, 258] {
                 for max_chain in [1, 2, 4] {
-                    candidates.push(TokenPredictorParameters {
-                        hash_algorithm,
-                        matching_type: MatchingType::Greedy,
-                        nice_length,
-                        max_chain,
-                        ..params
+                    candidates.push({
+                        let mut canonical_configuration = params;
+                        canonical_configuration.set_hash_algorithm(hash_algorithm);
+                        canonical_configuration.set_nice_length(nice_length);
+                        canonical_configuration.set_max_chain(max_chain);
+                        canonical_configuration.set_matching_type(MatchingType::Greedy);
+                        canonical_configuration
                     });
                 }
             }
@@ -3389,10 +3470,11 @@ fn diagnose_miniz_profile_selection() {
         for candidate in std::iter::once(params).chain(candidates) {
             for window_bits in minimum_window..=15 {
                 for very_far_matches_detected in [false, true] {
-                    let candidate = TokenPredictorParameters {
-                        window_bits,
-                        very_far_matches_detected,
-                        ..candidate
+                    let candidate = {
+                        let mut canonical_configuration = candidate;
+                        canonical_configuration.set_full_window(very_far_matches_detected);
+                        canonical_configuration.set_window_bits(window_bits);
+                        canonical_configuration
                     };
                     if !variants.contains(&candidate) {
                         variants.push(candidate);
@@ -3403,8 +3485,10 @@ fn diagnose_miniz_profile_selection() {
         let mut scored: Vec<_> = variants
             .into_iter()
             .map(|candidate| {
-                let score = crate::estimator::prediction_scoring::score_predictions(
-                    &mut crate::prediction_state::PredictionState::new(&candidate),
+                let score = crate::estimator::test_support::score_predictions(
+                    &mut crate::prediction_state::PredictionState::from_reconstruction_parameters(
+                        (&candidate).into(),
+                    ),
                     &contents.blocks,
                     &plain,
                     4096,
@@ -3417,10 +3501,10 @@ fn diagnose_miniz_profile_selection() {
         let mut seen = Vec::new();
         for (score, candidate) in scored {
             let family = (
-                candidate.hash_algorithm,
-                candidate.matching_type,
-                candidate.window_bits,
-                candidate.add_policy,
+                candidate.hash_algorithm(),
+                candidate.matching_type(),
+                candidate.window_bits(),
+                candidate.add_policy(),
             );
             if seen.contains(&family) {
                 continue;
@@ -3475,18 +3559,19 @@ fn diagnose_prediction_residual_shapes() {
         let (contents, plain) = parse_deflate_whole(&compressed).unwrap();
         assert_eq!(contents.compressed_size, compressed.len());
         let estimated = estimate_preflate_parameters(&contents, &plain).unwrap();
-        let params = if matches!(estimated.hash_algorithm, HashAlgorithm::Zlib { .. }) {
+        let params = if matches!(estimated.hash_algorithm(), HashAlgorithm::Zlib { .. }) {
             estimated
         } else {
-            TokenPredictorParameters {
-                hash_algorithm: HashAlgorithm::Libdeflate4,
-                matching_type: MatchingType::LibdeflateLazy {
+            {
+                let mut canonical_configuration = estimated;
+                canonical_configuration.set_hash_algorithm(HashAlgorithm::Libdeflate4);
+                canonical_configuration.set_nice_length(130);
+                canonical_configuration.set_max_chain(101);
+                canonical_configuration.set_short_match_cutoff(4096);
+                canonical_configuration.set_matching_type(MatchingType::LibdeflateLazy {
                     two_positions: false,
-                },
-                nice_length: 130,
-                max_chain: 101,
-                max_dist_3_matches: 4096,
-                ..estimated
+                });
+                canonical_configuration
             }
         };
         let measurement =
@@ -3523,20 +3608,22 @@ fn diagnose_prediction_residual_shapes() {
             );
         }
         let mut probes = Vec::new();
-        if matches!(params.hash_algorithm, HashAlgorithm::Zlib { .. }) {
+        if matches!(params.hash_algorithm(), HashAlgorithm::Zlib { .. }) {
             for cutoff in [0, 16, 64, 256, 1024] {
-                probes.push(TokenPredictorParameters {
-                    max_dist_3_matches: cutoff,
-                    ..params
+                probes.push({
+                    let mut canonical_configuration = params;
+                    canonical_configuration.set_short_match_cutoff(cutoff);
+                    canonical_configuration
                 });
             }
         } else {
             for max_chain in [99, 100, 101, 102] {
                 for nice_length in [128, 130] {
-                    probes.push(TokenPredictorParameters {
-                        max_chain,
-                        nice_length,
-                        ..params
+                    probes.push({
+                        let mut canonical_configuration = params;
+                        canonical_configuration.set_nice_length(nice_length);
+                        canonical_configuration.set_max_chain(max_chain);
+                        canonical_configuration
                     });
                 }
             }
@@ -3546,9 +3633,9 @@ fn diagnose_prediction_residual_shapes() {
             verify(&trial, &plain, &compressed);
             println!(
                 "NEIGHBOR {name}: chain={} nice={} cutoff={} bytes={} mismatches={}",
-                candidate.max_chain,
-                candidate.nice_length,
-                candidate.max_dist_3_matches,
+                candidate.max_chain(),
+                candidate.nice_length(),
+                candidate.max_dist_3_matches(),
                 trial.corrections.len(),
                 trial.trace.mismatch_count,
             );
@@ -3639,17 +3726,14 @@ fn sparse_short_references_select_suppression_and_round_trip() {
         info.reference_count
     );
     let params = estimate_preflate_parameters(&contents, &plain).unwrap();
-    assert_eq!(params.max_dist_3_matches, 0, "{params:?}");
+    assert_eq!(params.max_dist_3_matches(), 0, "{params:?}");
     let measurement = measure(&contents, &plain, &params).unwrap();
     verify(&measurement, &plain, &compressed);
-    let baseline = measure(
-        &contents,
-        &plain,
-        &TokenPredictorParameters {
-            max_dist_3_matches: info.max_dist_3_matches,
-            ..params
-        },
-    )
+    let baseline = measure(&contents, &plain, &{
+        let mut canonical_configuration = params;
+        canonical_configuration.set_short_match_cutoff(info.max_dist_3_matches);
+        canonical_configuration
+    })
     .unwrap();
     verify(&baseline, &plain, &compressed);
     assert!(
@@ -3660,7 +3744,15 @@ fn sparse_short_references_select_suppression_and_round_trip() {
     );
     let (production, plaintext) =
         preflate_whole_deflate_stream(&compressed, &PreflateConfig::default()).unwrap();
-    assert_eq!(production.parameters.unwrap().max_dist_3_matches, 0);
+    assert_eq!(
+        production
+            .parameters
+            .unwrap()
+            .reconstruction
+            .behavior
+            .short_match_cutoff(),
+        0
+    );
     assert_eq!(
         recreate_whole_deflate_stream(plaintext.text(), &production.corrections).unwrap(),
         compressed,
@@ -3687,9 +3779,10 @@ fn diagnose_short_match_policy() {
         assert_eq!(contents.compressed_size, compressed.len());
         let params = estimate_preflate_parameters(&contents, &plain).unwrap();
         let mut lengths = std::collections::BTreeMap::<u32, usize>::new();
-        let short_disabled = TokenPredictorParameters {
-            max_dist_3_matches: 0,
-            ..params
+        let short_disabled = {
+            let mut canonical_configuration = params;
+            canonical_configuration.set_short_match_cutoff(0);
+            canonical_configuration
         };
         let residual =
             measure_with_tracking(&contents, &plain, &short_disabled, false, false, 1_000_000)
@@ -3714,7 +3807,7 @@ fn diagnose_short_match_policy() {
         let mut short_at_head = 0;
         let mut literal_run_samples = 0;
         let mut rejected_short_heads = 0;
-        let mut state = crate::hash_chain_holder::new_hash_chain_holder(&params);
+        let mut state = crate::hash_chain_holder::tests::new_hash_chain_holder(&params);
         let mut input = PreflateInput::new(&plain);
         let mut position = 0;
         for (index, block) in contents.blocks.iter().enumerate() {
@@ -3743,9 +3836,9 @@ fn diagnose_short_match_policy() {
                                 {
                                     literal_run_samples += 1;
                                     if matches!(
-                                        state.match_token_0(2, 1, &input),
+                                        state.match_token_0(2, 1, &input, SearchPurpose::Prediction),
                                         crate::hash_chain_holder::MatchResult::Success(head)
-                                            if head.len() == 3 && head.dist() <= params.max_dist_3_matches
+                                            if head.len() == 3 && head.dist() <= params.max_dist_3_matches()
                                     ) {
                                         rejected_short_heads += 1;
                                     }
@@ -3758,15 +3851,25 @@ fn diagnose_short_match_policy() {
                                 if missed_references.contains_key(&position) {
                                     println!(
                                         "SHORT_MISS {name}: offset={position} actual={reference:?} current={:?} full={:?}",
-                                        state.match_token_0(0, params.max_chain, &input),
-                                        state.match_token_0(0, 65535, &input),
+                                        state.match_token_0(
+                                            0,
+                                            params.max_chain(),
+                                            &input,
+                                            SearchPurpose::Prediction
+                                        ),
+                                        state.match_token_0(
+                                            0,
+                                            65535,
+                                            &input,
+                                            SearchPurpose::Prediction
+                                        ),
                                     );
                                 }
                                 *lengths.entry(reference.len()).or_default() += 1;
                                 if reference.len() == 3 {
                                     short_count += 1;
                                     if matches!(
-                                        state.match_token_0(2, 1, &input),
+                                        state.match_token_0(2, 1, &input, SearchPurpose::Prediction),
                                         crate::hash_chain_holder::MatchResult::Success(head)
                                             if head == *reference
                                     ) {
@@ -3809,43 +3912,48 @@ fn diagnose_short_match_policy() {
         let mut candidates = vec![
             params,
             short_disabled,
-            TokenPredictorParameters {
-                matching_type: level8.match_type,
-                max_chain: level8.max_chain,
-                nice_length: level8.nice_length,
-                ..short_disabled
+            {
+                let mut canonical_configuration = short_disabled;
+                canonical_configuration.set_nice_length(level8.nice_length);
+                canonical_configuration.set_max_chain(level8.max_chain);
+                canonical_configuration.set_matching_type(level8.parser.matching_type());
+                canonical_configuration
             },
-            TokenPredictorParameters {
-                max_chain: 1024,
-                matching_type: MatchingType::Lazy {
+            {
+                let mut canonical_configuration = short_disabled;
+                canonical_configuration.set_max_chain(1024);
+                canonical_configuration.set_matching_type(MatchingType::Lazy {
                     max_lazy: 16,
                     filtered_matching: false,
                     behavior: LazyBehavior::Zlib { good_length: 8 },
-                },
-                ..short_disabled
+                });
+                canonical_configuration
             },
         ];
         for limit in [30, 32, 64] {
             for base in [params, candidates[3]] {
-                for cutoff in [0, params.max_dist_3_matches] {
-                    candidates.push(TokenPredictorParameters {
-                        add_policy: DictionaryAddPolicy::AddFirst(limit),
-                        max_dist_3_matches: cutoff,
-                        ..base
+                for cutoff in [0, params.max_dist_3_matches()] {
+                    candidates.push({
+                        let mut canonical_configuration = base;
+                        canonical_configuration.set_insertion(DictionaryAddPolicy::AddFirst(limit));
+                        canonical_configuration.set_short_match_cutoff(cutoff);
+                        canonical_configuration
                     });
                 }
             }
             for nice_length in [32, 64, 128] {
-                candidates.push(TokenPredictorParameters {
-                    nice_length,
-                    ..params
+                candidates.push({
+                    let mut canonical_configuration = params;
+                    canonical_configuration.set_nice_length(nice_length);
+                    canonical_configuration
                 });
             }
             for config in &SLOW_PREFLATE_PARSER_SETTINGS[2..5] {
-                candidates.push(TokenPredictorParameters {
-                    nice_length: 128,
-                    matching_type: config.match_type,
-                    ..params
+                candidates.push({
+                    let mut canonical_configuration = params;
+                    canonical_configuration.set_nice_length(128);
+                    canonical_configuration.set_matching_type(config.parser.matching_type());
+                    canonical_configuration
                 });
             }
         }
@@ -3857,14 +3965,15 @@ fn diagnose_short_match_policy() {
             HashAlgorithm::Libdeflate4,
             HashAlgorithm::Chromium { hash_mask: 0x7fff },
         ] {
-            candidates.extend(sweep_neighborhood(TokenPredictorParameters {
-                hash_algorithm,
-                matching_type: four_byte_config.match_type,
-                max_chain: four_byte_config.max_chain,
-                nice_length: four_byte_config.nice_length,
-                add_policy: DictionaryAddPolicy::AddAll,
-                max_dist_3_matches: 0,
-                ..params
+            candidates.extend(sweep_neighborhood({
+                let mut canonical_configuration = params;
+                canonical_configuration.set_hash_algorithm(hash_algorithm);
+                canonical_configuration.set_insertion(DictionaryAddPolicy::AddAll);
+                canonical_configuration.set_nice_length(four_byte_config.nice_length);
+                canonical_configuration.set_max_chain(four_byte_config.max_chain);
+                canonical_configuration.set_short_match_cutoff(0);
+                canonical_configuration.set_matching_type(four_byte_config.parser.matching_type());
+                canonical_configuration
             }));
         }
         let mut measured = std::collections::HashSet::new();
@@ -3951,14 +4060,16 @@ fn diagnose_chromium_profiles() {
         let baseline = estimate_preflate_parameters(&contents, &plain).unwrap();
         for hash_mask in [0x7fff, 0xffff] {
             for config in &SLOW_PREFLATE_PARSER_SETTINGS {
-                let parameters = TokenPredictorParameters {
-                    hash_algorithm: HashAlgorithm::Chromium { hash_mask },
-                    matching_type: config.match_type,
-                    nice_length: config.nice_length,
-                    max_chain: config.max_chain,
-                    add_policy: DictionaryAddPolicy::AddAll,
-                    max_dist_3_matches: 4096,
-                    ..baseline
+                let parameters = {
+                    let mut canonical_configuration = baseline;
+                    canonical_configuration
+                        .set_hash_algorithm(HashAlgorithm::Chromium { hash_mask });
+                    canonical_configuration.set_insertion(DictionaryAddPolicy::AddAll);
+                    canonical_configuration.set_nice_length(config.nice_length);
+                    canonical_configuration.set_max_chain(config.max_chain);
+                    canonical_configuration.set_short_match_cutoff(4096);
+                    canonical_configuration.set_matching_type(config.parser.matching_type());
+                    canonical_configuration
                 };
                 let trial =
                     match measure_with_tracking(&contents, &plain, &parameters, false, false, 4096)
@@ -4199,7 +4310,7 @@ fn diagnose_dictionary_insertion_origins() {
     let mut skipped = 0;
     let mut source_lengths = std::collections::BTreeMap::new();
     let mut dual =
-        (parameters.hash_algorithm == HashAlgorithm::Libdeflate4).then(HashChainLibflate4::new);
+        (parameters.hash_algorithm() == HashAlgorithm::Libdeflate4).then(HashChainLibflate4::new);
     let mut missing_short = 0;
     for (block_index, block) in contents.blocks.iter().enumerate() {
         let block_start = position;
@@ -4247,7 +4358,7 @@ fn diagnose_dictionary_insertion_origins() {
                     }
                 }
                 let mut inserted = false;
-                parameters.add_policy.update_hash(
+                parameters.add_policy().update_hash(
                     &plain.text()[start as usize..],
                     start,
                     length,
@@ -4273,7 +4384,7 @@ fn diagnose_dictionary_insertion_origins() {
                 DeflateToken::Reference(reference) => reference.len(),
             };
             if let Some(chain) = &mut dual {
-                parameters.add_policy.update_hash(
+                parameters.add_policy().update_hash(
                     &plain.text()[position as usize..],
                     position,
                     length,
@@ -4310,22 +4421,25 @@ fn diagnose_dictionary_insertion_origins() {
     println!("DUAL_HASH missing_short_references={missing_short}");
     if dual.is_some() {
         let settings = &SLOW_PREFLATE_PARSER_SETTINGS[2];
-        let alternative = TokenPredictorParameters {
-            hash_algorithm: crate::models::zlib::DEFAULT_HASH,
-            matching_type: settings.match_type,
-            max_chain: settings.max_chain,
-            nice_length: settings.nice_length,
-            max_dist_3_matches: 4096,
-            very_far_matches_detected: false,
-            window_bits:
-                crate::estimator::preflate_parameter_estimator::estimate_preflate_window_bits(
-                    first_info.max_dist,
-                ),
-            ..parameters
+        let alternative = {
+            let mut canonical_configuration = parameters;
+            canonical_configuration
+                .set_hash_algorithm(crate::estimator::test_support::zlib::DEFAULT_HASH);
+            canonical_configuration.set_full_window(false);
+            canonical_configuration.set_window_bits(
+                crate::estimator::test_support::estimate_preflate_window_bits(first_info.max_dist),
+            );
+            canonical_configuration.set_nice_length(settings.nice_length);
+            canonical_configuration.set_max_chain(settings.max_chain);
+            canonical_configuration.set_short_match_cutoff(4096);
+            canonical_configuration.set_matching_type(settings.parser.matching_type());
+            canonical_configuration
         };
         for (name, candidate) in [("selected", parameters), ("zlib_level6", alternative)] {
-            let score = crate::estimator::prediction_scoring::score_predictions(
-                &mut crate::prediction_state::PredictionState::new(&candidate),
+            let score = crate::estimator::test_support::score_predictions(
+                &mut crate::prediction_state::PredictionState::from_reconstruction_parameters(
+                    (&candidate).into(),
+                ),
                 &first.blocks,
                 &first_plain,
                 4096,
@@ -4369,8 +4483,10 @@ fn diagnose_dictionary_insertion_origins() {
                 }
                 let mut block_prediction = crate::block_predictor::BlockPrediction::default();
                 block_prediction.begin_chunk(&first.blocks);
-                let leading_score = crate::estimator::prediction_scoring::score_predictions(
-                    &mut crate::prediction_state::PredictionState::new(&candidate),
+                let leading_score = crate::estimator::test_support::score_predictions(
+                    &mut crate::prediction_state::PredictionState::from_reconstruction_parameters(
+                        (&candidate).into(),
+                    ),
                     &first.blocks[..first.blocks.len().min(64)],
                     &first_plain,
                     4096,
@@ -4384,8 +4500,10 @@ fn diagnose_dictionary_insertion_origins() {
             for max_bytes in [
                 524288, 1048576, 2097152, 4194304, 8388608, 16777216, 33554432,
             ] {
-                let (errors, tokens) = crate::estimator::prediction_scoring::score_predictions(
-                    &mut crate::prediction_state::PredictionState::new(&candidate),
+                let (errors, tokens) = crate::estimator::test_support::score_predictions(
+                    &mut crate::prediction_state::PredictionState::from_reconstruction_parameters(
+                        (&candidate).into(),
+                    ),
                     &first.blocks,
                     &first_plain,
                     usize::MAX,
@@ -4406,21 +4524,24 @@ fn diagnose_dictionary_insertion_origins() {
         );
         for (index, settings) in SLOW_PREFLATE_PARSER_SETTINGS.iter().enumerate().skip(3) {
             for hash_algorithm in [
-                crate::models::zlib::DEFAULT_HASH,
+                crate::estimator::test_support::zlib::DEFAULT_HASH,
                 HashAlgorithm::Zlib {
                     hash_mask: 4095,
                     hash_shift: 4,
                 },
             ] {
-                let candidate = TokenPredictorParameters {
-                    hash_algorithm,
-                    matching_type: settings.match_type,
-                    nice_length: settings.nice_length,
-                    max_chain: settings.max_chain,
-                    ..alternative
+                let candidate = {
+                    let mut canonical_configuration = alternative;
+                    canonical_configuration.set_hash_algorithm(hash_algorithm);
+                    canonical_configuration.set_nice_length(settings.nice_length);
+                    canonical_configuration.set_max_chain(settings.max_chain);
+                    canonical_configuration.set_matching_type(settings.parser.matching_type());
+                    canonical_configuration
                 };
-                let score = crate::estimator::prediction_scoring::score_predictions(
-                    &mut crate::prediction_state::PredictionState::new(&candidate),
+                let score = crate::estimator::test_support::score_predictions(
+                    &mut crate::prediction_state::PredictionState::from_reconstruction_parameters(
+                        (&candidate).into(),
+                    ),
                     &first.blocks,
                     &first_plain,
                     4096,
@@ -4447,7 +4568,7 @@ fn diagnose_dictionary_insertion_origins() {
         }
     }
     if matches!(
-        parameters.add_policy,
+        parameters.add_policy(),
         DictionaryAddPolicy::AddFirst(3) | DictionaryAddPolicy::AddFirstAndLast(3)
     ) {
         let baseline = measure(&first, &first_plain, &parameters).unwrap();
@@ -4460,9 +4581,10 @@ fn diagnose_dictionary_insertion_origins() {
             DictionaryAddPolicy::AddFirst(4),
             DictionaryAddPolicy::AddFirstAndLast(4),
         ] {
-            let candidate = TokenPredictorParameters {
-                add_policy,
-                ..parameters
+            let candidate = {
+                let mut canonical_configuration = parameters;
+                canonical_configuration.set_insertion(add_policy);
+                canonical_configuration
             };
             let prefix = measure(&first, &first_plain, &candidate).unwrap();
             let measurement = measure(&contents, plain, &candidate).unwrap();
@@ -4554,32 +4676,42 @@ fn diagnose_compressor_constraints() {
     assert!(matched > 0, "no .deflate fixtures matched");
 }
 
-fn sweep_neighborhood(base: TokenPredictorParameters) -> Vec<TokenPredictorParameters> {
+fn sweep_neighborhood(base: ReconstructionParameters) -> Vec<ReconstructionParameters> {
     let mut candidates = vec![base];
     for delta in 1..=8 {
         for max_chain in [
-            base.max_chain.saturating_sub(delta).max(1),
-            base.max_chain.saturating_add(delta).min(32768),
+            base.max_chain().saturating_sub(delta).max(1),
+            base.max_chain().saturating_add(delta).min(32768),
         ] {
-            candidates.push(TokenPredictorParameters { max_chain, ..base });
+            candidates.push({
+                let mut canonical_configuration = base;
+                canonical_configuration.set_max_chain(max_chain);
+                canonical_configuration
+            });
         }
     }
     for max_chain in [
         1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 768, 1024, 1200, 1536, 2048, 3072, 4096, 8192,
         16384, 32768,
     ] {
-        candidates.push(TokenPredictorParameters { max_chain, ..base });
+        candidates.push({
+            let mut canonical_configuration = base;
+            canonical_configuration.set_max_chain(max_chain);
+            canonical_configuration
+        });
     }
     for nice_length in [3, 4, 5, 6, 8, 12, 16, 24, 32, 48, 64, 96, 128, 192, 258] {
-        candidates.push(TokenPredictorParameters {
-            nice_length,
-            ..base
+        candidates.push({
+            let mut canonical_configuration = base;
+            canonical_configuration.set_nice_length(nice_length);
+            canonical_configuration
         });
     }
     for max_dist_3_matches in [0, 1, 16, 64, 256, 1024, 2048, 4096, 8192, 32768] {
-        candidates.push(TokenPredictorParameters {
-            max_dist_3_matches,
-            ..base
+        candidates.push({
+            let mut canonical_configuration = base;
+            canonical_configuration.set_short_match_cutoff(max_dist_3_matches);
+            canonical_configuration
         });
     }
     for add_policy in [
@@ -4597,14 +4729,19 @@ fn sweep_neighborhood(base: TokenPredictorParameters) -> Vec<TokenPredictorParam
         DictionaryAddPolicy::AddFirstAndLast(64),
         DictionaryAddPolicy::AddFirstAndLast(128),
     ] {
-        candidates.push(TokenPredictorParameters { add_policy, ..base });
+        candidates.push({
+            let mut canonical_configuration = base;
+            canonical_configuration.set_insertion(add_policy);
+            canonical_configuration
+        });
     }
     for very_far_matches_detected in [false, true] {
         for matches_to_start_detected in [false, true] {
-            candidates.push(TokenPredictorParameters {
-                very_far_matches_detected,
-                matches_to_start_detected,
-                ..base
+            candidates.push({
+                let mut canonical_configuration = base;
+                canonical_configuration.set_full_window(very_far_matches_detected);
+                canonical_configuration.set_matches_to_start(matches_to_start_detected);
+                canonical_configuration
             });
         }
     }
@@ -4612,28 +4749,30 @@ fn sweep_neighborhood(base: TokenPredictorParameters) -> Vec<TokenPredictorParam
         filtered_matching,
         behavior,
         ..
-    } = base.matching_type
+    } = base.matching_type()
     {
         for max_lazy in [0, 4, 8, 12, 16, 24, 32, 48, 64, 96, 128, 192, 258] {
-            candidates.push(TokenPredictorParameters {
-                matching_type: MatchingType::Lazy {
+            candidates.push({
+                let mut canonical_configuration = base;
+                canonical_configuration.set_matching_type(MatchingType::Lazy {
                     max_lazy,
                     filtered_matching,
                     behavior,
-                },
-                ..base
+                });
+                canonical_configuration
             });
         }
         if let LazyBehavior::Zlib { .. } = behavior {
             for good_length in [0, 4, 8, 12, 16, 24, 32, 64, 128, 258] {
-                if let MatchingType::Lazy { max_lazy, .. } = base.matching_type {
-                    candidates.push(TokenPredictorParameters {
-                        matching_type: MatchingType::Lazy {
+                if let MatchingType::Lazy { max_lazy, .. } = base.matching_type() {
+                    candidates.push({
+                        let mut canonical_configuration = base;
+                        canonical_configuration.set_matching_type(MatchingType::Lazy {
                             max_lazy,
                             filtered_matching,
                             behavior: LazyBehavior::Zlib { good_length },
-                        },
-                        ..base
+                        });
+                        canonical_configuration
                     });
                 }
             }
@@ -4649,27 +4788,32 @@ fn sweep_neighborhood_preserves_parser_hash_pairings() {
             two_positions: true,
         },
         MatchingType::LibdeflateGreedy,
-        SLOW_PREFLATE_PARSER_SETTINGS[2].match_type,
+        SLOW_PREFLATE_PARSER_SETTINGS[2].parser.matching_type(),
     ] {
-        let base = TokenPredictorParameters {
-            hash_algorithm: HashAlgorithm::Libdeflate4,
-            matching_type,
-            ..synthetic_params()
+        let base = {
+            let mut canonical_configuration = synthetic_params();
+            canonical_configuration.set_hash_algorithm(HashAlgorithm::Libdeflate4);
+            canonical_configuration.set_matching_type(matching_type);
+            canonical_configuration
         };
         let candidates = sweep_neighborhood(base);
         assert!(candidates.contains(&base));
-        if (2..32768).contains(&base.max_chain) {
-            for max_chain in [base.max_chain - 1, base.max_chain + 1] {
-                assert!(candidates.contains(&TokenPredictorParameters { max_chain, ..base }));
+        if (2..32768).contains(&base.max_chain()) {
+            for max_chain in [base.max_chain() - 1, base.max_chain() + 1] {
+                assert!(candidates.contains(&{
+                    let mut canonical_configuration = base;
+                    canonical_configuration.set_max_chain(max_chain);
+                    canonical_configuration
+                }));
             }
         }
         assert!(
             candidates
                 .iter()
-                .all(|candidate| candidate.hash_algorithm == base.hash_algorithm)
+                .all(|candidate| candidate.hash_algorithm() == base.hash_algorithm())
         );
         assert!(candidates.iter().all(|candidate| {
-            match (matching_type, candidate.matching_type) {
+            match (matching_type, candidate.matching_type()) {
                 (MatchingType::Lazy { .. }, MatchingType::Lazy { .. }) => true,
                 (original, candidate) => original == candidate,
             }
@@ -4678,7 +4822,7 @@ fn sweep_neighborhood_preserves_parser_hash_pairings() {
 }
 
 fn oracle_measurement_json(
-    parameters: TokenPredictorParameters,
+    parameters: ReconstructionParameters,
     measured: &Measurement,
 ) -> serde_json::Value {
     serde_json::json!({
@@ -4686,18 +4830,18 @@ fn oracle_measurement_json(
         "reconstruction_bytes": measured.corrections.len(),
         "token_mismatches": measured.trace.mismatch_count,
         "settings": {
-            "hash_algorithm": format!("{:?}", parameters.hash_algorithm),
-            "matching_type": format!("{:?}", parameters.matching_type),
-            "strategy": format!("{:?}", parameters.strategy),
-            "add_policy": format!("{:?}", parameters.add_policy),
+            "hash_algorithm": format!("{:?}", parameters.hash_algorithm()),
+            "matching_type": format!("{:?}", parameters.matching_type()),
+            "strategy": format!("{:?}", parameters.strategy()),
+            "add_policy": format!("{:?}", parameters.add_policy()),
             "block_type_strategy": format!("{:?}", parameters.block_type_strategy),
-            "window_bits": parameters.window_bits,
-            "nice_length": parameters.nice_length,
-            "max_chain": parameters.max_chain,
+            "window_bits": parameters.window_bits(),
+            "nice_length": parameters.nice_length(),
+            "max_chain": parameters.max_chain(),
             "max_token_count": parameters.max_token_count,
-            "max_dist_3_matches": parameters.max_dist_3_matches,
-            "matches_to_start_detected": parameters.matches_to_start_detected,
-            "very_far_matches_detected": parameters.very_far_matches_detected,
+            "max_dist_3_matches": parameters.max_dist_3_matches(),
+            "matches_to_start_detected": parameters.matches_to_start_detected(),
+            "very_far_matches_detected": parameters.very_far_matches_detected(),
         }
     })
 }
@@ -4729,19 +4873,23 @@ fn oracle_search(compressed: &[u8]) -> serde_json::Value {
     let info = extract_preflate_info(&contents.blocks);
     let mut candidates = Vec::new();
     // Include coupled tuples with both full-window policies. A prefix cannot prove identity.
-    for hash_algorithm in [baseline.hash_algorithm, crate::models::zlib::DEFAULT_HASH] {
-        for settings in crate::models::zlib::SLOW_PREFLATE_PARSER_SETTINGS {
+    for hash_algorithm in [
+        baseline.hash_algorithm(),
+        crate::estimator::test_support::zlib::DEFAULT_HASH,
+    ] {
+        for settings in crate::estimator::test_support::zlib::SLOW_PREFLATE_PARSER_SETTINGS {
             for very_far_matches_detected in [false, true] {
-                for window_bits in [baseline.window_bits, 15] {
-                    candidates.push(TokenPredictorParameters {
-                        hash_algorithm,
-                        matching_type: settings.match_type,
-                        nice_length: settings.nice_length,
-                        max_chain: settings.max_chain,
-                        add_policy: settings.dictionary_add_policy,
-                        very_far_matches_detected,
-                        window_bits,
-                        ..baseline
+                for window_bits in [baseline.window_bits(), 15] {
+                    candidates.push({
+                        let mut canonical_configuration = baseline;
+                        canonical_configuration.set_hash_algorithm(hash_algorithm);
+                        canonical_configuration.set_full_window(very_far_matches_detected);
+                        canonical_configuration.set_window_bits(window_bits);
+                        canonical_configuration.set_insertion(settings.dictionary_add_policy);
+                        canonical_configuration.set_nice_length(settings.nice_length);
+                        canonical_configuration.set_max_chain(settings.max_chain);
+                        canonical_configuration.set_matching_type(settings.parser.matching_type());
+                        canonical_configuration
                     });
                 }
             }
@@ -4764,8 +4912,10 @@ fn oracle_search(compressed: &[u8]) -> serde_json::Value {
             if !seen.insert(bitcode::encode(&parameters)) {
                 continue;
             }
-            let (errors, _) = crate::estimator::prediction_scoring::score_predictions(
-                &mut crate::prediction_state::PredictionState::new(&parameters),
+            let (errors, _) = crate::estimator::test_support::score_predictions(
+                &mut crate::prediction_state::PredictionState::from_reconstruction_parameters(
+                    (&parameters).into(),
+                ),
                 &contents.blocks,
                 &plain,
                 4096,
@@ -4884,28 +5034,32 @@ fn noncanonical_insertion_refinement_requires_a_perfect_prefix_and_roundtrips() 
     let (contents, plain) = parse_deflate_whole(&compressed).unwrap();
     let info = extract_preflate_info(&contents.blocks);
     let estimated = estimate_preflate_parameters(&contents, &plain).unwrap();
-    let baseline = TokenPredictorParameters {
-        hash_algorithm: HashAlgorithm::RandomVector,
-        add_policy: DictionaryAddPolicy::AddFirst(258),
-        max_chain: 3525,
-        nice_length: 255,
-        very_far_matches_detected: true,
-        ..estimated
+    let baseline = {
+        let mut canonical_configuration = estimated;
+        canonical_configuration.set_hash_algorithm(HashAlgorithm::RandomVector);
+        canonical_configuration.set_full_window(true);
+        canonical_configuration.set_insertion(DictionaryAddPolicy::AddFirst(258));
+        canonical_configuration.set_nice_length(255);
+        canonical_configuration.set_max_chain(3525);
+        canonical_configuration
     };
     let before = measure(&contents, &plain, &baseline).unwrap();
     verify(&before, &plain, &compressed);
-    let selected = crate::estimator::prediction_scoring::refine_ambiguous_profile(
+    let selected = crate::estimator::test_support::refine_ambiguous_profile(
         baseline, &info, &contents, &plain,
     );
-    assert_eq!(selected.hash_algorithm, crate::models::zlib::DEFAULT_HASH);
-    assert_eq!(selected.add_policy, DictionaryAddPolicy::AddAll);
-    assert!(!selected.very_far_matches_detected);
+    assert_eq!(
+        selected.hash_algorithm(),
+        crate::estimator::test_support::zlib::DEFAULT_HASH
+    );
+    assert_eq!(selected.add_policy(), DictionaryAddPolicy::AddAll);
+    assert!(!selected.very_far_matches_detected());
     let after = measure(&contents, &plain, &selected).unwrap();
     assert_eq!(after.trace.mismatch_count, 0);
     assert!(after.corrections.len() < before.corrections.len());
     verify(&after, &plain, &compressed);
     assert_eq!(
-        crate::estimator::prediction_scoring::refine_ambiguous_profile(
+        crate::estimator::test_support::refine_ambiguous_profile(
             selected, &info, &contents, &plain
         ),
         selected
@@ -4914,8 +5068,10 @@ fn noncanonical_insertion_refinement_requires_a_perfect_prefix_and_roundtrips() 
     let (contents, plain) = parse_deflate_whole(&compressed).unwrap();
     let info = extract_preflate_info(&contents.blocks);
     assert!(
-        crate::estimator::prediction_scoring::score_predictions(
-            &mut crate::prediction_state::PredictionState::new(&selected),
+        crate::estimator::test_support::score_predictions(
+            &mut crate::prediction_state::PredictionState::from_reconstruction_parameters(
+                (&selected).into()
+            ),
             &contents.blocks,
             &plain,
             4096,
@@ -4924,7 +5080,7 @@ fn noncanonical_insertion_refinement_requires_a_perfect_prefix_and_roundtrips() 
         .0 > 0
     );
     assert_ne!(
-        crate::estimator::prediction_scoring::refine_ambiguous_profile(
+        crate::estimator::test_support::refine_ambiguous_profile(
             baseline, &info, &contents, &plain
         ),
         selected
@@ -5076,10 +5232,12 @@ fn diagnose_libdeflate_cohorts() {
         assert_eq!(contents.compressed_size, compressed.len());
         let info = extract_preflate_info(&contents.blocks);
         let baseline = estimate_preflate_parameters(&contents, &plain).unwrap();
-        let prefix = |parameters: &TokenPredictorParameters| {
+        let prefix = |parameters: &ReconstructionParameters| {
             let score = |tokens, bytes| {
-                crate::estimator::prediction_scoring::score_predictions(
-                    &mut crate::prediction_state::PredictionState::new(parameters),
+                crate::estimator::test_support::score_predictions(
+                    &mut crate::prediction_state::PredictionState::from_reconstruction_parameters(
+                        *parameters,
+                    ),
                     &contents.blocks,
                     &plain,
                     tokens,
@@ -5091,46 +5249,45 @@ fn diagnose_libdeflate_cohorts() {
         let original = measure(&contents, &plain, &baseline).unwrap();
         verify(&original, &plain, &compressed);
         let mut variants = Vec::new();
-        if baseline.hash_algorithm == HashAlgorithm::Libdeflate4 {
+        if baseline.hash_algorithm() == HashAlgorithm::Libdeflate4 {
             for cutoff in [4096, 8192, 32768] {
-                variants.push((
-                    "table_hash",
-                    TokenPredictorParameters {
-                        hash_algorithm: HashAlgorithm::RandomVector,
-                        matching_type: MatchingType::Lazy {
-                            max_lazy: 16,
-                            filtered_matching: false,
-                            behavior: LazyBehavior::RecomputeAfterLiteral,
-                        },
-                        max_chain: 128,
-                        nice_length: 128,
-                        max_dist_3_matches: cutoff,
-                        ..baseline
-                    },
-                ));
+                variants.push(("table_hash", {
+                    let mut canonical_configuration = baseline;
+                    canonical_configuration.set_hash_algorithm(HashAlgorithm::RandomVector);
+                    canonical_configuration.set_nice_length(128);
+                    canonical_configuration.set_max_chain(128);
+                    canonical_configuration.set_short_match_cutoff(cutoff);
+                    canonical_configuration.set_matching_type(MatchingType::Lazy {
+                        max_lazy: 16,
+                        filtered_matching: false,
+                        behavior: LazyBehavior::RecomputeAfterLiteral,
+                    });
+                    canonical_configuration
+                }));
             }
         } else {
             for hash_algorithm in [
-                baseline.hash_algorithm,
-                crate::models::zlib::DEFAULT_HASH,
+                baseline.hash_algorithm(),
+                crate::estimator::test_support::zlib::DEFAULT_HASH,
                 HashAlgorithm::RandomVector,
             ] {
                 for filtered_matching in [false, true] {
-                    for max_chain in [baseline.max_chain, baseline.max_chain.next_power_of_two()] {
-                        variants.push((
-                            "hash_filter",
-                            TokenPredictorParameters {
-                                hash_algorithm,
-                                max_chain,
-                                matching_type: MatchingType::Lazy {
-                                    max_lazy: 16,
-                                    filtered_matching,
-                                    behavior: LazyBehavior::Zlib { good_length: 8 },
-                                },
-                                nice_length: 128,
-                                ..baseline
-                            },
-                        ));
+                    for max_chain in [
+                        baseline.max_chain(),
+                        baseline.max_chain().next_power_of_two(),
+                    ] {
+                        variants.push(("hash_filter", {
+                            let mut canonical_configuration = baseline;
+                            canonical_configuration.set_hash_algorithm(hash_algorithm);
+                            canonical_configuration.set_nice_length(128);
+                            canonical_configuration.set_max_chain(max_chain);
+                            canonical_configuration.set_matching_type(MatchingType::Lazy {
+                                max_lazy: 16,
+                                filtered_matching,
+                                behavior: LazyBehavior::Zlib { good_length: 8 },
+                            });
+                            canonical_configuration
+                        }));
                     }
                 }
             }
@@ -5181,15 +5338,15 @@ fn sweep_compressor_parameters() {
     use std::{collections::HashSet, io::Write};
 
     fn representatives(
-        ranked: &[(usize, TokenPredictorParameters)],
-    ) -> Vec<TokenPredictorParameters> {
+        ranked: &[(usize, ReconstructionParameters)],
+    ) -> Vec<ReconstructionParameters> {
         let mut hashes = Vec::new();
         let mut parsers = Vec::new();
         let mut result = Vec::new();
         for &(_, parameters) in ranked {
-            let parser = std::mem::discriminant(&parameters.matching_type);
-            if !hashes.contains(&parameters.hash_algorithm) || !parsers.contains(&parser) {
-                hashes.push(parameters.hash_algorithm);
+            let parser = std::mem::discriminant(&parameters.matching_type());
+            if !hashes.contains(&parameters.hash_algorithm()) || !parsers.contains(&parser) {
+                hashes.push(parameters.hash_algorithm());
                 parsers.push(parser);
                 result.push(parameters);
             }
@@ -5309,14 +5466,15 @@ fn sweep_compressor_parameters() {
             for nice_length in [16, 64, 128, 258] {
                 for &matching_type in &family_parsers {
                     for max_dist_3_matches in [0, 4096] {
-                        candidates.push(TokenPredictorParameters {
-                            hash_algorithm,
-                            matching_type,
-                            max_chain,
-                            nice_length,
-                            max_dist_3_matches,
-                            add_policy: DictionaryAddPolicy::AddAll,
-                            ..baseline
+                        candidates.push({
+                            let mut canonical_configuration = baseline;
+                            canonical_configuration.set_hash_algorithm(hash_algorithm);
+                            canonical_configuration.set_insertion(DictionaryAddPolicy::AddAll);
+                            canonical_configuration.set_nice_length(nice_length);
+                            canonical_configuration.set_max_chain(max_chain);
+                            canonical_configuration.set_short_match_cutoff(max_dist_3_matches);
+                            canonical_configuration.set_matching_type(matching_type);
+                            canonical_configuration
                         });
                     }
                 }
@@ -5326,12 +5484,15 @@ fn sweep_compressor_parameters() {
     for max_probes in [1, 6, 16, 32, 128, 512, 1024, 4096] {
         for greedy in [false, true] {
             for max_dist_3_matches in [0, 4096] {
-                candidates.push(TokenPredictorParameters {
-                    hash_algorithm: crate::models::zlib::DEFAULT_HASH,
-                    matching_type: MatchingType::MiniZ { max_probes, greedy },
-                    max_dist_3_matches,
-                    add_policy: DictionaryAddPolicy::AddAll,
-                    ..baseline
+                candidates.push({
+                    let mut canonical_configuration = baseline;
+                    canonical_configuration
+                        .set_hash_algorithm(crate::estimator::test_support::zlib::DEFAULT_HASH);
+                    canonical_configuration.set_insertion(DictionaryAddPolicy::AddAll);
+                    canonical_configuration.set_short_match_cutoff(max_dist_3_matches);
+                    canonical_configuration
+                        .set_matching_type(MatchingType::MiniZ { max_probes, greedy });
+                    canonical_configuration
                 });
             }
         }
@@ -5343,8 +5504,10 @@ fn sweep_compressor_parameters() {
             if !seen.insert(bitcode::encode(&candidate)) {
                 continue;
             }
-            let (mismatches, tokens) = crate::estimator::prediction_scoring::score_predictions(
-                &mut crate::prediction_state::PredictionState::new(&candidate),
+            let (mismatches, tokens) = crate::estimator::test_support::score_predictions(
+                &mut crate::prediction_state::PredictionState::from_reconstruction_parameters(
+                    (&candidate).into(),
+                ),
                 &contents.blocks,
                 &plain,
                 usize::MAX,
@@ -5382,7 +5545,7 @@ fn sweep_compressor_parameters() {
     let mut measured = HashSet::new();
     let mut verified_count = 0;
     let mut rejected_count = 0;
-    let mut best: Option<(TokenPredictorParameters, Measurement)> = None;
+    let mut best: Option<(ReconstructionParameters, Measurement)> = None;
     for candidate in finalists {
         if verified_count >= 64 {
             break;
@@ -5503,17 +5666,20 @@ fn diagnose_lazy_neighborhood() {
                 LazyBehavior::Zlib { good_length: 128 },
                 LazyBehavior::Zlib { good_length: 258 },
             ] {
-                let parameters = TokenPredictorParameters {
-                    matching_type: MatchingType::Lazy {
+                let parameters = {
+                    let mut canonical_configuration = baseline;
+                    canonical_configuration.set_nice_length(nice_length);
+                    canonical_configuration.set_matching_type(MatchingType::Lazy {
                         max_lazy,
                         filtered_matching: false,
                         behavior,
-                    },
-                    nice_length,
-                    ..baseline
+                    });
+                    canonical_configuration
                 };
-                let (errors, tokens) = crate::estimator::prediction_scoring::score_predictions(
-                    &mut crate::prediction_state::PredictionState::new(&parameters),
+                let (errors, tokens) = crate::estimator::test_support::score_predictions(
+                    &mut crate::prediction_state::PredictionState::from_reconstruction_parameters(
+                        (&parameters).into(),
+                    ),
                     &contents.blocks,
                     &plain,
                     usize::MAX,
@@ -5527,8 +5693,10 @@ fn diagnose_lazy_neighborhood() {
     ranked.sort_by_key(|row| row.0);
     let seed = ranked[0].1;
     for parameters in sweep_neighborhood(seed) {
-        let (errors, tokens) = crate::estimator::prediction_scoring::score_predictions(
-            &mut crate::prediction_state::PredictionState::new(&parameters),
+        let (errors, tokens) = crate::estimator::test_support::score_predictions(
+            &mut crate::prediction_state::PredictionState::from_reconstruction_parameters(
+                (&parameters).into(),
+            ),
             &contents.blocks,
             &plain,
             usize::MAX,
@@ -5675,21 +5843,21 @@ fn compare_compressor_tokens() {
 }
 
 fn pdf_parameter_variants(
-    params: TokenPredictorParameters,
+    params: ReconstructionParameters,
     observed_min_len: u32,
-) -> Vec<TokenPredictorParameters> {
-    use crate::models::zlib::ZLIB_PREFLATE_PARSER_SETTINGS;
+) -> Vec<ReconstructionParameters> {
+    use crate::estimator::test_support::zlib::ZLIB_PREFLATE_PARSER_SETTINGS;
 
     let mut variants = parameter_variants(params, observed_min_len, false);
     let compatible = zlib_compatible(&params);
-    let mut add = |candidate: TokenPredictorParameters| {
+    let mut add = |candidate: ReconstructionParameters| {
         let candidate = candidate.with_lazy_behavior(compatible, observed_min_len);
         if candidate != params && !variants.contains(&candidate) {
             variants.push(candidate);
         }
     };
     for hash_algorithm in [
-        params.hash_algorithm,
+        params.hash_algorithm(),
         HashAlgorithm::RandomVector,
         HashAlgorithm::Libdeflate4,
         HashAlgorithm::Libdeflate4Fast,
@@ -5705,21 +5873,23 @@ fn pdf_parameter_variants(
             hash_shift: 4,
         },
     ] {
-        add(TokenPredictorParameters {
-            hash_algorithm,
-            ..params
+        add({
+            let mut canonical_configuration = params;
+            canonical_configuration.set_hash_algorithm(hash_algorithm);
+            canonical_configuration
         });
         for config in ZLIB_PREFLATE_PARSER_SETTINGS
             .iter()
             .chain(SLOW_PREFLATE_PARSER_SETTINGS.iter())
         {
-            add(TokenPredictorParameters {
-                hash_algorithm,
-                matching_type: config.match_type,
-                nice_length: config.nice_length,
-                max_chain: config.max_chain,
-                add_policy: config.dictionary_add_policy,
-                ..params
+            add({
+                let mut canonical_configuration = params;
+                canonical_configuration.set_hash_algorithm(hash_algorithm);
+                canonical_configuration.set_insertion(config.dictionary_add_policy);
+                canonical_configuration.set_nice_length(config.nice_length);
+                canonical_configuration.set_max_chain(config.max_chain);
+                canonical_configuration.set_matching_type(config.parser.matching_type());
+                canonical_configuration
             });
         }
     }
@@ -5763,39 +5933,42 @@ fn pdf_parameter_variants(
             },
         ),
     ] {
-        add(TokenPredictorParameters {
-            hash_algorithm: HashAlgorithm::Libdeflate4,
-            matching_type,
-            nice_length,
-            max_chain: depth,
-            add_policy: DictionaryAddPolicy::AddAll,
-            window_bits: 15,
-            max_dist_3_matches: 4096,
-            ..params
+        add({
+            let mut canonical_configuration = params;
+            canonical_configuration.set_hash_algorithm(HashAlgorithm::Libdeflate4);
+            canonical_configuration.set_window_bits(15);
+            canonical_configuration.set_insertion(DictionaryAddPolicy::AddAll);
+            canonical_configuration.set_nice_length(nice_length);
+            canonical_configuration.set_max_chain(depth);
+            canonical_configuration.set_short_match_cutoff(4096);
+            canonical_configuration.set_matching_type(matching_type);
+            canonical_configuration
         });
     }
     for max_probes in [6, 16, 32, 128, 256, 512, 768, 1500] {
         for greedy in [false, true] {
-            add(TokenPredictorParameters {
-                hash_algorithm: HashAlgorithm::Zlib {
+            add({
+                let mut canonical_configuration = params;
+                canonical_configuration.set_hash_algorithm(HashAlgorithm::Zlib {
                     hash_mask: 32767,
                     hash_shift: 5,
-                },
-                matching_type: MatchingType::MiniZ { max_probes, greedy },
-                nice_length: 258,
-                max_chain: u32::from(max_probes).div_ceil(3) * 3,
-                add_policy: DictionaryAddPolicy::AddAll,
-                window_bits: 15,
-                ..params
+                });
+                canonical_configuration.set_window_bits(15);
+                canonical_configuration.set_insertion(DictionaryAddPolicy::AddAll);
+                canonical_configuration.set_nice_length(258);
+                canonical_configuration.set_max_chain(u32::from(max_probes).div_ceil(3) * 3);
+                canonical_configuration
+                    .set_matching_type(MatchingType::MiniZ { max_probes, greedy });
+                canonical_configuration
             });
         }
     }
-    variants.retain(|candidate| match candidate.matching_type {
+    variants.retain(|candidate| match candidate.matching_type() {
         MatchingType::LibdeflateGreedy | MatchingType::LibdeflateLazy { .. } => {
-            candidate.hash_algorithm == HashAlgorithm::Libdeflate4
+            candidate.hash_algorithm() == HashAlgorithm::Libdeflate4
         }
         MatchingType::MiniZ { .. } => {
-            candidate.hash_algorithm
+            candidate.hash_algorithm()
                 == HashAlgorithm::Zlib {
                     hash_mask: 32767,
                     hash_shift: 5,
@@ -5822,13 +5995,13 @@ fn pdf_probe_variants_keep_coupled_parsers_and_hashes() {
         for (index, candidate) in variants.iter().enumerate() {
             assert_ne!(candidate, &params);
             assert!(!variants[..index].contains(candidate));
-            match candidate.matching_type {
+            match candidate.matching_type() {
                 MatchingType::LibdeflateGreedy | MatchingType::LibdeflateLazy { .. } => {
-                    assert_eq!(candidate.hash_algorithm, HashAlgorithm::Libdeflate4);
+                    assert_eq!(candidate.hash_algorithm(), HashAlgorithm::Libdeflate4);
                 }
                 MatchingType::MiniZ { .. } => {
                     assert_eq!(
-                        candidate.hash_algorithm,
+                        candidate.hash_algorithm(),
                         HashAlgorithm::Zlib {
                             hash_mask: 32767,
                             hash_shift: 5
@@ -5837,8 +6010,10 @@ fn pdf_probe_variants_keep_coupled_parsers_and_hashes() {
                 }
                 _ => {}
             }
-            crate::estimator::prediction_scoring::score_predictions(
-                &mut crate::prediction_state::PredictionState::new(candidate),
+            crate::estimator::test_support::score_predictions(
+                &mut crate::prediction_state::PredictionState::from_reconstruction_parameters(
+                    candidate.into(),
+                ),
                 &contents.blocks,
                 &plain,
                 128,
@@ -6031,7 +6206,7 @@ fn diagnose_compression() {
             baseline.corrections.len(),
             compressed.len(),
         ));
-        if !sweep || params.max_chain == 0 {
+        if !sweep || params.max_chain() == 0 {
             continue;
         }
         let mut best = baseline;
@@ -6043,7 +6218,9 @@ fn diagnose_compression() {
                     verify(&measurement, &plain_text, &compressed);
                     println!(
                         "  ISOLATED match={:?} nice={} chain={}",
-                        candidate.matching_type, candidate.nice_length, candidate.max_chain
+                        candidate.matching_type(),
+                        candidate.nice_length(),
+                        candidate.max_chain()
                     );
                     print_measurement("  RESULT", &measurement, compressed.len());
                     if measurement.corrections.len() < best.corrections.len() {
@@ -6101,7 +6278,7 @@ fn diagnostic_measurement_matches_production() {
         let measurement = measure_normalized(&contents, &plain_text, &params).unwrap();
         if name == "compressed_libdeflate_level1.deflate" {
             assert_eq!(
-                params.hash_algorithm,
+                params.hash_algorithm(),
                 crate::HashAlgorithm::Libdeflate4Fast15
             );
             assert_eq!(measurement.trace.mismatch_count, 0);
@@ -6141,18 +6318,19 @@ fn isolated_variants_change_one_parameter() {
             let variants = parameter_variants(params, observed_min_len, combined);
             assert!(!variants.is_empty(), "{name}");
             for (index, candidate) in variants.iter().enumerate() {
-                let changes = usize::from(candidate.matching_type != params.matching_type)
-                    + usize::from(candidate.nice_length != params.nice_length)
-                    + usize::from(candidate.max_chain != params.max_chain);
+                let changes = usize::from(candidate.matching_type() != params.matching_type())
+                    + usize::from(candidate.nice_length() != params.nice_length())
+                    + usize::from(candidate.max_chain() != params.max_chain());
                 assert!((1..=3).contains(&changes), "{name}");
                 if !combined {
                     assert_eq!(changes, 1, "{name}");
                 }
-                let expected = TokenPredictorParameters {
-                    matching_type: candidate.matching_type,
-                    nice_length: candidate.nice_length,
-                    max_chain: candidate.max_chain,
-                    ..params
+                let expected = {
+                    let mut canonical_configuration = params;
+                    canonical_configuration.set_nice_length(candidate.nice_length());
+                    canonical_configuration.set_max_chain(candidate.max_chain());
+                    canonical_configuration.set_matching_type(candidate.matching_type());
+                    canonical_configuration
                 }
                 .with_lazy_behavior(zlib_compatible(&params), observed_min_len);
                 assert_eq!(*candidate, expected, "{name}");
@@ -6187,13 +6365,14 @@ fn windows_lazy_parameters_and_corrections_roundtrip() {
         DeflateToken::Literal(b'a'),
         DeflateToken::Literal(b'a'),
     ]);
-    let parameters = TokenPredictorParameters {
-        matching_type: MatchingType::WindowsLazy { max_lazy: 128 },
-        hash_algorithm: HashAlgorithm::RandomVector,
-        matches_to_start_detected: true,
-        max_token_count: 4,
-        max_chain: 100,
-        ..synthetic_params()
+    let parameters = {
+        let mut canonical_configuration = synthetic_params();
+        canonical_configuration.set_hash_algorithm(HashAlgorithm::RandomVector);
+        canonical_configuration.set_matches_to_start(true);
+        canonical_configuration.set_max_chain(100);
+        canonical_configuration.set_matching_type(MatchingType::WindowsLazy { max_lazy: 128 });
+        canonical_configuration.max_token_count = 4;
+        canonical_configuration
     };
     let measured = measure(&contents, &plain, &parameters).unwrap();
     assert_eq!(measured.trace.mismatch_count, 0);
@@ -6201,26 +6380,193 @@ fn windows_lazy_parameters_and_corrections_roundtrip() {
 }
 
 #[test]
-fn legacy_flat_record_remains_decodable() {
+fn obsolete_flat_record_is_rejected() {
     let record = [
         0x83, 0x00, 0x00, 0x04, 0x0f, 0x00, 0x04, 0x80, 0x00, 0xff, 0x3f, 0x02, 0xfe, 0x0f, 0x01,
         0x10, 0x00, 0x00, 0x00, 0x08, 0x00, 0x04, 0x80, 0x01, 0xff, 0x7f, 0x04, 0x05, 0x00, 0x00,
     ];
-    let compressed = crate::utils::read_file("compressed_zlib_level6.deflate");
-    let (contents, plain) = parse_deflate_whole(&compressed).unwrap();
-    assert_eq!(
-        recreate_whole_deflate_stream(plain.text(), &record).unwrap(),
-        compressed[..contents.compressed_size]
+    let error = recreate_whole_deflate_stream(&[], &record).unwrap_err();
+    assert_eq!(error.exit_code(), ExitCode::InvalidCompressedWrapper);
+    assert!(
+        error
+            .to_string()
+            .contains("unsupported corrections version 0x83")
     );
 }
 
-fn synthetic_params() -> TokenPredictorParameters {
-    TokenPredictorParameters {
-        add_policy: DictionaryAddPolicy::AddAll,
-        nice_length: 258,
-        max_chain: 32,
-        block_type_strategy: BlockTypeStrategy::Static,
-        ..crate::token_predictor::zlib_level_1_params()
+fn synthetic_params() -> ReconstructionParameters {
+    {
+        let mut canonical_configuration = crate::token_predictor::tests::zlib_level_1_params();
+        canonical_configuration.set_insertion(DictionaryAddPolicy::AddAll);
+        canonical_configuration.set_nice_length(258);
+        canonical_configuration.set_max_chain(32);
+        canonical_configuration.block_type_strategy = BlockTypeStrategy::Static;
+        canonical_configuration
+    }
+}
+
+#[test]
+fn table_hash_refinement_preserves_partial_compressed_input() {
+    let compressed = crate::utils::read_file("pptxplaintext.zip");
+    let mut processor = PreflateStreamProcessor::new(&PreflateConfig::default());
+    processor.trace = Some(TokenPredictionTrace::default());
+    let result = processor.decompress(&compressed[79..128000]);
+    assert!(
+        result.is_ok(),
+        "{:?}; parameters={:?}",
+        result.err(),
+        processor.trace.as_ref().and_then(|trace| trace.parameters)
+    );
+    let mut offset = 79 + result.unwrap().compressed_size;
+    while !processor.is_done() {
+        processor.shrink_to_dictionary();
+        offset += processor
+            .decompress(&compressed[offset..])
+            .unwrap()
+            .compressed_size;
+    }
+    assert_eq!(offset, 279012);
+}
+
+#[test]
+fn table_hash_refinement_recovers_coupled_fast_and_small_window_zlib() {
+    use crate::{deflate::deflate_token::TokenFrequency, prediction_state::PredictionState};
+    let source = crate::utils::read_file("compressed_zlib_level6.deflate");
+    let (_, source_plain) = parse_deflate_whole(&source).unwrap();
+    let mut seed = 1234567u32;
+    let mut random_byte = || {
+        seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+        (seed >> 24) as u8
+    };
+    let pattern: Vec<_> = (0..256).map(|_| random_byte()).collect();
+    let mut fast_plain = pattern.repeat(32);
+    for index in 0..256 {
+        let position = (index * 7) % 253;
+        fast_plain.extend_from_slice(&pattern[position..position + 3]);
+        fast_plain.push(pattern[position + 3] ^ 255);
+    }
+    for _ in 0..128 {
+        let target = [random_byte(), random_byte(), random_byte(), random_byte()];
+        fast_plain.extend_from_slice(&target);
+        for collision in 1..8 {
+            fast_plain.extend_from_slice(&[
+                target[0] ^ (collision * 32),
+                target[1],
+                target[2],
+                target[3],
+            ]);
+        }
+        fast_plain.extend_from_slice(&target);
+    }
+    fast_plain.extend((0..2048).map(|_| random_byte()));
+    let mut slow_plain = source_plain.text()[..10000].to_vec();
+    slow_plain.extend((0..4096).map(|_| random_byte()));
+    for (fast, bytes) in [(true, fast_plain), (false, slow_plain)] {
+        let settings = if fast {
+            &crate::estimator::test_support::zlib::ZLIB_PREFLATE_PARSER_SETTINGS[0]
+        } else {
+            &SLOW_PREFLATE_PARSER_SETTINGS[2]
+        };
+        let parameters = {
+            let mut canonical_configuration = crate::token_predictor::tests::zlib_level_1_params();
+            canonical_configuration.set_hash_algorithm(
+                crate::estimator::test_support::zlib::memory_hash(if fast { 8 } else { 5 }),
+            );
+            canonical_configuration.set_window_bits(if fast { 15 } else { 12 });
+            canonical_configuration.set_insertion(settings.dictionary_add_policy);
+            canonical_configuration.set_nice_length(settings.nice_length);
+            canonical_configuration.set_max_chain(settings.max_chain);
+            canonical_configuration.set_short_match_cutoff(if fast { 32768 } else { 4096 });
+            canonical_configuration.set_matching_type(settings.parser.matching_type());
+            canonical_configuration.max_token_count = if fast { 16383 } else { 2047 };
+            canonical_configuration.block_type_strategy = BlockTypeStrategy::Static;
+            canonical_configuration
+        };
+        let plain = PlainText::new_with_data(bytes);
+        let mut state = PredictionState::from_reconstruction_parameters((&parameters).into());
+        let mut input = PreflateInput::new(&plain);
+        let mut writer = DeflateWriter::new();
+        while input.remaining() != 0 {
+            state
+                .begin_decoded_huffman_block(&mut input, None, false)
+                .unwrap();
+            let mut tokens = Vec::new();
+            while input.remaining() != 0 && tokens.len() < usize::from(parameters.max_token_count) {
+                let token = state.predict(&input, &TokenFrequency::default());
+                state.accept_token(&token, token, &mut input);
+                tokens.push(token);
+            }
+            state.finish_block(&mut input).unwrap();
+            writer
+                .encode_block(&DeflateTokenBlock {
+                    block_type: DeflateTokenBlockType::Huffman {
+                        tokens,
+                        huffman_type: DeflateHuffmanType::Static,
+                    },
+                    last: input.remaining() == 0,
+                })
+                .unwrap();
+        }
+        writer.flush();
+        let compressed = writer.detach_output();
+        let (contents, plain) = parse_deflate_whole(&compressed).unwrap();
+        let info = extract_preflate_info(&contents.blocks);
+        let baseline = {
+            let mut canonical_configuration = parameters;
+            canonical_configuration.set_hash_algorithm(HashAlgorithm::RandomVector);
+            canonical_configuration.set_full_window(!fast);
+            canonical_configuration.set_nice_length(if fast {
+                parameters.nice_length()
+            } else {
+                258
+            });
+            canonical_configuration.set_max_chain(if fast { parameters.max_chain() } else { 1 });
+            canonical_configuration.set_short_match_cutoff(info.max_dist_3_matches);
+            canonical_configuration.set_matching_type(if fast {
+                parameters.matching_type()
+            } else {
+                MatchingType::Lazy {
+                    max_lazy: 128,
+                    filtered_matching: false,
+                    behavior: LazyBehavior::RecomputeAfterLiteral,
+                }
+            });
+            canonical_configuration
+        };
+        let before = measure(&contents, &plain, &baseline).unwrap();
+        assert!(before.trace.mismatch_count >= 2, "fast={fast}");
+        let candidates = [crate::estimator::test_support::CandidateEvidence {
+            hash_algorithm: parameters.hash_algorithm(),
+            required_chain: parameters.max_chain(),
+            distance_policy: crate::estimator::test_support::DistancePolicy::ZlibWindow,
+            parser: crate::estimator::test_support::ParserInference::Unresolved,
+            shallow_miniz_greedy: false,
+            minimum_nice_length: 0,
+        }];
+        let selected = crate::estimator::test_support::refine_profile(
+            crate::estimator::test_support::CompressorProfile::Custom.with_parameters(baseline),
+            &info,
+            &contents,
+            &plain,
+            &candidates,
+        )
+        .reconstruction;
+        assert_eq!(
+            selected.hash_algorithm(),
+            parameters.hash_algorithm(),
+            "fast={fast}"
+        );
+        let after = measure(&contents, &plain, &selected).unwrap();
+        assert_eq!(after.trace.mismatch_count, 0, "fast={fast}");
+        assert!(after.cabac_size < before.cabac_size);
+        verify(&before, &plain, &compressed);
+        verify(&after, &plain, &compressed);
+        assert_eq!(
+            crate::estimator::test_support::refine_ambiguous_profile(
+                selected, &info, &contents, &plain,
+            ),
+            selected
+        );
     }
 }
 
@@ -6230,12 +6576,14 @@ fn ambiguous_fast_hash_refinement_selects_the_missing_memory_size() {
     let source = crate::utils::read_file("compressed_zlib_level1.deflate");
     let (_, source_plain) = parse_deflate_whole(&source).unwrap();
     let plain = PlainText::new_with_data(source_plain.text()[..10000].to_vec());
-    let parameters = TokenPredictorParameters {
-        hash_algorithm: crate::models::zlib::memory_hash(7),
-        max_token_count: 8191,
-        ..crate::token_predictor::zlib_level_1_params()
+    let parameters = {
+        let mut canonical_configuration = crate::token_predictor::tests::zlib_level_1_params();
+        canonical_configuration
+            .set_hash_algorithm(crate::estimator::test_support::zlib::memory_hash(7));
+        canonical_configuration.max_token_count = 8191;
+        canonical_configuration
     };
-    let mut state = PredictionState::new(&parameters);
+    let mut state = PredictionState::from_reconstruction_parameters((&parameters).into());
     let mut input = PreflateInput::new(&plain);
     let mut tokens = Vec::new();
     while input.remaining() != 0 {
@@ -6246,28 +6594,30 @@ fn ambiguous_fast_hash_refinement_selects_the_missing_memory_size() {
     let (compressed, contents, plain) = synthetic_stream(tokens);
     let info = extract_preflate_info(&contents.blocks);
     assert_eq!(
-        crate::models::zlib::adjacent_memory_hash(&info, parameters.add_policy),
-        Some(parameters.hash_algorithm),
+        crate::estimator::test_support::zlib::adjacent_memory_hash(&info, parameters.add_policy()),
+        Some(parameters.hash_algorithm()),
         "tokens={}",
         info.max_tokens_per_block
     );
-    let baseline = TokenPredictorParameters {
-        hash_algorithm: crate::models::zlib::DEFAULT_HASH,
-        block_type_strategy: BlockTypeStrategy::Static,
-        ..parameters
+    let baseline = {
+        let mut canonical_configuration = parameters;
+        canonical_configuration
+            .set_hash_algorithm(crate::estimator::test_support::zlib::DEFAULT_HASH);
+        canonical_configuration.block_type_strategy = BlockTypeStrategy::Static;
+        canonical_configuration
     };
     let before = measure(&contents, &plain, &baseline).unwrap();
-    let selected = crate::estimator::prediction_scoring::refine_ambiguous_profile(
+    let selected = crate::estimator::test_support::refine_ambiguous_profile(
         baseline, &info, &contents, &plain,
     );
-    assert_eq!(selected.hash_algorithm, parameters.hash_algorithm);
+    assert_eq!(selected.hash_algorithm(), parameters.hash_algorithm());
     let after = measure(&contents, &plain, &selected).unwrap();
     assert!(before.trace.mismatch_count >= 2);
     assert_eq!(after.trace.mismatch_count, 0);
     assert!(after.cabac_size < before.cabac_size);
     verify(&before, &plain, &compressed);
     verify(&after, &plain, &compressed);
-    let unchanged = crate::estimator::prediction_scoring::refine_ambiguous_profile(
+    let unchanged = crate::estimator::test_support::refine_ambiguous_profile(
         selected, &info, &contents, &plain,
     );
     assert_eq!(unchanged, selected);
@@ -6298,58 +6648,69 @@ fn diagnose_table_hash_alternative() {
         let (contents, plain) = parse_deflate_whole(&compressed).unwrap();
         let info = extract_preflate_info(&contents.blocks);
         let baseline = estimate_preflate_parameters(&contents, &plain).unwrap();
-        let candidate = TokenPredictorParameters {
-            hash_algorithm: HashAlgorithm::RandomVector,
-            matching_type: MatchingType::Lazy {
+        let candidate = {
+            let mut canonical_configuration = baseline;
+            canonical_configuration.set_hash_algorithm(HashAlgorithm::RandomVector);
+            canonical_configuration.set_insertion(DictionaryAddPolicy::AddAll);
+            canonical_configuration.set_nice_length(128);
+            canonical_configuration.set_max_chain(128);
+            canonical_configuration.set_short_match_cutoff(4096);
+            canonical_configuration.set_matching_type(MatchingType::Lazy {
                 max_lazy: 16,
                 filtered_matching: false,
                 behavior: LazyBehavior::RecomputeAfterLiteral,
-            },
-            add_policy: DictionaryAddPolicy::AddAll,
-            nice_length: 128,
-            max_chain: 128,
-            max_dist_3_matches: 4096,
-            ..baseline
+            });
+            canonical_configuration
         };
         let candidate = if std::env::var_os("PREFLATE_TABLE_WINDOWS").is_some() {
-            TokenPredictorParameters {
-                hash_algorithm: HashAlgorithm::RandomVector,
-                matching_type: MatchingType::WindowsLazy { max_lazy: 258 },
-                nice_length: 258,
-                max_chain: 100,
-                very_far_matches_detected: true,
-                max_token_count: if info.max_tokens_per_block.is_power_of_two() {
-                    u16::try_from(info.max_tokens_per_block).unwrap()
-                } else {
-                    baseline.max_token_count
-                },
-                ..baseline
+            {
+                let mut canonical_configuration = baseline;
+                canonical_configuration.set_hash_algorithm(HashAlgorithm::RandomVector);
+                canonical_configuration.set_full_window(true);
+                canonical_configuration.set_nice_length(258);
+                canonical_configuration.set_max_chain(100);
+                canonical_configuration
+                    .set_matching_type(MatchingType::WindowsLazy { max_lazy: 258 });
+                canonical_configuration.max_token_count =
+                    if info.max_tokens_per_block.is_power_of_two() {
+                        u16::try_from(info.max_tokens_per_block).unwrap()
+                    } else {
+                        baseline.max_token_count
+                    };
+                canonical_configuration
             }
         } else {
             candidate
         };
         let candidate = if std::env::var_os("PREFLATE_TABLE_GREEDY").is_some() {
-            TokenPredictorParameters {
-                matching_type: if std::env::var_os("PREFLATE_TABLE_WINDOWS_GREEDY").is_some() {
-                    MatchingType::WindowsLazy { max_lazy: 0 }
-                } else {
-                    MatchingType::Greedy
-                },
-                nice_length: 258,
-                ..baseline
+            {
+                let mut canonical_configuration = baseline;
+                canonical_configuration.set_nice_length(258);
+                canonical_configuration.set_matching_type(
+                    if std::env::var_os("PREFLATE_TABLE_WINDOWS_GREEDY").is_some() {
+                        MatchingType::WindowsLazy { max_lazy: 0 }
+                    } else {
+                        MatchingType::Greedy
+                    },
+                );
+                canonical_configuration
             }
         } else {
             candidate
         };
-        let first = crate::estimator::prediction_scoring::score_predictions(
-            &mut crate::prediction_state::PredictionState::new(&baseline),
+        let first = crate::estimator::test_support::score_predictions(
+            &mut crate::prediction_state::PredictionState::from_reconstruction_parameters(
+                (&baseline).into(),
+            ),
             &contents.blocks,
             &plain,
             4096,
             524288,
         );
-        let next = crate::estimator::prediction_scoring::score_predictions(
-            &mut crate::prediction_state::PredictionState::new(&candidate),
+        let next = crate::estimator::test_support::score_predictions(
+            &mut crate::prediction_state::PredictionState::from_reconstruction_parameters(
+                (&candidate).into(),
+            ),
             &contents.blocks,
             &plain,
             4096,
@@ -6403,7 +6764,7 @@ fn diagnose_table_hash_residuals() {
         assert_eq!(contents.compressed_size, compressed.len());
         let baseline = estimate_preflate_parameters(&contents, &plain).unwrap();
         assert!(matches!(
-            baseline.hash_algorithm,
+            baseline.hash_algorithm(),
             HashAlgorithm::RandomVector | HashAlgorithm::Zlib { .. }
         ));
         let observed =
@@ -6488,69 +6849,59 @@ fn diagnose_table_hash_residuals() {
         let mem_level = (u32::from(baseline.max_token_count) + 1)
             .ilog2()
             .saturating_sub(6);
-        let hashes = crate::models::zlib::candidate_hashes(mem_level);
+        let hashes = crate::estimator::test_support::zlib::candidate_hashes(mem_level);
         for hash_algorithm in [Some(hashes.memory), hashes.default, hashes.small]
             .into_iter()
             .flatten()
         {
-            variants.push((
-                "zlib_hash",
-                TokenPredictorParameters {
-                    hash_algorithm,
-                    ..baseline
-                },
-            ));
-            for settings in crate::models::zlib::SLOW_PREFLATE_PARSER_SETTINGS {
-                if settings.max_chain < baseline.max_chain {
+            variants.push(("zlib_hash", {
+                let mut canonical_configuration = baseline;
+                canonical_configuration.set_hash_algorithm(hash_algorithm);
+                canonical_configuration
+            }));
+            for settings in crate::estimator::test_support::zlib::SLOW_PREFLATE_PARSER_SETTINGS {
+                if settings.max_chain < baseline.max_chain() {
                     continue;
                 }
-                variants.push((
-                    "zlib_tuple",
-                    TokenPredictorParameters {
-                        hash_algorithm,
-                        matching_type: settings.match_type,
-                        nice_length: settings.nice_length,
-                        max_chain: settings.max_chain,
-                        very_far_matches_detected: false,
-                        ..baseline
-                    },
-                ));
+                variants.push(("zlib_tuple", {
+                    let mut canonical_configuration = baseline;
+                    canonical_configuration.set_hash_algorithm(hash_algorithm);
+                    canonical_configuration.set_full_window(false);
+                    canonical_configuration.set_nice_length(settings.nice_length);
+                    canonical_configuration.set_max_chain(settings.max_chain);
+                    canonical_configuration.set_matching_type(settings.parser.matching_type());
+                    canonical_configuration
+                }));
                 break;
             }
         }
-        variants.push((
-            "long_nice",
-            TokenPredictorParameters {
-                nice_length: 258,
-                ..baseline
-            },
-        ));
-        variants.push((
-            "long_chain",
-            TokenPredictorParameters {
-                max_chain: 4096,
-                ..baseline
-            },
-        ));
-        if baseline.matching_type == MatchingType::Greedy {
+        variants.push(("long_nice", {
+            let mut canonical_configuration = baseline;
+            canonical_configuration.set_nice_length(258);
+            canonical_configuration
+        }));
+        variants.push(("long_chain", {
+            let mut canonical_configuration = baseline;
+            canonical_configuration.set_max_chain(4096);
+            canonical_configuration
+        }));
+        if baseline.matching_type() == MatchingType::Greedy {
             for add_policy in [
                 DictionaryAddPolicy::AddFirst(0),
                 DictionaryAddPolicy::AddFirstAndLast(0),
             ] {
-                variants.push((
-                    "insertion_boundary",
-                    TokenPredictorParameters {
-                        add_policy,
-                        ..baseline
-                    },
-                ));
+                variants.push(("insertion_boundary", {
+                    let mut canonical_configuration = baseline;
+                    canonical_configuration.set_insertion(add_policy);
+                    canonical_configuration
+                }));
             }
         }
         if let MatchingType::Lazy {
             filtered_matching,
             behavior,
             ..
-        } = baseline.matching_type
+        } = baseline.matching_type()
         {
             for max_lazy in [128, 258] {
                 for behavior in [
@@ -6558,23 +6909,23 @@ fn diagnose_table_hash_residuals() {
                     LazyBehavior::Zlib { good_length: 258 },
                     LazyBehavior::RecomputeAfterLiteral,
                 ] {
-                    variants.push((
-                        "long_lazy",
-                        TokenPredictorParameters {
-                            matching_type: MatchingType::Lazy {
-                                max_lazy,
-                                filtered_matching,
-                                behavior,
-                            },
-                            ..baseline
-                        },
-                    ));
+                    variants.push(("long_lazy", {
+                        let mut canonical_configuration = baseline;
+                        canonical_configuration.set_matching_type(MatchingType::Lazy {
+                            max_lazy,
+                            filtered_matching,
+                            behavior,
+                        });
+                        canonical_configuration
+                    }));
                 }
             }
         }
         for (variant, candidate) in variants {
-            let (errors, tokens) = crate::estimator::prediction_scoring::score_predictions(
-                &mut crate::prediction_state::PredictionState::new(&candidate),
+            let (errors, tokens) = crate::estimator::test_support::score_predictions(
+                &mut crate::prediction_state::PredictionState::from_reconstruction_parameters(
+                    (&candidate).into(),
+                ),
                 &contents.blocks,
                 &plain,
                 4096,
@@ -6668,30 +7019,34 @@ fn sparse_windows_profile_selects_hash_and_long_lazy_policy_together() {
     let info = extract_preflate_info(&contents.blocks);
     assert_eq!(info.min_len, 5);
     assert_eq!(info.max_tokens_per_block, 4096);
-    let baseline = TokenPredictorParameters {
-        hash_algorithm: HashAlgorithm::Libdeflate4Fast,
-        matching_type: MatchingType::Lazy {
+    let baseline = {
+        let mut canonical_configuration = synthetic_params();
+        canonical_configuration.set_hash_algorithm(HashAlgorithm::Libdeflate4Fast);
+        canonical_configuration.set_nice_length(128);
+        canonical_configuration.set_max_chain(99);
+        canonical_configuration.set_short_match_cutoff(0);
+        canonical_configuration.set_matching_type(MatchingType::Lazy {
             max_lazy: 16,
             filtered_matching: false,
             behavior: LazyBehavior::RecomputeAfterLiteral,
-        },
-        nice_length: 128,
-        max_chain: 99,
-        max_token_count: 8191,
-        max_dist_3_matches: 0,
-        ..synthetic_params()
+        });
+        canonical_configuration.max_token_count = 8191;
+        canonical_configuration
     };
-    let expected = TokenPredictorParameters {
-        hash_algorithm: HashAlgorithm::RandomVector,
-        matching_type: MatchingType::WindowsLazy { max_lazy: 258 },
-        nice_length: 258,
-        max_chain: 100,
-        max_token_count: 4096,
-        ..baseline
+    let expected = {
+        let mut canonical_configuration = baseline;
+        canonical_configuration.set_hash_algorithm(HashAlgorithm::RandomVector);
+        canonical_configuration.set_nice_length(258);
+        canonical_configuration.set_max_chain(100);
+        canonical_configuration.set_matching_type(MatchingType::WindowsLazy { max_lazy: 258 });
+        canonical_configuration.max_token_count = 4096;
+        canonical_configuration
     };
-    let score = |parameters| {
-        crate::estimator::prediction_scoring::score_predictions(
-            &mut crate::prediction_state::PredictionState::new(parameters),
+    let score = |parameters: &ReconstructionParameters| {
+        crate::estimator::test_support::score_predictions(
+            &mut crate::prediction_state::PredictionState::from_reconstruction_parameters(
+                *parameters,
+            ),
             &contents.blocks,
             &plain,
             4096,
@@ -6709,28 +7064,30 @@ fn sparse_windows_profile_selects_hash_and_long_lazy_policy_together() {
             .first_mismatches
     );
     assert!(
-        score(&TokenPredictorParameters {
-            matching_type: MatchingType::WindowsLazy { max_lazy: 128 },
-            ..expected
+        score(&{
+            let mut canonical_configuration = expected;
+            canonical_configuration.set_matching_type(MatchingType::WindowsLazy { max_lazy: 128 });
+            canonical_configuration
         })
         .0 >= 2
     );
-    let selected = crate::estimator::prediction_scoring::refine_profile(
-        crate::models::CompressorProfile::Custom(baseline),
+    let selected = crate::estimator::test_support::refine_profile(
+        crate::estimator::test_support::CompressorProfile::Custom.with_parameters(baseline),
         &info,
         &contents,
         &plain,
+        &[],
     );
-    assert_eq!(selected.parameters(), expected);
-    assert!(matches!(
-        selected,
-        crate::models::CompressorProfile::Windows(_)
-    ));
-    let measured = measure(&contents, &plain, &selected.parameters()).unwrap();
+    assert_eq!(selected.reconstruction, expected);
+    assert_eq!(
+        selected.model,
+        crate::estimator::test_support::CompressorProfile::Windows
+    );
+    let measured = measure(&contents, &plain, &selected.reconstruction).unwrap();
     assert_eq!(measured.trace.mismatch_count, 0);
     verify(&measured, &plain, &compressed);
     assert_eq!(
-        crate::estimator::prediction_scoring::refine_ambiguous_profile(
+        crate::estimator::test_support::refine_ambiguous_profile(
             expected, &info, &contents, &plain
         ),
         expected
@@ -6738,8 +7095,10 @@ fn sparse_windows_profile_selects_hash_and_long_lazy_policy_together() {
     let (greedy_compressed, greedy_contents, greedy_plain) = synthetic_stream(greedy_tokens);
     assert_eq!(plain.text(), greedy_plain.text());
     assert!(
-        crate::estimator::prediction_scoring::score_predictions(
-            &mut crate::prediction_state::PredictionState::new(&expected),
+        crate::estimator::test_support::score_predictions(
+            &mut crate::prediction_state::PredictionState::from_reconstruction_parameters(
+                (&expected).into()
+            ),
             &greedy_contents.blocks,
             &greedy_plain,
             4096,
@@ -6747,7 +7106,7 @@ fn sparse_windows_profile_selects_hash_and_long_lazy_policy_together() {
         )
         .0 > 0
     );
-    let rejected = crate::estimator::prediction_scoring::refine_ambiguous_profile(
+    let rejected = crate::estimator::test_support::refine_ambiguous_profile(
         baseline,
         &extract_preflate_info(&greedy_contents.blocks),
         &greedy_contents,
@@ -6800,32 +7159,36 @@ fn bounded_table_hash_repair_rejects_libdeflate_equal_length_deferral() {
     assert!(compressed.len() > 1024);
     let info = extract_preflate_info(&contents.blocks);
     assert_eq!(info.min_len, 3);
-    let expected = TokenPredictorParameters {
-        hash_algorithm: HashAlgorithm::RandomVector,
-        matching_type: MatchingType::Lazy {
+    let expected = {
+        let mut canonical_configuration = synthetic_params();
+        canonical_configuration.set_hash_algorithm(HashAlgorithm::RandomVector);
+        canonical_configuration.set_full_window(true);
+        canonical_configuration.set_nice_length(128);
+        canonical_configuration.set_max_chain(128);
+        canonical_configuration.set_short_match_cutoff(4096);
+        canonical_configuration.set_matching_type(MatchingType::Lazy {
             max_lazy: 16,
             filtered_matching: false,
             behavior: LazyBehavior::RecomputeAfterLiteral,
-        },
-        nice_length: 128,
-        max_chain: 128,
-        max_dist_3_matches: 4096,
-        very_far_matches_detected: true,
-        ..synthetic_params()
+        });
+        canonical_configuration
     };
-    let baseline = TokenPredictorParameters {
-        hash_algorithm: HashAlgorithm::Libdeflate4,
-        matching_type: MatchingType::LibdeflateLazy {
+    let baseline = {
+        let mut canonical_configuration = expected;
+        canonical_configuration.set_hash_algorithm(HashAlgorithm::Libdeflate4);
+        canonical_configuration.set_nice_length(258);
+        canonical_configuration.set_max_chain(301);
+        canonical_configuration.set_short_match_cutoff(8192);
+        canonical_configuration.set_matching_type(MatchingType::LibdeflateLazy {
             two_positions: true,
-        },
-        nice_length: 258,
-        max_chain: 301,
-        max_dist_3_matches: 8192,
-        ..expected
+        });
+        canonical_configuration
     };
     assert!(
-        crate::estimator::prediction_scoring::score_predictions(
-            &mut crate::prediction_state::PredictionState::new(&baseline),
+        crate::estimator::test_support::score_predictions(
+            &mut crate::prediction_state::PredictionState::from_reconstruction_parameters(
+                (&baseline).into()
+            ),
             &contents.blocks,
             &plain,
             4096,
@@ -6834,8 +7197,10 @@ fn bounded_table_hash_repair_rejects_libdeflate_equal_length_deferral() {
         .0 >= 2
     );
     assert_eq!(
-        crate::estimator::prediction_scoring::score_predictions(
-            &mut crate::prediction_state::PredictionState::new(&expected),
+        crate::estimator::test_support::score_predictions(
+            &mut crate::prediction_state::PredictionState::from_reconstruction_parameters(
+                (&expected).into()
+            ),
             &contents.blocks,
             &plain,
             4096,
@@ -6844,7 +7209,7 @@ fn bounded_table_hash_repair_rejects_libdeflate_equal_length_deferral() {
         .0,
         0
     );
-    let selected = crate::estimator::prediction_scoring::refine_ambiguous_profile(
+    let selected = crate::estimator::test_support::refine_ambiguous_profile(
         baseline, &info, &contents, &plain,
     );
     assert_eq!(selected, expected);
@@ -6852,7 +7217,7 @@ fn bounded_table_hash_repair_rejects_libdeflate_equal_length_deferral() {
     assert_eq!(measured.trace.mismatch_count, 0);
     verify(&measured, &plain, &compressed);
     assert_eq!(
-        crate::estimator::prediction_scoring::refine_ambiguous_profile(
+        crate::estimator::test_support::refine_ambiguous_profile(
             expected, &info, &contents, &plain
         ),
         expected
@@ -6907,22 +7272,25 @@ fn partial_windows_profile_recreates_long_deferrals_and_trailing_literals() {
     assert_eq!(plain.len(), position as usize);
     assert!(compressed.len() > 1024);
     let info = extract_preflate_info(&contents.blocks);
-    let baseline = TokenPredictorParameters {
-        hash_algorithm: HashAlgorithm::RandomVector,
-        matching_type: MatchingType::Lazy {
+    let baseline = {
+        let mut canonical_configuration = synthetic_params();
+        canonical_configuration.set_hash_algorithm(HashAlgorithm::RandomVector);
+        canonical_configuration.set_nice_length(128);
+        canonical_configuration.set_max_chain(100);
+        canonical_configuration.set_short_match_cutoff(4096);
+        canonical_configuration.set_matching_type(MatchingType::Lazy {
             max_lazy: 16,
             filtered_matching: false,
             behavior: LazyBehavior::RecomputeAfterLiteral,
-        },
-        nice_length: 128,
-        max_chain: 100,
-        max_token_count: 8191,
-        max_dist_3_matches: 4096,
-        ..synthetic_params()
+        });
+        canonical_configuration.max_token_count = 8191;
+        canonical_configuration
     };
     assert!(
-        crate::estimator::prediction_scoring::score_predictions(
-            &mut crate::prediction_state::PredictionState::new(&baseline),
+        crate::estimator::test_support::score_predictions(
+            &mut crate::prediction_state::PredictionState::from_reconstruction_parameters(
+                (&baseline).into()
+            ),
             &contents.blocks,
             &plain,
             4096,
@@ -6930,15 +7298,18 @@ fn partial_windows_profile_recreates_long_deferrals_and_trailing_literals() {
         )
         .0 >= 2
     );
-    let expected = TokenPredictorParameters {
-        matching_type: MatchingType::WindowsLazy { max_lazy: 258 },
-        nice_length: 258,
-        very_far_matches_detected: true,
-        ..baseline
+    let expected = {
+        let mut canonical_configuration = baseline;
+        canonical_configuration.set_full_window(true);
+        canonical_configuration.set_nice_length(258);
+        canonical_configuration.set_matching_type(MatchingType::WindowsLazy { max_lazy: 258 });
+        canonical_configuration
     };
     assert_eq!(
-        crate::estimator::prediction_scoring::score_predictions(
-            &mut crate::prediction_state::PredictionState::new(&expected),
+        crate::estimator::test_support::score_predictions(
+            &mut crate::prediction_state::PredictionState::from_reconstruction_parameters(
+                (&expected).into()
+            ),
             &contents.blocks,
             &plain,
             4096,
@@ -6947,7 +7318,7 @@ fn partial_windows_profile_recreates_long_deferrals_and_trailing_literals() {
         .0,
         0
     );
-    let selected = crate::estimator::prediction_scoring::refine_ambiguous_profile(
+    let selected = crate::estimator::test_support::refine_ambiguous_profile(
         baseline, &info, &contents, &plain,
     );
     assert_eq!(selected, expected);
@@ -6978,22 +7349,25 @@ fn shallow_windows_profile_recreates_greedy_decisions_and_trailing_literals() {
     let (compressed, contents, plain) = synthetic_stream(tokens);
     assert!(compressed.len() > 1024);
     let info = extract_preflate_info(&contents.blocks);
-    let baseline = TokenPredictorParameters {
-        hash_algorithm: HashAlgorithm::RandomVector,
-        matching_type: MatchingType::Lazy {
+    let baseline = {
+        let mut canonical_configuration = synthetic_params();
+        canonical_configuration.set_hash_algorithm(HashAlgorithm::RandomVector);
+        canonical_configuration.set_nice_length(16);
+        canonical_configuration.set_max_chain(5);
+        canonical_configuration.set_short_match_cutoff(4096);
+        canonical_configuration.set_matching_type(MatchingType::Lazy {
             max_lazy: 4,
             filtered_matching: false,
             behavior: LazyBehavior::Zlib { good_length: 4 },
-        },
-        nice_length: 16,
-        max_chain: 5,
-        max_token_count: 16383,
-        max_dist_3_matches: 4096,
-        ..synthetic_params()
+        });
+        canonical_configuration.max_token_count = 16383;
+        canonical_configuration
     };
     assert!(
-        crate::estimator::prediction_scoring::score_predictions(
-            &mut crate::prediction_state::PredictionState::new(&baseline),
+        crate::estimator::test_support::score_predictions(
+            &mut crate::prediction_state::PredictionState::from_reconstruction_parameters(
+                (&baseline).into()
+            ),
             &contents.blocks,
             &plain,
             4096,
@@ -7001,14 +7375,17 @@ fn shallow_windows_profile_recreates_greedy_decisions_and_trailing_literals() {
         )
         .0 >= 2
     );
-    let expected = TokenPredictorParameters {
-        matching_type: MatchingType::WindowsLazy { max_lazy: 0 },
-        nice_length: 258,
-        ..baseline
+    let expected = {
+        let mut canonical_configuration = baseline;
+        canonical_configuration.set_nice_length(258);
+        canonical_configuration.set_matching_type(MatchingType::WindowsLazy { max_lazy: 0 });
+        canonical_configuration
     };
     assert_eq!(
-        crate::estimator::prediction_scoring::score_predictions(
-            &mut crate::prediction_state::PredictionState::new(&expected),
+        crate::estimator::test_support::score_predictions(
+            &mut crate::prediction_state::PredictionState::from_reconstruction_parameters(
+                (&expected).into()
+            ),
             &contents.blocks,
             &plain,
             4096,
@@ -7017,7 +7394,7 @@ fn shallow_windows_profile_recreates_greedy_decisions_and_trailing_literals() {
         .0,
         0
     );
-    let selected = crate::estimator::prediction_scoring::refine_ambiguous_profile(
+    let selected = crate::estimator::test_support::refine_ambiguous_profile(
         baseline, &info, &contents, &plain,
     );
     assert_eq!(selected, expected);
@@ -7025,7 +7402,7 @@ fn shallow_windows_profile_recreates_greedy_decisions_and_trailing_literals() {
     assert_eq!(measured.trace.mismatch_count, 0);
     verify(&measured, &plain, &compressed);
     assert_eq!(
-        crate::estimator::prediction_scoring::refine_ambiguous_profile(
+        crate::estimator::test_support::refine_ambiguous_profile(
             expected, &info, &contents, &plain
         ),
         expected
@@ -7033,98 +7410,7 @@ fn shallow_windows_profile_recreates_greedy_decisions_and_trailing_literals() {
 }
 
 #[test]
-fn inactive_profile_fields_miniz_ignores_nice_length() {
-    let mut tokens: Vec<_> = b"@abcdefX"
-        .iter()
-        .copied()
-        .map(DeflateToken::Literal)
-        .collect();
-    tokens.push(DeflateToken::new_ref(3, 7));
-    tokens.push(DeflateToken::Literal(b'Y'));
-    tokens.push(DeflateToken::new_ref(6, 11));
-    let (compressed, contents, plain) = synthetic_stream(tokens);
-    for (max_probes, greedy) in [(3, true), (32, false)] {
-        let parameters = TokenPredictorParameters {
-            matching_type: MatchingType::MiniZ { max_probes, greedy },
-            max_chain: u32::from(max_probes).div_ceil(3) * 3,
-            max_dist_3_matches: 8191,
-            ..synthetic_params()
-        };
-        let baseline = measure(&contents, &plain, &parameters).unwrap();
-        let baseline_cabac = ReconstructionData::read(&baseline.corrections)
-            .unwrap()
-            .corrections;
-        for nice_length in [3, 16, 128, 258] {
-            let alternative = measure(
-                &contents,
-                &plain,
-                &TokenPredictorParameters {
-                    nice_length,
-                    ..parameters
-                },
-            )
-            .unwrap();
-            verify(&alternative, &plain, &compressed);
-            assert_eq!(
-                alternative.trace.mismatch_count,
-                baseline.trace.mismatch_count
-            );
-            assert_eq!(
-                ReconstructionData::read(&alternative.corrections)
-                    .unwrap()
-                    .corrections,
-                baseline_cabac
-            );
-        }
-    }
-}
-
-#[test]
-fn inactive_profile_fields_filtered_parser_ignores_three_byte_cutoff() {
-    let mut tokens: Vec<_> = b"@abcdefX"
-        .iter()
-        .copied()
-        .map(DeflateToken::Literal)
-        .collect();
-    tokens.push(DeflateToken::new_ref(3, 7));
-    tokens.push(DeflateToken::Literal(b'Y'));
-    tokens.push(DeflateToken::new_ref(6, 11));
-    let (compressed, contents, plain) = synthetic_stream(tokens);
-    let parameters = TokenPredictorParameters {
-        matching_type: MatchingType::Lazy {
-            max_lazy: 128,
-            filtered_matching: true,
-            behavior: LazyBehavior::Zlib { good_length: 32 },
-        },
-        ..synthetic_params()
-    };
-    let baseline = measure(&contents, &plain, &parameters).unwrap();
-    assert!(baseline.trace.mismatch_count > 0);
-    let baseline_cabac = ReconstructionData::read(&baseline.corrections)
-        .unwrap()
-        .corrections;
-    for max_dist_3_matches in [0, 4, 4096, 32768] {
-        let alternative = measure(
-            &contents,
-            &plain,
-            &TokenPredictorParameters {
-                max_dist_3_matches,
-                ..parameters
-            },
-        )
-        .unwrap();
-        verify(&alternative, &plain, &compressed);
-        assert_eq!(
-            ReconstructionData::read(&alternative.corrections)
-                .unwrap()
-                .corrections,
-            baseline_cabac
-        );
-    }
-}
-
-#[test]
-fn distance_policy_rle_ignores_source_start_including_corrections() {
+fn rle_matching_roundtrips_out_of_policy_reference_corrections() {
     use crate::parameters::PreflateStrategy;
 
     let (compressed, contents, plain) = synthetic_stream(vec![
@@ -7182,36 +7468,24 @@ fn distance_policy_rle_ignores_source_start_including_corrections() {
             {
                 continue;
             }
-            let parameters = TokenPredictorParameters {
-                hash_algorithm,
-                matching_type,
-                strategy: PreflateStrategy::RleOnly,
-                very_far_matches_detected: false,
-                matches_to_start_detected: false,
-                window_bits: 9,
-                max_token_count: 8191,
-                ..synthetic_params()
+            let parameters = {
+                let mut canonical_configuration = synthetic_params();
+                canonical_configuration.set_hash_algorithm(hash_algorithm);
+                canonical_configuration.set_strategy(PreflateStrategy::RleOnly);
+                canonical_configuration.set_full_window(false);
+                canonical_configuration.set_matches_to_start(false);
+                canonical_configuration.set_window_bits(9);
+                canonical_configuration.set_matching_type(matching_type);
+                canonical_configuration.max_token_count = 8191;
+                canonical_configuration
             };
             let baseline = measure(&contents, &plain, &parameters).unwrap();
             verify(&baseline, &plain, &compressed);
             assert!(baseline.trace.mismatch_count > 0);
-            let alternative = measure(
-                &contents,
-                &plain,
-                &TokenPredictorParameters {
-                    matches_to_start_detected: true,
-                    ..parameters
-                },
-            )
-            .unwrap();
-            verify(&alternative, &plain, &compressed);
-            assert_eq!(
-                ReconstructionData::read(&baseline.corrections)
-                    .unwrap()
-                    .corrections,
-                ReconstructionData::read(&alternative.corrections)
-                    .unwrap()
-                    .corrections,
+            assert!(
+                baseline.trace.first_mismatches.iter().any(|(_, actual, _)| {
+                    matches!(actual, DeflateToken::Reference(reference) if reference.dist() == 14)
+                }),
                 "{hash_algorithm:?}, {matching_type:?}"
             );
         }
@@ -7219,187 +7493,7 @@ fn distance_policy_rle_ignores_source_start_including_corrections() {
 }
 
 #[test]
-fn distance_policy_full_window_ignores_strategy_including_corrections() {
-    use crate::parameters::PreflateStrategy;
-
-    let mut tokens: Vec<_> = b"@abcdefX"
-        .iter()
-        .copied()
-        .map(DeflateToken::Literal)
-        .collect();
-    tokens.push(DeflateToken::new_ref(3, 7));
-    tokens.push(DeflateToken::Literal(b'Y'));
-    tokens.extend(b"abcdef".iter().copied().map(DeflateToken::Literal));
-    let (compressed, contents, plain) = synthetic_stream(tokens);
-    for matching_type in [
-        MatchingType::Greedy,
-        MatchingType::Lazy {
-            max_lazy: 128,
-            filtered_matching: false,
-            behavior: LazyBehavior::Zlib { good_length: 32 },
-        },
-        MatchingType::Lazy {
-            max_lazy: 128,
-            filtered_matching: true,
-            behavior: LazyBehavior::RecomputeAfterLiteral,
-        },
-        MatchingType::MiniZ {
-            max_probes: 32,
-            greedy: false,
-        },
-        MatchingType::LibdeflateGreedy,
-        MatchingType::LibdeflateLazy {
-            two_positions: true,
-        },
-        MatchingType::WindowsLazy { max_lazy: 258 },
-    ] {
-        let parameters = TokenPredictorParameters {
-            matching_type,
-            very_far_matches_detected: true,
-            strategy: PreflateStrategy::Default,
-            nice_length: 3,
-            ..synthetic_params()
-        };
-        let baseline = measure(&contents, &plain, &parameters).unwrap();
-        verify(&baseline, &plain, &compressed);
-        assert!(baseline.trace.mismatch_count > 0);
-        let baseline_cabac = ReconstructionData::read(&baseline.corrections)
-            .unwrap()
-            .corrections;
-        for strategy in [
-            PreflateStrategy::Default,
-            PreflateStrategy::RleOnly,
-            PreflateStrategy::HuffOnly,
-            PreflateStrategy::Store,
-        ] {
-            let alternative = measure(
-                &contents,
-                &plain,
-                &TokenPredictorParameters {
-                    strategy,
-                    ..parameters
-                },
-            )
-            .unwrap();
-            verify(&alternative, &plain, &compressed);
-            assert_eq!(
-                ReconstructionData::read(&alternative.corrections)
-                    .unwrap()
-                    .corrections,
-                baseline_cabac,
-                "{matching_type:?}, {strategy:?}"
-            );
-        }
-    }
-}
-
-#[test]
-fn distance_policy_miniz_ignores_enabled_strategy_and_full_window() {
-    use crate::parameters::PreflateStrategy;
-
-    let mut tokens: Vec<_> = b"@abcdefX"
-        .iter()
-        .copied()
-        .map(DeflateToken::Literal)
-        .collect();
-    tokens.push(DeflateToken::new_ref(3, 7));
-    tokens.push(DeflateToken::Literal(b'Y'));
-    tokens.extend(b"abcdef".iter().copied().map(DeflateToken::Literal));
-    let (compressed, contents, plain) = synthetic_stream(tokens);
-    for greedy in [false, true] {
-        let parameters = TokenPredictorParameters {
-            matching_type: MatchingType::MiniZ {
-                max_probes: 32,
-                greedy,
-            },
-            max_chain: 33,
-            strategy: PreflateStrategy::Default,
-            ..synthetic_params()
-        };
-        let baseline = measure(&contents, &plain, &parameters).unwrap();
-        verify(&baseline, &plain, &compressed);
-        assert!(baseline.trace.mismatch_count > 0);
-        let baseline_cabac = ReconstructionData::read(&baseline.corrections)
-            .unwrap()
-            .corrections;
-        for (very_far_matches_detected, strategy) in [
-            (false, PreflateStrategy::Default),
-            (false, PreflateStrategy::RleOnly),
-            (true, PreflateStrategy::Default),
-            (true, PreflateStrategy::RleOnly),
-            (true, PreflateStrategy::HuffOnly),
-            (true, PreflateStrategy::Store),
-        ] {
-            let alternative = measure(
-                &contents,
-                &plain,
-                &TokenPredictorParameters {
-                    very_far_matches_detected,
-                    strategy,
-                    ..parameters
-                },
-            )
-            .unwrap();
-            verify(&alternative, &plain, &compressed);
-            assert_eq!(
-                ReconstructionData::read(&alternative.corrections)
-                    .unwrap()
-                    .corrections,
-                baseline_cabac
-            );
-        }
-    }
-}
-
-#[test]
-fn inactive_profile_fields_no_hash_has_no_dictionary_settings() {
-    let (compressed, contents, plain) = synthetic_stream(
-        b"literal-only-data"
-            .iter()
-            .copied()
-            .map(DeflateToken::Literal)
-            .collect(),
-    );
-    let parameters = TokenPredictorParameters {
-        hash_algorithm: HashAlgorithm::None,
-        strategy: crate::parameters::PreflateStrategy::HuffOnly,
-        window_bits: 0,
-        max_chain: 0,
-        nice_length: 0,
-        max_dist_3_matches: 0,
-        ..synthetic_params()
-    };
-    let baseline = measure(&contents, &plain, &parameters).unwrap();
-    let alternative = measure(
-        &contents,
-        &plain,
-        &TokenPredictorParameters {
-            window_bits: 15,
-            max_chain: 4096,
-            nice_length: 258,
-            max_dist_3_matches: 32768,
-            matches_to_start_detected: !parameters.matches_to_start_detected,
-            very_far_matches_detected: !parameters.very_far_matches_detected,
-            add_policy: DictionaryAddPolicy::AddFirst(6),
-            ..parameters
-        },
-    )
-    .unwrap();
-    verify(&alternative, &plain, &compressed);
-    assert_eq!(baseline.trace.mismatch_count, 0);
-    assert_eq!(alternative.trace.mismatch_count, 0);
-    assert_eq!(
-        ReconstructionData::read(&baseline.corrections)
-            .unwrap()
-            .corrections,
-        ReconstructionData::read(&alternative.corrections)
-            .unwrap()
-            .corrections
-    );
-}
-
-#[test]
-fn distance_policy_disabled_matching_ignores_strategy_alias_and_source_start() {
+fn disabled_matching_roundtrips_literals_and_rejects_references() {
     use crate::parameters::PreflateStrategy;
 
     let mut tokens: Vec<_> = b"@abcdefX"
@@ -7434,78 +7528,49 @@ fn distance_policy_disabled_matching_ignores_strategy_alias_and_source_start() {
         },
         MatchingType::WindowsLazy { max_lazy: 258 },
     ] {
-        let parameters = TokenPredictorParameters {
-            matching_type,
-            strategy: PreflateStrategy::HuffOnly,
-            very_far_matches_detected: false,
-            matches_to_start_detected: false,
-            ..synthetic_params()
+        let parameters = {
+            let mut canonical_configuration = synthetic_params();
+            canonical_configuration.set_strategy(PreflateStrategy::HuffOnly);
+            canonical_configuration.set_full_window(false);
+            canonical_configuration.set_matches_to_start(false);
+            canonical_configuration.set_matching_type(matching_type);
+            canonical_configuration
         };
         let baseline = measure(&contents, &plain, &parameters).unwrap();
         verify(&baseline, &plain, &compressed);
         assert_eq!(baseline.trace.mismatch_count, 0);
-        let baseline_cabac = ReconstructionData::read(&baseline.corrections)
-            .unwrap()
-            .corrections;
-        for strategy in [PreflateStrategy::HuffOnly, PreflateStrategy::Store] {
-            for matches_to_start_detected in [false, true] {
-                let alternative_parameters = TokenPredictorParameters {
-                    strategy,
-                    matches_to_start_detected,
-                    ..parameters
-                };
-                let alternative = measure(&contents, &plain, &alternative_parameters).unwrap();
-                verify(&alternative, &plain, &compressed);
-                assert_eq!(
-                    ReconstructionData::read(&alternative.corrections)
-                        .unwrap()
-                        .corrections,
-                    baseline_cabac
-                );
-                let error = measure(
-                    &reference_contents,
-                    &reference_plain,
-                    &alternative_parameters,
-                )
-                .err()
-                .expect("disabled matching must still reject reference reprediction");
-                assert_eq!(error.exit_code(), ExitCode::PredictionFailure);
-            }
-        }
+        let error = measure(&reference_contents, &reference_plain, &parameters)
+            .err()
+            .expect("disabled matching must still reject reference reprediction");
+        assert_eq!(error.exit_code(), ExitCode::PredictionFailure);
     }
 }
 
 #[test]
-fn inactive_profile_fields_dynamic_and_mixed_have_identical_block_prediction() {
+fn dynamic_and_mixed_strategies_produce_identical_corrections() {
     for name in ["compressed_zlib_level6.deflate", "treegdi.extract.deflate"] {
         let compressed = crate::utils::read_file(name);
         let (contents, plain) = parse_deflate_whole(&compressed).unwrap();
         let parameters = estimate_preflate_parameters(&contents, &plain).unwrap();
-        let dynamic = measure(
-            &contents,
-            &plain,
-            &TokenPredictorParameters {
-                block_type_strategy: BlockTypeStrategy::Dynamic,
-                ..parameters
-            },
-        )
+        let dynamic = measure(&contents, &plain, &{
+            let mut canonical_configuration = parameters;
+            canonical_configuration.block_type_strategy = BlockTypeStrategy::Dynamic;
+            canonical_configuration
+        })
         .unwrap();
-        let mixed = measure(
-            &contents,
-            &plain,
-            &TokenPredictorParameters {
-                block_type_strategy: BlockTypeStrategy::Mixed,
-                ..parameters
-            },
-        )
+        let mixed = measure(&contents, &plain, &{
+            let mut canonical_configuration = parameters;
+            canonical_configuration.block_type_strategy = BlockTypeStrategy::Mixed;
+            canonical_configuration
+        })
         .unwrap();
         verify(&dynamic, &plain, &compressed[..contents.compressed_size]);
         verify(&mixed, &plain, &compressed[..contents.compressed_size]);
         assert_eq!(
-            ReconstructionData::read(&dynamic.corrections)
+            InspectedReconstructionData::read(&dynamic.corrections)
                 .unwrap()
                 .corrections,
-            ReconstructionData::read(&mixed.corrections)
+            InspectedReconstructionData::read(&mixed.corrections)
                 .unwrap()
                 .corrections
         );
@@ -7529,18 +7594,15 @@ fn diagnostic_isolates_greedy_from_lazy_matching() {
     assert_eq!(plain_text.text(), b"@abcdXbcdefYabcdef");
     let params = synthetic_params();
     let greedy = measure(&contents, &plain_text, &params).unwrap();
-    let lazy = measure(
-        &contents,
-        &plain_text,
-        &TokenPredictorParameters {
-            matching_type: MatchingType::Lazy {
-                max_lazy: 258,
-                filtered_matching: false,
-                behavior: LazyBehavior::Zlib { good_length: 32 },
-            },
-            ..params
-        },
-    )
+    let lazy = measure(&contents, &plain_text, &{
+        let mut canonical_configuration = params;
+        canonical_configuration.set_matching_type(MatchingType::Lazy {
+            max_lazy: 258,
+            filtered_matching: false,
+            behavior: LazyBehavior::Zlib { good_length: 32 },
+        });
+        canonical_configuration
+    })
     .unwrap();
     verify(&greedy, &plain_text, &compressed);
     verify(&lazy, &plain_text, &compressed);
@@ -7576,14 +7638,11 @@ fn diagnostic_isolates_nice_length_cutoff() {
     assert_eq!(plain_text.text(), b"@abcdefXabcYabcdef");
     let params = synthetic_params();
     let full_search = measure(&contents, &plain_text, &params).unwrap();
-    let early_exit = measure(
-        &contents,
-        &plain_text,
-        &TokenPredictorParameters {
-            nice_length: 3,
-            ..params
-        },
-    )
+    let early_exit = measure(&contents, &plain_text, &{
+        let mut canonical_configuration = params;
+        canonical_configuration.set_nice_length(3);
+        canonical_configuration
+    })
     .unwrap();
     verify(&full_search, &plain_text, &compressed);
     verify(&early_exit, &plain_text, &compressed);
@@ -7629,4 +7688,778 @@ fn diagnostic_trace_bounds_samples_not_counts() {
             assert!(pair[0].0 < pair[1].0);
         }
     }
+}
+
+use crate::estimator::estimate_preflate_parameters;
+
+type InspectedReconstructionData = ReconstructionData;
+
+#[test]
+fn parameter_reports_match_the_finalized_wire_settings_and_trace() {
+    let compressed = crate::utils::read_file("compressed_zlib_level6.deflate");
+    let mut processor = PreflateStreamProcessor::new(&PreflateConfig::default());
+    processor.enable_trace(0);
+    let chunk = processor.decompress(&compressed).unwrap();
+    let encoded = ReconstructionData::read(&chunk.corrections)
+        .unwrap()
+        .parameters;
+    let reconstruction_json = chunk.reconstruction_parameters_json().unwrap().unwrap();
+    let reconstruction: ReconstructionParameters =
+        serde_json::from_str(&reconstruction_json).unwrap();
+    assert_eq!(encoded, reconstruction);
+    assert_eq!(chunk.hash_algorithm(), Some(encoded.hash_algorithm()));
+    let wrapper: serde_json::Value =
+        serde_json::from_str(&chunk.estimator_parameters_json().unwrap().unwrap()).unwrap();
+    assert_eq!(wrapper.as_object().unwrap().len(), 2);
+    assert_eq!(
+        wrapper["reconstruction"],
+        serde_json::to_value(encoded).unwrap()
+    );
+    assert!(wrapper["model"].is_string());
+    let trace = processor.prediction_trace().unwrap();
+    assert_eq!(
+        trace.reconstruction_parameters_json().unwrap(),
+        Some(reconstruction_json)
+    );
+    assert_eq!(
+        trace.estimator_parameters_json().unwrap(),
+        chunk.estimator_parameters_json().unwrap()
+    );
+}
+
+#[test]
+fn continuation_chunks_do_not_repeat_parameter_reports() {
+    let mut writer = DeflateWriter::new();
+    for last in [false, true] {
+        writer
+            .encode_block(&DeflateTokenBlock {
+                block_type: crate::deflate::deflate_token::DeflateTokenBlockType::Stored {
+                    uncompressed: vec![b'a'; 768],
+                },
+                last,
+            })
+            .unwrap();
+    }
+    writer.flush();
+    let compressed = writer.detach_output();
+    let mut processor = PreflateStreamProcessor::new(&PreflateConfig {
+        plain_text_limit: 1024,
+        ..PreflateConfig::default()
+    });
+    let first = processor.decompress(&compressed).unwrap();
+    assert!(first.estimator_parameters_json().unwrap().is_some());
+    assert!(!processor.is_done());
+    processor.shrink_to_dictionary();
+    let second = processor
+        .decompress(&compressed[first.compressed_size..])
+        .unwrap();
+    assert!(second.estimator_parameters_json().unwrap().is_none());
+    assert!(second.reconstruction_parameters_json().unwrap().is_none());
+    assert!(second.hash_algorithm().is_none());
+}
+
+/// takes a deflate compressed stream, analyzes it, decoompresses it, and records
+/// any differences in the encoder codec
+fn encode_mispredictions(
+    deflate: &crate::deflate::deflate_reader::DeflateContents,
+    plain_text: &PlainText,
+    params: &ReconstructionParameters,
+    encoder: &mut impl PredictionEncoder,
+) -> Result<()> {
+    let mut input = PreflateInput::new(plain_text);
+
+    let mut token_predictor = TokenPredictor::from_parameters(params);
+
+    predict_blocks(&deflate.blocks, &mut token_predictor, encoder, &mut input)?;
+
+    Ok(())
+}
+
+fn decode_mispredictions(
+    params: &ReconstructionParameters,
+    input: &mut PreflateInput,
+    decoder: &mut impl crate::statistical_codec::PredictionDecoder,
+) -> Result<(Vec<u8>, Vec<DeflateTokenBlock>)> {
+    let mut deflate_writer: DeflateWriter = DeflateWriter::new();
+    let mut predictor = TokenPredictor::from_parameters(params);
+
+    let output_blocks = recreate_blocks(&mut predictor, decoder, &mut deflate_writer, input)?;
+
+    deflate_writer.flush();
+
+    Ok((deflate_writer.detach_output(), output_blocks))
+}
+
+/// decompresses a deflate stream and returns the plaintext and cabac_encoded data that can be used to reconstruct it
+/// This version uses DebugWriter and DebugReader, which are slower but can be used to debug the cabac encoding errors.
+fn decompress_deflate_stream_assert(
+    compressed_data: &[u8],
+    verify: bool,
+) -> Result<(PreflateStreamChunkResult, PlainText)> {
+    use crate::cabac::debug::{DebugReader, DebugWriter};
+    use crate::deflate::deflate_reader::tests::parse_deflate_whole;
+
+    use crate::preflate_error::AddContext;
+
+    let mut cabac_encoded = Vec::new();
+
+    let mut cabac_encoder =
+        PredictionEncoderCabac::new(DebugWriter::new(&mut cabac_encoded).unwrap());
+
+    let (contents, plain_text) = parse_deflate_whole(compressed_data)?;
+
+    let params = estimate_preflate_parameters(&contents, &plain_text).context()?;
+
+    encode_mispredictions(&contents, &plain_text, &params, &mut cabac_encoder)?;
+    assert_eq!(contents.compressed_size, compressed_data.len());
+    cabac_encoder.finish();
+
+    let reconstruction_data = ReconstructionData {
+        parameters: params,
+        corrections: cabac_encoded,
+    }
+    .write();
+
+    if verify {
+        let r = InspectedReconstructionData::read(&reconstruction_data)?;
+
+        let mut cabac_decoder =
+            PredictionDecoderCabac::new(DebugReader::new(Cursor::new(&r.corrections)).unwrap());
+
+        let params = r.parameters;
+        let mut input = PreflateInput::new(&plain_text);
+        let (recompressed, _recreated_blocks) =
+            decode_mispredictions(&params, &mut input, &mut cabac_decoder)?;
+
+        if recompressed[..] != compressed_data[..] {
+            return Err(PreflateError::new(
+                ExitCode::RoundtripMismatch,
+                "recompressed data does not match original",
+            ));
+        }
+    }
+
+    Ok((
+        PreflateStreamChunkResult {
+            corrections: reconstruction_data,
+            compressed_size: contents.compressed_size,
+            parameters: Some(crate::estimator::EstimationResult::test_fixture(params)),
+            blocks: contents.blocks,
+        },
+        plain_text,
+    ))
+}
+
+#[test]
+fn verify_roundtrip_assert() {
+    crate::utils::init_logging();
+
+    use crate::utils::read_file;
+
+    let v = read_file("compressed_zlib_level1.deflate");
+
+    let (r, plain_text) = decompress_deflate_stream_assert(&v, true).unwrap();
+    let recompressed = recompress_deflate_stream_assert(&plain_text, &r.corrections).unwrap();
+    assert!(v == recompressed);
+}
+
+#[test]
+fn verify_roundtrip_zlib() {
+    crate::utils::init_logging();
+
+    for i in 0..9 {
+        verify_file(&format!("compressed_zlib_level{}.deflate", i));
+    }
+}
+
+#[test]
+fn verify_roundtrip_flate2() {
+    crate::utils::init_logging();
+
+    for i in 0..9 {
+        verify_file(&format!("compressed_flate2_level{}.deflate", i));
+    }
+}
+
+#[test]
+fn verify_roundtrip_libdeflate() {
+    crate::utils::init_logging();
+
+    for i in 0..9 {
+        verify_file(&format!("compressed_libdeflate_level{}.deflate", i));
+    }
+}
+
+#[test]
+fn typed_parameters_normalize_and_roundtrip() {
+    use crate::deflate::deflate_token::{DeflateHuffmanType, DeflateToken, DeflateTokenBlockType};
+
+    let text = b"@abcdXabcdYabcdZabcdW";
+    let block = DeflateTokenBlock {
+        last: true,
+        block_type: DeflateTokenBlockType::Huffman {
+            tokens: text.iter().copied().map(DeflateToken::Literal).collect(),
+            huffman_type: DeflateHuffmanType::Static,
+        },
+    };
+    let mut writer = DeflateWriter::new();
+    writer.encode_block(&block).unwrap();
+    writer.flush();
+    let compressed = writer.detach_output();
+    let (contents, plain) =
+        crate::deflate::deflate_reader::tests::parse_deflate_whole(&compressed).unwrap();
+    assert!(contents.compressed_size < 1024);
+    let mut predictor =
+        TokenPredictor::from_parameters(&crate::token_predictor::tests::zlib_level_1_params());
+    let original = bitcode::encode(&predictor.reconstruction_parameters());
+    let encoded = encode_first_chunk(&mut predictor, &contents, &plain, true, None).unwrap();
+    let record = ReconstructionData::read(&encoded).unwrap();
+    assert_ne!(original, bitcode::encode(&record.parameters));
+    let decoder = TokenPredictor::from_reconstruction_parameters(record.parameters);
+    assert_eq!(
+        bitcode::encode(&decoder.reconstruction_parameters()),
+        bitcode::encode(&record.parameters)
+    );
+    assert_eq!(
+        recreate_whole_deflate_stream(plain.text(), &encoded).unwrap(),
+        compressed
+    );
+}
+
+#[test]
+fn reconstruction_data_version() {
+    use crate::utils::read_file;
+
+    let v = read_file("compressed_zlib_level1.deflate");
+    let (r, plain_text) = preflate_whole_deflate_stream(&v, &PreflateConfig::default()).unwrap();
+    assert_eq!(r.corrections[0], RECONSTRUCTION_DATA_VERSION);
+
+    let parsed = InspectedReconstructionData::read(&r.corrections).unwrap();
+
+    // blobs written before the version byte existed are plain bitcode
+    let unversioned = bitcode::encode(&parsed);
+    let mut wrong_version = r.corrections.clone();
+    wrong_version[0] = RECONSTRUCTION_DATA_VERSION + 1;
+    let mut previous_version = r.corrections.clone();
+    previous_version[0] = 0x81;
+    let mut previous_models = r.corrections.clone();
+    previous_models[0] = 0x82;
+    let mut previous_flat = r.corrections.clone();
+    previous_flat[0] = 0x83;
+
+    for bad in [
+        &unversioned[..],
+        &wrong_version[..],
+        &previous_version[..],
+        &previous_models[..],
+        &previous_flat[..],
+        &[],
+    ] {
+        let e = recreate_whole_deflate_stream(plain_text.text(), bad).unwrap_err();
+        assert_eq!(e.exit_code(), ExitCode::InvalidCompressedWrapper);
+    }
+}
+
+#[test]
+fn truncated_nested_reconstruction_parameters_are_rejected() {
+    let compressed = crate::utils::read_file("compressed_zlib_level1.deflate");
+    let (record, _) =
+        preflate_whole_deflate_stream(&compressed, &PreflateConfig::default()).unwrap();
+    for length in 0..record.corrections.len() {
+        let error = InspectedReconstructionData::read(&record.corrections[..length])
+            .err()
+            .unwrap();
+        assert_eq!(error.exit_code(), ExitCode::InvalidCompressedWrapper);
+    }
+}
+
+/// Adobe PDF Library 25/26 emits libdeflate-style streams whose final token is a
+/// length 3 match covering the last 3 bytes of the plaintext. Stock libdeflate never
+/// matches in the last 4 bytes, but the libdeflate model's length 3 hash table can
+/// still find this match (see `HashChain::min_lookup_bytes`).
+#[test]
+fn verify_roundtrip_adobe_tail3() {
+    crate::utils::init_logging();
+
+    use crate::utils::read_file;
+    let v = read_file("compressed_adobe_tail3.deflate");
+
+    let (r, plain_text) = preflate_whole_deflate_stream(&v, &PreflateConfig::default()).unwrap();
+    let recompressed = recreate_whole_deflate_stream(plain_text.text(), &r.corrections).unwrap();
+
+    assert_eq!(r.compressed_size, v.len());
+    assert!(v == recompressed);
+}
+
+fn verify_file(filename: &str) {
+    use crate::utils::read_file;
+    let v = read_file(filename);
+
+    let (r, plain_text) = preflate_whole_deflate_stream(&v, &PreflateConfig::default()).unwrap();
+    let recompressed = recreate_whole_deflate_stream(plain_text.text(), &r.corrections).unwrap();
+    assert!(v == recompressed);
+}
+
+/// recompresses a deflate stream using the cabac_encoded data that was returned from decompress_deflate_stream
+/// This version uses DebugWriter and DebugReader, which are slower and don't compress but can be used to debug the cabac encoding errors.
+fn recompress_deflate_stream_assert(
+    plain_text: &PlainText,
+    prediction_corrections: &[u8],
+) -> Result<Vec<u8>> {
+    use crate::cabac::debug::DebugReader;
+
+    let r = InspectedReconstructionData::read(prediction_corrections)?;
+
+    let mut cabac_decoder =
+        PredictionDecoderCabac::new(DebugReader::new(Cursor::new(&r.corrections)).unwrap());
+
+    let mut input = PreflateInput::new(plain_text);
+    let (recompressed, _recreated_blocks) =
+        decode_mispredictions(&r.parameters, &mut input, &mut cabac_decoder)?;
+    Ok(recompressed)
+}
+
+fn analyze_compressed_data_fast(
+    compressed_data: &[u8],
+    header_crc32: Option<u32>,
+    uncompressed_size: &mut u64,
+) {
+    use crate::{
+        cabac_codec::{PredictionDecoderCabac, PredictionEncoderCabac},
+        deflate::deflate_reader::tests::parse_deflate_whole,
+    };
+    use std::io::Cursor;
+
+    use crate::cabac::vp8::{VP8Reader, VP8Writer};
+
+    let mut buffer = Vec::new();
+
+    let mut cabac_encoder = PredictionEncoderCabac::new(VP8Writer::new(&mut buffer).unwrap());
+
+    let (contents, plain_text) = parse_deflate_whole(compressed_data).unwrap();
+
+    let params = estimate_preflate_parameters(&contents, &plain_text).unwrap();
+
+    println!("params: {:?}", params);
+
+    encode_mispredictions(&contents, &plain_text, &params, &mut cabac_encoder).unwrap();
+
+    if let Some(crc) = header_crc32 {
+        let result_crc = crc32fast::hash(plain_text.text());
+        assert_eq!(result_crc, crc);
+    }
+
+    assert_eq!(contents.compressed_size, compressed_data.len());
+
+    cabac_encoder.finish();
+
+    cabac_encoder.print();
+
+    println!("buffer size: {}", buffer.len());
+
+    let mut cabac_decoder =
+        PredictionDecoderCabac::new(VP8Reader::new(Cursor::new(&buffer)).unwrap());
+
+    let mut input = PreflateInput::new(&plain_text);
+
+    let (recompressed, _recreated_blocks) =
+        decode_mispredictions(&params, &mut input, &mut cabac_decoder).unwrap();
+
+    assert!(recompressed[..] == compressed_data[..]);
+
+    *uncompressed_size = plain_text.text().len() as u64;
+}
+
+fn analyze_compressed_data_verify(
+    compressed_data: &[u8],
+    header_crc32: Option<u32>,
+    _deflate_info_dump_level: i32,
+    uncompressed_size: &mut u64,
+) {
+    use crate::cabac::debug::{DebugReader, DebugWriter};
+    use crate::{
+        cabac_codec::{PredictionDecoderCabac, PredictionEncoderCabac},
+        deflate::{
+            deflate_reader::tests::parse_deflate_whole, deflate_token::DeflateTokenBlockType,
+        },
+        statistical_codec::{VerifyPredictionDecoder, VerifyPredictionEncoder},
+        utils::assert_eq_array,
+    };
+    use std::io::Cursor;
+
+    let mut buffer = Vec::new();
+
+    let cabac_encoder = PredictionEncoderCabac::new(DebugWriter::new(&mut buffer).unwrap());
+    let debug_encoder = VerifyPredictionEncoder::new();
+
+    let mut combined_encoder = (debug_encoder, cabac_encoder);
+
+    let (contents, plain_text) = parse_deflate_whole(compressed_data).unwrap();
+
+    let params = estimate_preflate_parameters(&contents, &plain_text).unwrap();
+
+    println!("params: {:?}", params);
+
+    encode_mispredictions(&contents, &plain_text, &params, &mut combined_encoder).unwrap();
+
+    assert_eq!(contents.compressed_size, compressed_data.len());
+
+    combined_encoder.finish();
+
+    combined_encoder.0.print();
+
+    let actions = combined_encoder.0.actions();
+
+    println!("buffer size: {}", buffer.len());
+
+    let debug_decoder = VerifyPredictionDecoder::new(actions);
+    let cabac_decoder =
+        PredictionDecoderCabac::new(DebugReader::new(Cursor::new(&buffer)).unwrap());
+
+    let mut combined_decoder = (debug_decoder, cabac_decoder);
+    let mut input = PreflateInput::new(&plain_text);
+
+    let (recompressed, recreated_blocks) =
+        decode_mispredictions(&params, &mut input, &mut combined_decoder).unwrap();
+
+    assert_eq!(contents.blocks.len(), recreated_blocks.len());
+    contents
+        .blocks
+        .iter()
+        .zip(recreated_blocks)
+        .enumerate()
+        .for_each(|(index, (a, b))| match (&a.block_type, &b.block_type) {
+            (
+                DeflateTokenBlockType::Stored { uncompressed: a },
+                DeflateTokenBlockType::Stored { uncompressed: c },
+            ) => {
+                assert_eq!(a, c, "uncompressed data differs {index}");
+            }
+            (
+                DeflateTokenBlockType::Huffman {
+                    tokens: t1,
+                    huffman_type: h1,
+                },
+                DeflateTokenBlockType::Huffman {
+                    tokens: t2,
+                    huffman_type: h2,
+                },
+            ) => {
+                assert_eq_array(t1, t2);
+                assert_eq!(h1, h2, "huffman type differs {index}");
+            }
+            _ => panic!("block type differs {index}"),
+        });
+
+    assert_eq!(
+        recompressed.len(),
+        compressed_data.len(),
+        "re-compressed version should be same (length)"
+    );
+    assert!(
+        &recompressed[..] == compressed_data,
+        "re-compressed version should be same (content)"
+    );
+
+    let result_crc = crc32fast::hash(plain_text.text());
+
+    if let Some(crc) = header_crc32 {
+        assert_eq!(crc, result_crc, "crc mismatch");
+    }
+
+    *uncompressed_size = plain_text.text().len() as u64;
+}
+
+fn do_analyze(crc: Option<u32>, compressed_data: &[u8]) {
+    let mut uncompressed_size = 0;
+
+    analyze_compressed_data_verify(compressed_data, crc, 1, &mut uncompressed_size);
+    analyze_compressed_data_fast(compressed_data, crc, &mut uncompressed_size);
+}
+
+/// verify that levels 1-6 of zlib are compressed without any correction data
+///
+/// Future work: figure out why level 7 and above are not perfect
+#[test]
+fn verify_zlib_perfect_compression() {
+    crate::utils::init_logging();
+
+    use crate::deflate::deflate_reader::tests::parse_deflate_whole;
+    use crate::utils::read_file;
+
+    for i in 1..6 {
+        println!("iteration {}", i);
+        let compressed_data: &[u8] =
+            &read_file(format!("compressed_zlib_level{i}.deflate").as_str());
+
+        let (contents, plain_text) = parse_deflate_whole(compressed_data).unwrap();
+
+        let params = estimate_preflate_parameters(&contents, &plain_text).unwrap();
+
+        println!("params: {:?}", params);
+
+        // this "encoder" just asserts if anything gets passed to it
+        let mut verify_encoder = crate::statistical_codec::tests::AssertDefaultOnlyEncoder {};
+        encode_mispredictions(&contents, &plain_text, &params, &mut verify_encoder).unwrap();
+
+        println!("params buffer length {}", params.serialized_size());
+    }
+}
+
+#[test]
+fn verify_longmatch() {
+    crate::utils::init_logging();
+
+    use crate::utils::read_file;
+    do_analyze(
+        None,
+        &read_file("compressed_flate2_level1_longmatch.deflate"),
+    );
+}
+
+#[test]
+fn verify_zlibng() {
+    crate::utils::init_logging();
+
+    use crate::utils::read_file;
+
+    do_analyze(None, &read_file("compressed_zlibng_level1.deflate"));
+}
+
+#[test]
+fn verify_miniz() {
+    crate::utils::init_logging();
+
+    use crate::utils::read_file;
+
+    do_analyze(None, &read_file("compressed_minizoxide_level1.deflate"));
+}
+
+/// this is the deflate stream extracted out of the png file (minus the idat wrapper)
+#[test]
+fn verify_png_deflate() {
+    crate::utils::init_logging();
+
+    use crate::utils::read_file;
+    do_analyze(None, &read_file("treegdi.extract.deflate"));
+}
+
+pub fn analyze_compressed_data_verify_incremental(compressed_data: &[u8], config: &PreflateConfig) {
+    use crate::{deflate::deflate_reader::tests::parse_deflate_whole, utils::assert_eq_array};
+
+    let (original_con, _) = parse_deflate_whole(compressed_data).unwrap();
+
+    let mut start_offset = 0;
+    let mut end_offset = compressed_data.len().min(100001);
+
+    let mut stream = PreflateStreamProcessor::new(config);
+
+    let mut plain_text_offset = 0;
+
+    let mut expanded_contents = Vec::new();
+    while !stream.is_done() {
+        let result = stream.decompress(&compressed_data[start_offset..end_offset]);
+        match result {
+            Ok(r) => {
+                println!(
+                    "chunk cmp_start={} cmp_size={} blocks={} pt_off={}({})",
+                    start_offset,
+                    r.compressed_size,
+                    r.blocks.len(),
+                    plain_text_offset,
+                    stream.plain_text().len()
+                );
+                start_offset += r.compressed_size;
+                end_offset = (start_offset + 10001).min(compressed_data.len());
+
+                plain_text_offset += stream.plain_text().len();
+                expanded_contents.push((r.corrections, stream.plain_text().text().to_vec()));
+
+                stream.shrink_to_dictionary();
+            }
+            Err(e) => {
+                if e.exit_code() == ExitCode::PredictionFailure {
+                    println!(
+                        "Prediction failure for {:?} not great, but some corner cases where the initial estimator isn't totaly right",
+                        e
+                    );
+                    return;
+                }
+                assert_eq!(
+                    e.exit_code(),
+                    ExitCode::ShortRead,
+                    "unexpected error {:?}",
+                    e
+                );
+                end_offset = (end_offset + 10001).min(compressed_data.len());
+            }
+        }
+    }
+
+    // now reconstruct the data and make sure it is identical
+    let mut recompressed = Vec::new();
+    let mut reconstructed_blocks = Vec::new();
+
+    let mut reconstruct = RecreateStreamProcessor::new();
+    for (i, (corrections, plaintext)) in expanded_contents.iter().enumerate() {
+        let (mut r, mut b) = reconstruct
+            .recompress(&mut Cursor::new(plaintext), corrections)
+            .unwrap();
+
+        println!(
+            "reconstruct block offset={} blocks={} pt={}",
+            i,
+            b.len(),
+            plaintext.len()
+        );
+
+        recompressed.append(&mut r);
+        reconstructed_blocks.append(&mut b);
+    }
+
+    //assert_eq!(original_con.blocks.len(), reconstructed_blocks.len());
+    for (i, block) in original_con.blocks.iter().enumerate() {
+        println!("block {}", i);
+        crate::utils::assert_block_eq(block, &reconstructed_blocks[i]);
+    }
+
+    assert_eq_array(compressed_data, &recompressed);
+}
+
+#[test]
+fn verify_plain_text_limit() {
+    crate::utils::init_logging();
+
+    analyze_compressed_data_verify_incremental(
+        &crate::utils::read_file("compressed_zlib_level3.deflate"),
+        &PreflateConfig {
+            plain_text_limit: 1024 * 1024,
+            ..Default::default()
+        },
+    );
+}
+
+/// test partial reading reading
+#[test]
+fn verify_partial_blocks() {
+    crate::utils::init_logging();
+
+    for i in 0..=9 {
+        analyze_compressed_data_verify_incremental(
+            &crate::utils::read_file(&format!("compressed_zlib_level{}.deflate", i)),
+            &PreflateConfig::default(),
+        );
+    }
+}
+
+/// Replicates exactly what `scan_deflate::find_compressable_stream` does when it
+/// encounters a gzip stream in a truncated 200 KiB content buffer:
+///
+/// 1. strip the 10-byte gzip header (and 8-byte footer) to obtain the raw DEFLATE body
+/// 2. call `decompress` with only the first ~190 KB of that body (what fits in the
+///    200 KiB content window after the header)
+/// 3. assert the call returns `Ok` and `is_done() == false`  ← DeflateContinue requires this
+/// 4. call `decompress` again with the remainder of the body, assert `is_done() == true`
+/// 5. reconstruct the original DEFLATE bytes and assert roundtrip identity
+#[test]
+fn verify_decompress_partial_gzip_deflate_body_roundtrip() {
+    crate::utils::init_logging();
+
+    // sample1.bin.gz: 263 972 bytes total; gzip header = 10 bytes, footer = 8 bytes
+    // → raw DEFLATE body = 263 954 bytes
+    let gzip = crate::utils::read_file("sample1.bin.gz");
+    assert!(gzip.len() > 18, "gzip file too short");
+
+    // Gzip header for this file has no extra flags, so it is exactly 10 bytes.
+    let deflate_start: usize = 10;
+    let deflate_end: usize = gzip.len() - 8;
+    let deflate_body = &gzip[deflate_start..deflate_end];
+
+    // Mimic what find_compressable_stream does: content buffer contains the first
+    // 200 000 bytes of the gzip file, and the DEFLATE body starts at offset 10,
+    // so the slice passed to decompress() is bytes [10..200000] = 199 990 bytes.
+    let content_window: usize = 200_000 - deflate_start; // 199 990
+    assert!(
+        content_window < deflate_body.len(),
+        "content window must truncate the DEFLATE body (window={content_window}, body={})",
+        deflate_body.len()
+    );
+
+    let mut state = PreflateStreamProcessor::new(&PreflateConfig::default());
+
+    // ── First call: truncated slice ──────────────────────────────────────────
+    let r1 = state.decompress(&deflate_body[..content_window]);
+    let r1 = match r1 {
+        Ok(r) => r,
+        Err(e) => panic!(
+            "decompress on truncated DEFLATE body ({content_window} B of {} B) returned \
+             Err({e:?}); expected Ok(partial) with is_done()=false",
+            deflate_body.len()
+        ),
+    };
+    assert!(
+        !state.is_done(),
+        "is_done() must be false after truncated first call; compressed_size={}",
+        r1.compressed_size
+    );
+    assert!(
+        r1.compressed_size > 0,
+        "at least one block must have been consumed"
+    );
+    assert!(
+        r1.compressed_size <= content_window,
+        "compressed_size ({}) must not exceed the slice length ({content_window})",
+        r1.compressed_size
+    );
+    println!(
+        "first call: compressed_size={} / {content_window}  blocks={}",
+        r1.compressed_size,
+        r1.blocks.len()
+    );
+
+    let first_corrections = r1.corrections.clone();
+    let first_plain_text = state.plain_text().text().to_vec();
+    state.shrink_to_dictionary();
+
+    // ── Second call: remainder ────────────────────────────────────────────────
+    let offset = r1.compressed_size;
+    let r2 = state.decompress(&deflate_body[offset..]);
+    let r2 = match r2 {
+        Ok(r) => r,
+        Err(e) => panic!(
+            "decompress on remainder ({} B) returned Err({e:?})",
+            deflate_body.len() - offset
+        ),
+    };
+    assert!(
+        state.is_done(),
+        "is_done() must be true after consuming the full body"
+    );
+    println!(
+        "second call: compressed_size={}  blocks={}",
+        r2.compressed_size,
+        r2.blocks.len()
+    );
+
+    let second_corrections = r2.corrections.clone();
+    let second_plain_text = state.plain_text().text().to_vec();
+
+    // ── Roundtrip: reconstruct the original bytes ─────────────────────────────
+    let mut reconstruct = RecreateStreamProcessor::new();
+    let (mut recompressed, _) = reconstruct
+        .recompress(
+            &mut std::io::Cursor::new(&first_plain_text),
+            &first_corrections,
+        )
+        .expect("recompress chunk 1 failed");
+
+    let (mut rest, _) = reconstruct
+        .recompress(
+            &mut std::io::Cursor::new(&second_plain_text),
+            &second_corrections,
+        )
+        .expect("recompress chunk 2 failed");
+
+    recompressed.append(&mut rest);
+    crate::utils::assert_eq_array(deflate_body, &recompressed);
 }

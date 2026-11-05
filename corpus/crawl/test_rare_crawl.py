@@ -1,4 +1,5 @@
 import gzip
+import copy
 import hashlib
 import json
 import random
@@ -20,11 +21,25 @@ from .settings import OFFICE_MIME_PATTERNS, CrawlSettings, settings_from_config
 from .stats import rarity_stats
 from .storage import migrate_storage, payload_path, source_path
 
-ZLIB = dict(hash_algorithm="Zlib { hash_mask: 32767, hash_shift: 5 }", matching_type="Lazy { good_length: 8, max_lazy: 16 }",
-            strategy="Default", add_policy="AddFirst(106)", block_type_strategy="Dynamic", window_bits=15,
-            nice_length=128, max_chain=128, max_token_count=16383, max_dist_3_matches=4096,
-            matches_to_start_detected=False, very_far_matches_detected=False)
-ODD = {**ZLIB, "hash_algorithm": "MiniZFast", "matching_type": "MiniZ", "add_policy": "AddAll"}
+ZLIB = dict(reconstruction=dict(
+    max_token_count=16383, block_type_strategy="Dynamic",
+    behavior={"Chain": dict(
+        common=dict(
+            dictionary=dict(index={"Chain": {"hash": {"Zlib": dict(hash_mask=32767, hash_shift=5)}}},
+                            window_bits=15, insertion={"AddFirst": 106}),
+            distance={"Window": dict(history=dict(matches_to_start=False), bounds="Lookahead")},
+            search=dict(budget=dict(max_chain=128), nice_length=128, input_tail="HashMinimum")),
+        parser={"Lazy": dict(lookahead=dict(max_lazy=16, behavior={"Zlib": dict(good_length=8)}),
+                             minimum={"Three": dict(short_match_cutoff=4096)})})}),
+    model="zlib")
+ODD = dict(reconstruction=dict(
+    max_token_count=16383, block_type_strategy="Dynamic",
+    behavior={"MiniZ": dict(
+        common=dict(dictionary=dict(index={"Chain": {"hash": "MiniZFast"}}, window_bits=15, insertion="AddAll"),
+                    distance={"Enabled": dict(matches_to_start=False)},
+                    search=dict(budget=dict(max_chain=128), max_probes=128, input_tail="HashMinimum")),
+        greedy=False, short_match_cutoff=4096)}),
+    model="miniz")
 
 
 def stream(parameters=ZLIB, *, status="ok", deflate_bytes=5000, correction=10, error_code=None, offset=0):
@@ -71,10 +86,43 @@ class RareCrawlTests(unittest.TestCase):
 
     def test_signatures_strip_estimated_arguments_only_at_family_tier(self):
         family = stream_signatures(ZLIB)["family"]
-        self.assertEqual(family, "Zlib { hash_mask: 32767, hash_shift: 5 } | Lazy | Default | AddFirst")
-        other = stream_signatures({**ZLIB, "add_policy": "AddFirst(4)", "matching_type": "Lazy { good_length: 4, max_lazy: 4 }"})
+        self.assertEqual(family, '{"Chain":{"hash":{"Zlib":{"hash_mask":32767,"hash_shift":5}}}}'
+                         ' | Lazy | Lookahead | AddFirst | "HashMinimum"')
+        changed = copy.deepcopy(ZLIB)
+        chain = changed["reconstruction"]["behavior"]["Chain"]
+        chain["common"]["dictionary"]["insertion"] = {"AddFirst": 4}
+        chain["parser"]["Lazy"]["lookahead"] = dict(max_lazy=4, behavior={"Zlib": dict(good_length=4)})
+        other = stream_signatures(changed)
         self.assertEqual(other["family"], family)
         self.assertNotEqual(other["variant"], stream_signatures(ZLIB)["variant"])
+
+    def test_model_hypothesis_does_not_change_executable_signatures(self):
+        changed = copy.deepcopy(ZLIB)
+        changed["model"] = "custom"
+        self.assertEqual(stream_signatures(changed), stream_signatures(ZLIB))
+
+    def test_signatures_preserve_explicit_index_window_and_tail_policies(self):
+        original = stream_signatures(ZLIB)
+        for field in ("index", "bounds", "input_tail"):
+            with self.subTest(field=field):
+                changed = copy.deepcopy(ZLIB)
+                common = changed["reconstruction"]["behavior"]["Chain"]["common"]
+                if field == "index":
+                    common["dictionary"]["index"] = "LibdeflateDualHash"
+                elif field == "bounds":
+                    common["distance"]["Window"]["bounds"] = "LookaheadMinusOne"
+                else:
+                    common["search"]["input_tail"] = "AtLeastFiveBytes"
+                signatures = stream_signatures(changed)
+                for tier in ("family", "variant", "exact"):
+                    self.assertNotEqual(signatures[tier], original[tier])
+        changed = copy.deepcopy(ZLIB)
+        common = changed["reconstruction"]["behavior"]["Chain"]["common"]
+        common["distance"]["Window"]["history"]["matches_to_start"] = True
+        signatures = stream_signatures(changed)
+        self.assertEqual(signatures["family"], original["family"])
+        self.assertNotEqual(signatures["variant"], original["variant"])
+        self.assertNotEqual(signatures["exact"], original["exact"])
 
     def test_cdx_lines_resynchronize_and_drop_partial_member(self):
         def member(index):

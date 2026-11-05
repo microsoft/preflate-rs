@@ -4,6 +4,18 @@
  *  This software incorporates material from third parties. See NOTICE.txt for details.
  *--------------------------------------------------------------------------------------------*/
 
+//! DEFLATE Huffman code generation, decoding tables, and dynamic-tree serialization.
+//!
+//! Code lengths are converted into canonical codes and decoding tables, with
+//! different completeness checks for code-length, literal/length, and distance
+//! alphabets. Valid single-symbol or empty distance trees need special handling
+//! so unused branches cannot silently decode as real symbols.
+//!
+//! A dynamic tree's code lengths can have several equivalent run-length encodings.
+//! `HuffmanOriginalEncoding` retains the original repeat operations and alphabet
+//! sizes as well as the resulting lengths, allowing the writer to reproduce the
+//! original tree bits.
+
 use std::io::BufRead;
 
 use crate::preflate_error::{ExitCode, Result, err_exit_code};
@@ -129,10 +141,10 @@ fn is_valid_huffman_code_lengths(code_lengths: &[u8], alphabet: HuffmanAlphabet)
 
 /// Calculates Huffman code array given an array of Huffman Code Lengths using the RFC 1951 algorithm
 /// Huffman tree will be returned in tree where:
-/// 1. when N is an even number tree[N] is the array index of the '0' child and
-///    tree[N+1] is the array index of the '1' child
-/// 2. If tree[i] is less than zero then it is a leaf and the literal alphabet value is !tree[i]
-/// 3. The root node index 'N' is tree.len() - 2. Search should start at that node.
+/// 1. When N is an even number, `tree[N]` is the array index of the '0' child and
+///    `tree[N+1]` is the array index of the '1' child.
+/// 2. If `tree[i]` is less than zero, it is a leaf and the literal alphabet value is `!tree[i]`.
+/// 3. The root node index N is `tree.len() - 2`. Search should start at that node.
 fn calculate_huffman_code_tree(
     code_lengths: &[u8],
     alphabet: HuffmanAlphabet,
@@ -212,8 +224,8 @@ fn calculate_huffman_code_tree(
 
 /// Reads the next Huffman encoded char from bitReader using the Huffman tree encoded in huffman_tree
 /// Huffman Nodes are encoded in the array of ints as follows:
-/// '0' child link of node 'N' is at huffman_tree[N], '1' child link is at huffman_tree[N + 1]
-/// Root of tree is at huffman_tree.len() - 2
+/// The '0' child link of node N is at `huffman_tree[N]`, and the '1' child is at `huffman_tree[N + 1]`.
+/// The root of the tree is at `huffman_tree.len() - 2`.
 #[inline(always)]
 fn decode_symbol(
     bit_reader: &mut impl ReadBits,
@@ -257,77 +269,6 @@ fn decode_symbol_slow(
 
         i_node_cur = node as usize;
     }
-}
-
-#[cfg(test)]
-/// A ReadBits implementation that reads bits from a single u32 used for unit tests
-struct SingleCode {
-    pub code: u32,
-}
-
-#[cfg(test)]
-impl ReadBits for SingleCode {
-    fn get(&mut self, cbits: u32, _: &mut impl BufRead) -> std::io::Result<u32> {
-        let result = self.code & ((1 << cbits) - 1);
-        self.code >>= cbits;
-
-        Ok(result)
-    }
-
-    fn peek_byte(&self) -> u8 {
-        (self.code & 0xff) as u8
-    }
-
-    fn bits_left(&self) -> u32 {
-        8
-    }
-
-    fn consume(&mut self, cbits: u32) {
-        self.code >>= cbits;
-    }
-}
-
-#[cfg(test)]
-fn roundtrip(frequencies: &[u16], huffcalc: super::huffman_calc::HufftreeBitCalc) {
-    use super::huffman_calc::calc_bit_lengths;
-
-    let code_lengths = calc_bit_lengths(huffcalc, frequencies, 7);
-
-    let codes = calc_huffman_codes(&code_lengths).unwrap();
-
-    let huffman_tree =
-        calculate_huffman_code_tree(&code_lengths, HuffmanAlphabet::LiteralLength).unwrap();
-
-    for i in 0..code_lengths.len() {
-        // skip zero length codes
-        if code_lengths[i] != 0 {
-            // calculate the stream of bits for the code
-            let mut code = SingleCode {
-                code: codes[i].into(),
-            };
-
-            let symbol = decode_symbol(&mut code, &mut std::io::empty(), &huffman_tree).unwrap();
-
-            assert_eq!(i, symbol as usize);
-        }
-    }
-}
-/// verify that the huffman codes generated can be decoded with the huffman code tree
-#[test]
-fn roundtrip_huffman_code() {
-    roundtrip(
-        &[1, 0, 2, 3, 5, 8, 13, 0],
-        super::huffman_calc::HufftreeBitCalc::Miniz,
-    );
-    roundtrip(
-        &[1, 0, 2, 3, 5, 8, 13, 0],
-        super::huffman_calc::HufftreeBitCalc::Zlib,
-    );
-
-    roundtrip(
-        &[1, 0, 2, 3, 5, 1008, 113, 1, 1, 1, 100, 10000],
-        super::huffman_calc::HufftreeBitCalc::Zlib,
-    );
 }
 
 #[derive(PartialEq, Eq, Clone, Copy, Debug)]
@@ -714,53 +655,127 @@ impl HuffmanWriter {
     }
 }
 
-#[test]
-fn roundtrip_huffman_bitreadwrite() {
-    use crate::deflate::bit_reader::BitReader;
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    use std::io::Cursor;
-
-    let code_lengths = [1, 0, 3, 3, 4, 4, 3, 0];
-
-    let codes = calc_huffman_codes(&code_lengths).unwrap();
-
-    let mut bit_writer = BitWriter::default();
-    let mut data_buffer = Vec::new();
-    for (i, &length) in code_lengths.iter().enumerate() {
-        if length != 0 {
-            bit_writer.write(codes[i] as u32, code_lengths[i] as u32, &mut data_buffer);
-        }
+    /// A ReadBits implementation that reads bits from a single u32 used for unit tests
+    struct SingleCode {
+        pub code: u32,
     }
-    // write a sentinal to make sure that we read everything properly
-    bit_writer.write(0x1234, 16, &mut data_buffer);
-    bit_writer.pad(0, &mut data_buffer);
 
-    let mut reader = Cursor::new(&data_buffer);
-    let mut bit_reader = BitReader::new();
+    impl ReadBits for SingleCode {
+        fn get(&mut self, cbits: u32, _: &mut impl BufRead) -> std::io::Result<u32> {
+            let result = self.code & ((1 << cbits) - 1);
+            self.code >>= cbits;
 
-    let huffman_tree =
-        calculate_huffman_code_tree(&code_lengths, HuffmanAlphabet::LiteralLength).unwrap();
+            Ok(result)
+        }
 
-    for (i, &length) in code_lengths.iter().enumerate() {
-        if length != 0 {
-            assert_eq!(
-                i as u16,
-                decode_symbol(&mut bit_reader, &mut reader, &huffman_tree).unwrap()
-            );
+        fn peek_byte(&self) -> u8 {
+            (self.code & 0xff) as u8
+        }
+
+        fn bits_left(&self) -> u32 {
+            8
+        }
+
+        fn consume(&mut self, cbits: u32) {
+            self.code >>= cbits;
         }
     }
 
-    // read sentinal to make sure we read everything correctly
-    assert_eq!(
-        bit_reader.get(16, &mut reader).unwrap(),
-        0x1234,
-        "sentinal value didn't match"
-    );
-}
+    fn roundtrip(frequencies: &[u16], huffcalc: super::super::huffman_calc::HufftreeBitCalc) {
+        use super::super::huffman_calc::calc_bit_lengths;
 
-#[test]
-fn roundtrip_complicated() {
-    #[rustfmt::skip]
+        let code_lengths = calc_bit_lengths(huffcalc, frequencies, 7);
+
+        let codes = calc_huffman_codes(&code_lengths).unwrap();
+
+        let huffman_tree =
+            calculate_huffman_code_tree(&code_lengths, HuffmanAlphabet::LiteralLength).unwrap();
+
+        for i in 0..code_lengths.len() {
+            // skip zero length codes
+            if code_lengths[i] != 0 {
+                // calculate the stream of bits for the code
+                let mut code = SingleCode {
+                    code: codes[i].into(),
+                };
+
+                let symbol =
+                    decode_symbol(&mut code, &mut std::io::empty(), &huffman_tree).unwrap();
+
+                assert_eq!(i, symbol as usize);
+            }
+        }
+    }
+
+    /// verify that the huffman codes generated can be decoded with the huffman code tree
+    #[test]
+    fn roundtrip_huffman_code() {
+        roundtrip(
+            &[1, 0, 2, 3, 5, 8, 13, 0],
+            super::super::huffman_calc::HufftreeBitCalc::Miniz,
+        );
+        roundtrip(
+            &[1, 0, 2, 3, 5, 8, 13, 0],
+            super::super::huffman_calc::HufftreeBitCalc::Zlib,
+        );
+
+        roundtrip(
+            &[1, 0, 2, 3, 5, 1008, 113, 1, 1, 1, 100, 10000],
+            super::super::huffman_calc::HufftreeBitCalc::Zlib,
+        );
+    }
+
+    #[test]
+    fn roundtrip_huffman_bitreadwrite() {
+        use crate::deflate::bit_reader::BitReader;
+
+        use std::io::Cursor;
+
+        let code_lengths = [1, 0, 3, 3, 4, 4, 3, 0];
+
+        let codes = calc_huffman_codes(&code_lengths).unwrap();
+
+        let mut bit_writer = BitWriter::default();
+        let mut data_buffer = Vec::new();
+        for (i, &length) in code_lengths.iter().enumerate() {
+            if length != 0 {
+                bit_writer.write(codes[i] as u32, code_lengths[i] as u32, &mut data_buffer);
+            }
+        }
+        // write a sentinal to make sure that we read everything properly
+        bit_writer.write(0x1234, 16, &mut data_buffer);
+        bit_writer.pad(0, &mut data_buffer);
+
+        let mut reader = Cursor::new(&data_buffer);
+        let mut bit_reader = BitReader::new();
+
+        let huffman_tree =
+            calculate_huffman_code_tree(&code_lengths, HuffmanAlphabet::LiteralLength).unwrap();
+
+        for (i, &length) in code_lengths.iter().enumerate() {
+            if length != 0 {
+                assert_eq!(
+                    i as u16,
+                    decode_symbol(&mut bit_reader, &mut reader, &huffman_tree).unwrap()
+                );
+            }
+        }
+
+        // read sentinal to make sure we read everything correctly
+        assert_eq!(
+            bit_reader.get(16, &mut reader).unwrap(),
+            0x1234,
+            "sentinal value didn't match"
+        );
+    }
+
+    #[test]
+    fn roundtrip_complicated() {
+        #[rustfmt::skip]
     let h = HuffmanOriginalEncoding {
         lengths: vec![(TreeCodeType::ZeroShort, 10), (TreeCodeType::Code, 11), (TreeCodeType::Code, 0), (TreeCodeType::Code, 0),
             (TreeCodeType::Code, 11), (TreeCodeType::ZeroLong, 18), (TreeCodeType::Code, 6), (TreeCodeType::Code, 14), (TreeCodeType::ZeroShort, 5),
@@ -789,315 +804,317 @@ fn roundtrip_complicated() {
         num_code_lengths: 17
     };
 
-    rountrip_test(h);
-}
+        rountrip_test(h);
+    }
 
-#[test]
-fn roundtrip_huffman_table() {
-    // simple hardcoded encoding
+    #[test]
+    fn roundtrip_huffman_table() {
+        // simple hardcoded encoding
 
-    let encoding = HuffmanOriginalEncoding {
-        lengths: vec![
-            (TreeCodeType::Code, 1),
-            (TreeCodeType::Code, 2),
-            (TreeCodeType::Code, 3),
-            (TreeCodeType::ZeroLong, 138),
-            (TreeCodeType::ZeroLong, 115),
-            (TreeCodeType::Code, 3),
-            (TreeCodeType::Code, 1),
-            (TreeCodeType::Code, 2),
-            (TreeCodeType::Code, 2),
-        ],
-        code_lengths: [0, 2, 2, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2],
-        num_literals: 257,
-        num_dist: 3,
-        num_code_lengths: 19,
-    };
+        let encoding = HuffmanOriginalEncoding {
+            lengths: vec![
+                (TreeCodeType::Code, 1),
+                (TreeCodeType::Code, 2),
+                (TreeCodeType::Code, 3),
+                (TreeCodeType::ZeroLong, 138),
+                (TreeCodeType::ZeroLong, 115),
+                (TreeCodeType::Code, 3),
+                (TreeCodeType::Code, 1),
+                (TreeCodeType::Code, 2),
+                (TreeCodeType::Code, 2),
+            ],
+            code_lengths: [0, 2, 2, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2],
+            num_literals: 257,
+            num_dist: 3,
+            num_code_lengths: 19,
+        };
 
-    rountrip_test(encoding);
-}
+        rountrip_test(encoding);
+    }
 
-#[cfg(test)]
-fn rountrip_test(encoding: HuffmanOriginalEncoding) {
-    use super::bit_reader::BitReader;
-    use std::io::Cursor;
+    fn rountrip_test(encoding: HuffmanOriginalEncoding) {
+        use super::super::bit_reader::BitReader;
+        use std::io::Cursor;
 
-    let mut output_buffer = Vec::new();
-    let mut bit_writer = BitWriter::default();
-    encoding.write(&mut bit_writer, &mut output_buffer).unwrap();
+        let mut output_buffer = Vec::new();
+        let mut bit_writer = BitWriter::default();
+        encoding.write(&mut bit_writer, &mut output_buffer).unwrap();
 
-    // write a sentinal to make sure that we read everything properly
-    bit_writer.write(0x1234, 16, &mut output_buffer);
+        // write a sentinal to make sure that we read everything properly
+        bit_writer.write(0x1234, 16, &mut output_buffer);
 
-    // flush everything
-    bit_writer.pad(0, &mut output_buffer);
-    bit_writer.flush_whole_bytes(&mut output_buffer);
+        // flush everything
+        bit_writer.pad(0, &mut output_buffer);
+        bit_writer.flush_whole_bytes(&mut output_buffer);
 
-    // now re-read the encoding
-    let mut reader = Cursor::new(&output_buffer);
-    let mut bit_reader = BitReader::new();
+        // now re-read the encoding
+        let mut reader = Cursor::new(&output_buffer);
+        let mut bit_reader = BitReader::new();
 
-    let encoding2 = HuffmanOriginalEncoding::read(&mut bit_reader, &mut reader).unwrap();
-    assert_eq!(encoding, encoding2);
+        let encoding2 = HuffmanOriginalEncoding::read(&mut bit_reader, &mut reader).unwrap();
+        assert_eq!(encoding, encoding2);
 
-    // verify sentinal to make sure we didn't write anything extra or too little
-    assert_eq!(
-        bit_reader.get(16, &mut reader).unwrap(),
-        0x1234,
-        "sentinal value didn't match"
-    );
-}
-
-// Different DEFLATE alphabets permit different degenerate trees, but not arbitrary missing codes.
-// Verify complete trees, permitted special cases, depth limits and malformed length sets.
-#[test]
-fn huffman_code_lengths_respect_alphabet_rules() {
-    for alphabet in [
-        HuffmanAlphabet::CodeLengths,
-        HuffmanAlphabet::LiteralLength,
-        HuffmanAlphabet::Distance,
-    ] {
-        for lengths in [
-            vec![1, 1],
-            vec![0, 1, 0, 2, 2, 0],
-            vec![2; 4],
-            vec![1, 2, 3, 4, 5, 6, 7, 7],
-        ] {
-            assert!(is_valid_huffman_code_lengths(&lengths, alphabet));
-        }
-        for lengths in [
-            vec![],
-            vec![1, 1, 1],
-            vec![1, 2, 2, 3],
-            vec![2, 2],
-            vec![0, 2, 0],
-            vec![16],
-        ] {
-            assert!(
-                !is_valid_huffman_code_lengths(&lengths, alphabet),
-                "{alphabet:?}: {lengths:?}"
-            );
-        }
+        // verify sentinal to make sure we didn't write anything extra or too little
         assert_eq!(
-            is_valid_huffman_code_lengths(&[0, 1, 0], alphabet),
-            alphabet != HuffmanAlphabet::CodeLengths
-        );
-        assert_eq!(
-            is_valid_huffman_code_lengths(&[0, 0], alphabet),
-            alphabet == HuffmanAlphabet::Distance
+            bit_reader.get(16, &mut reader).unwrap(),
+            0x1234,
+            "sentinal value didn't match"
         );
     }
 
-    let deep: Vec<_> = (1..15).chain([15, 15]).collect();
-    assert!(is_valid_huffman_code_lengths(
-        &deep,
-        HuffmanAlphabet::LiteralLength
-    ));
-    assert!(is_valid_huffman_code_lengths(
-        &deep,
-        HuffmanAlphabet::Distance
-    ));
-    assert!(!is_valid_huffman_code_lengths(
-        &deep,
-        HuffmanAlphabet::CodeLengths
-    ));
-}
+    // Different DEFLATE alphabets permit different degenerate trees, but not arbitrary missing codes.
+    // Verify complete trees, permitted special cases, depth limits and malformed length sets.
+    #[test]
+    fn huffman_code_lengths_respect_alphabet_rules() {
+        for alphabet in [
+            HuffmanAlphabet::CodeLengths,
+            HuffmanAlphabet::LiteralLength,
+            HuffmanAlphabet::Distance,
+        ] {
+            for lengths in [
+                vec![1, 1],
+                vec![0, 1, 0, 2, 2, 0],
+                vec![2; 4],
+                vec![1, 2, 3, 4, 5, 6, 7, 7],
+            ] {
+                assert!(is_valid_huffman_code_lengths(&lengths, alphabet));
+            }
+            for lengths in [
+                vec![],
+                vec![1, 1, 1],
+                vec![1, 2, 2, 3],
+                vec![2, 2],
+                vec![0, 2, 0],
+                vec![16],
+            ] {
+                assert!(
+                    !is_valid_huffman_code_lengths(&lengths, alphabet),
+                    "{alphabet:?}: {lengths:?}"
+                );
+            }
+            assert_eq!(
+                is_valid_huffman_code_lengths(&[0, 1, 0], alphabet),
+                alphabet != HuffmanAlphabet::CodeLengths
+            );
+            assert_eq!(
+                is_valid_huffman_code_lengths(&[0, 0], alphabet),
+                alphabet == HuffmanAlphabet::Distance
+            );
+        }
 
-// One-symbol trees still consume one bit, and their unused branch must not alias the symbol.
-// Verify every symbol position and both decoder paths preserve trailing bits and mark invalid codes.
-#[test]
-fn huffman_single_symbol_trees_preserve_bits_and_unused_branches() {
-    for (alphabet, width) in [
-        (HuffmanAlphabet::LiteralLength, 286),
-        (HuffmanAlphabet::Distance, 32),
-    ] {
-        for symbol in 0..width {
-            let mut lengths = vec![0; width];
-            lengths[symbol] = 1;
-            let tree = calculate_huffman_code_tree(&lengths, alphabet).unwrap();
-            for slow in [false, true] {
-                for bit in 0..=1 {
-                    let input = 0x12345670 | bit;
-                    let mut reader = SingleCode { code: input };
-                    let result = if slow {
-                        decode_symbol_slow(&mut reader, &mut std::io::empty(), &tree)
-                    } else {
-                        decode_symbol(&mut reader, &mut std::io::empty(), &tree)
-                    }
-                    .unwrap();
-                    assert_eq!(
-                        result,
-                        if bit == 0 {
-                            symbol as u16
+        let deep: Vec<_> = (1..15).chain([15, 15]).collect();
+        assert!(is_valid_huffman_code_lengths(
+            &deep,
+            HuffmanAlphabet::LiteralLength
+        ));
+        assert!(is_valid_huffman_code_lengths(
+            &deep,
+            HuffmanAlphabet::Distance
+        ));
+        assert!(!is_valid_huffman_code_lengths(
+            &deep,
+            HuffmanAlphabet::CodeLengths
+        ));
+    }
+
+    // One-symbol trees still consume one bit, and their unused branch must not alias the symbol.
+    // Verify every symbol position and both decoder paths preserve trailing bits and mark invalid codes.
+    #[test]
+    fn huffman_single_symbol_trees_preserve_bits_and_unused_branches() {
+        for (alphabet, width) in [
+            (HuffmanAlphabet::LiteralLength, 286),
+            (HuffmanAlphabet::Distance, 32),
+        ] {
+            for symbol in 0..width {
+                let mut lengths = vec![0; width];
+                lengths[symbol] = 1;
+                let tree = calculate_huffman_code_tree(&lengths, alphabet).unwrap();
+                for slow in [false, true] {
+                    for bit in 0..=1 {
+                        let input = 0x12345670 | bit;
+                        let mut reader = SingleCode { code: input };
+                        let result = if slow {
+                            decode_symbol_slow(&mut reader, &mut std::io::empty(), &tree)
                         } else {
-                            INVALID_HUFFMAN_SYMBOL
-                        },
-                        "{alphabet:?}, symbol={symbol}, slow={slow}, bit={bit}"
-                    );
-                    assert_eq!(reader.code, input >> 1);
+                            decode_symbol(&mut reader, &mut std::io::empty(), &tree)
+                        }
+                        .unwrap();
+                        assert_eq!(
+                            result,
+                            if bit == 0 {
+                                symbol as u16
+                            } else {
+                                INVALID_HUFFMAN_SYMBOL
+                            },
+                            "{alphabet:?}, symbol={symbol}, slow={slow}, bit={bit}"
+                        );
+                        assert_eq!(reader.code, input >> 1);
+                    }
                 }
             }
         }
     }
-}
 
-#[cfg(test)]
-fn huffman_test_stream(
-    literal_lengths: &[u8],
-    distance_lengths: &[u8],
-    data_bits: &[(u32, u32)],
-) -> Vec<u8> {
-    let encoding = HuffmanOriginalEncoding {
-        lengths: literal_lengths
-            .iter()
-            .chain(distance_lengths)
-            .map(|&length| (TreeCodeType::Code, length))
-            .collect(),
-        code_lengths: std::array::from_fn(|symbol| if symbol < 16 { 4 } else { 0 }),
-        num_literals: literal_lengths.len(),
-        num_dist: distance_lengths.len(),
-        num_code_lengths: 19,
-    };
-    let mut output = Vec::new();
-    let mut writer = BitWriter::default();
-    writer.write(1, 1, &mut output);
-    writer.write(2, 2, &mut output);
-    encoding.write(&mut writer, &mut output).unwrap();
-    for &(bits, count) in data_bits {
-        writer.write(bits, count, &mut output);
-    }
-    writer.pad(0, &mut output);
-    writer.flush_whole_bytes(&mut output);
-    output
-}
-
-// Valid degenerate alphabets must survive the public API, not just Huffman table construction.
-// Verify empty, literal-only and back-reference blocks preserve plaintext and exact original bytes.
-#[test]
-fn huffman_degenerate_blocks_roundtrip() {
-    let roundtrip = |literal_lengths: &[u8],
-                     distance_lengths: &[u8],
-                     bits: &[(u32, u32)],
-                     expected: &[u8]| {
-        let compressed = huffman_test_stream(literal_lengths, distance_lengths, bits);
-        let (result, plain) =
-            crate::preflate_whole_deflate_stream(&compressed, &crate::PreflateConfig::default())
-                .unwrap_or_else(|error| {
-                    panic!("distance={distance_lengths:?}, expected={expected:?}: {error:?}")
-                });
-        assert_eq!(plain.text(), expected);
-        let recreated =
-            crate::recreate_whole_deflate_stream(plain.text(), &result.corrections).unwrap();
-        assert_eq!(compressed, recreated);
-    };
-
-    for distance_lengths in [
-        vec![0],
-        vec![0; 32],
-        vec![1],
-        [vec![0; 15], vec![1]].concat(),
-        [vec![0; 29], vec![1]].concat(),
-    ] {
-        for plain in [
-            vec![],
-            vec![0],
-            vec![65; 7],
-            vec![128; 8],
-            vec![255; 9],
-            vec![0; 257],
-        ] {
-            let mut literal_lengths = vec![0; 257];
-            literal_lengths[256] = 1;
-            if let Some(&literal) = plain.first() {
-                literal_lengths[literal as usize] = 1;
-            }
-            let mut bits = vec![(0, 1); plain.len()];
-            bits.push((u32::from(!plain.is_empty()), 1));
-            roundtrip(&literal_lengths, &distance_lengths, &bits, &plain);
+    fn huffman_test_stream(
+        literal_lengths: &[u8],
+        distance_lengths: &[u8],
+        data_bits: &[(u32, u32)],
+    ) -> Vec<u8> {
+        let encoding = HuffmanOriginalEncoding {
+            lengths: literal_lengths
+                .iter()
+                .chain(distance_lengths)
+                .map(|&length| (TreeCodeType::Code, length))
+                .collect(),
+            code_lengths: std::array::from_fn(|symbol| if symbol < 16 { 4 } else { 0 }),
+            num_literals: literal_lengths.len(),
+            num_dist: distance_lengths.len(),
+            num_code_lengths: 19,
+        };
+        let mut output = Vec::new();
+        let mut writer = BitWriter::default();
+        writer.write(1, 1, &mut output);
+        writer.write(2, 2, &mut output);
+        encoding.write(&mut writer, &mut output).unwrap();
+        for &(bits, count) in data_bits {
+            writer.write(bits, count, &mut output);
         }
+        writer.pad(0, &mut output);
+        writer.flush_whole_bytes(&mut output);
+        output
     }
 
-    let mut literal_lengths = vec![0; 258];
-    literal_lengths[65] = 1;
-    literal_lengths[256] = 2;
-    literal_lengths[257] = 2;
-    roundtrip(
-        &literal_lengths,
-        &[1],
-        &[(0, 1), (3, 2), (0, 1), (1, 2)],
-        b"AAAA",
-    );
-}
+    // Valid degenerate alphabets must survive the public API, not just Huffman table construction.
+    // Verify empty, literal-only and back-reference blocks preserve plaintext and exact original bytes.
+    #[test]
+    fn huffman_degenerate_blocks_roundtrip() {
+        let roundtrip = |literal_lengths: &[u8],
+                         distance_lengths: &[u8],
+                         bits: &[(u32, u32)],
+                         expected: &[u8]| {
+            let compressed = huffman_test_stream(literal_lengths, distance_lengths, bits);
+            let (result, plain) = crate::preflate_whole_deflate_stream(
+                &compressed,
+                &crate::PreflateConfig::default(),
+            )
+            .unwrap_or_else(|error| {
+                panic!("distance={distance_lengths:?}, expected={expected:?}: {error:?}")
+            });
+            assert_eq!(plain.text(), expected);
+            let recreated =
+                crate::recreate_whole_deflate_stream(plain.text(), &result.corrections).unwrap();
+            assert_eq!(compressed, recreated);
+        };
 
-// Accepting degenerate trees must not make unused prefixes or malformed tables decode as data.
-// Verify parser errors for missing end markers, invalid trees and illegal literal/distance branches.
-#[test]
-fn huffman_invalid_degenerate_blocks_are_rejected() {
-    let mut literal_lengths = vec![0; 258];
-    literal_lengths[65] = 1;
-    literal_lengths[256] = 2;
-    literal_lengths[257] = 2;
-    let mut cases = vec![
-        (
-            "unused distance branch",
-            huffman_test_stream(&literal_lengths, &[1], &[(0, 1), (3, 2), (1, 1), (1, 2)]),
-        ),
-        (
-            "empty distance referenced",
-            huffman_test_stream(&literal_lengths, &[0], &[(0, 1), (3, 2), (0, 1), (1, 2)]),
-        ),
-    ];
-    for distance_lengths in [vec![2], vec![2, 2], vec![1, 1, 1]] {
-        cases.push((
-            "invalid distance tree",
-            huffman_test_stream(&literal_lengths, &distance_lengths, &[]),
-        ));
-    }
-
-    literal_lengths.fill(0);
-    literal_lengths[256] = 1;
-    cases.push((
-        "unused literal branch",
-        huffman_test_stream(&literal_lengths, &[0], &[(1, 1)]),
-    ));
-    literal_lengths[65] = 1;
-    literal_lengths[66] = 1;
-    cases.push((
-        "oversubscribed literal tree",
-        huffman_test_stream(&literal_lengths, &[0], &[]),
-    ));
-    literal_lengths[65] = 2;
-    literal_lengths[66] = 0;
-    literal_lengths[256] = 2;
-    cases.push((
-        "incomplete literal tree",
-        huffman_test_stream(&literal_lengths, &[0], &[]),
-    ));
-    literal_lengths[65] = 1;
-    literal_lengths[66] = 1;
-    literal_lengths[256] = 0;
-    cases.push((
-        "missing end marker",
-        huffman_test_stream(&literal_lengths, &[0], &[(0, 1)]),
-    ));
-    literal_lengths.fill(0);
-    cases.push((
-        "empty literal tree",
-        huffman_test_stream(&literal_lengths, &[0], &[]),
-    ));
-
-    for (name, compressed) in cases {
-        for read_ahead in [false, true] {
-            let mut input = compressed.clone();
-            if read_ahead {
-                input.extend_from_slice(&[0; 16]);
+        for distance_lengths in [
+            vec![0],
+            vec![0; 32],
+            vec![1],
+            [vec![0; 15], vec![1]].concat(),
+            [vec![0; 29], vec![1]].concat(),
+        ] {
+            for plain in [
+                vec![],
+                vec![0],
+                vec![65; 7],
+                vec![128; 8],
+                vec![255; 9],
+                vec![0; 257],
+            ] {
+                let mut literal_lengths = vec![0; 257];
+                literal_lengths[256] = 1;
+                if let Some(&literal) = plain.first() {
+                    literal_lengths[literal as usize] = 1;
+                }
+                let mut bits = vec![(0, 1); plain.len()];
+                bits.push((u32::from(!plain.is_empty()), 1));
+                roundtrip(&literal_lengths, &distance_lengths, &bits, &plain);
             }
-            let error = super::deflate_reader::parse_deflate_whole(&input).expect_err(name);
-            assert_eq!(
-                error.exit_code(),
-                ExitCode::InvalidDeflate,
-                "{name}: {error:?}"
-            );
+        }
+
+        let mut literal_lengths = vec![0; 258];
+        literal_lengths[65] = 1;
+        literal_lengths[256] = 2;
+        literal_lengths[257] = 2;
+        roundtrip(
+            &literal_lengths,
+            &[1],
+            &[(0, 1), (3, 2), (0, 1), (1, 2)],
+            b"AAAA",
+        );
+    }
+
+    // Accepting degenerate trees must not make unused prefixes or malformed tables decode as data.
+    // Verify parser errors for missing end markers, invalid trees and illegal literal/distance branches.
+    #[test]
+    fn huffman_invalid_degenerate_blocks_are_rejected() {
+        let mut literal_lengths = vec![0; 258];
+        literal_lengths[65] = 1;
+        literal_lengths[256] = 2;
+        literal_lengths[257] = 2;
+        let mut cases = vec![
+            (
+                "unused distance branch",
+                huffman_test_stream(&literal_lengths, &[1], &[(0, 1), (3, 2), (1, 1), (1, 2)]),
+            ),
+            (
+                "empty distance referenced",
+                huffman_test_stream(&literal_lengths, &[0], &[(0, 1), (3, 2), (0, 1), (1, 2)]),
+            ),
+        ];
+        for distance_lengths in [vec![2], vec![2, 2], vec![1, 1, 1]] {
+            cases.push((
+                "invalid distance tree",
+                huffman_test_stream(&literal_lengths, &distance_lengths, &[]),
+            ));
+        }
+
+        literal_lengths.fill(0);
+        literal_lengths[256] = 1;
+        cases.push((
+            "unused literal branch",
+            huffman_test_stream(&literal_lengths, &[0], &[(1, 1)]),
+        ));
+        literal_lengths[65] = 1;
+        literal_lengths[66] = 1;
+        cases.push((
+            "oversubscribed literal tree",
+            huffman_test_stream(&literal_lengths, &[0], &[]),
+        ));
+        literal_lengths[65] = 2;
+        literal_lengths[66] = 0;
+        literal_lengths[256] = 2;
+        cases.push((
+            "incomplete literal tree",
+            huffman_test_stream(&literal_lengths, &[0], &[]),
+        ));
+        literal_lengths[65] = 1;
+        literal_lengths[66] = 1;
+        literal_lengths[256] = 0;
+        cases.push((
+            "missing end marker",
+            huffman_test_stream(&literal_lengths, &[0], &[(0, 1)]),
+        ));
+        literal_lengths.fill(0);
+        cases.push((
+            "empty literal tree",
+            huffman_test_stream(&literal_lengths, &[0], &[]),
+        ));
+
+        for (name, compressed) in cases {
+            for read_ahead in [false, true] {
+                let mut input = compressed.clone();
+                if read_ahead {
+                    input.extend_from_slice(&[0; 16]);
+                }
+                let error = crate::deflate::deflate_reader::tests::parse_deflate_whole(&input)
+                    .expect_err(name);
+                assert_eq!(
+                    error.exit_code(),
+                    ExitCode::InvalidDeflate,
+                    "{name}: {error:?}"
+                );
+            }
         }
     }
 }

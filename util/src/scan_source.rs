@@ -1,3 +1,14 @@
+//! Read-only selection of scan inputs from corpus or crawl SQLite catalogs.
+//!
+//! A completed scan run selects its recorded files; a crawl catalog selects its
+//! distinct saved payloads. Both are read through a SQLite snapshot, so the input
+//! set does not change while workers inspect the files.
+//!
+//! Recorded paths are resolved under the source root and checked for escapes,
+//! symlinks, and cloud-only placeholders before reading. Database selection
+//! schedules only those files rather than discovering new inputs through a
+//! recursive walk, and the source catalog is separate from any output database.
+
 use std::{
     fs,
     path::{Component, Path, PathBuf},

@@ -1,3 +1,7 @@
+//! Transactional reads from buffered input.
+//! Commits consumed bytes only when parsing succeeds, allowing incomplete
+//! container records to be retried without losing input.
+
 use std::{
     collections::VecDeque,
     io::{Cursor, Error, ErrorKind, Read, Result, SeekFrom},

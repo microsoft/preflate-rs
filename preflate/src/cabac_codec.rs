@@ -4,6 +4,17 @@
  *  This software incorporates material from third parties. See NOTICE.txt for details.
  *--------------------------------------------------------------------------------------------*/
 
+//! Arithmetic coding of prediction corrections.
+//!
+//! Zero corrections represent successful predictions. The encoder groups them into runs
+//! within each correction category, even when requests for other categories are
+//! interleaved. Nonzero corrections use separate adaptive integer-coding contexts.
+//!
+//! Encoding buffers actions until it knows which categories ever need a nonzero
+//! correction, then writes that category mask and the buffered actions. The
+//! decoder returns zero directly for absent categories and consumes run counts
+//! for the others, preserving the caller's sequence of correction requests.
+
 use crate::cabac::{CabacReader, CabacWriter};
 
 use crate::{
@@ -29,15 +40,6 @@ pub fn decode_difference(pred_val: u32, encoded_val: u32) -> u32 {
         pred_val - (encoded_val >> 1)
     } else {
         pred_val + (encoded_val >> 1)
-    }
-}
-
-#[test]
-fn test_encode_decode_difference() {
-    for i in 0..10 {
-        assert_eq!(i, decode_difference(0, encode_difference(0, i)));
-        assert_eq!(i, decode_difference(10, encode_difference(10, i)));
-        assert_eq!(i, decode_difference(100, encode_difference(100, i)));
     }
 }
 
@@ -90,15 +92,23 @@ impl<CTX> PredictionCabacContext<CTX> {
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
-enum Actions {
-    Default(CodecCorrection, u32),
-    Correction(CodecCorrection, u32),
+enum ActionKind {
+    DefaultRun,
+    Correction,
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+struct Action {
+    correction: CodecCorrection,
+    kind: ActionKind,
+    // Run length for DefaultRun; nonzero correction value otherwise.
+    value: u32,
 }
 
 pub struct PredictionEncoderCabac<W, CTX> {
     context: PredictionCabacContext<CTX>,
 
-    actions: Vec<Actions>,
+    actions: Vec<Action>,
 
     last_action: [Option<usize>; CodecCorrection::MAX as usize],
 
@@ -136,7 +146,11 @@ impl<W: CabacWriter<CTX>, CTX: Default> PredictionEncoder for PredictionEncoderC
         // if it is a non-zero correction, then we just insert it
         if value != 0 {
             self.last_action[i] = Some(self.actions.len());
-            self.actions.push(Actions::Correction(c, value));
+            self.actions.push(Action {
+                correction: c,
+                kind: ActionKind::Correction,
+                value,
+            });
             self.action_seen[i] = true;
 
             self.count.record_correction(c, value);
@@ -147,15 +161,19 @@ impl<W: CabacWriter<CTX>, CTX: Default> PredictionEncoder for PredictionEncoderC
         // and if so, just increment it
         if let Some(l) = self.last_action[i] {
             let a = &mut self.actions[l];
-            if let Actions::Default(_, x) = a {
-                *x += 1;
+            if a.kind == ActionKind::DefaultRun {
+                a.value += 1;
                 return;
             }
         }
 
         // otherwise we add a new default action
         self.last_action[c as usize] = Some(self.actions.len());
-        self.actions.push(Actions::Default(c, 1));
+        self.actions.push(Action {
+            correction: c,
+            kind: ActionKind::DefaultRun,
+            value: 1,
+        });
     }
 
     fn finish(&mut self) {
@@ -173,30 +191,28 @@ impl<W: CabacWriter<CTX>, CTX: Default> PredictionEncoder for PredictionEncoderC
 
         // now write all the actions
         for &a in self.actions.iter() {
-            match a {
-                Actions::Default(c, value) => {
-                    let i = c as usize;
-
+            let i = a.correction as usize;
+            match a.kind {
+                ActionKind::DefaultRun => {
                     if self.action_seen[i] {
                         self.writer
                             .put(true, &mut self.context.default_signal_ctx[i])
                             .unwrap();
 
                         PredictionCabacContext::write_exp_encoded(
-                            value - 1,
+                            a.value - 1,
                             &mut self.context.default_ctx[i],
                             &mut self.context.default_ctx_bits[i],
                             &mut self.writer,
                         );
                     }
                 }
-                Actions::Correction(c, value) => {
-                    let i = c as usize;
+                ActionKind::Correction => {
                     self.writer
                         .put(false, &mut self.context.default_signal_ctx[i])
                         .unwrap();
                     PredictionCabacContext::write_exp_encoded(
-                        value - 1,
+                        a.value - 1,
                         &mut self.context.correction_ctx[i],
                         &mut self.context.correction_ctx_bits[i],
                         &mut self.writer,
@@ -284,147 +300,200 @@ impl<R: CabacReader<CTX>, CTX: Default> PredictionDecoder for PredictionDecoderC
     }
 }
 
-#[test]
-fn roundtree_cabac_decoding() {
-    use crate::cabac::vp8::{VP8Reader, VP8Writer};
-    use crate::statistical_codec::{CodecAction, drive_encoder, verify_decoder};
-    use std::io::Cursor;
-
-    let mut buffer = Vec::new();
-
-    let test_codec_actions = [
-        CodecAction::Correction(CodecCorrection::DistanceCountCorrection, 1),
-        CodecAction::Correction(CodecCorrection::TokenCount, 100000),
-        CodecAction::Correction(CodecCorrection::BlockTypeCorrection, 5),
-        CodecAction::Correction(CodecCorrection::DistAfterLenCorrection, 0),
-    ];
-
-    let mut encoder = PredictionEncoderCabac::new(VP8Writer::new(&mut buffer).unwrap());
-
-    drive_encoder(&mut encoder, &test_codec_actions);
-
-    encoder.finish();
-
-    let mut decoder = PredictionDecoderCabac::new(VP8Reader::new(Cursor::new(&buffer)).unwrap());
-
-    verify_decoder(&mut decoder, &test_codec_actions);
-}
-
 #[cfg(test)]
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-enum Operation {
-    Correction(u32, CodecCorrection),
-}
+mod tests {
+    use super::*;
 
-#[test]
-fn roundtree_cabac_correction() {
-    // use the debug version of the cabac writer/reader to make sure that the we don't mix up contexts anywhere
-    use crate::cabac::debug::{DebugReader, DebugWriter};
-    use std::io::Cursor;
+    #[test]
+    fn test_encode_decode_difference() {
+        for i in 0..10 {
+            assert_eq!(i, decode_difference(0, encode_difference(0, i)));
+            assert_eq!(i, decode_difference(10, encode_difference(10, i)));
+            assert_eq!(i, decode_difference(100, encode_difference(100, i)));
+        }
+    }
 
-    // generate a random set of operations
-    let operations = [
-        Operation::Correction(5, CodecCorrection::DistanceCountCorrection),
-        Operation::Correction(1, CodecCorrection::BlockTypeCorrection),
-        Operation::Correction(2, CodecCorrection::BlockTypeCorrection),
-        Operation::Correction(3, CodecCorrection::BlockTypeCorrection),
-        Operation::Correction(4, CodecCorrection::BlockTypeCorrection),
-        Operation::Correction(0, CodecCorrection::DistAfterLenCorrection),
-        Operation::Correction(0, CodecCorrection::DistOnlyCorrection),
-        Operation::Correction(7, CodecCorrection::LDTypeCorrection),
-        Operation::Correction(9, CodecCorrection::LenCorrection),
-        Operation::Correction(0, CodecCorrection::LiteralPredictionWrong),
-        Operation::Correction(100000, CodecCorrection::TokenCount),
-        Operation::Correction(1, CodecCorrection::ReferencePredictionWrong),
-    ];
+    #[test]
+    fn roundtree_cabac_decoding() {
+        use crate::cabac::vp8::{VP8Reader, VP8Writer};
+        use crate::statistical_codec::{CodecAction, tests::drive_encoder, tests::verify_decoder};
+        use std::io::Cursor;
 
-    let mut buffer = Vec::new();
+        let mut buffer = Vec::new();
 
-    let writer = DebugWriter::new(&mut buffer).unwrap();
+        let test_codec_actions = [
+            CodecAction::Correction(CodecCorrection::DistanceCountCorrection, 1),
+            CodecAction::Correction(CodecCorrection::TokenCount, 100000),
+            CodecAction::Correction(CodecCorrection::BlockTypeCorrection, 5),
+            CodecAction::Correction(CodecCorrection::DistAfterLenCorrection, 0),
+        ];
 
-    let mut encoder = PredictionEncoderCabac::new(writer);
+        let mut encoder = PredictionEncoderCabac::new(VP8Writer::new(&mut buffer).unwrap());
 
-    for &o in operations.iter() {
-        match o {
-            Operation::Correction(val, context_type) => {
-                encoder.encode_correction(context_type, val);
+        drive_encoder(&mut encoder, &test_codec_actions);
+
+        encoder.finish();
+
+        let mut decoder =
+            PredictionDecoderCabac::new(VP8Reader::new(Cursor::new(&buffer)).unwrap());
+
+        verify_decoder(&mut decoder, &test_codec_actions);
+    }
+
+    #[test]
+    fn roundtrip_cabac_interleaved_default_runs() {
+        use crate::cabac::vp8::{VP8Reader, VP8Writer};
+        use crate::statistical_codec::{CodecAction, tests::drive_encoder, tests::verify_decoder};
+        use std::io::Cursor;
+
+        let corrections = [
+            (CodecCorrection::TokenCount, 0),
+            (CodecCorrection::BlockTypeCorrection, 0),
+            (CodecCorrection::TokenCount, 0),
+            (CodecCorrection::LenCorrection, 0),
+            (CodecCorrection::BlockTypeCorrection, 5),
+            (CodecCorrection::TokenCount, 7),
+            (CodecCorrection::TokenCount, 0),
+            (CodecCorrection::BlockTypeCorrection, 0),
+            (CodecCorrection::LenCorrection, 0),
+            (CodecCorrection::TokenCount, 0),
+            (CodecCorrection::BlockTypeCorrection, 0),
+            (CodecCorrection::TokenCount, 1),
+            (CodecCorrection::BlockTypeCorrection, 1),
+            (CodecCorrection::TokenCount, 0),
+            (CodecCorrection::TokenCount, 0),
+            (CodecCorrection::BlockTypeCorrection, 0),
+        ]
+        .map(|(correction, value)| CodecAction::Correction(correction, value));
+        let mut buffer = Vec::new();
+        let mut encoder = PredictionEncoderCabac::new(VP8Writer::new(&mut buffer).unwrap());
+        drive_encoder(&mut encoder, &corrections);
+        encoder.finish();
+
+        let mut decoder =
+            PredictionDecoderCabac::new(VP8Reader::new(Cursor::new(&buffer)).unwrap());
+        verify_decoder(&mut decoder, &corrections);
+    }
+
+    #[derive(Copy, Clone, Debug, Eq, PartialEq)]
+    enum Operation {
+        Correction(u32, CodecCorrection),
+    }
+
+    #[test]
+    fn roundtree_cabac_correction() {
+        // use the debug version of the cabac writer/reader to make sure that the we don't mix up contexts anywhere
+        use crate::cabac::debug::{DebugReader, DebugWriter};
+        use std::io::Cursor;
+
+        // generate a random set of operations
+        let operations = [
+            Operation::Correction(5, CodecCorrection::DistanceCountCorrection),
+            Operation::Correction(1, CodecCorrection::BlockTypeCorrection),
+            Operation::Correction(2, CodecCorrection::BlockTypeCorrection),
+            Operation::Correction(3, CodecCorrection::BlockTypeCorrection),
+            Operation::Correction(4, CodecCorrection::BlockTypeCorrection),
+            Operation::Correction(0, CodecCorrection::DistAfterLenCorrection),
+            Operation::Correction(0, CodecCorrection::DistOnlyCorrection),
+            Operation::Correction(7, CodecCorrection::LDTypeCorrection),
+            Operation::Correction(9, CodecCorrection::LenCorrection),
+            Operation::Correction(0, CodecCorrection::LiteralPredictionWrong),
+            Operation::Correction(100000, CodecCorrection::TokenCount),
+            Operation::Correction(1, CodecCorrection::ReferencePredictionWrong),
+        ];
+
+        let mut buffer = Vec::new();
+
+        let writer = DebugWriter::new(&mut buffer).unwrap();
+
+        let mut encoder = PredictionEncoderCabac::new(writer);
+
+        for &o in operations.iter() {
+            match o {
+                Operation::Correction(val, context_type) => {
+                    encoder.encode_correction(context_type, val);
+                }
+            }
+        }
+
+        encoder.finish();
+
+        let reader = DebugReader::new(Cursor::new(&buffer)).unwrap();
+
+        let mut decoder = PredictionDecoderCabac::new(reader);
+
+        for (i, &o) in operations.iter().enumerate() {
+            match o {
+                Operation::Correction(val, context_type) => {
+                    assert_eq!(
+                        val,
+                        decoder.decode_correction(context_type),
+                        "operation {}",
+                        i
+                    );
+                }
             }
         }
     }
 
-    encoder.finish();
+    #[test]
+    fn roundtrip_cabac_write_value() {
+        use crate::cabac::vp8::{VP8Context, VP8Reader, VP8Writer};
+        use std::io::Cursor;
 
-    let reader = DebugReader::new(Cursor::new(&buffer)).unwrap();
+        let mut buffer = Vec::new();
 
-    let mut decoder = PredictionDecoderCabac::new(reader);
+        let mut writer = VP8Writer::new(&mut buffer).unwrap();
 
-    for (i, &o) in operations.iter().enumerate() {
-        match o {
-            Operation::Correction(val, context_type) => {
-                assert_eq!(
-                    val,
-                    decoder.decode_correction(context_type),
-                    "operation {}",
-                    i
-                );
-            }
+        let mut context = [
+            VP8Context::default(),
+            VP8Context::default(),
+            VP8Context::default(),
+            VP8Context::default(),
+        ];
+
+        let mut context_bits = [
+            VP8Context::default(),
+            VP8Context::default(),
+            VP8Context::default(),
+            VP8Context::default(),
+        ];
+
+        for i in 0..10 {
+            PredictionCabacContext::write_exp_encoded(
+                i * 13,
+                &mut context,
+                &mut context_bits,
+                &mut writer,
+            );
         }
-    }
-}
 
-#[test]
-fn roundtrip_cabac_write_value() {
-    use crate::cabac::vp8::{VP8Context, VP8Reader, VP8Writer};
-    use std::io::Cursor;
+        writer.finish().unwrap();
 
-    let mut buffer = Vec::new();
+        let mut reader = VP8Reader::new(Cursor::new(&buffer)).unwrap();
+        context = [
+            VP8Context::default(),
+            VP8Context::default(),
+            VP8Context::default(),
+            VP8Context::default(),
+        ];
 
-    let mut writer = VP8Writer::new(&mut buffer).unwrap();
+        context_bits = [
+            VP8Context::default(),
+            VP8Context::default(),
+            VP8Context::default(),
+            VP8Context::default(),
+        ];
 
-    let mut context = [
-        VP8Context::default(),
-        VP8Context::default(),
-        VP8Context::default(),
-        VP8Context::default(),
-    ];
-
-    let mut context_bits = [
-        VP8Context::default(),
-        VP8Context::default(),
-        VP8Context::default(),
-        VP8Context::default(),
-    ];
-
-    for i in 0..10 {
-        PredictionCabacContext::write_exp_encoded(
-            i * 13,
-            &mut context,
-            &mut context_bits,
-            &mut writer,
-        );
-    }
-
-    writer.finish().unwrap();
-
-    let mut reader = VP8Reader::new(Cursor::new(&buffer)).unwrap();
-    context = [
-        VP8Context::default(),
-        VP8Context::default(),
-        VP8Context::default(),
-        VP8Context::default(),
-    ];
-
-    context_bits = [
-        VP8Context::default(),
-        VP8Context::default(),
-        VP8Context::default(),
-        VP8Context::default(),
-    ];
-
-    for i in 0..10 {
-        assert_eq!(
-            i * 13,
-            PredictionCabacContext::read_exp_value(&mut context, &mut context_bits, &mut reader)
-        );
+        for i in 0..10 {
+            assert_eq!(
+                i * 13,
+                PredictionCabacContext::read_exp_value(
+                    &mut context,
+                    &mut context_bits,
+                    &mut reader
+                )
+            );
+        }
     }
 }

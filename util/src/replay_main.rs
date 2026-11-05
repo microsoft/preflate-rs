@@ -1,3 +1,7 @@
+//! JSON command-line interface for replaying explicit reconstruction settings.
+//! Loads bounded file ranges or synthetic blocks and emits prediction diagnostics
+//! with optional correction encoding and exact reconstruction verification.
+
 #![forbid(unsafe_code)]
 
 mod scan_fs;
@@ -11,7 +15,7 @@ use std::{
 
 use clap::Parser;
 use preflate_rs::{
-    PreflateError, TokenPredictorParameters,
+    PreflateError,
     diagnostics::{ReplayBlock, ReplayOptions, encode_replay_blocks, replay_deflate},
 };
 use serde::Deserialize;
@@ -36,7 +40,7 @@ struct Cli {
 #[serde(deny_unknown_fields)]
 struct Request {
     source: Source,
-    parameters: TokenPredictorParameters,
+    reconstruction_parameters: Box<serde_json::value::RawValue>,
     #[serde(default)]
     options: ReplayOptions,
 }
@@ -99,7 +103,7 @@ fn run(cli: &Cli) -> preflate_rs::Result<Value> {
     let request: Request =
         serde_json::from_slice(&request).map_err(|error| invalid(error.to_string()))?;
     request.options.validate()?;
-    preflate_rs::diagnostics::validate_replay_parameters(&request.parameters)?;
+    preflate_rs::diagnostics::validate_replay_parameters(request.reconstruction_parameters.get())?;
     let bytes = match request.source {
         Source::Deflate { bytes } => bytes,
         Source::Blocks { blocks } => encode_replay_blocks(blocks, &request.options)?,
@@ -134,7 +138,11 @@ fn run(cli: &Cli) -> preflate_rs::Result<Value> {
             bytes
         }
     };
-    let result = replay_deflate(&bytes, &request.parameters, &request.options)?;
+    let result = replay_deflate(
+        &bytes,
+        request.reconstruction_parameters.get(),
+        &request.options,
+    )?;
     Ok(json!({"status": "ok", "result": result}))
 }
 

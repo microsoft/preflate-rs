@@ -1,3 +1,6 @@
+//! Container configuration, block framing, and shared streaming interfaces.
+//! Defines the wire tags and variable-length integers used by both container processors.
+
 use std::io::{BufRead, Read, Write};
 
 use preflate_rs::{AddContext, HashAlgorithm, PreflateConfig, Result};
@@ -115,24 +118,6 @@ pub(crate) fn read_varint(source: &mut impl Read) -> std::io::Result<u32> {
     Ok(result)
 }
 
-#[test]
-fn test_variant_roundtrip() {
-    let values = [
-        0, 1, 127, 128, 255, 256, 16383, 16384, 2097151, 2097152, 268435455, 268435456, 4294967295,
-    ];
-
-    let mut buffer = Vec::new();
-    for &v in values.iter() {
-        write_varint(&mut buffer, v).unwrap();
-    }
-
-    let mut buffer = &buffer[..];
-
-    for &v in values.iter() {
-        assert_eq!(v, read_varint(&mut buffer).unwrap());
-    }
-}
-
 /// Statistics about the preflate process
 #[derive(Debug, Copy, Clone, Default)]
 pub struct PreflateStats {
@@ -152,30 +137,6 @@ pub trait ProcessBuffer {
         input_complete: bool,
         writer: &mut impl Write,
     ) -> Result<()>;
-
-    #[cfg(test)]
-    fn process_vec(&mut self, input: &[u8]) -> Result<Vec<u8>> {
-        let mut writer = Vec::new();
-
-        self.copy_to_end(&mut std::io::Cursor::new(&input), &mut writer)
-            .context()?;
-
-        Ok(writer)
-    }
-
-    #[cfg(test)]
-    fn process_vec_size(&mut self, input: &[u8], read_chunk_size: usize) -> Result<Vec<u8>> {
-        let mut writer = Vec::new();
-
-        self.copy_to_end_size(
-            &mut std::io::Cursor::new(&input),
-            &mut writer,
-            read_chunk_size,
-        )
-        .context()?;
-
-        Ok(writer)
-    }
 
     /// Reads everything from input and writes it to the output.
     /// Wraps calls to process buffer
@@ -236,7 +197,9 @@ pub trait ProcessBuffer {
 }
 
 #[cfg(test)]
-pub(crate) mod test {
+pub(crate) mod tests {
+    use super::*;
+
     use std::io::Write;
 
     use preflate_rs::{AddContext, Result};
@@ -249,6 +212,32 @@ pub(crate) mod test {
     };
     use crate::container_read::RecreateContainerProcessor;
     use crate::container_write::PreflateContainerProcessor;
+
+    trait ProcessBufferTestExt: ProcessBuffer {
+        fn process_vec(&mut self, input: &[u8]) -> Result<Vec<u8>> {
+            let mut writer = Vec::new();
+
+            self.copy_to_end(&mut std::io::Cursor::new(&input), &mut writer)
+                .context()?;
+
+            Ok(writer)
+        }
+
+        fn process_vec_size(&mut self, input: &[u8], read_chunk_size: usize) -> Result<Vec<u8>> {
+            let mut writer = Vec::new();
+
+            self.copy_to_end_size(
+                &mut std::io::Cursor::new(&input),
+                &mut writer,
+                read_chunk_size,
+            )
+            .context()?;
+
+            Ok(writer)
+        }
+    }
+
+    impl<T: ProcessBuffer + ?Sized> ProcessBufferTestExt for T {}
 
     pub struct NopProcessBuffer {}
 
@@ -266,9 +255,9 @@ pub(crate) mod test {
     }
 
     fn roundtrip_deflate_chunks(filename: &str) {
-        use crate::utils::assert_eq_array;
+        use crate::utils::tests::assert_eq_array;
 
-        let f = crate::utils::read_file(filename);
+        let f = crate::utils::tests::read_file(filename);
 
         println!("Processing file: {}", filename);
 
@@ -315,7 +304,7 @@ pub(crate) mod test {
 
     #[test]
     fn roundtrip_small_chunk() {
-        use crate::utils::{assert_eq_array, read_file};
+        use crate::utils::{tests::assert_eq_array, tests::read_file};
 
         let original = read_file("pptxplaintext.zip");
 
@@ -340,7 +329,7 @@ pub(crate) mod test {
 
     #[test]
     fn roundtrip_small_plain_text() {
-        use crate::utils::{assert_eq_array, read_file};
+        use crate::utils::{tests::assert_eq_array, tests::read_file};
 
         let original = read_file("pptxplaintext.zip");
 
@@ -365,7 +354,7 @@ pub(crate) mod test {
 
     #[test]
     fn roundtrip_zstd_per_block() {
-        use crate::utils::{assert_eq_array, read_file};
+        use crate::utils::{tests::assert_eq_array, tests::read_file};
 
         let original = read_file("samplezip.zip");
 
@@ -417,56 +406,6 @@ pub(crate) mod test {
             expected,
             "wrong exit code for stream {stream:02X?}"
         );
-    }
-
-    /// The two masks must partition the byte: non-overlapping and together covering all 8 bits.
-    /// Every content-kind constant must sit entirely within BLOCK_TYPE_MASK, and every
-    /// compression constant within BLOCK_COMPRESSION_MASK.
-    #[test]
-    fn test_bit_field_masks_partition_byte() {
-        assert_eq!(
-            BLOCK_COMPRESSION_MASK | BLOCK_TYPE_MASK,
-            0xFF,
-            "masks do not cover all bits"
-        );
-        assert_eq!(
-            BLOCK_COMPRESSION_MASK & BLOCK_TYPE_MASK,
-            0x00,
-            "masks overlap"
-        );
-        for kind in [
-            BLOCK_TYPE_LITERAL,
-            BLOCK_TYPE_DEFLATE,
-            BLOCK_TYPE_PNG,
-            BLOCK_TYPE_DEFLATE_CONTINUE,
-            BLOCK_TYPE_JPEG_LEPTON,
-            BLOCK_TYPE_WEBP,
-        ] {
-            assert_eq!(
-                kind & BLOCK_COMPRESSION_MASK,
-                0,
-                "BLOCK_TYPE 0x{kind:02X} bleeds into compression bits"
-            );
-        }
-        for comp in [BLOCK_COMPRESSION_NONE, BLOCK_COMPRESSION_ZSTD] {
-            assert_eq!(
-                comp & BLOCK_TYPE_MASK,
-                0,
-                "BLOCK_COMPRESSION 0x{comp:02X} bleeds into type bits"
-            );
-        }
-    }
-
-    /// The combined (compression | kind) wire bytes must match the expected values
-    /// documented in AGENTS.md. This catches accidental constant drift.
-    #[test]
-    fn test_combined_wire_values() {
-        assert_eq!(BLOCK_COMPRESSION_ZSTD | BLOCK_TYPE_LITERAL, 0x40);
-        assert_eq!(BLOCK_COMPRESSION_ZSTD | BLOCK_TYPE_DEFLATE, 0x41);
-        assert_eq!(BLOCK_COMPRESSION_ZSTD | BLOCK_TYPE_PNG, 0x42);
-        assert_eq!(BLOCK_COMPRESSION_ZSTD | BLOCK_TYPE_DEFLATE_CONTINUE, 0x43);
-        assert_eq!(BLOCK_COMPRESSION_NONE | BLOCK_TYPE_JPEG_LEPTON, 0x04);
-        assert_eq!(BLOCK_COMPRESSION_NONE | BLOCK_TYPE_WEBP, 0x05);
     }
 
     #[test]
@@ -524,7 +463,7 @@ pub(crate) mod test {
         let mut ctx =
             PreflateContainerProcessor::new(&PreflateContainerConfig::default(), 1, false);
         let compressed = ctx.process_vec(&input).unwrap();
-        assert_eq!(compressed[0], 3);
+        assert_eq!(&compressed[..2], &[3, 0x40]);
 
         let blocks = parse_wire_block_types(&compressed);
         assert!(
@@ -543,7 +482,7 @@ pub(crate) mod test {
     /// reserved patterns 0x80 or 0xC0.
     #[test]
     fn test_encoder_never_emits_reserved_compression_bits() {
-        let input = crate::utils::read_file("samplezip.zip");
+        let input = crate::utils::tests::read_file("samplezip.zip");
         let mut ctx =
             PreflateContainerProcessor::new(&PreflateContainerConfig::default(), 1, false);
         let compressed = ctx.process_vec(&input).unwrap();
@@ -562,7 +501,7 @@ pub(crate) mod test {
     /// through to the error arm and the round-trip would fail.
     #[test]
     fn test_decoder_strips_compression_bits_before_dispatch() {
-        use crate::utils::{assert_eq_array, read_file};
+        use crate::utils::{tests::assert_eq_array, tests::read_file};
         // A zip file exercises DEFLATE blocks (wire type 0x41 = ZSTD|DEFLATE).
         // A successful round-trip proves the decoder is matching on 0x01, not 0x41.
         let original = read_file("samplezip.zip");
@@ -591,7 +530,7 @@ pub(crate) mod test {
     /// `webp` feature is enabled, may store pixels as WebP lossless instead of raw.
     #[test]
     fn test_png_produces_idat_block_and_roundtrips() {
-        use crate::utils::{assert_eq_array, read_file};
+        use crate::utils::{tests::assert_eq_array, tests::read_file};
         let original = read_file("treegdi.png");
         let mut enc =
             PreflateContainerProcessor::new(&PreflateContainerConfig::default(), 1, false);
@@ -617,7 +556,7 @@ pub(crate) mod test {
     /// streams. Both must survive a full round-trip.
     #[test]
     fn test_pdf_with_jpegs_produces_lepton_and_deflate_blocks_and_roundtrips() {
-        use crate::utils::{assert_eq_array, read_file};
+        use crate::utils::{tests::assert_eq_array, tests::read_file};
         let original = read_file("embedded-images.pdf");
         let mut enc =
             PreflateContainerProcessor::new(&PreflateContainerConfig::default(), 1, false);
@@ -657,7 +596,7 @@ pub(crate) mod test {
     /// blocks that must all round-trip correctly.
     #[test]
     fn test_deflate_continue_blocks_appear_and_roundtrip() {
-        use crate::utils::{assert_eq_array, read_file};
+        use crate::utils::{tests::assert_eq_array, tests::read_file};
         let original = read_file("sample1.bin.gz");
         // min_chunk_size: 0 so the loop processes data immediately after Start,
         // letting Searching run with the first truncated chunk rather than waiting
@@ -708,7 +647,7 @@ pub(crate) mod test {
     /// unprocessed portion.
     #[test]
     fn test_total_plain_text_limit_forces_literal_fallback_and_roundtrips() {
-        use crate::utils::{assert_eq_array, read_file};
+        use crate::utils::{tests::assert_eq_array, tests::read_file};
         // samplezip.zip has several DEFLATE entries; setting the limit to 1 byte
         // ensures that after the first DEFLATE entry's plaintext is accumulated,
         // every subsequent scan sees total_plain_text_seen > limit and falls back
@@ -762,7 +701,7 @@ pub(crate) mod test {
     /// Expected wire sequence: literal, deflate, literal, deflate, literal, EOS
     #[test]
     fn test_two_gzip_streams_produce_two_deflate_blocks_and_roundtrip() {
-        use crate::utils::read_file;
+        use crate::utils::tests::read_file;
         let original = read_file("test_two_gzip_streams.bin");
         let (compressed, blocks) = compress_default(&original);
 
@@ -774,7 +713,7 @@ pub(crate) mod test {
 
         let mut dec = RecreateContainerProcessor::new(usize::MAX);
         let recreated = dec.process_vec(&compressed).unwrap();
-        crate::utils::assert_eq_array(&original, &recreated);
+        crate::utils::tests::assert_eq_array(&original, &recreated);
     }
 
     /// A gzip stream whose plaintext is below MIN_BLOCKSIZE (500 < 1024) must NOT
@@ -784,7 +723,7 @@ pub(crate) mod test {
     /// Expected wire sequence: literal, EOS (no DEFLATE blocks)
     #[test]
     fn test_tiny_gzip_below_min_blocksize_becomes_literal_and_roundtrip() {
-        use crate::utils::read_file;
+        use crate::utils::tests::read_file;
         let original = read_file("test_tiny_gzip.bin");
         let (compressed, blocks) = compress_default(&original);
 
@@ -797,7 +736,7 @@ pub(crate) mod test {
 
         let mut dec = RecreateContainerProcessor::new(usize::MAX);
         let recreated = dec.process_vec(&compressed).unwrap();
-        crate::utils::assert_eq_array(&original, &recreated);
+        crate::utils::tests::assert_eq_array(&original, &recreated);
     }
 
     /// File contains a large gzip (plaintext > MIN_BLOCKSIZE) immediately followed by
@@ -808,7 +747,7 @@ pub(crate) mod test {
     /// Expected wire sequence: literal, deflate, literal, EOS (exactly 1 DEFLATE block)
     #[test]
     fn test_big_gzip_deflate_small_gzip_literal_and_roundtrip() {
-        use crate::utils::read_file;
+        use crate::utils::tests::read_file;
         let original = read_file("test_big_then_small_gzip.bin");
         let (compressed, blocks) = compress_default(&original);
 
@@ -820,7 +759,7 @@ pub(crate) mod test {
 
         let mut dec = RecreateContainerProcessor::new(usize::MAX);
         let recreated = dec.process_vec(&compressed).unwrap();
-        crate::utils::assert_eq_array(&original, &recreated);
+        crate::utils::tests::assert_eq_array(&original, &recreated);
     }
 
     /// A file with a valid gzip header but a deliberately corrupted DEFLATE body
@@ -831,7 +770,7 @@ pub(crate) mod test {
     /// Expected wire sequence: literal, EOS (0 DEFLATE blocks)
     #[test]
     fn test_corrupted_deflate_body_falls_back_to_literal_and_roundtrip() {
-        use crate::utils::read_file;
+        use crate::utils::tests::read_file;
         let original = read_file("test_corrupted_deflate.bin");
         let (compressed, blocks) = compress_default(&original);
 
@@ -843,7 +782,7 @@ pub(crate) mod test {
 
         let mut dec = RecreateContainerProcessor::new(usize::MAX);
         let recreated = dec.process_vec(&compressed).unwrap();
-        crate::utils::assert_eq_array(&original, &recreated);
+        crate::utils::tests::assert_eq_array(&original, &recreated);
     }
 
     /// A file containing padding bytes, then two zlib streams (each with plaintext
@@ -855,7 +794,7 @@ pub(crate) mod test {
     /// Expected wire sequence: literal, deflate, literal, deflate, literal, EOS
     #[test]
     fn test_two_zlib_streams_produce_two_deflate_blocks_and_roundtrip() {
-        use crate::utils::read_file;
+        use crate::utils::tests::read_file;
         let original = read_file("test_two_zlib_streams.bin");
         let (compressed, blocks) = compress_default(&original);
 
@@ -868,7 +807,7 @@ pub(crate) mod test {
 
         let mut dec = RecreateContainerProcessor::new(usize::MAX);
         let recreated = dec.process_vec(&compressed).unwrap();
-        crate::utils::assert_eq_array(&original, &recreated);
+        crate::utils::tests::assert_eq_array(&original, &recreated);
     }
 
     /// A ZIP file containing three DEFLATE-compressed entries must produce exactly three
@@ -878,7 +817,7 @@ pub(crate) mod test {
     /// Expected wire sequence: literal, deflate, literal, deflate, literal, deflate, literal, EOS
     #[test]
     fn test_zip_three_deflated_entries_produce_three_deflate_blocks_and_roundtrip() {
-        use crate::utils::read_file;
+        use crate::utils::tests::read_file;
         let original = read_file("test_zip_3entries.zip");
         let (compressed, blocks) = compress_default(&original);
 
@@ -890,7 +829,7 @@ pub(crate) mod test {
 
         let mut dec = RecreateContainerProcessor::new(usize::MAX);
         let recreated = dec.process_vec(&compressed).unwrap();
-        crate::utils::assert_eq_array(&original, &recreated);
+        crate::utils::tests::assert_eq_array(&original, &recreated);
     }
 
     /// A ZIP file with a STORED entry (method=0) followed by a DEFLATED entry (method=8).
@@ -901,7 +840,7 @@ pub(crate) mod test {
     /// Expected wire sequence: literal, deflate, literal, EOS (exactly 1 DEFLATE block)
     #[test]
     fn test_zip_stored_entry_stays_literal_deflated_entry_becomes_deflate_and_roundtrip() {
-        use crate::utils::read_file;
+        use crate::utils::tests::read_file;
         let original = read_file("test_zip_stored_then_deflated.zip");
         let (compressed, blocks) = compress_default(&original);
 
@@ -914,7 +853,7 @@ pub(crate) mod test {
 
         let mut dec = RecreateContainerProcessor::new(usize::MAX);
         let recreated = dec.process_vec(&compressed).unwrap();
-        crate::utils::assert_eq_array(&original, &recreated);
+        crate::utils::tests::assert_eq_array(&original, &recreated);
     }
 
     /// A buffer filled with pseudo-random bytes contains no recognisable DEFLATE/zlib/gzip
@@ -925,7 +864,7 @@ pub(crate) mod test {
     /// Expected wire sequence: literal, EOS
     #[test]
     fn test_random_bytes_produce_no_deflate_blocks_and_roundtrip() {
-        use crate::utils::read_file;
+        use crate::utils::tests::read_file;
         let original = read_file("test_random_bytes.bin");
         let (compressed, blocks) = compress_default(&original);
 
@@ -938,7 +877,7 @@ pub(crate) mod test {
         // The literal block must survive the round-trip.
         let mut dec = RecreateContainerProcessor::new(usize::MAX);
         let recreated = dec.process_vec(&compressed).unwrap();
-        crate::utils::assert_eq_array(&original, &recreated);
+        crate::utils::tests::assert_eq_array(&original, &recreated);
     }
 
     /// Two gzip streams separated by a 1000-byte null gap.  Both streams have
@@ -949,7 +888,7 @@ pub(crate) mod test {
     /// Expected wire sequence: literal, deflate, literal, deflate, literal, EOS
     #[test]
     fn test_two_gzip_streams_with_null_gap_produce_two_deflate_blocks_and_roundtrip() {
-        use crate::utils::read_file;
+        use crate::utils::tests::read_file;
         let original = read_file("test_gzip_with_gap.bin");
         let (compressed, blocks) = compress_default(&original);
 
@@ -968,7 +907,7 @@ pub(crate) mod test {
 
         let mut dec = RecreateContainerProcessor::new(usize::MAX);
         let recreated = dec.process_vec(&compressed).unwrap();
-        crate::utils::assert_eq_array(&original, &recreated);
+        crate::utils::tests::assert_eq_array(&original, &recreated);
     }
 
     /// Feed a fixture containing two gzip streams in very small chunks (64 bytes at a
@@ -976,7 +915,7 @@ pub(crate) mod test {
     /// The round-trip result must be byte-exact regardless of where chunk boundaries fall.
     #[test]
     fn test_two_gzip_streams_incremental_small_chunks_roundtrip() {
-        use crate::utils::{assert_eq_array, read_file};
+        use crate::utils::{tests::assert_eq_array, tests::read_file};
         let original = read_file("test_two_gzip_streams.bin");
 
         let mut enc = PreflateContainerProcessor::new(
@@ -1007,7 +946,7 @@ pub(crate) mod test {
     /// the incremental path handles mixed literal padding + zlib streams correctly.
     #[test]
     fn test_two_zlib_streams_incremental_small_chunks_roundtrip() {
-        use crate::utils::{assert_eq_array, read_file};
+        use crate::utils::{tests::assert_eq_array, tests::read_file};
         let original = read_file("test_two_zlib_streams.bin");
 
         let mut enc = PreflateContainerProcessor::new(
@@ -1038,7 +977,7 @@ pub(crate) mod test {
     /// inside the ZIP local-file headers and DEFLATE bodies are handled gracefully.
     #[test]
     fn test_zip_three_entries_incremental_small_chunks_roundtrip() {
-        use crate::utils::{assert_eq_array, read_file};
+        use crate::utils::{tests::assert_eq_array, tests::read_file};
         let original = read_file("test_zip_3entries.zip");
 
         let mut enc = PreflateContainerProcessor::new(
@@ -1070,7 +1009,7 @@ pub(crate) mod test {
     /// Uses `test_zip_stored_then_deflated.zip` (mixed STORED + DEFLATED entries).
     #[test]
     fn test_zip_stored_then_deflated_decoder_small_chunks_roundtrip() {
-        use crate::utils::{assert_eq_array, read_file};
+        use crate::utils::{tests::assert_eq_array, tests::read_file};
         let original = read_file("test_zip_stored_then_deflated.zip");
 
         let mut enc =
@@ -1081,5 +1020,24 @@ pub(crate) mod test {
         let mut dec = RecreateContainerProcessor::new(usize::MAX);
         let recreated = dec.process_vec_size(&compressed, 512).unwrap();
         assert_eq_array(&original, &recreated);
+    }
+
+    #[test]
+    fn test_variant_roundtrip() {
+        let values = [
+            0, 1, 127, 128, 255, 256, 16383, 16384, 2097151, 2097152, 268435455, 268435456,
+            4294967295,
+        ];
+
+        let mut buffer = Vec::new();
+        for &v in values.iter() {
+            write_varint(&mut buffer, v).unwrap();
+        }
+
+        let mut buffer = &buffer[..];
+
+        for &v in values.iter() {
+            assert_eq!(v, read_varint(&mut buffer).unwrap());
+        }
     }
 }

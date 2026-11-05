@@ -4,6 +4,10 @@
  *  This software incorporates material from third parties. See NOTICE.txt for details.
  *--------------------------------------------------------------------------------------------*/
 
+//! Verifies byte-exact DEFLATE and container reconstruction using sample files
+//! and streams produced by native compressors. Covers compressor profiles,
+//! chunk boundaries, flush behavior, and diagnostic parameter replay.
+
 use std::fs::File;
 use std::io::Read;
 use std::path::Path;
@@ -20,6 +24,48 @@ use preflate_rs::{
     PreflateConfig, PreflateStreamProcessor, RecreateStreamProcessor,
     preflate_whole_deflate_stream, recreate_whole_deflate_stream,
 };
+
+fn parameters(result: &preflate_rs::PreflateStreamChunkResult) -> Option<serde_json::Value> {
+    result
+        .reconstruction_parameters_json()
+        .unwrap()
+        .map(|json| serde_json::from_str(&json).unwrap())
+}
+
+#[test]
+fn chunk_parameter_json_can_be_replayed_without_estimator_types() {
+    for (strategy, plain) in [
+        (Strategy::Default, b"abcabcabcabcabcabc".repeat(256)),
+        (Strategy::HuffmanOnly, b"abc".repeat(256)),
+        (Strategy::Rle, vec![b'A'; 2048]),
+    ] {
+        let wrapped = libzsys_compress(&plain, 6, strategy);
+        let compressed = &wrapped[2..wrapped.len() - 4];
+        let (chunk, _) =
+            preflate_whole_deflate_stream(compressed, &PreflateConfig::default()).unwrap();
+        let json = chunk.reconstruction_parameters_json().unwrap().unwrap();
+        let estimator: serde_json::Value =
+            serde_json::from_str(&chunk.estimator_parameters_json().unwrap().unwrap()).unwrap();
+        let replay = preflate_rs::diagnostics::replay_deflate(
+            compressed,
+            &json,
+            &preflate_rs::diagnostics::ReplayOptions::default(),
+        )
+        .unwrap();
+        let replay = serde_json::to_value(replay).unwrap();
+        assert_eq!(replay["verified"], true);
+        assert_eq!(
+            replay["reconstruction_parameters"],
+            serde_json::from_str::<serde_json::Value>(&json).unwrap()
+        );
+        assert_eq!(
+            estimator["reconstruction"],
+            replay["reconstruction_parameters"]
+        );
+        assert!(estimator["model"].is_string());
+        assert!(chunk.hash_algorithm().is_some());
+    }
+}
 
 #[cfg(test)]
 pub fn read_file(filename: &str) -> Vec<u8> {
@@ -133,7 +179,10 @@ fn verifyresult(compressed_data: &[u8]) {
         compressed_data.len(),
         result.corrections.len()
     );
-    println!("parameters: {:?}", result.parameters);
+    println!(
+        "parameters: {:?}",
+        result.estimator_parameters_json().unwrap()
+    );
 
     assert_eq!(compressed_data, recomp);
 }
@@ -410,9 +459,10 @@ fn tuned_zlib_partial_blocks_roundtrip_without_token_corrections() {
                 CodecCorrection::DistAfterLenCorrection,
             ] {
                 assert_eq!(
-                    counts.corrections_count[correction as usize], 0,
+                    counts.corrections_count[correction as usize],
+                    0,
                     "level={level} memory={memory} flush={flush:?} correction={correction:?} params={:?}",
-                    chunk.parameters
+                    chunk.estimator_parameters_json().unwrap()
                 );
             }
             assert_eq!(
@@ -436,7 +486,14 @@ fn specialized_strategies_survive_empty_flush_tails() {
             &PreflateConfig::default(),
         )
         .unwrap();
-        let expected = baseline_result.parameters.unwrap().strategy;
+        let baseline = parameters(&baseline_result).unwrap();
+        let expected = if matches!(strategy, Strategy::HuffmanOnly) {
+            &baseline["behavior"]["NoDictionary"]["strategy"]
+        } else {
+            &baseline["behavior"]["Chain"]["common"]["distance"]
+        }
+        .clone();
+        assert!(!expected.is_null());
         for flush in [
             None,
             Some(libz_sys::Z_PARTIAL_FLUSH),
@@ -449,7 +506,11 @@ fn specialized_strategies_survive_empty_flush_tails() {
                 preflate_whole_deflate_stream(compressed, &PreflateConfig::default()).unwrap();
             assert_eq!(decoded.text(), plain);
             assert_eq!(
-                result.parameters.unwrap().strategy,
+                if matches!(strategy, Strategy::HuffmanOnly) {
+                    parameters(&result).unwrap()["behavior"]["NoDictionary"]["strategy"].clone()
+                } else {
+                    parameters(&result).unwrap()["behavior"]["Chain"]["common"]["distance"].clone()
+                },
                 expected,
                 "{strategy:?}, {flush:?}"
             );
@@ -640,20 +701,21 @@ fn compression_benchmark_overhead_size() {
     // The lower compression levels are more important since
     // they are better recompressed and give more bang-for-buck.
     // Each value includes the 1-byte RECONSTRUCTION_DATA_VERSION prefix.
+    // Include the explicit dictionary, distance/window, input-tail and parser selectors.
     let bench = [
         BenchmarkResult {
             name: "libngzsys",
             compress_fn: libngzsys,
             overhead: [
                 Ok(7),
-                Ok(33),
-                Ok(20),
-                Ok(20),
-                Ok(41),
-                Ok(2500),
-                Ok(1800),
-                Ok(48),
-                Ok(26),
+                Ok(37),
+                Ok(24),
+                Ok(24),
+                Ok(45),
+                Ok(2504),
+                Ok(1804),
+                Ok(52),
+                Ok(30),
                 Err(ExitCode::NoCompressionCandidates),
             ],
         },
@@ -662,15 +724,15 @@ fn compression_benchmark_overhead_size() {
             compress_fn: zlib,
             overhead: [
                 Ok(7),
-                Ok(25),
-                Ok(25),
-                Ok(25),
                 Ok(29),
                 Ok(29),
                 Ok(29),
-                Ok(327),
-                Ok(129),
-                Ok(27),
+                Ok(33),
+                Ok(33),
+                Ok(33),
+                Ok(331),
+                Ok(133),
+                Ok(31),
             ],
         },
         BenchmarkResult {
@@ -678,15 +740,15 @@ fn compression_benchmark_overhead_size() {
             compress_fn: libdeflate,
             overhead: [
                 Ok(7),
+                Ok(79),
+                Ok(125),
+                Ok(96),
+                Ok(97),
+                Ok(164),
+                Ok(108),
                 Ok(75),
-                Ok(122),
-                Ok(93),
-                Ok(94),
-                Ok(161),
-                Ok(105),
-                Ok(72),
-                Ok(89),
-                Ok(88),
+                Ok(92),
+                Ok(91),
             ],
         },
         BenchmarkResult {
@@ -694,15 +756,15 @@ fn compression_benchmark_overhead_size() {
             compress_fn: miniz_oxide,
             overhead: [
                 Ok(16),
-                Ok(176),
-                Ok(48),
+                Ok(180),
+                Ok(50),
+                Ok(52),
+                Ok(53),
+                Ok(51),
                 Ok(50),
                 Ok(51),
-                Ok(49),
-                Ok(48),
-                Ok(49),
-                Ok(49),
-                Ok(49),
+                Ok(51),
+                Ok(51),
             ],
         },
     ];
@@ -983,12 +1045,10 @@ fn miniz_shallow_fingerprint_preserves_canonical_native_profiles() {
         let result = processor.decompress(&compressed).unwrap();
         assert!(processor.is_done());
         assert_eq!(processor.plain_text().text(), plain);
-        assert_ne!(
-            result.parameters.unwrap().matching_type,
-            preflate_rs::MatchingType::MiniZ {
-                max_probes: 3,
-                greedy: true,
-            },
+        let settings = parameters(&result).unwrap();
+        let miniz = &settings["behavior"]["MiniZ"];
+        assert!(
+            miniz["common"]["search"]["max_probes"] != 3 || miniz["greedy"] != true,
             "native level {level}"
         );
         assert_eq!(
@@ -1052,25 +1112,18 @@ fn miniz_low_probe_profiles_roundtrip_synthetic() {
                 compressed,
             );
             if name == "long_matches" || name == "ambiguous_long_matches" {
-                let parameters = result.parameters.unwrap();
+                let parameters = parameters(&result).unwrap();
                 if greedy {
-                    assert_eq!(
-                        parameters.matching_type,
-                        preflate_rs::MatchingType::MiniZ {
-                            max_probes: 3,
-                            greedy: true,
-                        }
-                    );
-                    assert_eq!(parameters.max_chain, 3);
-                    assert_eq!(parameters.max_dist_3_matches, 8191);
+                    let miniz = &parameters["behavior"]["MiniZ"];
+                    assert_eq!(miniz["common"]["search"]["max_probes"], 3);
+                    assert_eq!(miniz["greedy"], true);
+                    assert_eq!(miniz["common"]["search"]["budget"]["max_chain"], 3);
+                    assert_eq!(miniz["short_match_cutoff"], 8191);
                     assert_eq!(processor.prediction_trace().unwrap().mismatch_count, 0);
                 } else {
-                    assert_ne!(
-                        parameters.matching_type,
-                        preflate_rs::MatchingType::MiniZ {
-                            max_probes: 3,
-                            greedy: true,
-                        }
+                    let miniz = &parameters["behavior"]["MiniZ"];
+                    assert!(
+                        miniz["common"]["search"]["max_probes"] != 3 || miniz["greedy"] != true
                     );
                 }
             }
@@ -1079,7 +1132,7 @@ fn miniz_low_probe_profiles_roundtrip_synthetic() {
                 compressed.len(),
                 result.corrections.len(),
                 processor.prediction_trace().unwrap().mismatch_count,
-                result.parameters,
+                result.estimator_parameters_json().unwrap(),
             );
         }
     }
@@ -1154,9 +1207,11 @@ fn low_alphabet_libdeflate_profiles_reconstruct_without_token_corrections() {
         );
         let trace = processor.prediction_trace().unwrap();
         assert_eq!(
-            trace.mismatch_count, 0,
+            trace.mismatch_count,
+            0,
             "level {level}: {:?}; {:?}",
-            result.parameters, trace.first_mismatches
+            result.estimator_parameters_json().unwrap(),
+            trace.first_mismatches
         );
         assert!(
             result.corrections.len() <= 512,
@@ -1210,21 +1265,16 @@ fn pdf_zlib_profiles_have_low_correction_overhead() {
                     if matches!(strategy, Strategy::Filtered) {
                         assert!(
                             matches!(
-                                result.parameters.unwrap().hash_algorithm,
+                                result.hash_algorithm().unwrap(),
                                 preflate_rs::HashAlgorithm::Zlib { .. }
                             ),
                             "{context}: {:?}",
-                            result.parameters
+                            result.estimator_parameters_json().unwrap()
                         );
-                        assert!(
-                            matches!(
-                                result.parameters.unwrap().matching_type,
-                                preflate_rs::MatchingType::Lazy {
-                                    filtered_matching: true,
-                                    ..
-                                }
-                            ),
-                            "{context}"
+                        assert_eq!(
+                            parameters(&result).unwrap()["behavior"]["Chain"]["parser"]["Lazy"]["minimum"],
+                            "FilteredSix",
+                            "{context}",
                         );
                     }
                     let recreated = recreate_whole_deflate_stream(
@@ -1238,7 +1288,7 @@ fn pdf_zlib_profiles_have_low_correction_overhead() {
                         "{context}: {} corrections / {} deflate bytes; {:?}",
                         result.corrections.len(),
                         compressed.len(),
-                        result.parameters
+                        result.estimator_parameters_json().unwrap()
                     );
                 }
             }
@@ -1333,7 +1383,11 @@ fn compressor_models_roundtrip_across_chunks() {
                         trace_chunk.compressed_size, chunk.compressed_size,
                         "{context}"
                     );
-                    assert_eq!(trace_chunk.parameters, chunk.parameters, "{context}");
+                    assert_eq!(
+                        trace_chunk.estimator_parameters_json().unwrap(),
+                        chunk.estimator_parameters_json().unwrap(),
+                        "{context}"
+                    );
                     assert_eq!(trace_chunk.corrections, chunk.corrections, "{context}");
                     assert_eq!(
                         traced.plain_text().text(),
@@ -1377,9 +1431,25 @@ fn compressor_models_roundtrip_across_chunks() {
                     );
                     mismatches_seen = trace.mismatch_count;
                     assert!(chunk.compressed_size > 0, "{context}");
-                    assert_eq!(chunk.parameters.is_some(), chunks == 0, "{context}");
-                    if let Some(params) = chunk.parameters {
-                        assert!(params.max_chain <= config.max_chain_length, "{context}");
+                    assert_eq!(
+                        chunk.estimator_parameters_json().unwrap().is_some(),
+                        chunks == 0,
+                        "{context}"
+                    );
+                    if let Some(params) = parameters(&chunk) {
+                        let behavior = &params["behavior"];
+                        let common = behavior.get("Chain").or_else(|| behavior.get("MiniZ"));
+                        if let Some(common) = common {
+                            assert!(
+                                common["common"]["search"]["budget"]["max_chain"]
+                                    .as_u64()
+                                    .unwrap()
+                                    <= u64::from(config.max_chain_length),
+                                "{context}"
+                            );
+                        } else {
+                            assert!(behavior.get("NoDictionary").is_some(), "{context}");
+                        }
                     }
                     decoded.extend_from_slice(processor.plain_text().text());
                     let (bytes, _) = recreate

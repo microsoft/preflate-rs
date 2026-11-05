@@ -4,6 +4,16 @@
  *  This software incorporates material from third parties. See NOTICE.txt for details.
  *--------------------------------------------------------------------------------------------*/
 
+//! Plaintext storage and views of the compressor's sliding history.
+//!
+//! `PlainText` separates newly produced bytes from a retained prefix that later
+//! references may still address. Shrinking a completed chunk keeps that prefix
+//! and adjusts position offsets rather than losing the compressor's history.
+//!
+//! `PreflateInput` is a cursor over this storage. It exposes bytes before and
+//! after the current position, including overlapping reference sources, and can
+//! temporarily restrict lookahead at a flush boundary without discarding data.
+
 use crate::{
     ExitCode,
     preflate_error::{Result, err_exit_code},
@@ -217,67 +227,72 @@ impl<'a> PreflateInput<'a> {
     }
 }
 
-#[test]
-fn test_length_behavior() {
-    let mut data = PlainText::new_with_data(vec![0; 10000]);
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    let mut input = PreflateInput::new(&data);
-    assert_eq!(input.total_length(), 10000);
-    assert_eq!(input.pos(), 0);
-    assert_eq!(input.remaining(), 10000);
+    #[test]
+    fn test_length_behavior() {
+        let mut data = PlainText::new_with_data(vec![0; 10000]);
 
-    input.advance(1000);
-    assert_eq!(input.total_length(), 10000);
-    assert_eq!(input.pos(), 1000);
-    assert_eq!(input.remaining(), 9000);
+        let mut input = PreflateInput::new(&data);
+        assert_eq!(input.total_length(), 10000);
+        assert_eq!(input.pos(), 0);
+        assert_eq!(input.remaining(), 10000);
 
-    input.advance(9000);
-    assert_eq!(input.total_length(), 10000);
-    assert_eq!(input.pos(), 10000);
-    assert_eq!(input.remaining(), 0);
+        input.advance(1000);
+        assert_eq!(input.total_length(), 10000);
+        assert_eq!(input.pos(), 1000);
+        assert_eq!(input.remaining(), 9000);
 
-    data.shrink_to_dictionary();
-    data.append(&[1; 10000]);
+        input.advance(9000);
+        assert_eq!(input.total_length(), 10000);
+        assert_eq!(input.pos(), 10000);
+        assert_eq!(input.remaining(), 0);
 
-    let mut input = PreflateInput::new(&data);
-    assert_eq!(input.total_length(), 20000);
-    assert_eq!(input.pos(), 10000);
-    assert_eq!(input.remaining(), 10000);
-    assert_eq!(input.cur_char(0), 1);
-    assert_eq!(input.cur_char(-1), 0);
-    assert_eq!(input.cur_char(-1000), 0);
+        data.shrink_to_dictionary();
+        data.append(&[1; 10000]);
 
-    input.advance(1000);
-    assert_eq!(input.total_length(), 20000);
-    assert_eq!(input.pos(), 11000);
-    assert_eq!(input.remaining(), 9000);
+        let mut input = PreflateInput::new(&data);
+        assert_eq!(input.total_length(), 20000);
+        assert_eq!(input.pos(), 10000);
+        assert_eq!(input.remaining(), 10000);
+        assert_eq!(input.cur_char(0), 1);
+        assert_eq!(input.cur_char(-1), 0);
+        assert_eq!(input.cur_char(-1000), 0);
 
-    assert_eq!(input.cur_char(-1), 1);
-    assert_eq!(input.cur_char(-1000), 1);
-}
+        input.advance(1000);
+        assert_eq!(input.total_length(), 20000);
+        assert_eq!(input.pos(), 11000);
+        assert_eq!(input.remaining(), 9000);
 
-#[test]
-fn flush_limits_preserve_positions_and_prefix_history() {
-    let mut plain = PlainText::new_with_data(b"history".to_vec());
-    plain.shrink_to_dictionary();
-    plain.append(b"abcdef");
-    let mut input = PreflateInput::new(&plain);
-    assert!(input.limit(7).is_err());
-    input.limit(3).unwrap();
-    assert_eq!(input.pos(), 7);
-    assert_eq!(input.total_length(), 10);
-    assert_eq!(input.remaining(), 3);
-    assert_eq!(input.cur_chars(0), b"abc");
-    assert_eq!(input.cur_chars(-7), b"historyabc");
-    assert!(input.limit(1).is_err());
-    input.advance(3);
-    assert_eq!(input.remaining(), 0);
-    input.clear_limit();
-    assert_eq!(input.pos(), 10);
-    assert_eq!(input.total_length(), 13);
-    assert_eq!(input.cur_chars(0), b"def");
-    input.limit(0).unwrap();
-    assert_eq!(input.remaining(), 0);
-    input.clear_limit();
-    assert_eq!(input.remaining(), 3);
+        assert_eq!(input.cur_char(-1), 1);
+        assert_eq!(input.cur_char(-1000), 1);
+    }
+
+    #[test]
+    fn flush_limits_preserve_positions_and_prefix_history() {
+        let mut plain = PlainText::new_with_data(b"history".to_vec());
+        plain.shrink_to_dictionary();
+        plain.append(b"abcdef");
+        let mut input = PreflateInput::new(&plain);
+        assert!(input.limit(7).is_err());
+        input.limit(3).unwrap();
+        assert_eq!(input.pos(), 7);
+        assert_eq!(input.total_length(), 10);
+        assert_eq!(input.remaining(), 3);
+        assert_eq!(input.cur_chars(0), b"abc");
+        assert_eq!(input.cur_chars(-7), b"historyabc");
+        assert!(input.limit(1).is_err());
+        input.advance(3);
+        assert_eq!(input.remaining(), 0);
+        input.clear_limit();
+        assert_eq!(input.pos(), 10);
+        assert_eq!(input.total_length(), 13);
+        assert_eq!(input.cur_chars(0), b"def");
+        input.limit(0).unwrap();
+        assert_eq!(input.remaining(), 0);
+        input.clear_limit();
+        assert_eq!(input.remaining(), 3);
+    }
 }

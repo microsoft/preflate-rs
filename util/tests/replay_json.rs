@@ -1,3 +1,6 @@
+//! Tests the JSON replay CLI with explicit settings, file ranges, and synthetic blocks.
+//! Checks diagnostic output, execution limits, input rejection, and reconstruction verification.
+
 use std::{
     fs,
     io::Write,
@@ -59,7 +62,22 @@ fn replay_reports_later_blocks_with_preceding_dictionary_context() {
     assert_eq!(result["blocks"][0]["plaintext_offset"], 16);
     assert_eq!(result["blocks"][0]["dictionary_reset"], false);
     assert!(result["reconstruction_bytes"].as_u64().unwrap() > 0);
-    assert_eq!(result["effective_parameters"], result["parameters"]);
+    assert_eq!(
+        result["effective_reconstruction_parameters"],
+        result["reconstruction_parameters"]
+    );
+    assert_eq!(
+        result["input_statistics"],
+        json!({
+            "literal_tokens":4,
+            "reference_tokens":2,
+            "reference_lengths":{"12":2},
+            "maximum_reference_distance":3,
+            "distance_one_maximum_matches":0,
+            "max_tokens_per_block":5,
+            "max_huffman_block_bytes":16
+        })
+    );
 }
 
 #[test]
@@ -77,13 +95,15 @@ fn replay_without_encoding_labels_unverified_results() {
 fn replay_rejects_bad_parameters_ranges_tokens_limits_and_unknown_fields() {
     let mut cases = Vec::new();
     let mut input = request();
-    input["parameters"]["window_bits"] = json!(32);
+    input["reconstruction_parameters"]["behavior"]["Chain"]["common"]["dictionary"]["window_bits"] =
+        json!(32);
     cases.push(input);
     let mut input = request();
-    input["parameters"]["hash_algorithm"]["Zlib"]["hash_shift"] = json!(16);
+    input["reconstruction_parameters"]["behavior"]["Chain"]["common"]["dictionary"]["index"]["Chain"]
+        ["hash"]["Zlib"]["hash_shift"] = json!(16);
     cases.push(input);
     let mut input = request();
-    input["parameters"]["surprise"] = json!(true);
+    input["reconstruction_parameters"]["surprise"] = json!(true);
     cases.push(input);
     let mut input = request();
     input["options"]["block_start"] = json!(3);
@@ -165,8 +185,14 @@ fn replay_preserves_parameters_and_bounds_mismatch_examples() {
     assert!(output.status.success(), "{result}");
     let result = &result["result"];
     assert_eq!(result["verified"], true);
-    assert_eq!(result["parameters"], input["parameters"]);
-    assert_eq!(result["effective_parameters"], input["parameters"]);
+    assert_eq!(
+        result["reconstruction_parameters"],
+        input["reconstruction_parameters"]
+    );
+    assert_eq!(
+        result["effective_reconstruction_parameters"],
+        input["reconstruction_parameters"]
+    );
     assert!(result["total_mismatches"].as_u64().unwrap() > 2);
     assert_eq!(result["mismatches"].as_array().unwrap().len(), 2);
     assert_eq!(result["mismatches_truncated"], true);
@@ -210,22 +236,72 @@ fn replay_enforces_raw_stream_limits_during_parsing() {
 }
 
 #[test]
-fn typed_parameter_json_roundtrips_all_supplied_variants() {
+fn parameter_json_replays_all_supplied_variants() {
     let matching = [
-        json!("Greedy"),
-        json!({"Lazy":{"max_lazy":16,"filtered_matching":false,"behavior":{"Zlib":{"good_length":8}}}}),
-        json!({"Lazy":{"max_lazy":16,"filtered_matching":true,"behavior":"RecomputeAfterLiteral"}}),
-        json!({"MiniZ":{"max_probes":128,"greedy":false}}),
-        json!({"LibdeflateLazy":{"two_positions":true}}),
-        json!("LibdeflateGreedy"),
-        json!({"WindowsLazy":{"max_lazy":32}}),
+        json!({"Greedy":{"short_match_cutoff":8192}}),
+        json!({"Lazy":{
+            "lookahead":{"max_lazy":16,"behavior":{"Zlib":{"good_length":8}}},
+            "minimum":{"Three":{"short_match_cutoff":8192}}
+        }}),
+        json!({"Lazy":{
+            "lookahead":{"max_lazy":16,"behavior":"RecomputeAfterLiteral"},
+            "minimum":"FilteredSix"
+        }}),
+        json!({"LibdeflateLazy":{"two_positions":true,"short_match_cutoff":8192}}),
+        json!({"LibdeflateGreedy":{"short_match_cutoff":8192}}),
+        json!({"WindowsLazy":{"max_lazy":32,"short_match_cutoff":8192}}),
     ];
     for variant in matching {
-        let mut parameters = request()["parameters"].clone();
-        parameters["matching_type"] = variant;
-        let typed: preflate_rs::TokenPredictorParameters =
-            serde_json::from_value(parameters.clone()).unwrap();
-        assert_eq!(serde_json::to_value(typed).unwrap(), parameters);
+        let mut input = request();
+        if variant.get("LibdeflateLazy").is_some() {
+            input["reconstruction_parameters"]["behavior"]["Chain"]["common"]["dictionary"]["index"] =
+                json!("LibdeflateDualHash");
+        }
+        input["reconstruction_parameters"]["behavior"]["Chain"]["parser"] = variant;
+        let (output, result) = run(&input);
+        assert!(output.status.success(), "{result}");
+        assert_eq!(
+            result["result"]["reconstruction_parameters"],
+            input["reconstruction_parameters"]
+        );
+    }
+    let mut input = request();
+    let mut common = input["reconstruction_parameters"]["behavior"]["Chain"]["common"].clone();
+    common["distance"] = json!({"Enabled":{"matches_to_start":false}});
+    common["search"] =
+        json!({"max_probes":128,"budget":{"max_chain":128},"input_tail":"HashMinimum"});
+    input["reconstruction_parameters"]["behavior"] =
+        json!({"MiniZ":{"common":common,"greedy":false,"short_match_cutoff":8192}});
+    let (output, result) = run(&input);
+    assert!(output.status.success(), "{result}");
+    assert_eq!(
+        result["result"]["reconstruction_parameters"],
+        input["reconstruction_parameters"]
+    );
+}
+
+#[test]
+fn replay_requires_reconstruction_json_not_estimator_or_flat_json() {
+    let mut wrapped = request();
+    wrapped["reconstruction_parameters"] = json!({
+        "reconstruction": wrapped["reconstruction_parameters"].clone(),
+        "model": "custom"
+    });
+    let mut flat = request();
+    flat["reconstruction_parameters"] = json!({
+        "max_chain": 128, "nice_length": 258, "window_bits": 15
+    });
+    let mut old_envelope = request();
+    let settings = old_envelope
+        .as_object_mut()
+        .unwrap()
+        .remove("reconstruction_parameters")
+        .unwrap();
+    old_envelope["parameters"] = settings;
+    for input in [wrapped, flat, old_envelope] {
+        let (output, result) = run(&input);
+        assert!(!output.status.success(), "{result}");
+        assert_eq!(result["error"]["code"], "InvalidParameter");
     }
 }
 
@@ -250,7 +326,8 @@ fn replay_reports_correction_failures_as_json_without_hiding_them() {
             ]
         }]
     });
-    input["parameters"]["hash_algorithm"] = json!("Libdeflate4");
+    input["reconstruction_parameters"]["behavior"]["Chain"]["common"]["dictionary"]["index"] =
+        json!("LibdeflateDualHash");
     input["options"] = json!({});
     let (output, result) = run(&input);
     assert!(!output.status.success());
@@ -269,9 +346,78 @@ fn replay_only_normalizes_parameters_when_explicitly_requested() {
     let (output, result) = run(&input);
     assert!(output.status.success(), "{result}");
     assert_eq!(result["result"]["verified"], true);
-    assert_eq!(result["result"]["parameters"], input["parameters"]);
+    assert_eq!(
+        result["result"]["reconstruction_parameters"],
+        input["reconstruction_parameters"]
+    );
     assert_ne!(
-        result["result"]["effective_parameters"],
-        input["parameters"]
+        result["result"]["effective_reconstruction_parameters"],
+        input["reconstruction_parameters"]
+    );
+}
+
+#[test]
+fn replay_rejects_two_position_search_without_the_required_index() {
+    for hash in [
+        json!("Libdeflate4"),
+        json!("Libdeflate4_15"),
+        json!({"Zlib":{"hash_mask":32767,"hash_shift":5}}),
+    ] {
+        let mut input = request();
+        input["reconstruction_parameters"]["behavior"]["Chain"]["common"]["dictionary"]["index"] =
+            json!({"Chain":{"hash":hash}});
+        input["reconstruction_parameters"]["behavior"]["Chain"]["parser"] =
+            json!({"LibdeflateLazy":{"two_positions":true,"short_match_cutoff":8192}});
+        let (output, result) = run(&input);
+        assert!(!output.status.success());
+        assert!(output.stderr.is_empty());
+        assert_eq!(result["status"], "error");
+        assert_eq!(result["error"]["code"], "InvalidParameter");
+        assert!(
+            result["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("requires the dual-hash index")
+        );
+    }
+    let mut input = request();
+    input["reconstruction_parameters"]["behavior"]["Chain"]["common"]["dictionary"]["index"] =
+        json!("LibdeflateDualHash");
+    input["reconstruction_parameters"]["behavior"]["Chain"]["parser"] =
+        json!({"LibdeflateLazy":{"two_positions":true,"short_match_cutoff":8192}});
+    let (output, result) = run(&input);
+    assert!(output.status.success(), "{result}");
+    assert_eq!(result["result"]["verified"], true);
+}
+
+#[test]
+fn replay_input_statistics_count_stored_and_repetitive_input_correctly() {
+    let mut input = request();
+    input["source"] = json!({
+        "type":"blocks",
+        "blocks":[
+            {"type":"stored","last":false,"bytes":[97]},
+            {"type":"huffman","last":true,"tokens":[
+                {"type":"literal","value":97},
+                {"type":"reference","length":258,"distance":1},
+                {"type":"reference","length":3,"distance":1}
+            ]}
+        ]
+    });
+    input["options"] = json!({"encode":false});
+    let (output, result) = run(&input);
+    assert!(output.status.success(), "{result}");
+    assert_eq!(result["result"]["plaintext_bytes"], 263);
+    assert_eq!(
+        result["result"]["input_statistics"],
+        json!({
+            "literal_tokens":1,
+            "reference_tokens":2,
+            "reference_lengths":{"3":1,"258":1},
+            "maximum_reference_distance":1,
+            "distance_one_maximum_matches":1,
+            "max_tokens_per_block":3,
+            "max_huffman_block_bytes":262
+        })
     );
 }

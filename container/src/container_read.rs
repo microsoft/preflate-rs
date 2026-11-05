@@ -1,3 +1,15 @@
+//! Decodes framed preflate blocks and restores the original file contents.
+//!
+//! The input state machine accumulates headers and payloads across arbitrary
+//! buffer boundaries. Zstd payloads share one decoder because they are successive
+//! flush segments with common history, not independent compressed frames.
+//!
+//! Decoded payloads are dispatched as literal bytes, DEFLATE reconstruction data,
+//! or image data. Embedded DEFLATE streams retain their reconstruction state
+//! across continuation blocks, and PNG payloads recover their IDAT framing.
+//! A running CRC covers every output byte and is checked against the final
+//! container marker.
+
 use byteorder::ReadBytesExt;
 use crc32fast::Hasher as CrcHasher;
 use lepton_jpeg::{DEFAULT_THREAD_POOL, EnabledFeatures};

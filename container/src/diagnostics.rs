@@ -1,11 +1,12 @@
-//! Offline DEFLATE diagnostics. Unlike the compression scanner, failed candidates
-//! are reported, including possible signature false positives.
+//! Read-only scanning and measurement of embedded DEFLATE streams.
+//! Reports boundaries, correction costs, verification results, and bounded traces,
+//! including rejected candidates that compression scanning would skip.
 
 use std::{collections::BTreeMap, io::Cursor, time::Instant};
 
 use preflate_rs::{
     CodecCorrection, CountNonDefaultActions, ExitCode, PreflateConfig, PreflateError,
-    PreflateStreamProcessor, TokenPredictorParameters,
+    PreflateStreamProcessor,
 };
 #[cfg(feature = "diagnostics")]
 use preflate_rs::{DeflateHuffmanType, DeflateToken, DeflateTokenBlockType};
@@ -102,36 +103,29 @@ pub struct StreamTrace {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct DiagnosticParameters {
-    hash_algorithm: String,
-    matching_type: String,
-    strategy: String,
-    add_policy: String,
-    block_type_strategy: String,
-    window_bits: u32,
-    nice_length: u32,
-    max_chain: u32,
-    max_token_count: u16,
-    max_dist_3_matches: u32,
-    matches_to_start_detected: bool,
-    very_far_matches_detected: bool,
+    #[serde(deserialize_with = "deserialize_object")]
+    reconstruction: serde_json::Value,
+    model: String,
 }
 
-impl From<TokenPredictorParameters> for DiagnosticParameters {
-    fn from(p: TokenPredictorParameters) -> Self {
-        Self {
-            hash_algorithm: format!("{:?}", p.hash_algorithm),
-            matching_type: format!("{:?}", p.matching_type),
-            strategy: format!("{:?}", p.strategy),
-            add_policy: format!("{:?}", p.add_policy),
-            block_type_strategy: format!("{:?}", p.block_type_strategy),
-            window_bits: p.window_bits,
-            nice_length: p.nice_length,
-            max_chain: p.max_chain,
-            max_token_count: p.max_token_count,
-            max_dist_3_matches: p.max_dist_3_matches,
-            matches_to_start_detected: p.matches_to_start_detected,
-            very_far_matches_detected: p.very_far_matches_detected,
-        }
+fn deserialize_object<'de, D>(deserializer: D) -> Result<serde_json::Value, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    if !value.is_object() {
+        return Err(serde::de::Error::custom(
+            "reconstruction settings must be an object",
+        ));
+    }
+    Ok(value)
+}
+
+impl DiagnosticParameters {
+    /// Read authoritative reconstruction settings and the supplementary model hypothesis.
+    pub fn from_json(json: &str) -> preflate_rs::Result<Self> {
+        serde_json::from_str(json)
+            .map_err(|error| PreflateError::new(ExitCode::InvalidParameter, error.to_string()))
     }
 }
 
@@ -381,8 +375,17 @@ fn analyze(
         }
         match result {
             Ok(chunk) => {
-                if let Some(parameters) = chunk.parameters {
-                    diagnostic.parameters = Some(parameters.into());
+                match chunk.estimator_parameters_json().and_then(|json| {
+                    json.as_deref()
+                        .map(DiagnosticParameters::from_json)
+                        .transpose()
+                }) {
+                    Ok(Some(parameters)) => diagnostic.parameters = Some(parameters),
+                    Ok(None) => {}
+                    Err(error) => {
+                        diagnostic.fail(error);
+                        break;
+                    }
                 }
                 diagnostic.deflate_bytes += chunk.compressed_size as u64;
                 diagnostic.plaintext_bytes += state.plain_text().len() as u64;
@@ -426,11 +429,21 @@ fn analyze(
         }
     }
     #[cfg(feature = "diagnostics")]
+    if diagnostic.parameters.is_none()
+        && let Some(predictions) = state.prediction_trace()
+    {
+        match predictions.estimator_parameters_json().and_then(|json| {
+            json.as_deref()
+                .map(DiagnosticParameters::from_json)
+                .transpose()
+        }) {
+            Ok(parameters) => diagnostic.parameters = parameters,
+            Err(error) => diagnostic.fail(error),
+        }
+    }
+    #[cfg(feature = "diagnostics")]
     if let (Some(trace), Some(predictions)) = (&mut diagnostic.trace, state.prediction_trace()) {
         trace.last_stage = predictions.stage;
-        if diagnostic.parameters.is_none() {
-            diagnostic.parameters = predictions.parameters.map(Into::into);
-        }
         trace.token_count = predictions.token_count;
         trace.token_mismatches = predictions.mismatch_count;
         trace.first_mismatches = predictions
@@ -655,6 +668,33 @@ pub fn scan_deflate_diagnostics_with_options(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn scanner_reports_keep_reconstruction_and_model_separate() {
+        let report = serde_json::json!({
+            "reconstruction": {
+                "max_token_count": 16383,
+                "block_type_strategy": "Dynamic",
+                "behavior": {"NoDictionary": {"strategy": "HuffOnly"}}
+            },
+            "model": "custom"
+        });
+        let parameters = super::DiagnosticParameters::from_json(&report.to_string()).unwrap();
+        assert_eq!(serde_json::to_value(&parameters).unwrap(), report);
+        assert_eq!(
+            serde_json::from_value::<super::DiagnosticParameters>(report).unwrap(),
+            parameters
+        );
+        for invalid in [
+            serde_json::json!({"hash_algorithm": "Zlib"}),
+            serde_json::json!({"reconstruction": {}, "model": []}),
+            serde_json::json!({"reconstruction": [], "model": "custom"}),
+            serde_json::json!({"reconstruction": {}, "estimation": {"model": "custom"}}),
+            serde_json::json!({"reconstruction": {}, "model": "custom", "max_chain": 128}),
+        ] {
+            assert!(super::DiagnosticParameters::from_json(&invalid.to_string()).is_err());
+        }
+    }
+
     use super::*;
     use miniz_oxide::deflate::{compress_to_vec, compress_to_vec_zlib};
 
@@ -1017,7 +1057,10 @@ mod tests {
             .unwrap();
         assert_eq!(baseline.corrections, diagnostic.corrections);
         assert_eq!(baseline.compressed_size, diagnostic.compressed_size);
-        assert_eq!(baseline.parameters, diagnostic.parameters);
+        assert_eq!(
+            baseline.estimator_parameters_json().unwrap(),
+            diagnostic.estimator_parameters_json().unwrap()
+        );
         assert!(counts.total_non_default > 0);
         assert_eq!(
             counts.total_non_default,

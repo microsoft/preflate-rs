@@ -1,3 +1,6 @@
+//! Per-file CPU and wall-time measurements for diagnostic scans.
+//! Repeats scans and writes JSONL samples separately from the main scan report.
+
 use std::{
     fs::{self, Metadata, OpenOptions},
     io::{BufWriter, Write},

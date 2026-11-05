@@ -4,6 +4,9 @@
  *  This software incorporates material from third parties. See NOTICE.txt for details.
  *--------------------------------------------------------------------------------------------*/
 
+//! Computes integer bit widths for correction coding and rolling hashes for
+//! diagnostic comparisons of predictor state.
+
 pub fn bit_length(n: u32) -> u32 {
     32 - n.leading_zeros()
 }

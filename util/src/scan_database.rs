@@ -1,3 +1,15 @@
+//! SQLite persistence for scanner runs, source files, streams, and diagnostics.
+//!
+//! File versions and stream boundaries describe the inputs, while run-specific
+//! rows record their measurements and verification outcomes. Parameter reports
+//! are deduplicated separately so streams with identical settings can share a
+//! profile row without losing their individual results.
+//!
+//! Each profile stores the full reconstruction/model JSON report. Searchable
+//! columns are derived only from active reconstruction settings; absent options
+//! remain NULL rather than becoming artificial defaults. Run completion is
+//! recorded only after the scan summary has been validated.
+
 use std::{path::Path, time::Duration};
 
 use rusqlite::{Connection, params};
@@ -5,20 +17,103 @@ use serde_json::{Value, json};
 
 use crate::{Cli, FileReport, Result, Summary};
 
-const PROFILE_FIELDS: &[&str] = &[
-    "hash_algorithm",
-    "matching_type",
-    "strategy",
-    "add_policy",
-    "block_type_strategy",
-    "window_bits",
-    "nice_length",
-    "max_chain",
-    "max_token_count",
-    "max_dist_3_matches",
-    "matches_to_start_detected",
-    "very_far_matches_detected",
-];
+fn required<'a>(value: &'a Value, field: &str) -> Result<&'a Value> {
+    value
+        .get(field)
+        .ok_or_else(|| format!("missing canonical parameter field {field}").into())
+}
+
+fn variant(value: &Value) -> Result<(&str, &Value)> {
+    if let Some(name) = value.as_str() {
+        return Ok((name, value));
+    }
+    let object = value
+        .as_object()
+        .ok_or("expected canonical parameter variant")?;
+    if object.len() != 1 {
+        return Err("canonical parameter variant must have exactly one tag".into());
+    }
+    let (name, settings) = object.iter().next().expect("checked one variant");
+    Ok((name.as_str(), settings))
+}
+
+fn profile_columns(settings: &Value) -> Result<Value> {
+    let reconstruction = required(settings, "reconstruction")?;
+    if !required(settings, "model")?.is_string() {
+        return Err("model hypothesis must be a string".into());
+    }
+    let (behavior, body) = variant(required(reconstruction, "behavior")?)?;
+    let mut columns = json!({
+        "settings_json": settings.to_string(),
+        "block_type_strategy": required(reconstruction, "block_type_strategy")?,
+        "max_token_count": required(reconstruction, "max_token_count")?,
+    });
+    if behavior == "NoDictionary" {
+        columns["hash_algorithm"] = json!("None");
+        columns["strategy"] = required(body, "strategy")?.clone();
+        return Ok(columns);
+    }
+    if !matches!(behavior, "Chain" | "MiniZ") {
+        return Err(format!("unknown reconstruction behavior {behavior}").into());
+    }
+    let common = required(body, "common")?;
+    let dictionary = required(common, "dictionary")?;
+    let (index, index_settings) = variant(required(dictionary, "index")?)?;
+    let hash_algorithm = match index {
+        "Chain" => match variant(required(index_settings, "hash")?)?.0 {
+            "Libdeflate4" => "Libdeflate4Fast",
+            "Libdeflate4_15" => "Libdeflate4Fast15",
+            other => other,
+        },
+        "LibdeflateDualHash" => "Libdeflate4",
+        _ => return Err(format!("unknown dictionary index {index}").into()),
+    };
+    columns["hash_algorithm"] = json!(hash_algorithm);
+    columns["window_bits"] = required(dictionary, "window_bits")?.clone();
+    columns["add_policy"] = json!(variant(required(dictionary, "insertion")?)?.0);
+    let search = required(common, "search")?;
+    columns["max_chain"] = required(required(search, "budget")?, "max_chain")?.clone();
+    let (distance, distance_settings) = variant(required(common, "distance")?)?;
+    let bounds = if distance == "Window" {
+        let bounds = required(distance_settings, "bounds")?
+            .as_str()
+            .ok_or("window bounds must be a string")?;
+        columns["matches_to_start_detected"] =
+            required(required(distance_settings, "history")?, "matches_to_start")?.clone();
+        Some(bounds)
+    } else {
+        if distance == "Enabled" {
+            columns["matches_to_start_detected"] =
+                required(distance_settings, "matches_to_start")?.clone();
+        }
+        None
+    };
+    columns["strategy"] = json!(bounds.unwrap_or(distance));
+    if behavior == "MiniZ" {
+        columns["matching_type"] = json!("MiniZ");
+        columns["max_dist_3_matches"] = required(body, "short_match_cutoff")?.clone();
+    } else {
+        columns["nice_length"] = required(search, "nice_length")?.clone();
+        columns["very_far_matches_detected"] =
+            json!(matches!(bounds, Some("Full" | "ExcludeOldest")));
+        let (parser, parser_settings) = variant(required(body, "parser")?)?;
+        columns["matching_type"] = json!(parser);
+        let cutoff = if parser == "Lazy" {
+            let (minimum, settings) = variant(required(parser_settings, "minimum")?)?;
+            match minimum {
+                "FilteredSix" => None,
+                "Three" => Some(required(settings, "short_match_cutoff")?),
+                _ => return Err(format!("unknown lazy minimum {minimum}").into()),
+            }
+        } else {
+            Some(required(parser_settings, "short_match_cutoff")?)
+        };
+        if let Some(cutoff) = cutoff {
+            columns["max_dist_3_matches"] = cutoff.clone();
+        }
+    }
+    Ok(columns)
+}
 
 fn sql(value: &Value) -> Result<rusqlite::types::Value> {
     use rusqlite::types::Value as Sql;
@@ -73,13 +168,6 @@ pub struct ScanDatabase {
 }
 
 impl ScanDatabase {
-    #[cfg(test)]
-    pub fn create(path: &Path, label: &str, cli: &Cli) -> Result<Self> {
-        let mut configuration = serde_json::to_value(cli)?;
-        configuration["input"] = serde_json::to_value(std::fs::canonicalize(&cli.input)?)?;
-        Self::create_with_configuration(path, label, cli, &configuration)
-    }
-
     pub fn create_with_configuration(
         path: &Path,
         label: &str,
@@ -132,10 +220,7 @@ impl ScanDatabase {
         if settings.is_null() {
             return Ok(None);
         }
-        let mut columns = json!({"settings_json": settings.to_string()});
-        for field in PROFILE_FIELDS {
-            columns[*field] = settings[*field].clone();
-        }
+        let columns = profile_columns(settings)?;
         insert(db, "profiles", columns, true)?;
         Ok(Some(db.query_row(
             "SELECT id FROM profiles WHERE settings_json=?",
@@ -338,6 +423,88 @@ mod tests {
     use miniz_oxide::deflate::compress_to_vec;
     use std::fs;
 
+    #[test]
+    fn profile_indexes_describe_only_active_reconstruction_settings() {
+        let report = json!({
+            "reconstruction": {
+                "max_token_count": 16383,
+                "block_type_strategy": "Dynamic",
+                "behavior": {"Chain": {
+                    "common": {
+                        "dictionary": {
+                            "index": {"Chain": {"hash": {"Zlib": {"hash_mask": 32767, "hash_shift": 5}}}},
+                            "window_bits": 15,
+                            "insertion": "AddAll"
+                        },
+                        "distance": {"Window": {"history": {"matches_to_start": false}, "bounds": "Lookahead"}},
+                        "search": {"budget": {"max_chain": 128}, "nice_length": 258, "input_tail": "HashMinimum"}
+                    },
+                    "parser": {"Lazy": {
+                        "lookahead": {"max_lazy": 16, "behavior": {"Zlib": {"good_length": 8}}},
+                        "minimum": "FilteredSix"
+                    }}
+                }}
+            },
+            "model": "custom"
+        });
+        let columns = profile_columns(&report).unwrap();
+        assert_eq!(columns["hash_algorithm"], "Zlib");
+        assert_eq!(columns["matching_type"], "Lazy");
+        assert_eq!(columns["strategy"], "Lookahead");
+        assert_eq!(columns["max_chain"], 128);
+        assert!(columns.get("max_dist_3_matches").is_none());
+        assert_eq!(columns["settings_json"], report.to_string());
+        assert!(profile_columns(&json!({"max_chain": 128})).is_err());
+
+        for (index, expected) in [
+            (json!({"Chain": {"hash": "Libdeflate4"}}), "Libdeflate4Fast"),
+            (
+                json!({"Chain": {"hash": "Libdeflate4_15"}}),
+                "Libdeflate4Fast15",
+            ),
+            (json!("LibdeflateDualHash"), "Libdeflate4"),
+        ] {
+            for bounds in ["Full", "ExcludeOldest", "Lookahead", "LookaheadMinusOne"] {
+                let mut explicit = report.clone();
+                explicit["model"] = json!("zlib");
+                let common = &mut explicit["reconstruction"]["behavior"]["Chain"]["common"];
+                common["dictionary"]["index"] = index.clone();
+                common["distance"] = json!({"Window": {
+                    "history": {"matches_to_start": true}, "bounds": bounds
+                }});
+                let columns = profile_columns(&explicit).unwrap();
+                assert_eq!(columns["hash_algorithm"], expected);
+                assert_eq!(columns["strategy"], bounds);
+                assert_eq!(columns["matches_to_start_detected"], true);
+                assert_eq!(
+                    columns["very_far_matches_detected"],
+                    matches!(bounds, "Full" | "ExcludeOldest")
+                );
+            }
+        }
+
+        let mut miniz = report.clone();
+        let mut common = miniz["reconstruction"]["behavior"]["Chain"]["common"].clone();
+        common["distance"] = json!({"Enabled": {"matches_to_start": false}});
+        common["search"] =
+            json!({"max_probes": 128, "budget": {"max_chain": 128}, "input_tail": "HashMinimum"});
+        miniz["reconstruction"]["behavior"] =
+            json!({"MiniZ": {"common": common, "greedy": false, "short_match_cutoff": 4096}});
+        let columns = profile_columns(&miniz).unwrap();
+        assert_eq!(columns["matching_type"], "MiniZ");
+        assert!(columns.get("nice_length").is_none());
+        assert_eq!(columns["max_dist_3_matches"], 4096);
+
+        let mut stored = report;
+        stored["reconstruction"]["behavior"] = json!({"NoDictionary": {"strategy": "Store"}});
+        let columns = profile_columns(&stored).unwrap();
+        assert_eq!(columns["hash_algorithm"], "None");
+        assert_eq!(columns["strategy"], "Store");
+        assert!(columns.get("window_bits").is_none());
+        assert!(columns.get("nice_length").is_none());
+        assert!(columns.get("max_chain").is_none());
+    }
+
     fn cli(input: &Path, database: &Path, label: &str) -> Cli {
         Cli::try_parse_from([
             "preflate_scan",
@@ -474,5 +641,13 @@ mod tests {
             &path,
             &options
         ));
+    }
+
+    impl ScanDatabase {
+        pub fn create(path: &Path, label: &str, cli: &Cli) -> Result<Self> {
+            let mut configuration = serde_json::to_value(cli)?;
+            configuration["input"] = serde_json::to_value(std::fs::canonicalize(&cli.input)?)?;
+            Self::create_with_configuration(path, label, cli, &configuration)
+        }
     }
 }

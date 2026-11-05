@@ -89,6 +89,22 @@ Run focused tests first, then the relevant broader round-trip coverage. Preserve
 existing sample files and validate byte-for-byte reconstruction, not just
 successful decompression.
 
+## Rust imports
+
+Always use `use` declarations at the top of the Rust file or enclosing module
+instead of fully qualified paths in code. Keep test-only imports at the top of
+the gated test module. Use import aliases to resolve name collisions; retain
+fully qualified syntax only when Rust requires it for disambiguation.
+
+## Rust test organization
+
+Always put inline Rust unit tests in a `#[cfg(test)] mod tests` at the end of the
+source file or enclosing inline module, with `use super::*;` to access the code
+under test. Keep test-only imports and private fixtures/helpers inside that
+module rather than interleaving them with production code. Shared test support
+may live in a separate `#[cfg(test)]` module; integration tests remain in their
+dedicated test targets.
+
 ## Architecture
 
 The core pipeline parses DEFLATE tokens, estimates compressor parameters, predicts

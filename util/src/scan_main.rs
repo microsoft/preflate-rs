@@ -1,3 +1,7 @@
+//! Command-line DEFLATE scanning and diagnostic report generation.
+//! Coordinates file or database-selected scans, limits, verification, and optional
+//! tracing without subsequent Zstd compression.
+
 #![forbid(unsafe_code)]
 
 mod scan_baseline;
@@ -7,8 +11,6 @@ mod scan_parallel;
 mod scan_perf;
 mod scan_progress;
 mod scan_source;
-#[cfg(test)]
-use scan_fs::cloud_attributes;
 use scan_fs::cloud_only;
 
 use std::{
@@ -1071,4 +1073,6 @@ mod tests {
             assert!(!cloud_attributes(attributes));
         }
     }
+
+    use scan_fs::cloud_attributes;
 }

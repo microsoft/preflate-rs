@@ -1,26 +1,29 @@
-//! This module estimates the parameters used to compress this DEFLATE stream. If we get these
-//! parameters right, it will minimize or even eliminate the need to encode any corrections when we
-//! recompress the stream.
+//! Estimation of the compressor settings behind a DEFLATE stream.
+//! Combines token observations, compressor models, and bounded candidate scoring
+//! to choose settings that minimize prediction corrections.
 
+mod add_policy_estimator;
 mod complevel_estimator;
 mod compressor_profile;
 mod depth_estimator;
+mod estimation_result;
 mod evidence_policy;
+mod initial_estimate;
+mod models;
 mod parser_estimator;
-pub(crate) mod prediction_scoring;
+mod prediction_encoding;
+mod prediction_scoring;
+mod preflate_parameter_estimator;
 mod preflate_stream_info;
 
-pub(crate) use complevel_estimator::{CandidateEvidence, DepthEstimate};
-pub(crate) use compressor_profile::{ParameterEstimate, ParserContext};
-pub(crate) use depth_estimator::{DistancePolicy, HashTableDepthEstimator};
-pub(crate) use evidence_policy::ParserEvidencePolicy;
-pub(crate) use parser_estimator::{InsertionConstraint, ParserInference};
-pub(crate) use preflate_stream_info::PreflateStreamInfo;
+pub use estimation_result::EstimationResult;
+pub use prediction_encoding::estimate_and_encode;
 
 #[cfg(test)]
-pub(crate) use compressor_profile::zlib_compatible;
-#[cfg(test)]
-pub(crate) use preflate_stream_info::extract_preflate_info;
+pub use preflate_parameter_estimator::tests::estimate_preflate_parameters;
 
-pub mod add_policy_estimator;
-pub mod preflate_parameter_estimator;
+#[cfg(feature = "diagnostics")]
+pub use preflate_parameter_estimator::estimate_preflate_result;
+
+#[cfg(test)]
+pub mod test_support;

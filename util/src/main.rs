@@ -1,3 +1,6 @@
+//! Command-line compression and round-trip verification of files and directories.
+//! Reports container sizes, reconstruction overhead, and optional Zstd-only baselines.
+
 use clap::Parser;
 use cpu_time::ProcessTime;
 use env_logger::Builder;

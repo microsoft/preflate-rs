@@ -1,3 +1,6 @@
+//! Assembly of executable compressor settings from stream and match-chain evidence.
+//! Coordinates insertion, hash, window, and parser estimation with bounded profile refinements.
+
 /*---------------------------------------------------------------------------------------------
  *  Copyright (c) Microsoft Corporation. All rights reserved.
  *  Licensed under the Apache License, Version 2.0. See LICENSE.txt in the project root for license information.
@@ -7,44 +10,33 @@
 use crate::{
     bit_helper::bit_length,
     deflate::{deflate_constants, deflate_reader::DeflateContents},
-    hash_algorithm::HashAlgorithm,
-    models::zlib::refine_parameters as refine_zlib_parameters,
-    parameters::{DictionaryAddPolicy, MatchingType},
+    estimator::models::zlib::refine_parameters as refine_zlib_parameters,
     preflate_error::Result,
     preflate_input::PlainText,
 };
 
 use super::{
     complevel_estimator::estimate_preflate_depth, compressor_profile::select_compressor_profile,
-    depth_estimator::DistancePolicy, preflate_stream_info::PreflateStreamInfo,
+    initial_estimate::InitialEstimate, models::zlib, preflate_stream_info::PreflateStreamInfo,
 };
 
-#[cfg(test)]
-use {
-    super::{
-        complevel_estimator::DepthEstimate,
-        compressor_profile::{ParameterEstimate, ParserContext},
-        preflate_stream_info::extract_preflate_info,
-    },
-    crate::{models::zlib::SLOW_PREFLATE_PARSER_SETTINGS, parameters::LazyBehavior},
+use crate::{
+    parameters::{BlockTypeStrategy, DictionaryAddPolicy, PreflateStrategy},
+    reconstruction_parameters::ReconstructionParameters,
 };
 
-use crate::parameters::{BlockTypeStrategy, PreflateStrategy, TokenPredictorParameters};
-
-/// From the plain text and the preflate blocks, estimate the preflate parameters
-#[cfg(any(test, feature = "diagnostics"))]
-pub fn estimate_preflate_parameters(
+#[cfg(feature = "diagnostics")]
+pub fn estimate_preflate_result(
     deflate_contents: &DeflateContents,
     plain_text: &PlainText,
-) -> Result<TokenPredictorParameters> {
+) -> Result<super::estimation_result::EstimationResult> {
     estimate_preflate_profile(deflate_contents, plain_text)
-        .map(crate::models::CompressorProfile::parameters)
 }
 
-pub(crate) fn estimate_preflate_profile(
+pub fn estimate_preflate_profile(
     deflate_contents: &DeflateContents,
     plain_text: &PlainText,
-) -> Result<crate::models::CompressorProfile> {
+) -> Result<super::estimation_result::EstimationResult> {
     let info = super::preflate_stream_info::extract_preflate_info_with_plaintext(
         &deflate_contents.blocks,
         plain_text,
@@ -57,24 +49,19 @@ pub(crate) fn estimate_preflate_profile(
         || preflate_strategy == PreflateStrategy::HuffOnly
     {
         // No dictionary used
-        return Ok(crate::models::CompressorProfile::Custom(
-            TokenPredictorParameters {
-                window_bits: 0,
-                very_far_matches_detected: false,
-                matches_to_start_detected: false,
-                strategy: preflate_strategy,
-                nice_length: 0,
-                add_policy: DictionaryAddPolicy::AddAll,
-                max_token_count: (1
-                    << (6 + estimate_preflate_mem_level(info.max_tokens_per_block)))
-                    - 1,
-                max_dist_3_matches: 0,
-                matching_type: MatchingType::Greedy,
-                max_chain: 0,
-                hash_algorithm: HashAlgorithm::None,
-                block_type_strategy: huff_strategy,
-            },
-        ));
+        return Ok(
+            crate::estimator::compressor_profile::CompressorProfile::Custom.with_parameters(
+                ReconstructionParameters {
+                    max_token_count: (1
+                        << (6 + estimate_preflate_mem_level(info.max_tokens_per_block)))
+                        - 1,
+                    block_type_strategy: huff_strategy,
+                    behavior: crate::reconstruction_parameters::BehaviorSettings::NoDictionary {
+                        strategy: preflate_strategy,
+                    },
+                },
+            ),
+        );
     }
 
     let window_bits = estimate_preflate_window_bits(info.max_dist);
@@ -94,111 +81,44 @@ pub(crate) fn estimate_preflate_profile(
         add_policy,
     )?;
 
-    let parameters = TokenPredictorParameters {
+    let initial = InitialEstimate {
+        evidence: depth.selected,
         window_bits,
-        very_far_matches_detected: depth.selected.distance_policy == DistancePolicy::FullWindow,
-        matches_to_start_detected: info.matches_to_start_detected,
-        strategy: preflate_strategy,
-        // Keep a broad generic limit without widening it for matches not observed.
-        nice_length: if depth.selected.required_chain == 1 {
-            u32::from(u8::MAX)
-        } else {
-            info.max_len.max(u32::from(u8::MAX))
-        },
-        add_policy: crate::models::chain_add_policy(
+        insertion: crate::estimator::compressor_profile::chain_add_policy(
             depth.selected.hash_algorithm,
             add_policy,
             info.max_len,
         ),
         max_token_count,
-        max_dist_3_matches: info.max_dist_3_matches,
-        matching_type: MatchingType::Greedy,
-        max_chain: depth.selected.required_chain,
-        hash_algorithm: depth.selected.hash_algorithm,
         block_type_strategy: huff_strategy,
+        strategy: preflate_strategy,
+        info: &info,
     };
-    let profile = select_compressor_profile(parameters, &depth.selected, info.min_len);
+    let profile = select_compressor_profile(&initial);
     let estimate = refine_zlib_parameters(profile, &depth, &info, deflate_contents, plain_text);
     // Keep prediction refinement first; changing its starting parser changes its ranking.
     let mut profile = estimate.resolve_profile(depth.selected.parser, info.max_len);
-    let parameters = profile.parameters();
+    let parameters = profile.reconstruction;
     let short_match_rejections = depth
         .short_match_rejections
         .iter()
-        .find_map(|&(hash, count)| (hash == parameters.hash_algorithm).then_some(count))
+        .find_map(|&(hash, count)| (hash == parameters.hash_algorithm()).then_some(count))
         .unwrap_or(0);
-    profile.refine_short_match_policy(&info, short_match_rejections);
-    let mut profile =
-        super::prediction_scoring::refine_profile(profile, &info, deflate_contents, plain_text);
+    zlib::refine_short_match_policy(&mut profile.reconstruction, &info, short_match_rejections);
+    let mut profile = super::prediction_scoring::refine_profile(
+        profile,
+        &info,
+        deflate_contents,
+        plain_text,
+        &depth.zlib_candidates,
+    );
     if info.ends_with_final_block {
-        profile.canonicalize_first_only_insertion(plain_text.total_length());
+        canonicalize_first_only_insertion(&mut profile.reconstruction, plain_text.total_length());
     }
     if deflate_contents.compressed_size < 1024 && info.ends_with_final_block {
-        profile.canonicalize_unobserved_insertion(info.max_len);
+        canonicalize_unobserved_insertion(&mut profile.reconstruction, info.max_len);
     }
     Ok(profile)
-}
-
-#[test]
-fn canonical_short_match_cutoffs_preserve_intervals_and_encoded_parameter_size() {
-    let mut params = crate::token_predictor::zlib_level_1_params();
-    for original in 0..=32768 {
-        params.max_dist_3_matches = original;
-        let original_size = params.serialized_size();
-        for bounds in [
-            (0, 32768),
-            (original, 32768),
-            (original / 2, original),
-            (original, original),
-        ] {
-            let cutoff = params.canonical_short_match_cutoff(bounds);
-            assert!(
-                (bounds.0..=bounds.1).contains(&cutoff),
-                "{original}: {bounds:?}"
-            );
-            let candidate = TokenPredictorParameters {
-                max_dist_3_matches: cutoff,
-                ..params
-            };
-            assert!(
-                candidate.serialized_size() <= original_size,
-                "{original} -> {cutoff}"
-            );
-            assert_eq!(candidate.canonical_short_match_cutoff(bounds), cutoff);
-        }
-    }
-    for (original, bounds, expected) in [
-        (4, (4, 8), 8),
-        (255, (255, 32768), 255),
-        (256, (256, 32768), 32768),
-        (8193, (8193, 9000), 8704),
-        (4097, (4097, 32768), 32768),
-        (3000, (2500, 3500), 3072),
-        (5, (4, 7), 4),
-        (32769, (32769, u32::MAX), 32769),
-    ] {
-        params.max_dist_3_matches = original;
-        assert_eq!(params.canonical_short_match_cutoff(bounds), expected);
-    }
-}
-
-#[test]
-fn canonical_short_match_cutoffs_choose_the_coarsest_binary_grid() {
-    let mut params = crate::token_predictor::zlib_level_1_params();
-    for lower in 0u32..=512 {
-        let mut expected = lower;
-        for upper in lower..=512 {
-            if upper == 0 || upper.trailing_zeros() > expected.trailing_zeros() {
-                expected = upper;
-            }
-            params.max_dist_3_matches = upper;
-            assert_eq!(
-                params.canonical_short_match_cutoff((lower, upper)),
-                expected,
-                "{lower}..={upper}"
-            );
-        }
-    }
 }
 
 fn estimate_preflate_mem_level(max_block_size_: u32) -> u32 {
@@ -212,7 +132,7 @@ fn estimate_preflate_mem_level(max_block_size_: u32) -> u32 {
     mbits - 6
 }
 
-pub(crate) fn estimate_preflate_window_bits(max_dist_: u32) -> u32 {
+pub fn estimate_preflate_window_bits(max_dist_: u32) -> u32 {
     let mut max_dist = max_dist_;
     max_dist += deflate_constants::MIN_LOOKAHEAD;
     let wbits = bit_length(max_dist - 1);
@@ -249,288 +169,433 @@ fn estimate_preflate_huff_strategy(info: &PreflateStreamInfo) -> BlockTypeStrate
     if info.count_static_huff_tree_blocks == 0 {
         return BlockTypeStrategy::Dynamic;
     }
-    BlockTypeStrategy::Mixed
+    BlockTypeStrategy::Dynamic
 }
 
-#[test]
-fn strategy_ignores_empty_structural_blocks() {
-    use crate::deflate::deflate_token::{
-        DeflateHuffmanType, DeflateToken, DeflateTokenBlock, DeflateTokenBlockType,
-    };
-
-    fn huffman(tokens: Vec<DeflateToken>) -> DeflateTokenBlock {
-        DeflateTokenBlock {
-            block_type: DeflateTokenBlockType::Huffman {
-                tokens,
-                huffman_type: DeflateHuffmanType::Static,
-            },
-            last: false,
-        }
-    }
-
-    fn stored(bytes: Vec<u8>) -> DeflateTokenBlock {
-        DeflateTokenBlock {
-            block_type: DeflateTokenBlockType::Stored {
-                uncompressed: bytes,
-            },
-            last: false,
-        }
-    }
-
-    for (body, expected) in [
-        (
-            huffman(vec![DeflateToken::Literal(b'A')]),
-            PreflateStrategy::HuffOnly,
-        ),
-        (
-            huffman(vec![
-                DeflateToken::Literal(b'A'),
-                DeflateToken::new_ref(199, 1),
-            ]),
-            PreflateStrategy::RleOnly,
-        ),
-        (
-            huffman(vec![
-                DeflateToken::Literal(b'A'),
-                DeflateToken::Literal(b'B'),
-                DeflateToken::new_ref(198, 2),
-            ]),
-            PreflateStrategy::Default,
-        ),
-        (stored(vec![b'A']), PreflateStrategy::Store),
-    ] {
-        let mut blocks = vec![body];
-        assert_eq!(
-            estimate_preflate_strategy(&extract_preflate_info(&blocks)),
-            expected
-        );
-        blocks.insert(0, stored(Vec::new()));
-        blocks.insert(0, huffman(Vec::new()));
-        blocks.push(stored(Vec::new()));
-        blocks.push(huffman(Vec::new()));
-        assert_eq!(
-            estimate_preflate_strategy(&extract_preflate_info(&blocks)),
-            expected
-        );
-    }
-
-    let mixed = [
-        huffman(vec![DeflateToken::Literal(b'A')]),
-        stored(vec![b'B']),
-    ];
-    assert_eq!(
-        estimate_preflate_strategy(&extract_preflate_info(&mixed)),
-        PreflateStrategy::Default
-    );
-}
-
-#[test]
-fn skipped_prefix_refinement_preserves_fingerprint_provenance() {
-    use super::complevel_estimator::CandidateEvidence;
-    use super::parser_estimator::ParserInference;
-
-    let parameters = crate::token_predictor::zlib_level_1_params();
-    let contents = DeflateContents {
-        compressed_size: 0,
-        blocks: Vec::new(),
-    };
-    let info = extract_preflate_info(&contents.blocks);
-    let depth = DepthEstimate {
-        selected: CandidateEvidence {
-            hash_algorithm: parameters.hash_algorithm,
-            required_chain: parameters.max_chain,
-            distance_policy: DistancePolicy::ZlibWindow,
-            parser: ParserInference::Unresolved,
-            shallow_miniz_greedy: false,
-            minimum_nice_length: 0,
-        },
-        zlib_candidates: Vec::new(),
-        short_match_rejections: Vec::new(),
-    };
-    assert!(matches!(
-        refine_zlib_parameters(
-            ParameterEstimate::Fingerprinted(crate::models::CompressorProfile::Zlib(
-                crate::models::zlib::Profile(parameters),
-            )),
-            &depth,
-            &info,
-            &contents,
-            &PlainText::new(),
-        ),
-        ParameterEstimate::Fingerprinted(_)
-    ));
-}
-
-#[test]
-fn parser_resolution_preserves_search_parameters_and_validated_choices() {
-    use super::parser_estimator::ParserEvidence;
-    let parameters = crate::token_predictor::zlib_level_1_params();
-    let inference = ParserEvidence {
-        lazy_matches: 4,
-        longest_lazy_match: 7,
-    }
-    .infer(false);
-    let expected = TokenPredictorParameters {
-        matching_type: MatchingType::Lazy {
-            max_lazy: 16,
-            filtered_matching: false,
-            behavior: LazyBehavior::Zlib { good_length: 8 },
-        },
-        ..parameters
-    };
-    assert_eq!(
-        ParameterEstimate::Inferred {
-            profile: crate::models::CompressorProfile::Custom(parameters),
-            parser: ParserContext {
-                zlib_compatible: true,
-                observed_min_len: 3,
-            },
-        }
-        .resolve_parser(inference, 4),
-        expected
-    );
-    assert_eq!(
-        ParameterEstimate::PrefixValidated(crate::models::CompressorProfile::Custom(parameters))
-            .resolve_parser(inference, 4),
+pub fn canonicalize_unobserved_insertion(
+    parameters: &mut ReconstructionParameters,
+    longest_match: u32,
+) {
+    if matches!(parameters.dictionary().expect("dictionary candidate").insertion,
+            DictionaryAddPolicy::AddFirst(limit) | DictionaryAddPolicy::AddFirstAndLast(limit)
+                if u32::from(limit) >= longest_match)
+    {
         parameters
-    );
-    assert_eq!(
-        ParameterEstimate::Fingerprinted(crate::models::CompressorProfile::Custom(parameters))
-            .resolve_parser(inference, 4),
-        parameters
-    );
-    assert_eq!(
-        ParameterEstimate::Inferred {
-            profile: crate::models::CompressorProfile::Custom(parameters),
-            parser: ParserContext {
-                zlib_compatible: true,
-                observed_min_len: 3,
-            },
-        }
-        .resolve_parser(inference, 5),
-        parameters
-    );
+            .dictionary_mut()
+            .expect("dictionary candidate")
+            .insertion = DictionaryAddPolicy::AddAll;
+    }
 }
 
-#[test]
-fn parser_resolution_matches_previous_refinement_rules() {
-    use super::parser_estimator::ParserEvidence;
+fn canonicalize_first_only_insertion(
+    parameters: &mut ReconstructionParameters,
+    plaintext_bytes: u32,
+) {
+    if parameters
+        .dictionary()
+        .expect("dictionary candidate")
+        .insertion
+        == DictionaryAddPolicy::AddFirst(0)
+        && plaintext_bytes <= crate::compressors::zlib_ng::SLIDE_POINT
+    {
+        // No later token can observe an insertion at the slide point.
+        parameters
+            .dictionary_mut()
+            .expect("dictionary candidate")
+            .insertion = DictionaryAddPolicy::AddFirstWith32KBoundary;
+    }
+}
 
-    // Frozen pre-refactor rules are the oracle for this metadata-only equivalence test.
-    fn previous_policy(
-        parameters: &TokenPredictorParameters,
-        hash_unchanged: bool,
-        longest_match: u32,
-        greedy: bool,
-        evidence: ParserEvidence,
-    ) -> MatchingType {
-        if hash_unchanged
-            && parameters.matching_type == MatchingType::Greedy
-            && matches!(parameters.add_policy,
-                DictionaryAddPolicy::AddFirst(limit) if u32::from(limit) >= longest_match)
-            && !greedy
-            && evidence.lazy_matches >= 4
-            && evidence.longest_lazy_match >= 6
-            && let Some(config) = SLOW_PREFLATE_PARSER_SETTINGS[2..].iter().find(|config| {
-                matches!(config.match_type, MatchingType::Lazy { max_lazy, .. }
-                    if max_lazy > evidence.longest_lazy_match)
-            })
-        {
-            config.match_type
-        } else {
-            parameters.matching_type
-        }
+#[cfg(test)]
+pub(crate) mod tests {
+    use super::*;
+    use crate::estimator::depth_estimator::DistancePolicy;
+
+    use crate::parameters::tests::MatchingType;
+
+    use {
+        super::super::{
+            complevel_estimator::DepthEstimate,
+            compressor_profile::{
+                CompressorProfile, EstimateProvenance, ParameterEstimate, ParserContext,
+            },
+            estimation_result::EstimationResult,
+            preflate_stream_info::tests::extract_preflate_info,
+        },
+        crate::{estimator::models::zlib::SLOW_PREFLATE_PARSER_SETTINGS, parameters::LazyBehavior},
+    };
+
+    /// From the plain text and the preflate blocks, estimate the preflate parameters
+    pub fn estimate_preflate_parameters(
+        deflate_contents: &DeflateContents,
+        plain_text: &PlainText,
+    ) -> Result<ReconstructionParameters> {
+        estimate_preflate_profile(deflate_contents, plain_text).map(|result| result.reconstruction)
     }
 
-    let base = crate::token_predictor::zlib_level_1_params();
-    for matching_type in [
-        MatchingType::Greedy,
-        MatchingType::Lazy {
-            max_lazy: 16,
-            filtered_matching: false,
-            behavior: LazyBehavior::Zlib { good_length: 8 },
-        },
-        MatchingType::MiniZ {
-            max_probes: 32,
-            greedy: true,
-        },
-        MatchingType::LibdeflateGreedy,
-        MatchingType::LibdeflateLazy {
-            two_positions: true,
-        },
-    ] {
-        for add_policy in [
-            DictionaryAddPolicy::AddAll,
-            DictionaryAddPolicy::AddFirst(0),
-            DictionaryAddPolicy::AddFirst(4),
-            DictionaryAddPolicy::AddFirst(6),
-            DictionaryAddPolicy::AddFirst(128),
-            DictionaryAddPolicy::AddFirst(258),
-            DictionaryAddPolicy::AddFirstAndLast(6),
-            DictionaryAddPolicy::AddFirstWith32KBoundary,
-            DictionaryAddPolicy::AddFirstExcept4kBoundary,
+    #[test]
+    fn canonical_short_match_cutoffs_preserve_intervals_and_encoded_parameter_size() {
+        let mut params = crate::token_predictor::tests::zlib_level_1_params();
+        for original in 0..=32768 {
+            params.set_short_match_cutoff(original);
+            let original_size = params.serialized_size();
+            for bounds in [
+                (0, 32768),
+                (original, 32768),
+                (original / 2, original),
+                (original, original),
+            ] {
+                let cutoff = params.canonical_short_match_cutoff(bounds);
+                assert!(
+                    (bounds.0..=bounds.1).contains(&cutoff),
+                    "{original}: {bounds:?}"
+                );
+                let candidate = {
+                    let mut canonical_configuration = params;
+                    canonical_configuration.set_short_match_cutoff(cutoff);
+                    canonical_configuration
+                };
+                assert!(
+                    candidate.serialized_size() <= original_size,
+                    "{original} -> {cutoff}"
+                );
+                assert_eq!(candidate.canonical_short_match_cutoff(bounds), cutoff);
+            }
+        }
+        for (original, bounds, expected) in [
+            (4, (4, 8), 8),
+            (255, (255, 32768), 255),
+            (256, (256, 32768), 32768),
+            (8193, (8193, 9000), 8704),
+            (4097, (4097, 32768), 32768),
+            (3000, (2500, 3500), 3072),
+            (5, (4, 7), 4),
+            (32769, (32769, u32::MAX), 32769),
         ] {
-            let parameters = TokenPredictorParameters {
-                matching_type,
-                add_policy,
-                ..base
-            };
-            for longest_match in [0, 4, 6, 128, 258] {
-                for lazy_matches in [0, 3, 4, 256] {
-                    for longest_lazy_match in [
-                        0,
-                        3,
-                        5,
-                        6,
-                        7,
-                        15,
-                        16,
-                        31,
-                        32,
-                        127,
-                        128,
-                        129,
-                        257,
-                        258,
-                        u16::MAX,
-                    ] {
-                        let evidence = ParserEvidence {
-                            lazy_matches,
-                            longest_lazy_match,
-                        };
-                        for greedy in [false, true] {
-                            for hash_unchanged in [false, true] {
-                                let expected = TokenPredictorParameters {
-                                    matching_type: previous_policy(
-                                        &parameters,
-                                        hash_unchanged,
-                                        longest_match,
-                                        greedy,
-                                        evidence,
-                                    ),
-                                    ..parameters
-                                };
-                                // Map the old hash-based protection to explicit provenance.
-                                // Same-hash validated choices are covered separately above.
-                                let estimate = if hash_unchanged {
-                                    ParameterEstimate::Inferred {
-                                        profile: crate::models::CompressorProfile::Custom(
-                                            parameters,
-                                        ),
-                                        parser: ParserContext {
+            params.set_short_match_cutoff(original);
+            assert_eq!(params.canonical_short_match_cutoff(bounds), expected);
+        }
+    }
+
+    #[test]
+    fn canonical_short_match_cutoffs_choose_the_coarsest_binary_grid() {
+        let mut params = crate::token_predictor::tests::zlib_level_1_params();
+        for lower in 0u32..=512 {
+            let mut expected = lower;
+            for upper in lower..=512 {
+                if upper == 0 || upper.trailing_zeros() > expected.trailing_zeros() {
+                    expected = upper;
+                }
+                params.set_short_match_cutoff(upper);
+                assert_eq!(
+                    params.canonical_short_match_cutoff((lower, upper)),
+                    expected,
+                    "{lower}..={upper}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn strategy_ignores_empty_structural_blocks() {
+        use crate::deflate::deflate_token::{
+            DeflateHuffmanType, DeflateToken, DeflateTokenBlock, DeflateTokenBlockType,
+        };
+
+        fn huffman(tokens: Vec<DeflateToken>) -> DeflateTokenBlock {
+            DeflateTokenBlock {
+                block_type: DeflateTokenBlockType::Huffman {
+                    tokens,
+                    huffman_type: DeflateHuffmanType::Static,
+                },
+                last: false,
+            }
+        }
+
+        fn stored(bytes: Vec<u8>) -> DeflateTokenBlock {
+            DeflateTokenBlock {
+                block_type: DeflateTokenBlockType::Stored {
+                    uncompressed: bytes,
+                },
+                last: false,
+            }
+        }
+
+        for (body, expected) in [
+            (
+                huffman(vec![DeflateToken::Literal(b'A')]),
+                PreflateStrategy::HuffOnly,
+            ),
+            (
+                huffman(vec![
+                    DeflateToken::Literal(b'A'),
+                    DeflateToken::new_ref(199, 1),
+                ]),
+                PreflateStrategy::RleOnly,
+            ),
+            (
+                huffman(vec![
+                    DeflateToken::Literal(b'A'),
+                    DeflateToken::Literal(b'B'),
+                    DeflateToken::new_ref(198, 2),
+                ]),
+                PreflateStrategy::Default,
+            ),
+            (stored(vec![b'A']), PreflateStrategy::Store),
+        ] {
+            let mut blocks = vec![body];
+            assert_eq!(
+                estimate_preflate_strategy(&extract_preflate_info(&blocks)),
+                expected
+            );
+            blocks.insert(0, stored(Vec::new()));
+            blocks.insert(0, huffman(Vec::new()));
+            blocks.push(stored(Vec::new()));
+            blocks.push(huffman(Vec::new()));
+            assert_eq!(
+                estimate_preflate_strategy(&extract_preflate_info(&blocks)),
+                expected
+            );
+        }
+
+        let mixed = [
+            huffman(vec![DeflateToken::Literal(b'A')]),
+            stored(vec![b'B']),
+        ];
+        assert_eq!(
+            estimate_preflate_strategy(&extract_preflate_info(&mixed)),
+            PreflateStrategy::Default
+        );
+    }
+
+    #[test]
+    fn skipped_prefix_refinement_preserves_fingerprint_provenance() {
+        use super::super::complevel_estimator::CandidateEvidence;
+        use super::super::parser_estimator::ParserInference;
+
+        let parameters = crate::token_predictor::tests::zlib_level_1_params();
+        let contents = DeflateContents {
+            compressed_size: 0,
+            blocks: Vec::new(),
+        };
+        let info = extract_preflate_info(&contents.blocks);
+        let depth = DepthEstimate {
+            selected: CandidateEvidence {
+                hash_algorithm: parameters.hash_algorithm(),
+                required_chain: parameters.max_chain(),
+                distance_policy: DistancePolicy::ZlibWindow,
+                parser: ParserInference::Unresolved,
+                shallow_miniz_greedy: false,
+                minimum_nice_length: 0,
+            },
+            zlib_candidates: Vec::new(),
+            short_match_rejections: Vec::new(),
+        };
+        assert!(matches!(
+            refine_zlib_parameters(
+                ParameterEstimate {
+                    profile: crate::estimator::compressor_profile::CompressorProfile::Zlib
+                        .with_parameters(parameters),
+                    provenance: EstimateProvenance::Fingerprinted,
+                },
+                &depth,
+                &info,
+                &contents,
+                &PlainText::new(),
+            )
+            .provenance,
+            EstimateProvenance::Fingerprinted
+        ));
+    }
+
+    #[test]
+    fn parser_resolution_preserves_search_parameters_and_validated_choices() {
+        use super::super::parser_estimator::ParserEvidence;
+        let parameters = crate::token_predictor::tests::zlib_level_1_params();
+        let inference = ParserEvidence {
+            lazy_matches: 4,
+            longest_lazy_match: 7,
+        }
+        .infer(false);
+        let expected = {
+            let mut canonical_configuration = parameters;
+            canonical_configuration.set_matching_type(MatchingType::Lazy {
+                max_lazy: 16,
+                filtered_matching: false,
+                behavior: LazyBehavior::Zlib { good_length: 8 },
+            });
+            canonical_configuration
+        };
+        assert_eq!(
+            ParameterEstimate {
+                profile: crate::estimator::compressor_profile::CompressorProfile::Custom
+                    .with_parameters(parameters),
+                provenance: EstimateProvenance::Inferred(ParserContext {
+                    zlib_compatible: true,
+                    observed_min_len: 3,
+                }),
+            }
+            .resolve_parser(inference, 4),
+            expected
+        );
+        assert_eq!(
+            ParameterEstimate {
+                profile: crate::estimator::compressor_profile::CompressorProfile::Custom
+                    .with_parameters(parameters),
+                provenance: EstimateProvenance::PrefixValidated,
+            }
+            .resolve_parser(inference, 4),
+            parameters
+        );
+        assert_eq!(
+            ParameterEstimate {
+                profile: crate::estimator::compressor_profile::CompressorProfile::Custom
+                    .with_parameters(parameters),
+                provenance: EstimateProvenance::Fingerprinted,
+            }
+            .resolve_parser(inference, 4),
+            parameters
+        );
+        assert_eq!(
+            ParameterEstimate {
+                profile: crate::estimator::compressor_profile::CompressorProfile::Custom
+                    .with_parameters(parameters),
+                provenance: EstimateProvenance::Inferred(ParserContext {
+                    zlib_compatible: true,
+                    observed_min_len: 3,
+                }),
+            }
+            .resolve_parser(inference, 5),
+            parameters
+        );
+    }
+
+    #[test]
+    fn parser_resolution_matches_previous_refinement_rules() {
+        use super::super::parser_estimator::ParserEvidence;
+
+        // Frozen pre-refactor rules are the oracle for this metadata-only equivalence test.
+        fn previous_policy(
+            parameters: &ReconstructionParameters,
+            hash_unchanged: bool,
+            longest_match: u32,
+            greedy: bool,
+            evidence: ParserEvidence,
+        ) -> MatchingType {
+            if hash_unchanged
+                && parameters.matching_type() == MatchingType::Greedy
+                && matches!(parameters.add_policy(),
+                DictionaryAddPolicy::AddFirst(limit) if u32::from(limit) >= longest_match)
+                && !greedy
+                && evidence.lazy_matches >= 4
+                && evidence.longest_lazy_match >= 6
+                && let Some(config) = SLOW_PREFLATE_PARSER_SETTINGS[2..].iter().find(|config| {
+                    matches!(config.parser.matching_type(), MatchingType::Lazy { max_lazy, .. }
+                    if max_lazy > evidence.longest_lazy_match)
+                })
+            {
+                config.parser.matching_type()
+            } else {
+                parameters.matching_type()
+            }
+        }
+
+        let base = crate::token_predictor::tests::zlib_level_1_params();
+        for matching_type in [
+            MatchingType::Greedy,
+            MatchingType::Lazy {
+                max_lazy: 16,
+                filtered_matching: false,
+                behavior: LazyBehavior::Zlib { good_length: 8 },
+            },
+            MatchingType::MiniZ {
+                max_probes: 32,
+                greedy: true,
+            },
+            MatchingType::LibdeflateGreedy,
+            MatchingType::LibdeflateLazy {
+                two_positions: true,
+            },
+        ] {
+            for add_policy in [
+                DictionaryAddPolicy::AddAll,
+                DictionaryAddPolicy::AddFirst(0),
+                DictionaryAddPolicy::AddFirst(4),
+                DictionaryAddPolicy::AddFirst(6),
+                DictionaryAddPolicy::AddFirst(128),
+                DictionaryAddPolicy::AddFirst(258),
+                DictionaryAddPolicy::AddFirstAndLast(6),
+                DictionaryAddPolicy::AddFirstWith32KBoundary,
+                DictionaryAddPolicy::AddFirstExcept4kBoundary,
+            ] {
+                let parameters = {
+                    let mut canonical_configuration = base;
+                    canonical_configuration.set_insertion(add_policy);
+                    canonical_configuration.set_matching_type(matching_type);
+                    canonical_configuration
+                };
+                for longest_match in [0, 4, 6, 128, 258] {
+                    for lazy_matches in [0, 3, 4, 256] {
+                        for longest_lazy_match in [
+                            0,
+                            3,
+                            5,
+                            6,
+                            7,
+                            15,
+                            16,
+                            31,
+                            32,
+                            127,
+                            128,
+                            129,
+                            257,
+                            258,
+                            u16::MAX,
+                        ] {
+                            let evidence = ParserEvidence {
+                                lazy_matches,
+                                longest_lazy_match,
+                            };
+                            for greedy in [false, true] {
+                                for hash_unchanged in [false, true] {
+                                    let expected = {
+                                        let mut canonical_configuration = parameters;
+                                        canonical_configuration.set_matching_type(previous_policy(
+                                            &parameters,
+                                            hash_unchanged,
+                                            longest_match,
+                                            greedy,
+                                            evidence,
+                                        ));
+                                        canonical_configuration
+                                    };
+                                    // Map the old hash-based protection to explicit provenance.
+                                    // Same-hash validated choices are covered separately above.
+                                    let estimate = if hash_unchanged {
+                                        ParameterEstimate {
+                                        profile:
+                                            crate::estimator::compressor_profile::CompressorProfile::Custom
+                                                .with_parameters(parameters),
+                                        provenance: EstimateProvenance::Inferred(ParserContext {
                                             zlib_compatible: true,
                                             observed_min_len: 3,
-                                        },
+                                        }),
                                     }
-                                } else {
-                                    ParameterEstimate::PrefixValidated(
-                                        crate::models::CompressorProfile::Custom(parameters),
-                                    )
-                                };
-                                assert_eq!(
-                                    estimate.resolve_parser(evidence.infer(greedy), longest_match),
-                                    expected
-                                );
+                                    } else {
+                                        ParameterEstimate {
+                                        profile:
+                                            crate::estimator::compressor_profile::CompressorProfile::Custom
+                                                .with_parameters(parameters),
+                                        provenance: EstimateProvenance::PrefixValidated,
+                                    }
+                                    };
+                                    assert_eq!(
+                                        estimate
+                                            .resolve_parser(evidence.infer(greedy), longest_match),
+                                        expected
+                                    );
+                                }
                             }
                         }
                     }
@@ -538,25 +603,144 @@ fn parser_resolution_matches_previous_refinement_rules() {
             }
         }
     }
-}
 
-#[test]
-fn zlib_stream_with_distance_4096_keeps_compatible_search_semantics() {
-    use crate::{deflate::deflate_reader::parse_deflate_whole, utils::read_file};
+    #[test]
+    fn zlib_stream_with_distance_4096_keeps_compatible_search_semantics() {
+        use crate::{deflate::deflate_reader::tests::parse_deflate_whole, utils::read_file};
 
-    let compressed = read_file("pptxplaintext.deflate");
-    let (contents, plain_text) = parse_deflate_whole(&compressed).unwrap();
-    assert_eq!(
-        extract_preflate_info(&contents.blocks).max_dist_3_matches,
-        4096
-    );
-    let parameters = estimate_preflate_parameters(&contents, &plain_text).unwrap();
-    assert_eq!(parameters.add_policy, DictionaryAddPolicy::AddAll);
-    assert!(matches!(
-        parameters.matching_type,
-        MatchingType::Lazy {
-            behavior: LazyBehavior::Zlib { .. },
-            ..
+        let compressed = read_file("pptxplaintext.deflate");
+        let (contents, plain_text) = parse_deflate_whole(&compressed).unwrap();
+        assert_eq!(
+            extract_preflate_info(&contents.blocks).max_dist_3_matches,
+            4096
+        );
+        let parameters = estimate_preflate_parameters(&contents, &plain_text).unwrap();
+        assert_eq!(parameters.add_policy(), DictionaryAddPolicy::AddAll);
+        assert!(matches!(
+            parameters.matching_type(),
+            MatchingType::Lazy {
+                behavior: LazyBehavior::Zlib { .. },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn first_only_canonicalization_requires_an_unobservable_slide_insertion() {
+        let parameters = {
+            let mut canonical_configuration = crate::token_predictor::tests::zlib_level_1_params();
+            canonical_configuration.set_insertion(DictionaryAddPolicy::AddFirst(0));
+            canonical_configuration
+        };
+        for (bytes, expected) in [
+            (0, DictionaryAddPolicy::AddFirstWith32KBoundary),
+            (
+                crate::compressors::zlib_ng::SLIDE_POINT,
+                DictionaryAddPolicy::AddFirstWith32KBoundary,
+            ),
+            (
+                crate::compressors::zlib_ng::SLIDE_POINT + 1,
+                DictionaryAddPolicy::AddFirst(0),
+            ),
+        ] {
+            let mut profile = CompressorProfile::Custom.with_parameters(parameters);
+            canonicalize_first_only_insertion(&mut profile.reconstruction, bytes);
+            assert!(matches!(
+                profile,
+                EstimationResult {
+                    model: CompressorProfile::Custom,
+                    ..
+                }
+            ));
+            assert_eq!(profile.reconstruction.add_policy(), expected);
+            assert!(profile.reconstruction.serialized_size() <= parameters.serialized_size());
         }
-    ));
+    }
+
+    #[test]
+    fn unobserved_insertion_limits_preserve_family_and_active_overrides() {
+        let parameters = crate::token_predictor::tests::zlib_level_1_params();
+        for (policy, maximum, expected) in [
+            (
+                DictionaryAddPolicy::AddFirst(4),
+                4,
+                DictionaryAddPolicy::AddAll,
+            ),
+            (
+                DictionaryAddPolicy::AddFirstAndLast(4),
+                4,
+                DictionaryAddPolicy::AddAll,
+            ),
+            (
+                DictionaryAddPolicy::AddFirst(4),
+                5,
+                DictionaryAddPolicy::AddFirst(4),
+            ),
+            (
+                DictionaryAddPolicy::AddFirstAndLast(4),
+                5,
+                DictionaryAddPolicy::AddFirstAndLast(4),
+            ),
+            (
+                DictionaryAddPolicy::AddFirstExcept4kBoundary,
+                4,
+                DictionaryAddPolicy::AddFirstExcept4kBoundary,
+            ),
+            (
+                DictionaryAddPolicy::AddFirstWith32KBoundary,
+                4,
+                DictionaryAddPolicy::AddFirstWith32KBoundary,
+            ),
+        ] {
+            let parameters = {
+                let mut canonical_configuration = parameters;
+                canonical_configuration.set_insertion(policy);
+                canonical_configuration
+            };
+            let mut profile = CompressorProfile::Zlib.with_parameters(parameters);
+            canonicalize_unobserved_insertion(&mut profile.reconstruction, maximum);
+            assert!(matches!(
+                profile,
+                EstimationResult {
+                    model: CompressorProfile::Zlib,
+                    ..
+                }
+            ));
+            assert_eq!(profile.reconstruction.add_policy(), expected);
+            assert!(profile.reconstruction.serialized_size() <= parameters.serialized_size());
+        }
+    }
+
+    #[test]
+    fn canonical_token_limits_preserve_bounds_width_and_idempotence() {
+        let mut parameters = crate::token_predictor::tests::zlib_level_1_params();
+        for original in 0..=u16::MAX {
+            parameters.max_token_count = original;
+            let size = parameters.serialized_size();
+            for bounds in [
+                (0, u32::from(u16::MAX)),
+                (u32::from(original), u32::from(original)),
+                (u32::from(original / 2), u32::from(original)),
+            ] {
+                let limit = crate::reconstruction_parameters::canonical_token_limit(
+                    parameters.max_token_count,
+                    bounds,
+                );
+                assert!((bounds.0..=bounds.1).contains(&u32::from(limit)));
+                let canonical = {
+                    let mut canonical_configuration = parameters;
+                    canonical_configuration.max_token_count = limit;
+                    canonical_configuration
+                };
+                assert!(canonical.serialized_size() <= size);
+                assert_eq!(
+                    crate::reconstruction_parameters::canonical_token_limit(
+                        canonical.max_token_count,
+                        bounds
+                    ),
+                    limit
+                );
+            }
+        }
+    }
 }

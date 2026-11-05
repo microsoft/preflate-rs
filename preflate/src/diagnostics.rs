@@ -1,10 +1,11 @@
-//! Bounded, explicit-parameter replay. JSON and file access belong to callers.
+//! Diagnostic replay of explicit reconstruction settings against DEFLATE input.
+//! Produces bounded prediction traces and optional correction/reconstruction
+//! measurements, with synthetic token blocks available for targeted experiments.
 
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    CountNonDefaultActions, ExitCode, HashAlgorithm, PreflateError, Result,
-    TokenPredictorParameters,
+    CountNonDefaultActions, ExitCode, PreflateError, Result,
     deflate::{
         deflate_reader::DeflateParser,
         deflate_token::{
@@ -13,8 +14,8 @@ use crate::{
         },
         deflate_writer::DeflateWriter,
     },
-    parameters::{DictionaryAddPolicy, LazyBehavior, MatchingType, PreflateStrategy},
     preflate_input::PreflateInput,
+    reconstruction_parameters::ReconstructionParameters,
     stream_processor::{
         encode_first_chunk_observed, predict_blocks_observed, recreate_whole_deflate_stream,
     },
@@ -172,50 +173,9 @@ pub fn encode_replay_blocks(blocks: Vec<ReplayBlock>, options: &ReplayOptions) -
     Ok(bytes)
 }
 
-/// Validate explicit experimental settings before constructing hash/search state.
-pub fn validate_replay_parameters(parameters: &TokenPredictorParameters) -> Result<()> {
-    let dictionary = matches!(
-        parameters.strategy,
-        PreflateStrategy::Default | PreflateStrategy::RleOnly
-    );
-    if parameters.max_token_count == 0
-        || parameters.max_chain > 4096
-        || parameters.max_dist_3_matches > 32768
-        || (dictionary
-            && (!(9..=15).contains(&parameters.window_bits)
-                || !(3..=258).contains(&parameters.nice_length)
-                || parameters.max_chain == 0
-                || parameters.hash_algorithm == HashAlgorithm::None))
-        || (!dictionary && parameters.hash_algorithm != HashAlgorithm::None)
-    {
-        return Err(invalid(
-            "invalid dictionary, window, search or token-buffer parameters",
-        ));
-    }
-    if let HashAlgorithm::Zlib {
-        hash_mask,
-        hash_shift,
-    } = parameters.hash_algorithm
-        && (hash_mask == 0
-            || !u32::from(hash_mask).saturating_add(1).is_power_of_two()
-            || !(1..=15).contains(&hash_shift))
-    {
-        return Err(invalid("invalid zlib hash mask or shift"));
-    }
-    if let HashAlgorithm::Chromium { hash_mask } = parameters.hash_algorithm
-        && ![32767, 65535].contains(&hash_mask)
-    {
-        return Err(invalid("invalid Chromium hash mask"));
-    }
-    if matches!(parameters.add_policy, DictionaryAddPolicy::AddFirst(n) | DictionaryAddPolicy::AddFirstAndLast(n) if n > 258)
-        || matches!(parameters.matching_type,
-            MatchingType::Lazy { max_lazy, .. } | MatchingType::WindowsLazy { max_lazy } if max_lazy > 258)
-        || matches!(parameters.matching_type, MatchingType::Lazy { behavior: LazyBehavior::Zlib { good_length }, .. } if good_length > 258)
-        || matches!(parameters.matching_type, MatchingType::MiniZ { max_probes, .. } if max_probes == 0 || max_probes > 4096)
-    {
-        return Err(invalid("invalid insertion or parser parameters"));
-    }
-    Ok(())
+/// Parse and validate explicit JSON settings before constructing hash/search state.
+pub fn validate_replay_parameters(parameters_json: &str) -> Result<()> {
+    ReconstructionParameters::from_json(parameters_json).map(|_| ())
 }
 
 /// Literal contents are deliberately omitted from output.
@@ -266,15 +226,62 @@ pub struct ReplayBlockResult {
     pub dictionary_reset: Option<bool>,
 }
 
+/// Observed first-chunk token statistics, independent of the supplied prediction settings.
+#[derive(Debug, Default, Serialize)]
+pub struct ReplayInputStatistics {
+    pub literal_tokens: usize,
+    pub reference_tokens: usize,
+    pub reference_lengths: std::collections::BTreeMap<u32, usize>,
+    pub maximum_reference_distance: u32,
+    pub distance_one_maximum_matches: usize,
+    pub max_tokens_per_block: usize,
+    pub max_huffman_block_bytes: usize,
+}
+
+impl ReplayInputStatistics {
+    fn observe(blocks: &[DeflateTokenBlock]) -> Self {
+        let mut statistics = Self::default();
+        for block in blocks {
+            if let DeflateTokenBlockType::Huffman { tokens, .. } = &block.block_type {
+                statistics.max_tokens_per_block = statistics.max_tokens_per_block.max(tokens.len());
+                let mut bytes = 0;
+                for token in tokens {
+                    match token {
+                        DeflateToken::Literal(_) => {
+                            statistics.literal_tokens += 1;
+                            bytes += 1;
+                        }
+                        DeflateToken::Reference(reference) => {
+                            statistics.reference_tokens += 1;
+                            *statistics
+                                .reference_lengths
+                                .entry(reference.len())
+                                .or_default() += 1;
+                            statistics.maximum_reference_distance =
+                                statistics.maximum_reference_distance.max(reference.dist());
+                            statistics.distance_one_maximum_matches +=
+                                usize::from(reference.len() == 258 && reference.dist() == 1);
+                            bytes += reference.len() as usize;
+                        }
+                    }
+                }
+                statistics.max_huffman_block_bytes = statistics.max_huffman_block_bytes.max(bytes);
+            }
+        }
+        statistics
+    }
+}
+
 #[derive(Debug, Serialize)]
 pub struct ReplayResult {
-    pub parameters: TokenPredictorParameters,
-    pub effective_parameters: TokenPredictorParameters,
+    reconstruction_parameters: ReconstructionParameters,
+    effective_reconstruction_parameters: ReconstructionParameters,
     pub stream_complete: bool,
     pub compressed_bytes: usize,
     pub plaintext_bytes: usize,
     pub total_blocks: usize,
     pub total_tokens: usize,
+    pub input_statistics: ReplayInputStatistics,
     pub total_mismatches: usize,
     pub total_mismatch_percent: f64,
     pub reported_tokens: usize,
@@ -300,24 +307,18 @@ fn percent(errors: usize, tokens: usize) -> f64 {
 /// Encoding verifies the exact consumed DEFLATE bytes and never invokes model selection/retry.
 pub fn replay_deflate(
     compressed: &[u8],
-    parameters: &TokenPredictorParameters,
+    reconstruction_parameters_json: &str,
     options: &ReplayOptions,
 ) -> Result<ReplayResult> {
     options.validate()?;
-    validate_replay_parameters(parameters)?;
+    let settings = ReconstructionParameters::from_json(reconstruction_parameters_json)?;
     if compressed.len() > options.max_input_bytes {
         return Err(invalid("DEFLATE input exceeds max_input_bytes"));
     }
     let mut parser = DeflateParser::new(options.max_plaintext_bytes);
     let contents = parser.parse_limited(compressed, options.max_tokens, options.max_blocks)?;
-    let total_tokens: usize = contents
-        .blocks
-        .iter()
-        .map(|block| match &block.block_type {
-            DeflateTokenBlockType::Huffman { tokens, .. } => tokens.len(),
-            DeflateTokenBlockType::Stored { .. } => 0,
-        })
-        .sum();
+    let input_statistics = ReplayInputStatistics::observe(&contents.blocks);
+    let total_tokens = input_statistics.literal_tokens + input_statistics.reference_tokens;
     if total_tokens > options.max_tokens || contents.blocks.len() > options.max_blocks {
         return Err(invalid("parsed chunk exceeds max_tokens or max_blocks"));
     }
@@ -330,13 +331,14 @@ pub fn replay_deflate(
         .ok_or_else(|| invalid("block range is outside the parsed first chunk"))?;
     let range = options.block_start..end;
     let mut result = ReplayResult {
-        parameters: *parameters,
-        effective_parameters: *parameters,
+        reconstruction_parameters: settings,
+        effective_reconstruction_parameters: settings,
         stream_complete: parser.is_done(),
         compressed_bytes: contents.compressed_size,
         plaintext_bytes: parser.plain_text().len(),
         total_blocks: contents.blocks.len(),
         total_tokens,
+        input_statistics,
         total_mismatches: 0,
         total_mismatch_percent: 0.0,
         reported_tokens: 0,
@@ -349,7 +351,7 @@ pub fn replay_deflate(
         mismatches: Vec::new(),
         mismatches_truncated: false,
     };
-    let mut predictor = TokenPredictor::new(parameters);
+    let mut predictor = TokenPredictor::from_reconstruction_parameters(settings);
     predictor.trace = Some(TokenPredictionTrace::default());
     let mut before = (0, 0, 0);
     let mut observe =
@@ -448,7 +450,7 @@ pub fn replay_deflate(
         .expect("replay trace")
         .mismatch_count;
     result.total_mismatch_percent = percent(result.total_mismatches, result.total_tokens);
-    result.effective_parameters = predictor.reconstruction_parameters();
+    result.effective_reconstruction_parameters = predictor.finalize_reconstruction_parameters();
     result.reported_mismatch_percent = percent(result.reported_mismatches, result.reported_tokens);
     result.mismatches_truncated = result.reported_mismatches > result.mismatches.len();
     use crate::CodecCorrection::*;
@@ -479,4 +481,47 @@ pub fn replay_deflate(
         }
     }
     Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        parameters::{BlockTypeStrategy, PreflateStrategy},
+        reconstruction_parameters::BehaviorSettings,
+    };
+
+    #[test]
+    fn replay_uses_only_canonical_reconstruction_settings() {
+        let parameters = ReconstructionParameters {
+            max_token_count: 127,
+            block_type_strategy: BlockTypeStrategy::Uncompressed,
+            behavior: BehaviorSettings::NoDictionary {
+                strategy: PreflateStrategy::Store,
+            },
+        };
+        let compressed = b"\x01\x03\x00\xfc\xffabc";
+        let settings_json = parameters.to_json().unwrap();
+        validate_replay_parameters(&settings_json).unwrap();
+        let result = replay_deflate(compressed, &settings_json, &ReplayOptions::default()).unwrap();
+        assert_eq!(result.verified, Some(true));
+        let report = serde_json::to_value(result).unwrap();
+        assert_eq!(
+            report["reconstruction_parameters"],
+            serde_json::to_value(parameters).unwrap()
+        );
+        assert_eq!(
+            report["effective_reconstruction_parameters"],
+            serde_json::to_value(parameters).unwrap()
+        );
+        assert!(report.get("parameters").is_none());
+        assert!(report.get("effective_parameters").is_none());
+        let estimator_report =
+            crate::estimate_first_chunk_estimator_json(compressed, 1024).unwrap();
+        let estimator_value: serde_json::Value = serde_json::from_str(&estimator_report).unwrap();
+        assert!(estimator_value["reconstruction"]["behavior"]["NoDictionary"].is_object());
+        assert!(validate_replay_parameters(&estimator_report).is_err());
+        assert!(replay_deflate(compressed, &estimator_report, &ReplayOptions::default()).is_err());
+        assert!(validate_replay_parameters(r#"{"strategy":"Store","max_chain":0}"#).is_err());
+    }
 }

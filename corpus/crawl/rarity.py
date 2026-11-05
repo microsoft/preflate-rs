@@ -3,37 +3,47 @@
 from __future__ import annotations
 
 import json
-import re
 import sqlite3
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from corpus.database.profiles import profile_fields, reconstruction_settings, variant
 
 TIERS = ("family", "variant", "exact", "failure")
-_ARGUMENTS = re.compile(r"\s*[\{\(].*$")
-
-
-def _kind(value: Any) -> str:
-    """Strip estimated numeric arguments: `AddFirst(106)` -> `AddFirst`, `Lazy { .. }` -> `Lazy`."""
-    return _ARGUMENTS.sub("", str(value))
 
 
 def stream_signatures(settings: Mapping[str, Any] | None) -> dict[str, str]:
     """Effective-settings signatures. These group behaviour, they do not prove producer identity."""
     if settings is None:
         return {"family": "unavailable", "variant": "unavailable", "exact": "unavailable"}
+    reconstruction = reconstruction_settings(settings)
+    fields = profile_fields(settings)
+    behavior, body = variant(reconstruction["behavior"])
+    if behavior == "NoDictionary":
+        dictionary, parser, distance, input_tail = {}, body, None, None
+    else:
+        common = body["common"]
+        dictionary = common["dictionary"]
+        distance = common["distance"]
+        input_tail = common["search"]["input_tail"]
+        parser = body["parser"] if behavior == "Chain" else {
+            "MiniZ": {"greedy": body["greedy"], "max_probes": body["common"]["search"]["max_probes"]}
+        }
+    def encode(value: Any) -> str:
+        return json.dumps(value, sort_keys=True, separators=(",", ":"))
+    index_signature = encode(dictionary.get("index"))
     family = " | ".join((
-        str(settings.get("hash_algorithm")), _kind(settings.get("matching_type")),
-        str(settings.get("strategy")), _kind(settings.get("add_policy")),
+        index_signature, str(fields.get("matching_type")),
+        str(fields.get("strategy")), str(fields.get("add_policy")), encode(input_tail),
     ))
-    variant = " | ".join((
-        str(settings.get("hash_algorithm")), str(settings.get("matching_type")),
-        str(settings.get("strategy")), _kind(settings.get("add_policy")),
-        str(settings.get("block_type_strategy")), f"w{settings.get('window_bits')}",
+    variant_signature = " | ".join((
+        index_signature, encode(parser), encode(distance),
+        str(fields.get("add_policy")), encode(input_tail),
+        str(fields.get("block_type_strategy")), f"w{fields.get('window_bits')}",
     ))
-    exact = json.dumps(settings, sort_keys=True, separators=(",", ":"))
-    return {"family": family, "variant": variant, "exact": exact}
+    exact = encode(reconstruction)
+    return {"family": family, "variant": variant_signature, "exact": exact}
 
 
 def failure_signature(kind: str, status: str, error_code: str | None) -> str:

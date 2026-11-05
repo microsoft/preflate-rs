@@ -4,10 +4,10 @@
  *  This software incorporates material from third parties. See NOTICE.txt for details.
  *--------------------------------------------------------------------------------------------*/
 
-use crate::parameters::DictionaryAddPolicy;
+//! Greedy and lazy parser inference from bounded match observations.
+//! Interprets repeated deferred matches and insertion constraints for profile selection.
 
-#[cfg(test)]
-use crate::{models::generic::resolve_matching_policy, parameters::MatchingType};
+use crate::parameters::DictionaryAddPolicy;
 
 // Confidence thresholds for inference, not constraints imposed by DEFLATE.
 const MIN_LAZY_OBSERVATIONS: u16 = 4;
@@ -34,7 +34,7 @@ impl ParserEvidence {
             ParserInference::Greedy
         } else if self.lazy_matches >= MIN_LAZY_OBSERVATIONS
             // Short matches can be rejected by filtering rather than lazy search.
-            && u32::from(self.longest_lazy_match) >= crate::models::zlib::FILTERED_MIN_MATCH_LENGTH
+            && u32::from(self.longest_lazy_match) >= crate::compressors::zlib::FILTERED_MIN_MATCH_LENGTH
         {
             ParserInference::Lazy {
                 longest_deferred_match: self.longest_lazy_match,
@@ -66,86 +66,102 @@ impl InsertionConstraint {
     }
 }
 
-#[test]
-fn parser_inference_requires_unfiltered_repeated_evidence() {
-    for (count, length, expected) in [
-        (0, 0, ParserInference::Unresolved),
-        (3, 7, ParserInference::Unresolved),
-        (4, 5, ParserInference::Unresolved),
-        (
-            4,
-            6,
-            ParserInference::Lazy {
-                longest_deferred_match: 6,
-            },
-        ),
-    ] {
-        let evidence = ParserEvidence {
-            lazy_matches: count,
-            longest_lazy_match: length,
-        };
-        assert_eq!(evidence.infer(false), expected);
-        assert_eq!(evidence.infer(true), ParserInference::Greedy);
-    }
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-#[test]
-fn insertion_cutoff_is_unresolved_until_it_excludes_an_observed_match() {
-    for (policy, longest, expected) in [
-        (
-            DictionaryAddPolicy::AddFirst(6),
-            5,
-            InsertionConstraint::Unresolved,
-        ),
-        (
-            DictionaryAddPolicy::AddFirst(6),
-            6,
-            InsertionConstraint::Unresolved,
-        ),
-        (
-            DictionaryAddPolicy::AddFirst(6),
-            7,
-            InsertionConstraint::Constrained,
-        ),
-        (
-            DictionaryAddPolicy::AddAll,
-            6,
-            InsertionConstraint::Constrained,
-        ),
-        (
-            DictionaryAddPolicy::AddFirstAndLast(6),
-            6,
-            InsertionConstraint::Constrained,
-        ),
-    ] {
-        assert_eq!(InsertionConstraint::observe(policy, longest), expected);
-    }
-}
+    use crate::{
+        estimator::models::generic::resolve_matching_policy, reconstruction_parameters::ChainParser,
+    };
 
-#[test]
-fn lazy_policy_must_look_beyond_the_deferred_match() {
-    for (length, expected) in [
-        (6, Some(16)),
-        (15, Some(16)),
-        (16, Some(32)),
-        (32, Some(128)),
-        (128, Some(258)),
-        (258, None),
-    ] {
-        let result = resolve_matching_policy(
-            MatchingType::Greedy,
-            InsertionConstraint::Unresolved,
-            ParserInference::Lazy {
-                longest_deferred_match: length,
-            },
-        );
-        match expected {
-            Some(expected) => {
-                assert!(
-                    matches!(result, MatchingType::Lazy { max_lazy, .. } if max_lazy == expected)
-                );
+    #[test]
+    fn parser_inference_requires_unfiltered_repeated_evidence() {
+        for (count, length, expected) in [
+            (0, 0, ParserInference::Unresolved),
+            (3, 7, ParserInference::Unresolved),
+            (4, 5, ParserInference::Unresolved),
+            (
+                4,
+                6,
+                ParserInference::Lazy {
+                    longest_deferred_match: 6,
+                },
+            ),
+        ] {
+            let evidence = ParserEvidence {
+                lazy_matches: count,
+                longest_lazy_match: length,
+            };
+            assert_eq!(evidence.infer(false), expected);
+            assert_eq!(evidence.infer(true), ParserInference::Greedy);
+        }
+    }
+
+    #[test]
+    fn insertion_cutoff_is_unresolved_until_it_excludes_an_observed_match() {
+        for (policy, longest, expected) in [
+            (
+                DictionaryAddPolicy::AddFirst(6),
+                5,
+                InsertionConstraint::Unresolved,
+            ),
+            (
+                DictionaryAddPolicy::AddFirst(6),
+                6,
+                InsertionConstraint::Unresolved,
+            ),
+            (
+                DictionaryAddPolicy::AddFirst(6),
+                7,
+                InsertionConstraint::Constrained,
+            ),
+            (
+                DictionaryAddPolicy::AddAll,
+                6,
+                InsertionConstraint::Constrained,
+            ),
+            (
+                DictionaryAddPolicy::AddFirstAndLast(6),
+                6,
+                InsertionConstraint::Constrained,
+            ),
+        ] {
+            assert_eq!(InsertionConstraint::observe(policy, longest), expected);
+        }
+    }
+
+    #[test]
+    fn lazy_policy_must_look_beyond_the_deferred_match() {
+        for (length, expected) in [
+            (6, Some(16)),
+            (15, Some(16)),
+            (16, Some(32)),
+            (32, Some(128)),
+            (128, Some(258)),
+            (258, None),
+        ] {
+            let result = resolve_matching_policy(
+                ChainParser::Greedy {
+                    short_match_cutoff: 0,
+                },
+                InsertionConstraint::Unresolved,
+                ParserInference::Lazy {
+                    longest_deferred_match: length,
+                },
+            );
+            match expected {
+                Some(expected) => {
+                    assert!(
+                        matches!(result, ChainParser::Lazy { lookahead, .. } if lookahead.max_lazy == expected)
+                    );
+                }
+                None => assert_eq!(
+                    result,
+                    ChainParser::Greedy {
+                        short_match_cutoff: 0
+                    }
+                ),
             }
-            None => assert_eq!(result, MatchingType::Greedy),
         }
     }
 }

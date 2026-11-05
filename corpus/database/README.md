@@ -7,6 +7,12 @@ The crawler exchanges current scanner JSON reports and streams them into its
 persistent SQLite catalog; it does not create per-download SQLite databases.
 There is no legacy archived-report import/resume/overlay compatibility path.
 Existing version-1 SQLite databases remain readable.
+Current parameter reports store `dictionary.index`, explicit window bounds, and
+the search input-tail policy. Indexed `hash_algorithm` remains a compact diagnostic
+signature, while `strategy` records the active window-bounds variant or the
+dictionary-free/disabled/RLE/MiniZ strategy. Full and oldest-excluded bounds both
+set `very_far_matches_detected`. The complete report remains in `settings_json`.
+Regenerate parameter baselines after schema changes; old JSON is not adapted.
 
 ## Scan private directories
 
@@ -201,6 +207,21 @@ scan the saved local extracts into a new run before checking parameters.
 - `effective_stream_settings`, `effective_block_settings`, `investigation_areas`:
   linked analysis views. Settings describe finalized predictor behaviour, not
   proven compressor identity or unrecorded estimator decisions.
+
+`profiles.settings_json` stores
+`{"reconstruction": {...}, "model": "..."}`: one authoritative executable
+configuration plus supplementary metadata. Native scanner and Python ingestion
+derive indexed summary columns from the same active reconstruction fields.
+Enum indexes contain variant names rather than Rust debug strings. Chain
+`strategy` indexes its concrete distance policy; dictionary-free profiles use
+their explicit strategy and the `None` hash summary. MiniZ has no indexed
+`nice_length`, and filtered-six lazy matching has no indexed three-byte cutoff:
+these columns remain SQL NULL. Full hash arguments and parser payloads remain
+in the structured JSON. Regenerate old baselines; the previous nested
+`estimation.model` report and old flat reports are not accepted as current input.
+
+Parameter regression changes use JSON-pointer paths, such as
+`/reconstruction/behavior/Chain/common/search/budget/max_chain`.
 
 Historical oracle, estimator and timing tables are preserved. The
 `oracle-opportunities`, `oracle-cohorts` and `timings` commands can query existing

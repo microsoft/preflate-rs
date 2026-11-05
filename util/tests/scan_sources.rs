@@ -1,3 +1,7 @@
+//! Exercises SQLite-selected scan inputs and baseline comparisons through the CLI.
+//! Checks recorded file scopes, source identity, path boundaries, and result
+//! ordering without modifying the source database.
+
 use std::{
     fs,
     path::Path,
@@ -290,7 +294,7 @@ fn baseline_diff_reports_size_settings_and_correction_changes_by_value() {
     )
     .unwrap();
     db.execute(
-        "UPDATE profiles SET settings_json=json_set(settings_json,'$.nice_length',12345)",
+        "UPDATE profiles SET settings_json=json_set(settings_json,'$.reconstruction.max_token_count',12345)",
         [],
     )
     .unwrap();
@@ -312,11 +316,11 @@ fn baseline_diff_reports_size_settings_and_correction_changes_by_value() {
         json!({"synthetic": 1})
     );
     assert_eq!(
-        changes[1]["changes"]["parameters"]["before"]["nice_length"],
+        changes[1]["changes"]["parameters"]["before"]["reconstruction"]["max_token_count"],
         12345
     );
     assert_ne!(
-        changes[1]["changes"]["parameters"]["after"]["nice_length"],
+        changes[1]["changes"]["parameters"]["after"]["reconstruction"]["max_token_count"],
         12345
     );
     assert_eq!(fs::read(&database).unwrap(), before);

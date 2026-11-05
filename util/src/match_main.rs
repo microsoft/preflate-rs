@@ -1,3 +1,7 @@
+//! Command-line comparison of current estimates with a recorded corpus run.
+//! Uses verified token-perfect streams and exact source ranges to report changes
+//! in reconstruction settings and estimation metadata.
+
 #![forbid(unsafe_code)]
 
 mod scan_fs;
@@ -13,7 +17,7 @@ use std::{
 
 use clap::Parser;
 use preflate_container::{DiagnosticParameters, diagnostic_deflate_payload};
-use preflate_rs::{PreflateConfig, PreflateStreamProcessor, estimate_first_chunk_parameters};
+use preflate_rs::{PreflateConfig, PreflateStreamProcessor, estimate_first_chunk_estimator_json};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Row};
 use serde::{Deserialize, Serialize};
 
@@ -223,6 +227,34 @@ struct Checker<'a> {
     cache: ParameterCache,
 }
 
+fn changed_parameter_paths(before: &serde_json::Value, after: &serde_json::Value) -> Vec<String> {
+    fn collect(
+        before: &serde_json::Value,
+        after: &serde_json::Value,
+        path: &str,
+        changes: &mut Vec<String>,
+    ) {
+        if before == after {
+            return;
+        }
+        if let (Some(before), Some(after)) = (before.as_object(), after.as_object()) {
+            let keys: std::collections::BTreeSet<_> = before.keys().chain(after.keys()).collect();
+            for key in keys {
+                let path = format!("{path}/{}", key.replace('~', "~0").replace('/', "~1"));
+                match (before.get(key), after.get(key)) {
+                    (Some(before), Some(after)) => collect(before, after, &path, changes),
+                    _ => changes.push(path),
+                }
+            }
+        } else {
+            changes.push(path.to_owned());
+        }
+    }
+    let mut changes = Vec::new();
+    collect(before, after, "", &mut changes);
+    changes
+}
+
 impl Checker<'_> {
     fn finding(&mut self, finding: Finding<'_>) -> Result<()> {
         if !self.first {
@@ -300,13 +332,7 @@ impl Checker<'_> {
                         self.summary.changed_streams += 1;
                         let before = serde_json::to_value(previous)?;
                         let after = serde_json::to_value(&current)?;
-                        let changed_fields = before
-                            .as_object()
-                            .expect("parameters serialize as an object")
-                            .iter()
-                            .filter(|(key, value)| after.get(key.as_str()) != Some(*value))
-                            .map(|(key, _)| key.clone())
-                            .collect();
+                        let changed_fields = changed_parameter_paths(&before, &after);
                         self.finding(Finding::ParametersChanged {
                             path: &file.path,
                             offset: stream.offset,
@@ -413,12 +439,12 @@ fn check_parameters(
         let mut processor = PreflateStreamProcessor::new(&config.preflate());
         processor
             .decompress(&payload)?
-            .parameters
+            .estimator_parameters_json()?
             .ok_or("first chunk did not return parameters")?
     } else {
-        estimate_first_chunk_parameters(&payload, config.preflate().plain_text_limit)?
+        estimate_first_chunk_estimator_json(&payload, config.preflate().plain_text_limit)?
     };
-    let parameters = DiagnosticParameters::from(parameters);
+    let parameters = DiagnosticParameters::from_json(&parameters)?;
     if let Some(key) = key {
         cache.insert(key, &payload, parameters.clone());
     }
@@ -605,9 +631,29 @@ fn main() -> std::process::ExitCode {
 mod tests {
     use super::*;
 
+    #[test]
+    fn parameter_differences_identify_nested_settings_and_metadata() {
+        let before = serde_json::json!({
+            "reconstruction": {"behavior": {"Chain": {"common": {"search": {"nice_length": 128}}}}},
+            "model": "custom"
+        });
+        let mut after = before.clone();
+        after["reconstruction"]["behavior"]["Chain"]["common"]["search"]["nice_length"] =
+            serde_json::json!(258);
+        after["model"] = serde_json::json!("zlib");
+        assert_eq!(
+            changed_parameter_paths(&before, &after),
+            [
+                "/model",
+                "/reconstruction/behavior/Chain/common/search/nice_length"
+            ]
+        );
+    }
+
     fn parameters() -> DiagnosticParameters {
         let raw = miniz_oxide::deflate::compress_to_vec(b"synthetic", 0);
-        estimate_first_chunk_parameters(&raw, 1024).unwrap().into()
+        DiagnosticParameters::from_json(&estimate_first_chunk_estimator_json(&raw, 1024).unwrap())
+            .unwrap()
     }
 
     #[test]

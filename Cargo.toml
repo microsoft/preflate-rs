@@ -23,6 +23,7 @@ rust-version = "1.89"
 repository = "https://github.com/microsoft/preflate-rs"
 
 [dev-dependencies]
+serde_json = "1"
 preflate-rs = { path = "preflate", features = ["diagnostics"] }
 preflate-container = { path = "container" }
 libz-sys = "1.1"

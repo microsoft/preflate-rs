@@ -311,15 +311,19 @@ Signatures group **effective estimated settings**, not proven producer identity:
 
 | Tier | Contents |
 |---|---|
-| `family` | Hash algorithm, matching kind, strategy and insertion kind, with estimated numeric arguments removed (`AddFirst(106)` becomes `AddFirst`) |
-| `variant` | Family plus full matching parameters, block-type strategy and window bits |
-| `exact` | The complete effective profile (statistics only by default) |
+| `family` | Structured dictionary index and hash, parser kind, explicit distance bounds/strategy, input-tail policy, and insertion kind; parser and insertion numeric arguments are omitted |
+| `variant` | Family plus full parser and distance settings, block-type strategy and window bits |
+| `exact` | The complete executable `reconstruction` configuration, excluding the supplementary `model` hypothesis (statistics only by default) |
 | `failure` | Wrapper kind, status and error code of an unsuccessful stream |
 
 A file counts once per signature. Crawl evidence accumulates in its own database
 and is applied to each subsequent document, including within the same batch,
 so a rare type stops being rare as it is found and save caps cannot be exceeded
 by documents selected together.
+
+The current reconstruction schema uses `dictionary.index`, explicit window bounds,
+and an input-tail policy. Signature baselines must be regenerated after this schema
+change; legacy parameter JSON is not translated.
 
 ## Crawl procedure
 

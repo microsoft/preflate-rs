@@ -105,12 +105,21 @@ A malformed request, limit violation or prediction failure produces
 Output/CLI errors are reported on stderr. A successful response is
 `{"status":"ok","result":{...}}`.
 
-The request contains `source`, complete typed `parameters`, and optional `options`.
-Enum names and payloads are structured JSON, not the scanner's debug strings:
-`"AddAll"`, `{"AddFirst":4}`, `"Greedy"`,
-`{"Zlib":{"hash_mask":32767,"hash_shift":5}}`, or
-`{"Lazy":{"max_lazy":16,"filtered_matching":false,"behavior":{"Zlib":{"good_length":8}}}}`.
-Unknown fields and invalid parameter ranges are rejected.
+The request contains `source`, complete structured JSON
+`reconstruction_parameters`, and optional `options`. These are the authoritative
+executable settings, with `max_token_count`, `block_type_strategy` and a typed
+`behavior` tree. See the example request for the complete nested layout.
+The core validates this JSON directly; estimator Rust types are not public.
+Core chunk/trace reports expose executable settings through
+`reconstruction_parameters_json()`. Their separate `estimator_parameters_json()`
+method returns `{"reconstruction": {...}, "model": "..."}`.
+`estimate_first_chunk_estimator_json()` returns this wrapper for the original
+first-chunk estimate, before encoding-time normalization.
+Scanner `parameters` fields and SQLite `settings_json` contain the same wrapper,
+with structured enum names/payloads, never Rust debug strings.
+To replay one, explicitly extract `reconstruction` into the request's
+`reconstruction_parameters`. Unknown fields, invalid ranges, old flat settings
+and full estimator wrappers are rejected. Regenerate old JSON/SQL baselines.
 
 Supported `source` objects:
 
@@ -152,6 +161,12 @@ Results include whole-chunk and selected-range mismatch counts/rates, per-block
 positions/types, flush lookahead limits, dictionary-reset decisions, nonzero
 correction counts, and bounded mismatch examples. Literal values and plaintext
 are omitted from output. Token counts exclude uncompressed stored-block bytes.
+`input_statistics` describes the whole parsed chunk independently of the supplied
+parameters: literal/reference counts, reference-length frequencies, maximum
+distance, full-length distance-one matches, and maximum tokens/plaintext bytes
+per Huffman block. These observations remain available with `encode:false`.
+Two-position libdeflate matching requires the `Libdeflate4` hash chain; incompatible
+explicit combinations return an `InvalidParameter` JSON error instead of panicking.
 
 `encode` defaults to `true`: complete reconstruction bytes include parameters and
 framing, and exact reconstruction of consumed compressed bytes is verified.
@@ -159,12 +174,13 @@ framing, and exact reconstruction of consumed compressed bytes is verified.
 but skips CABAC byte encoding/verification; both `reconstruction_bytes` and
 `verified` are `null`. Counts are not CABAC costs. `normalize_parameters` defaults
 to `false`; enable it explicitly to compare production's safe tiny-stream
-canonicalization. `parameters` always echoes the request; `effective_parameters`
+canonicalization. `reconstruction_parameters` always echoes the request;
+`effective_reconstruction_parameters`
 reports any resulting normalization.
 
-The typed Rust API is available under `preflate_rs::diagnostics` only with the
-`diagnostics` feature. JSON and file access remain in the utility crate; optional
-Serde derives do not change the bitcode reconstruction format.
+The replay Rust API is available under `preflate_rs::diagnostics` only with the
+`diagnostics` feature. File access and the request envelope remain in the utility
+crate; JSON serialization does not change the bitcode reconstruction format.
 
 ## Building
 

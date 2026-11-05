@@ -43,8 +43,14 @@ for verified token-perfect streams in a completed SQLite run selected with
 `--run`. It uses a read-only snapshot and writes diagnostic JSON; it does not
 accept JSON baselines. Both diagnostics share cloud-file
 checks in `src/scan_fs.rs`; parameter checks do not replace exact reconstruction.
+Scanner `parameters` and SQL `settings_json` contain the explicit
+`{"reconstruction": {...}, "model": "..."}` report. Index only active executable settings;
+absent settings stay SQL NULL. Parameter changes use nested JSON-pointer paths,
+including supplementary metadata changes.
 `src/replay_main.rs` implements JSON-in/JSON-out `preflate_replay` using the
-feature-gated typed core replay API. Preserve explicit parameters, bounded input,
+feature-gated core replay API. The request's `reconstruction_parameters` is only
+the executable configuration, never the estimator wrapper or an old flat record.
+Preserve explicit parameters, bounded input,
 traces and work, full first-chunk context for reported block ranges, structured
 errors and exact verification when encoding. Synthetic blocks use fixed trees;
 original streams are required for original Huffman/padding costs. Never add

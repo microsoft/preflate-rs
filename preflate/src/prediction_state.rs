@@ -4,26 +4,28 @@
  *  This software incorporates material from third parties. See NOTICE.txt for details.
  *--------------------------------------------------------------------------------------------*/
 
-//! Shared compressor replay state, independent of scoring policy and correction codecs.
+//! Shared token-prediction state for encoding, reconstruction, and candidate scoring.
 //!
-//! Each Huffman token follows `predict -> resolve actual token -> accept_token`.
-//! Prediction mutates lazy lookahead; acceptance advances history using the actual
-//! token, not the prediction. Encoder and decoder resolve corrections between
-//! these steps; estimator scoring already knows the actual token and skips recovery.
-//! Block/flush transitions and family matching rules must remain identical for all
-//! consumers. Candidate selection, replay limits, and error counting belong in the
-//! estimator; correction coding, tree frequencies, and traces belong in the wrapper.
-//! Fields are private: consumers use block transitions, prediction/acceptance,
-//! correction-recovery operations, and proven normalization reporting. Internal
-//! lookahead and hash storage must never be modified directly by a consumer.
-//! Block setup retains an internal context used by `finish_block`, which records block
-//! history and releases any lookahead limit. Known-token setup infers limit/reset
-//! decisions; decoded setup applies them. Framing decisions remain in the context
-//! for the encoder to read, preserving reset-tag presence from before setup.
+//! A token follows three steps: predict a literal or reference, resolve the actual
+//! token, then accept it and advance the dictionary. Scoring already knows the
+//! actual token; encoding and reconstruction resolve it through corrections.
+//! Advancing from actual tokens keeps all three paths on the same input history.
+//!
+//! Lazy matching can retain a reference found one position ahead instead of
+//! searching again after a literal. This state therefore includes pending matches
+//! as well as hash history, token-buffer limits, and block/flush transitions.
+//! Block context keeps temporary lookahead limits and reset decisions consistent
+//! until the block finishes. Observed equivalence bounds are retained for later
+//! parameter normalization without involving a correction codec.
 
 use crate::{
     bit_helper::DebugHash,
     block_predictor::BlockPrediction,
+    compressors::{
+        DeferredCutoff, LazyMinimum, MatchPrediction, block_minimum_match_length,
+        cross_4k_boundary, literal_at_buffer_edge, predict_libdeflate_lazy, predict_miniz_token,
+        predict_windows_lazy, predict_zlib_lazy,
+    },
     deflate::{
         deflate_constants::{MAX_MATCH, MIN_MATCH},
         deflate_token::{
@@ -31,12 +33,15 @@ use crate::{
             TokenFrequency,
         },
     },
-    hash_chain_holder::{HashChainHolder, MatchResult, new_hash_chain_holder_for_behavior},
-    models::{self, MatchPrediction, libdeflate, miniz, zlib},
-    parameters::{DictionaryAddPolicy, TokenPredictorParameters},
+    hash_chain_holder::{
+        HashChainHolder, MatchResult, SearchPurpose, new_hash_chain_holder_for_behavior,
+    },
+    parameters::DictionaryAddPolicy,
     preflate_error::{ExitCode, Result, err_exit_code},
     preflate_input::PreflateInput,
-    reconstruction_parameters::{BehaviorSettings, ReconstructionParameters, SearchBudget},
+    reconstruction_parameters::{
+        BehaviorSettings, ChainParser, ReconstructionParameters, SearchBudget,
+    },
 };
 
 /// Retained until finishing succeeds so limit cleanup uses the matching setup.
@@ -59,8 +64,7 @@ pub(crate) struct PredictionState {
     pending_reference: Option<DeflateTokenReference>,
     pending_literals: u8,
     min_match_length: u32,
-    lazy_minimum: Option<libdeflate::LazyMinimum>,
-    filtered_matching: bool,
+    lazy_minimum: Option<LazyMinimum>,
     max_token_count: u32,
     block_token_count: u32,
     block_prediction: BlockPrediction,
@@ -69,7 +73,7 @@ pub(crate) struct PredictionState {
     dictionary_start: Option<u32>,
     /// Conservative cutoff interval preserving encoded token predictions.
     short_match_distance_bounds: Option<(u32, u32)>,
-    deferred_cutoff: Option<zlib::DeferredCutoff>,
+    deferred_cutoff: Option<DeferredCutoff>,
     lazy_cutoff_equivalence: bool,
     token_limit_bounds: Option<(u32, u32)>,
 }
@@ -84,11 +88,6 @@ impl std::fmt::Debug for PredictionState {
 }
 
 impl PredictionState {
-    #[cfg(test)]
-    pub fn dictionary_reset_position(&self) -> Option<u32> {
-        self.dictionary_start
-    }
-
     #[cfg(any(test, feature = "diagnostics"))]
     pub fn block_profile_name(&self) -> &'static str {
         self.block_prediction.profile_name()
@@ -179,16 +178,23 @@ impl PredictionState {
 
     pub fn enable_parameter_normalization(
         &mut self,
-        parameters: &TokenPredictorParameters,
+        short_match_cutoff: u32,
+        lazy_cutoff_equivalence: bool,
         compressed_size: usize,
         complete: bool,
     ) {
         // Partial chunks cannot certify the history required by subsequent chunks.
         if complete && compressed_size < 1024 {
             self.state.enable_window_normalization();
-            self.short_match_distance_bounds = Some((0, parameters.max_dist_3_matches.max(32768)));
-            self.lazy_cutoff_equivalence = zlib::supports_deferred_cutoff(parameters);
-            if !matches!(self.settings.behavior, BehaviorSettings::WindowsLazy(_)) {
+            self.short_match_distance_bounds = Some((0, short_match_cutoff.max(32768)));
+            self.lazy_cutoff_equivalence = lazy_cutoff_equivalence;
+            if !matches!(
+                self.settings.behavior,
+                BehaviorSettings::Chain {
+                    parser: ChainParser::WindowsLazy { .. },
+                    ..
+                }
+            ) {
                 self.token_limit_bounds = Some((0, u32::from(u16::MAX)));
             }
         }
@@ -210,11 +216,6 @@ impl PredictionState {
                     .map_or(upper, |deferred| upper.min(deferred.upper_bound())),
             )
         })
-    }
-
-    #[cfg(test)]
-    pub fn track_short_match_distance(&mut self) {
-        self.short_match_distance_bounds = Some((0, 32768));
     }
 
     pub fn predict_and_observe_token_count(
@@ -242,8 +243,8 @@ impl PredictionState {
         predicted
     }
 
-    pub fn new(params: &TokenPredictorParameters) -> Self {
-        Self::new_with_mode(params, false)
+    pub fn reconstruction_parameters(&self) -> ReconstructionParameters {
+        self.settings
     }
 
     fn retain_deferred_cutoff(&mut self) {
@@ -254,11 +255,7 @@ impl PredictionState {
         }
     }
 
-    pub fn new_with_mode(params: &TokenPredictorParameters, legacy: bool) -> Self {
-        let mut settings = ReconstructionParameters::from(params);
-        if legacy {
-            settings.behavior = settings.behavior.for_legacy(params.max_dist_3_matches);
-        }
+    pub fn from_reconstruction_parameters(settings: ReconstructionParameters) -> Self {
         let predictor_state = new_hash_chain_holder_for_behavior(&settings.behavior);
         let (budget, insertion) = settings.behavior.dictionary_and_budget().map_or(
             (SearchBudget { max_chain: 0 }, DictionaryAddPolicy::AddAll),
@@ -275,13 +272,11 @@ impl PredictionState {
             pending_literals: 0,
             min_match_length: MIN_MATCH,
             lazy_minimum: None,
-            filtered_matching: !legacy,
             max_token_count: settings.max_token_count.into(),
             block_token_count: 0,
             block_prediction: {
                 let mut prediction = BlockPrediction::default();
                 prediction.begin_chunk(&[]);
-                prediction.legacy = legacy;
                 prediction
             },
             previous_empty_stored: false,
@@ -297,7 +292,6 @@ impl PredictionState {
     pub fn begin_chunk(&mut self, blocks: &[DeflateTokenBlock]) -> usize {
         let tail_length = self.block_prediction.begin_chunk(blocks);
         if self.previous_empty_stored
-            && !self.block_prediction.legacy
             && blocks.iter().any(|block| {
                 matches!(&block.block_type, DeflateTokenBlockType::Huffman { tokens, .. } if !tokens.is_empty())
             })
@@ -391,14 +385,16 @@ impl PredictionState {
         self.pending_reference = None;
         self.pending_literals = 0;
         self.block_token_count = 0;
-        self.min_match_length = models::block_minimum_match_length(
-            &self.settings.behavior,
-            self.filtered_matching,
-            input.cur_chars(0),
-        );
-        self.lazy_minimum = (self.filtered_matching
-            && matches!(self.settings.behavior, BehaviorSettings::LibdeflateLazy(_)))
-        .then(|| libdeflate::LazyMinimum::new(input.pos(), input.remaining()));
+        self.min_match_length =
+            block_minimum_match_length(&self.settings.behavior, input.cur_chars(0));
+        self.lazy_minimum = matches!(
+            self.settings.behavior,
+            BehaviorSettings::Chain {
+                parser: ChainParser::LibdeflateLazy { .. },
+                ..
+            }
+        )
+        .then(|| LazyMinimum::new(input.pos(), input.remaining()));
     }
 
     fn select_flush_limit(&self, tokens: &[DeflateToken], input: &PreflateInput) -> Option<u32> {
@@ -417,7 +413,7 @@ impl PredictionState {
     }
 
     fn select_flush_reset(&mut self, tokens: &[DeflateToken], input: &PreflateInput) -> bool {
-        if self.block_prediction.legacy || !self.previous_empty_stored || tokens.is_empty() {
+        if !self.previous_empty_stored || tokens.is_empty() {
             return false;
         }
         let mut produced = 0;
@@ -442,11 +438,8 @@ impl PredictionState {
             self.short_match_distance_bounds,
             self.deferred_cutoff,
         );
-        self.min_match_length = models::block_minimum_match_length(
-            &self.settings.behavior,
-            self.filtered_matching,
-            input.cur_chars(0),
-        );
+        self.min_match_length =
+            block_minimum_match_length(&self.settings.behavior, input.cur_chars(0));
         let mut probe = input.clone();
         let mut reset = false;
         for (offset, token) in tokens.iter().take(32).enumerate() {
@@ -542,15 +535,58 @@ impl PredictionState {
         if input.bytes_before() == 0
             || input.remaining() < MIN_MATCH
             || (self.insertion == DictionaryAddPolicy::AddFirstExcept4kBoundary
-                && miniz::cross_4k_boundary(input.pos()))
+                && cross_4k_boundary(input.pos()))
         {
             self.retain_deferred_cutoff();
             return DeflateToken::Literal(input.cur_char(0));
         }
 
-        let windows = matches!(self.settings.behavior, BehaviorSettings::WindowsLazy(_));
-        if windows
-            && models::windows::literal_at_buffer_edge(
+        match self.settings.behavior {
+            BehaviorSettings::NoDictionary { strategy: _ } => {
+                self.predict_match::<false>(input, 0, |_, _| MatchPrediction::Reference)
+            }
+            BehaviorSettings::MiniZ { common, greedy, .. } => {
+                self.predict_match::<false>(input, 0, |state, token| {
+                    predict_miniz_token(input, state, token, greedy, common.search.budget)
+                })
+            }
+            BehaviorSettings::Chain { common, parser } => match parser {
+                ChainParser::Greedy { .. } => {
+                    self.predict_match::<false>(input, 0, |_, _| MatchPrediction::Reference)
+                }
+                ChainParser::LibdeflateGreedy { .. } => {
+                    self.predict_match::<false>(input, self.min_match_length - 1, |_, _| {
+                        MatchPrediction::Reference
+                    })
+                }
+                ChainParser::LibdeflateLazy { two_positions, .. } => {
+                    self.predict_match::<false>(input, self.min_match_length - 1, |state, token| {
+                        predict_libdeflate_lazy(input, state, token, common.search, two_positions)
+                    })
+                }
+                ChainParser::Lazy { lookahead, .. } => {
+                    self.predict_match::<false>(input, 0, |state, token| {
+                        predict_zlib_lazy(input, state, token, lookahead, common.search.budget)
+                    })
+                }
+                ChainParser::WindowsLazy { max_lazy, .. } => {
+                    self.predict_match::<true>(input, 0, |state, token| {
+                        predict_windows_lazy(input, state, token, max_lazy, common.search.budget)
+                    })
+                }
+            },
+        }
+    }
+
+    #[inline(always)]
+    fn predict_match<const WINDOWS: bool>(
+        &mut self,
+        input: &PreflateInput,
+        previous_length: u32,
+        predict: impl FnOnce(&dyn HashChainHolder, DeflateTokenReference) -> MatchPrediction,
+    ) -> DeflateToken {
+        if WINDOWS
+            && literal_at_buffer_edge(
                 self.block_token_count,
                 self.max_token_count,
                 self.pending_reference.is_some(),
@@ -559,13 +595,15 @@ impl PredictionState {
             self.retain_deferred_cutoff();
             return DeflateToken::Literal(input.cur_char(0));
         }
-        let m = if let Some(pending) = self.pending_reference.filter(|_| !windows) {
+        let m = if let Some(pending) = self.pending_reference.filter(|_| !WINDOWS) {
             MatchResult::Success(pending)
         } else {
-            let previous =
-                libdeflate::initial_search_length(&self.settings.behavior, self.min_match_length);
-            self.state
-                .match_token_0(previous, self.budget.max_chain, input)
+            self.state.match_token_0(
+                previous_length,
+                self.budget.max_chain,
+                input,
+                SearchPurpose::Prediction,
+            )
         };
 
         self.pending_reference = None;
@@ -584,7 +622,7 @@ impl PredictionState {
             if match_token.len() == 3 && match_token.dist() > self.short_match_cutoff {
                 self.deferred_cutoff = self
                     .lazy_cutoff_equivalence
-                    .then(|| zlib::DeferredCutoff::new(input, match_token.dist()))
+                    .then(|| DeferredCutoff::new(input, match_token.dist()))
                     .flatten();
                 if self.deferred_cutoff.is_none()
                     && let Some((_, upper)) = &mut self.short_match_distance_bounds
@@ -594,39 +632,7 @@ impl PredictionState {
                 return DeflateToken::Literal(input.cur_char(0));
             }
 
-            let prediction = match &self.settings.behavior {
-                BehaviorSettings::MiniZ(settings) => miniz::predict_token(
-                    input,
-                    self.state.as_ref(),
-                    match_token,
-                    settings.greedy,
-                    settings.common.search.budget,
-                ),
-                BehaviorSettings::LibdeflateLazy(settings) => libdeflate::predict_lazy(
-                    input,
-                    self.state.as_ref(),
-                    match_token,
-                    settings.common.search,
-                    settings.two_positions,
-                ),
-                BehaviorSettings::Lazy(settings) => zlib::predict_lazy(
-                    input,
-                    self.state.as_ref(),
-                    match_token,
-                    settings.lookahead,
-                    settings.common.search.budget,
-                ),
-                BehaviorSettings::WindowsLazy(settings) => models::windows::predict_lazy(
-                    input,
-                    self.state.as_ref(),
-                    match_token,
-                    settings.max_lazy,
-                    settings.common.search.budget,
-                ),
-                BehaviorSettings::NoDictionary { strategy: _ }
-                | BehaviorSettings::Greedy(_)
-                | BehaviorSettings::LibdeflateGreedy(_) => MatchPrediction::Reference,
-            };
+            let prediction = predict(self.state.as_ref(), match_token);
             if match_token.len() == 3
                 && !(self.lazy_cutoff_equivalence
                     && matches!(
@@ -679,7 +685,9 @@ impl PredictionState {
             );
         }
 
-        let match_token = self.state.match_token_0(0, self.budget.max_chain, input);
+        let match_token =
+            self.state
+                .match_token_0(0, self.budget.max_chain, input, SearchPurpose::Prediction);
 
         // Re-prediction replaces any saved lookahead choice, including lazy2's extra literal.
         self.pending_reference = None;
@@ -692,7 +700,9 @@ impl PredictionState {
         }
 
         // If we didn't find a match, try again with a larger chain
-        let match_token = self.state.match_token_0(0, 4096, input);
+        let match_token =
+            self.state
+                .match_token_0(0, 4096, input, SearchPurpose::CorrectionRecovery);
 
         if let MatchResult::Success(m) = match_token
             && m.len() >= MIN_MATCH
@@ -725,15 +735,16 @@ impl PredictionState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::parameters::{LazyBehavior, MatchingType};
+    use crate::parameters::{LazyBehavior, tests::MatchingType};
     use crate::preflate_input::PlainText;
-    use crate::token_predictor::zlib_level_1_params;
+    use crate::token_predictor::tests::zlib_level_1_params;
 
     #[test]
     fn token_count_observation_uses_its_own_prediction() {
-        let parameters = TokenPredictorParameters {
-            max_token_count: 4,
-            ..zlib_level_1_params()
+        let parameters = {
+            let mut canonical_configuration = zlib_level_1_params();
+            canonical_configuration.max_token_count = 4;
+            canonical_configuration
         };
         for (actual, final_block, expected) in [
             (3, true, (3, 100)),
@@ -741,7 +752,8 @@ mod tests {
             (5, false, (0, 4)),
             (4, false, (4, 4)),
         ] {
-            let mut prediction = PredictionState::new(&parameters);
+            let mut prediction =
+                PredictionState::from_reconstruction_parameters((&parameters).into());
             prediction.token_limit_bounds = Some((0, 100));
             assert_eq!(
                 prediction.predict_and_observe_token_count(100, actual, final_block),
@@ -749,7 +761,7 @@ mod tests {
             );
             assert_eq!(prediction.token_limit_bounds, Some(expected));
         }
-        let mut prediction = PredictionState::new(&parameters);
+        let mut prediction = PredictionState::from_reconstruction_parameters((&parameters).into());
         assert_eq!(prediction.predict_and_observe_token_count(100, 3, true), 4);
         assert_eq!(prediction.token_limit_bounds, None);
     }
@@ -758,7 +770,8 @@ mod tests {
     fn block_context_preserves_framing_decisions_until_finish() {
         let plain = PlainText::new_with_data(vec![b'a'; 8]);
         let mut input = PreflateInput::new(&plain);
-        let mut prediction = PredictionState::new(&zlib_level_1_params());
+        let mut prediction =
+            PredictionState::from_reconstruction_parameters((&zlib_level_1_params()).into());
         assert!(prediction.block_reset_tag().is_err());
         prediction.block_prediction.flush = true;
         prediction.previous_empty_stored = true;
@@ -786,7 +799,8 @@ mod tests {
     fn block_context_finishes_stored_and_empty_huffman_history() {
         let plain = PlainText::new_with_data(vec![b'a'; 8]);
         let mut input = PreflateInput::new(&plain);
-        let mut prediction = PredictionState::new(&zlib_level_1_params());
+        let mut prediction =
+            PredictionState::from_reconstruction_parameters((&zlib_level_1_params()).into());
 
         prediction.begin_stored_block(&input).expect("idle block");
         prediction.advance_stored_byte(&mut input);
@@ -818,7 +832,8 @@ mod tests {
     fn block_context_applies_reset_and_restores_flush_lookahead() {
         let plain = PlainText::new_with_data(vec![b'a'; 16]);
         let mut input = PreflateInput::new(&plain);
-        let mut prediction = PredictionState::new(&zlib_level_1_params());
+        let mut prediction =
+            PredictionState::from_reconstruction_parameters((&zlib_level_1_params()).into());
         for _ in 0..4 {
             prediction.advance_stored_byte(&mut input);
         }
@@ -842,7 +857,8 @@ mod tests {
     fn block_context_rejects_unconsumed_flush_and_oversized_limits() {
         let plain = PlainText::new_with_data(vec![b'a'; 8]);
         let mut input = PreflateInput::new(&plain);
-        let mut prediction = PredictionState::new(&zlib_level_1_params());
+        let mut prediction =
+            PredictionState::from_reconstruction_parameters((&zlib_level_1_params()).into());
         assert!(
             prediction
                 .begin_decoded_huffman_block(&mut input, Some(9), false)
@@ -869,7 +885,8 @@ mod tests {
     fn block_context_rejects_nested_begin_and_unmatched_finish() {
         let plain = PlainText::new_with_data(vec![b'a'; 8]);
         let mut input = PreflateInput::new(&plain);
-        let mut prediction = PredictionState::new(&zlib_level_1_params());
+        let mut prediction =
+            PredictionState::from_reconstruction_parameters((&zlib_level_1_params()).into());
         assert!(prediction.finish_block(&mut input).is_err());
         prediction.begin_stored_block(&input).unwrap();
         assert!(prediction.begin_stored_block(&input).is_err());
@@ -899,7 +916,8 @@ mod tests {
         let plain = PlainText::new_with_data(vec![b'a'; 32]);
         for actual in [DeflateToken::Literal(b'a'), DeflateToken::new_ref(3, 1)] {
             for predicted in [DeflateToken::Literal(b'a'), DeflateToken::new_ref(4, 1)] {
-                let mut prediction = PredictionState::new_with_mode(&zlib_level_1_params(), false);
+                let mut prediction =
+                    PredictionState::from_reconstruction_parameters(zlib_level_1_params());
                 let mut input = PreflateInput::new(&plain);
                 prediction.commit_token(&DeflateToken::Literal(b'a'), &mut input);
                 let pending = Some(DeflateTokenReference::new(8, 1));
@@ -929,16 +947,17 @@ mod tests {
 
     #[test]
     fn unresolved_lazy_cutoff_proofs_retain_the_rejection_bound() {
-        let parameters = TokenPredictorParameters {
-            max_dist_3_matches: 4,
-            ..zlib_level_1_params()
+        let parameters = {
+            let mut canonical_configuration = zlib_level_1_params();
+            canonical_configuration.set_short_match_cutoff(4);
+            canonical_configuration
         };
         let plain = PlainText::new_with_data(vec![b'a'; 32]);
         let mut input = PreflateInput::new(&plain);
         input.advance(1);
-        let mut predictor = PredictionState::new(&parameters);
+        let mut predictor = PredictionState::from_reconstruction_parameters((&parameters).into());
         predictor.short_match_distance_bounds = Some((4, 32768));
-        predictor.deferred_cutoff = zlib::DeferredCutoff::new(&input, 8);
+        predictor.deferred_cutoff = DeferredCutoff::new(&input, 8);
         assert_eq!(predictor.short_match_distance_bounds(), Some((4, 7)));
         predictor.commit_token(&DeflateToken::new_ref(3, 1), &mut input);
         assert!(predictor.deferred_cutoff.is_none());
@@ -954,12 +973,13 @@ mod tests {
         bytes.extend([b'a'; 512]);
         let plain = PlainText::new_with_data(bytes);
         let mut input = PreflateInput::new(&plain);
-        let params = TokenPredictorParameters {
-            matching_type: MatchingType::LibdeflateGreedy,
-            max_chain: 17,
-            ..zlib_level_1_params()
+        let params = {
+            let mut canonical_configuration = zlib_level_1_params();
+            canonical_configuration.set_max_chain(17);
+            canonical_configuration.set_matching_type(MatchingType::LibdeflateGreedy);
+            canonical_configuration
         };
-        let mut predictor = PredictionState::new(&params);
+        let mut predictor = PredictionState::from_reconstruction_parameters((&params).into());
         predictor.start_block(&input);
         assert_eq!(predictor.min_match_length, 3);
         input.advance(4096);
@@ -979,12 +999,14 @@ mod tests {
             bytes.extend([b'a'; 30000]);
             let plain = PlainText::new_with_data(bytes);
             let mut input = PreflateInput::new(&plain);
-            let params = TokenPredictorParameters {
-                matching_type: MatchingType::LibdeflateLazy { two_positions },
-                max_chain: 101,
-                ..zlib_level_1_params()
+            let params = {
+                let mut canonical_configuration = zlib_level_1_params();
+                canonical_configuration.set_max_chain(101);
+                canonical_configuration
+                    .set_matching_type(MatchingType::LibdeflateLazy { two_positions });
+                canonical_configuration
             };
-            let mut predictor = PredictionState::new(&params);
+            let mut predictor = PredictionState::from_reconstruction_parameters((&params).into());
             predictor.start_block(&input);
             assert_eq!(predictor.min_match_length, 3);
             let mut frequency = TokenFrequency::default();
@@ -1034,27 +1056,28 @@ mod tests {
             bytes.extend_from_slice(b"abcdEFQ");
             let plain = PlainText::new_with_data(bytes);
             let mut input = PreflateInput::new(&plain);
-            let params = TokenPredictorParameters {
-                matching_type: MatchingType::MiniZ {
+            let params = {
+                let mut canonical_configuration = zlib_level_1_params();
+                canonical_configuration.set_insertion(DictionaryAddPolicy::AddAll);
+                canonical_configuration.set_max_chain(18);
+                canonical_configuration.set_matching_type(MatchingType::MiniZ {
                     max_probes: 16,
                     greedy,
-                },
-                add_policy: DictionaryAddPolicy::AddAll,
-                max_chain: 18,
-                ..zlib_level_1_params()
+                });
+                canonical_configuration
             };
-            let mut predictor = PredictionState::new(&params);
+            let mut predictor = PredictionState::from_reconstruction_parameters((&params).into());
             while input.pos() < position {
                 predictor.commit_token(&DeflateToken::Literal(input.cur_char(0)), &mut input);
             }
             assert!(matches!(
-                miniz::predict_token(
+                predict_miniz_token(
                     &input,
                     predictor.state.as_ref(),
                     DeflateTokenReference::new(3, position),
                     greedy,
                     SearchBudget {
-                        max_chain: params.max_chain
+                        max_chain: params.max_chain()
                     },
                 ),
                 MatchPrediction::Literal {
@@ -1104,18 +1127,19 @@ mod tests {
                 false,
             ),
         ] {
-            let params = TokenPredictorParameters {
-                matching_type: MatchingType::Lazy {
+            let params = {
+                let mut canonical_configuration = zlib_level_1_params();
+                canonical_configuration.set_insertion(DictionaryAddPolicy::AddAll);
+                canonical_configuration.set_nice_length(258);
+                canonical_configuration.set_max_chain(4);
+                canonical_configuration.set_matching_type(MatchingType::Lazy {
                     max_lazy: 16,
                     filtered_matching: false,
                     behavior,
-                },
-                add_policy: DictionaryAddPolicy::AddAll,
-                nice_length: 258,
-                max_chain: 4,
-                ..zlib_level_1_params()
+                });
+                canonical_configuration
             };
-            let mut predictor = PredictionState::new(&params);
+            let mut predictor = PredictionState::from_reconstruction_parameters((&params).into());
             let mut input = PreflateInput::new(&plain);
             while input.pos() < position {
                 predictor.commit_token(&DeflateToken::Literal(input.cur_char(0)), &mut input);
@@ -1150,15 +1174,17 @@ mod tests {
             bytes.extend_from_slice(if two_positions { b"abcdEFGQ" } else { b"abcdQ" });
             let plain = PlainText::new_with_data(bytes);
             let mut input = PreflateInput::new(&plain);
-            let params = TokenPredictorParameters {
-                matching_type: MatchingType::LibdeflateLazy { two_positions },
-                hash_algorithm: HashAlgorithm::Libdeflate4,
-                add_policy: DictionaryAddPolicy::AddAll,
-                nice_length: 258,
-                max_chain: 301,
-                ..zlib_level_1_params()
+            let params = {
+                let mut canonical_configuration = zlib_level_1_params();
+                canonical_configuration.set_hash_algorithm(HashAlgorithm::Libdeflate4);
+                canonical_configuration.set_insertion(DictionaryAddPolicy::AddAll);
+                canonical_configuration.set_nice_length(258);
+                canonical_configuration.set_max_chain(301);
+                canonical_configuration
+                    .set_matching_type(MatchingType::LibdeflateLazy { two_positions });
+                canonical_configuration
             };
-            let mut predictor = PredictionState::new(&params);
+            let mut predictor = PredictionState::from_reconstruction_parameters((&params).into());
             while input.pos() < position {
                 predictor.commit_token(&DeflateToken::Literal(input.cur_char(0)), &mut input);
             }
@@ -1191,17 +1217,18 @@ mod tests {
     fn windows_lazy_reserves_tail_and_tracks_block_slots() {
         use crate::{hash_algorithm::HashAlgorithm, preflate_input::PlainText};
         let plain = PlainText::new_with_data(vec![b'a'; 40]);
-        let params = TokenPredictorParameters {
-            matching_type: MatchingType::WindowsLazy { max_lazy: 128 },
-            hash_algorithm: HashAlgorithm::RandomVector,
-            matches_to_start_detected: true,
-            add_policy: DictionaryAddPolicy::AddAll,
-            max_token_count: 4,
-            max_chain: 100,
-            nice_length: 258,
-            ..zlib_level_1_params()
+        let params = {
+            let mut canonical_configuration = zlib_level_1_params();
+            canonical_configuration.set_hash_algorithm(HashAlgorithm::RandomVector);
+            canonical_configuration.set_matches_to_start(true);
+            canonical_configuration.set_insertion(DictionaryAddPolicy::AddAll);
+            canonical_configuration.set_nice_length(258);
+            canonical_configuration.set_max_chain(100);
+            canonical_configuration.set_matching_type(MatchingType::WindowsLazy { max_lazy: 128 });
+            canonical_configuration.max_token_count = 4;
+            canonical_configuration
         };
-        let mut predictor = PredictionState::new(&params);
+        let mut predictor = PredictionState::from_reconstruction_parameters((&params).into());
         let mut input = PreflateInput::new(&plain);
         predictor.commit_token(&DeflateToken::Literal(b'a'), &mut input);
         assert_eq!(
@@ -1210,7 +1237,7 @@ mod tests {
         );
         assert_eq!(predictor.repredict_reference(&mut input).unwrap().len(), 37);
         assert!(matches!(
-            predictor.state.match_token_0(0, 4096, &input),
+            predictor.state.match_token_0(0, params.max_chain(), &input, SearchPurpose::CorrectionRecovery),
             MatchResult::Success(reference) if reference.len() == 39
         ));
         predictor.commit_token(&DeflateToken::new_ref(37, 1), &mut input);
@@ -1220,7 +1247,7 @@ mod tests {
         }
         assert_eq!(input.remaining(), 0);
 
-        let mut predictor = PredictionState::new(&params);
+        let mut predictor = PredictionState::from_reconstruction_parameters((&params).into());
         let mut input = PreflateInput::new(&plain);
         for _ in 0..3 {
             predictor.commit_token(&DeflateToken::Literal(b'a'), &mut input);
@@ -1240,16 +1267,30 @@ mod tests {
             DeflateToken::new_ref(35, 1)
         );
 
-        let mut ordinary = PredictionState::new(&TokenPredictorParameters {
-            matching_type: MatchingType::Lazy {
-                max_lazy: 128,
-                filtered_matching: false,
-                behavior: LazyBehavior::RecomputeAfterLiteral,
-            },
-            ..params
-        });
+        let mut ordinary = PredictionState::from_reconstruction_parameters(
+            (&{
+                let mut canonical_configuration = params;
+                canonical_configuration.set_matching_type(MatchingType::Lazy {
+                    max_lazy: 128,
+                    filtered_matching: false,
+                    behavior: LazyBehavior::RecomputeAfterLiteral,
+                });
+                canonical_configuration
+            })
+                .into(),
+        );
         let mut input = PreflateInput::new(&plain);
         ordinary.commit_token(&DeflateToken::Literal(b'a'), &mut input);
         assert_eq!(ordinary.predict_token(&input), DeflateToken::new_ref(39, 1));
+    }
+
+    impl PredictionState {
+        pub fn dictionary_reset_position(&self) -> Option<u32> {
+            self.dictionary_start
+        }
+
+        pub fn track_short_match_distance(&mut self) {
+            self.short_match_distance_bounds = Some((0, 32768));
+        }
     }
 }

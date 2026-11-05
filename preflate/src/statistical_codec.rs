@@ -4,6 +4,10 @@
  *  This software incorporates material from third parties. See NOTICE.txt for details.
  *--------------------------------------------------------------------------------------------*/
 
+//! Correction categories and shared prediction encoder/decoder interfaces.
+//! Includes recording, counting, and verification implementations that inspect
+//! corrections independently of the arithmetic-coding backend.
+
 use crate::cabac_codec::{decode_difference, encode_difference};
 
 /// correction indictions, which are followed by a 16 bit value
@@ -278,65 +282,6 @@ impl PredictionDecoder for VerifyPredictionDecoder {
     }
 }
 
-#[cfg(test)]
-pub fn drive_encoder<T: PredictionEncoder>(encoder: &mut T, actions: &[CodecAction]) {
-    for action in actions {
-        match *action {
-            CodecAction::Correction(correction, value) => {
-                encoder.encode_correction(correction, value);
-            }
-            CodecAction::VerifyState(message, checksum) => {
-                encoder.encode_verify_state(message, checksum);
-            }
-        }
-    }
-}
-
-#[cfg(test)]
-pub fn verify_decoder<T: PredictionDecoder>(decoder: &mut T, actions: &[CodecAction]) {
-    for action in actions {
-        match *action {
-            CodecAction::Correction(correction, value) => {
-                let x = decoder.decode_correction(correction);
-                assert_eq!(x, value);
-            }
-            CodecAction::VerifyState(message, checksum) => {
-                decoder.decode_verify_state(message, checksum);
-            }
-        }
-    }
-}
-
-// used by tests to ensure that perfect prediction is performed for data
-// that we know should be encoded without any mispredictions or corrections
-#[cfg(test)]
-#[derive(Default)]
-pub struct AssertDefaultOnlyEncoder {}
-
-#[cfg(test)]
-impl PredictionEncoder for AssertDefaultOnlyEncoder {
-    fn encode_correction(&mut self, action: CodecCorrection, value: u32) {
-        assert_eq!(0, value, "unexpected correction {:?}", action);
-    }
-
-    fn encode_verify_state(&mut self, _message: &'static str, _checksum: u64) {}
-
-    fn finish(&mut self) {}
-}
-
-#[cfg(test)]
-#[derive(Default)]
-pub struct AssertDefaultOnlyDecoder {}
-
-#[cfg(test)]
-impl PredictionDecoder for AssertDefaultOnlyDecoder {
-    fn decode_correction(&mut self, _correction: CodecCorrection) -> u32 {
-        0
-    }
-
-    fn decode_verify_state(&mut self, _message: &'static str, _checksum: u64) {}
-}
-
 /// This implements a prediction encoder that tees the input to two different
 /// encoders. This allows us to verify that the behavior of two encoders is the same
 impl<A, B> PredictionEncoder for (A, B)
@@ -377,5 +322,64 @@ where
     fn decode_verify_state(&mut self, message: &'static str, checksum: u64) {
         self.0.decode_verify_state(message, checksum);
         self.1.decode_verify_state(message, checksum);
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use super::*;
+
+    pub fn drive_encoder<T: PredictionEncoder>(encoder: &mut T, actions: &[CodecAction]) {
+        for action in actions {
+            match *action {
+                CodecAction::Correction(correction, value) => {
+                    encoder.encode_correction(correction, value);
+                }
+                CodecAction::VerifyState(message, checksum) => {
+                    encoder.encode_verify_state(message, checksum);
+                }
+            }
+        }
+    }
+
+    pub fn verify_decoder<T: PredictionDecoder>(decoder: &mut T, actions: &[CodecAction]) {
+        for action in actions {
+            match *action {
+                CodecAction::Correction(correction, value) => {
+                    let x = decoder.decode_correction(correction);
+                    assert_eq!(x, value);
+                }
+                CodecAction::VerifyState(message, checksum) => {
+                    decoder.decode_verify_state(message, checksum);
+                }
+            }
+        }
+    }
+
+    // used by tests to ensure that perfect prediction is performed for data
+    // that we know should be encoded without any mispredictions or corrections
+
+    #[derive(Default)]
+    pub struct AssertDefaultOnlyEncoder {}
+
+    impl PredictionEncoder for AssertDefaultOnlyEncoder {
+        fn encode_correction(&mut self, action: CodecCorrection, value: u32) {
+            assert_eq!(0, value, "unexpected correction {:?}", action);
+        }
+
+        fn encode_verify_state(&mut self, _message: &'static str, _checksum: u64) {}
+
+        fn finish(&mut self) {}
+    }
+
+    #[derive(Default)]
+    pub struct AssertDefaultOnlyDecoder {}
+
+    impl PredictionDecoder for AssertDefaultOnlyDecoder {
+        fn decode_correction(&mut self, _correction: CodecCorrection) -> u32 {
+            0
+        }
+
+        fn decode_verify_state(&mut self, _message: &'static str, _checksum: u64) {}
     }
 }

@@ -1,3 +1,17 @@
+//! Encodes files as framed literal, DEFLATE, and image blocks.
+//!
+//! Scanning separates ordinary bytes from embedded streams. DEFLATE payloads
+//! become plaintext plus reconstruction data; surrounding bytes remain literal
+//! payloads, and PNG/JPEG data can use specialized encodings.
+//!
+//! One persistent Zstd encoder compresses successive payloads as flush segments,
+//! preserving history between blocks. Outer type/length headers and Lepton/WebP
+//! payloads are written outside that Zstd stream.
+//!
+//! The state machine retains partial input and active DEFLATE processors between
+//! calls, allowing large embedded streams to span continuation blocks rather
+//! than requiring the entire stream to fit in one input buffer.
+
 use crc32fast::Hasher as CrcHasher;
 
 use std::io::Write;
@@ -55,7 +69,7 @@ pub(crate) fn write_chunk_block_v2(
     stats: &mut PreflateStats,
 ) -> Result<(usize, Option<PreflateStreamProcessor>)> {
     match chunk.chunk_type {
-        FoundStreamType::DeflateStream(parameters, state) => {
+        FoundStreamType::DeflateStream(hash_algorithm, state) => {
             write_varint(encoder, chunk.corrections.len() as u32)?;
             write_varint(encoder, state.plain_text().text().len() as u32)?;
             encoder.write_all(&chunk.corrections)?;
@@ -69,7 +83,7 @@ pub(crate) fn write_chunk_block_v2(
 
             stats.overhead_bytes += chunk.corrections.len() as u64;
             stats.uncompressed_size += state.plain_text().len() as u64;
-            stats.hash_algorithm = parameters.hash_algorithm;
+            stats.hash_algorithm = hash_algorithm;
 
             if !state.is_done() {
                 return Ok((compressed_size, Some(state)));
@@ -77,10 +91,10 @@ pub(crate) fn write_chunk_block_v2(
             Ok((compressed_size, None))
         }
 
-        FoundStreamType::IDATDeflate(parameters, mut idat, plain_text) => {
+        FoundStreamType::IDATDeflate(hash_algorithm, mut idat, plain_text) => {
             log::debug!(
-                "IDATDeflate param {:?} corrections {}",
-                parameters,
+                "IDATDeflate hash {:?} corrections {}",
+                hash_algorithm,
                 chunk.corrections.len()
             );
 
@@ -95,7 +109,7 @@ pub(crate) fn write_chunk_block_v2(
                 writer.write_all(payload)?;
 
                 stats.uncompressed_size += plain_text.len() as u64;
-                stats.hash_algorithm = parameters.hash_algorithm;
+                stats.hash_algorithm = hash_algorithm;
                 stats.overhead_bytes += chunk.corrections.len() as u64;
 
                 Ok((payload.len(), None))
@@ -116,7 +130,7 @@ pub(crate) fn write_chunk_block_v2(
                 )?;
 
                 stats.uncompressed_size += plain_text.len() as u64;
-                stats.hash_algorithm = parameters.hash_algorithm;
+                stats.hash_algorithm = hash_algorithm;
                 stats.overhead_bytes += chunk.corrections.len() as u64;
 
                 Ok((compressed_size, None))
@@ -432,7 +446,7 @@ impl ProcessBuffer for PreflateContainerProcessor {
     }
 }
 
-/// Flushes the encoder, writes [block_type][varint(compressed_size)][compressed_bytes] to
+/// Flushes the encoder and writes `[block_type][varint(compressed_size)][compressed_bytes]` to
 /// destination, clears the encoder's inner buffer, and returns the compressed byte count.
 fn emit_compressed_block(
     block_type: u8,

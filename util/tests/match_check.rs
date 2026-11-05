@@ -1,3 +1,7 @@
+//! Tests the parameter checker against scanner-created SQLite baselines.
+//! Verifies detection of nested setting changes and source mismatches, and checks
+//! that filtering or invalid baselines cannot produce a false pass.
+
 use std::{fs, path::Path, process::Command};
 
 use miniz_oxide::deflate::{compress_to_vec, compress_to_vec_zlib};
@@ -148,15 +152,28 @@ fn unchanged_raw_zlib_png_tiny_and_multichunk_streams_pass() {
 
 #[test]
 fn every_parameter_field_is_frozen_and_reported() {
+    fn leaves(value: &Value, path: &str, output: &mut Vec<(String, Value)>) {
+        if let Some(fields) = value.as_object() {
+            for (name, value) in fields {
+                leaves(value, &format!("{path}/{name}"), output);
+            }
+        } else {
+            output.push((path.to_owned(), value.clone()));
+        }
+    }
     let directory = fixture();
     let original = parameters(&directory.path().join("baseline.sqlite"));
-    for (index, (name, value)) in original.as_object().unwrap().iter().enumerate() {
+    let mut fields = Vec::new();
+    leaves(&original, "", &mut fields);
+    for (index, (name, value)) in fields.iter().enumerate() {
         let mut changed = original.clone();
-        changed[name] = match value {
+        *changed.pointer_mut(name).unwrap() = match value {
             Value::Bool(value) => json!(!value),
             Value::Number(value) => json!(value.as_u64().unwrap() + 1),
             Value::String(value) => json!(format!("{value}_changed")),
-            _ => panic!("unexpected parameter type"),
+            Value::Null => json!(true),
+            Value::Array(_) => json!(["changed"]),
+            Value::Object(_) => unreachable!(),
         };
         let baseline = copy_baseline(directory.path(), &format!("changed-{index}.sqlite"));
         Connection::open(&baseline)
@@ -308,7 +325,14 @@ fn large_token_perfect_stream_uses_estimation_and_detects_changes() {
     assert_eq!(checked["summary"]["checked_streams"], 2);
     let db = Connection::open(&baseline).unwrap();
     let mut changed = parameters(&baseline);
-    changed["max_chain"] = json!(999);
+    let behavior = changed["reconstruction"]["behavior"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .next()
+        .unwrap();
+    let path = format!("/reconstruction/behavior/{behavior}/common/search/budget/max_chain");
+    *changed.pointer_mut(&path).unwrap() = json!(999);
     db.execute(
         "INSERT INTO profiles(settings_json) VALUES (?)",
         [changed.to_string()],
@@ -323,10 +347,7 @@ fn large_token_perfect_stream_uses_estimation_and_detects_changes() {
     let (success, checked) = check(&baseline, &directory.path().join("regression.json"), &[]);
     assert!(!success);
     assert_eq!(checked["summary"]["changed_streams"], 1);
-    assert_eq!(
-        checked["changes"][0]["changed_fields"],
-        json!(["max_chain"])
-    );
+    assert_eq!(checked["changes"][0]["changed_fields"], json!([path]));
 }
 
 #[test]

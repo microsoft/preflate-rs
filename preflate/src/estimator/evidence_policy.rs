@@ -4,21 +4,24 @@
  *  This software incorporates material from third parties. See NOTICE.txt for details.
  *--------------------------------------------------------------------------------------------*/
 
+//! Compressor-specific rules for interpreting parser observations.
+//! Applies family-dependent minimum match lengths before generic lazy-parser inference.
+
 use crate::hash_algorithm::HashAlgorithm;
 
 /// Family-specific restrictions on what a generic collector may count as evidence.
 /// Sampling bounds and inference confidence thresholds are not family policies.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) struct ParserEvidencePolicy {
+pub struct ParserEvidencePolicy {
     deferred_match_floor: u32,
 }
 
 impl ParserEvidencePolicy {
     pub fn for_hash(hash_algorithm: HashAlgorithm) -> Self {
-        crate::models::evidence_policy(hash_algorithm)
+        crate::estimator::compressor_profile::evidence_policy(hash_algorithm)
     }
 
-    pub(crate) const fn with_deferred_match_floor(deferred_match_floor: u32) -> Self {
+    pub const fn with_deferred_match_floor(deferred_match_floor: u32) -> Self {
         Self {
             deferred_match_floor,
         }

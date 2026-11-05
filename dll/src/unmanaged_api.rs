@@ -1,3 +1,6 @@
+//! C-callable container processors with opaque contexts and caller-owned buffers.
+//! Translates Rust errors and caught panics into status codes and bounded error messages.
+
 use std::{
     collections::VecDeque,
     panic::{AssertUnwindSafe, catch_unwind},
@@ -9,9 +12,6 @@ use preflate_container::{
     process_limited_buffer,
 };
 use preflate_rs::{ExitCode, PreflateError};
-
-#[cfg(test)]
-use std::ptr::null;
 
 /// Catch panics and convert them into a preflate error.
 fn catch_unwind_result<R>(
@@ -54,22 +54,6 @@ fn copy_cstring_utf8_to_buffer(str: &str, target_error_string: &mut [u8]) {
 
     // always null terminated
     target_error_string[copy_len] = 0;
-}
-
-#[test]
-fn test_copy_cstring_utf8_to_buffer() {
-    // test utf8
-    let mut buffer = [0u8; 10];
-    copy_cstring_utf8_to_buffer("h\u{00E1}llo", &mut buffer);
-    assert_eq!(buffer, [b'h', 0xc3, 0xa1, b'l', b'l', b'o', 0, 0, 0, 0]);
-
-    // test null termination
-    let mut buffer = [0u8; 10];
-    copy_cstring_utf8_to_buffer("helloeveryone", &mut buffer);
-    assert_eq!(
-        buffer,
-        [b'h', b'e', b'l', b'l', b'o', b'e', b'v', b'e', b'r', 0]
-    );
 }
 
 /// Allocates a compression context, or returns null on failure.
@@ -394,237 +378,258 @@ pub unsafe extern "C" fn decompress_buffer(
 }
 
 #[cfg(test)]
-pub fn read_file(filename: &str) -> Vec<u8> {
-    use std::fs::File;
-    use std::io::Read;
-    use std::path::Path;
+pub(crate) mod tests {
+    use super::*;
 
-    let filename = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("samples")
-        .join(filename);
-    println!("reading {0}", filename.to_str().unwrap());
-    let mut f = File::open(filename).unwrap();
+    use std::ptr::null;
 
-    let mut content = Vec::new();
-    f.read_to_end(&mut content).unwrap();
+    #[test]
+    fn test_copy_cstring_utf8_to_buffer() {
+        // test utf8
+        let mut buffer = [0u8; 10];
+        copy_cstring_utf8_to_buffer("h\u{00E1}llo", &mut buffer);
+        assert_eq!(buffer, [b'h', 0xc3, 0xa1, b'l', b'l', b'o', 0, 0, 0, 0]);
 
-    content
-}
+        // test null termination
+        let mut buffer = [0u8; 10];
+        copy_cstring_utf8_to_buffer("helloeveryone", &mut buffer);
+        assert_eq!(
+            buffer,
+            [b'h', b'e', b'l', b'l', b'o', b'e', b'v', b'e', b'r', 0]
+        );
+    }
 
-#[test]
-fn extern_interface() {
-    let original = read_file("samplezip.zip");
+    pub fn read_file(filename: &str) -> Vec<u8> {
+        use std::fs::File;
+        use std::io::Read;
+        use std::path::Path;
 
-    let mut compressed = Vec::new();
-    let error_string = &mut [0u8; 1024];
+        let filename = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("samples")
+            .join(filename);
+        println!("reading {0}", filename.to_str().unwrap());
+        let mut f = File::open(filename).unwrap();
 
-    unsafe {
-        let compression_context = create_compression_context(1);
+        let mut content = Vec::new();
+        f.read_to_end(&mut content).unwrap();
 
-        let mut compressed_chunk = vec![0; 10000];
+        content
+    }
 
-        original.chunks(10000).for_each(|chunk| {
+    #[test]
+    fn extern_interface() {
+        let original = read_file("samplezip.zip");
+
+        let mut compressed = Vec::new();
+        let error_string = &mut [0u8; 1024];
+
+        unsafe {
+            let compression_context = create_compression_context(1);
+
+            let mut compressed_chunk = vec![0; 10000];
+
+            original.chunks(10000).for_each(|chunk| {
+                let mut result_size: u64 = 0;
+
+                let retval = compress_buffer(
+                    compression_context,
+                    chunk.as_ptr(),
+                    chunk.len() as u64,
+                    false,
+                    compressed_chunk.as_mut_ptr(),
+                    compressed_chunk.len() as u64,
+                    (&mut result_size) as *mut u64,
+                    error_string.as_mut_ptr(),
+                    error_string.len() as u64,
+                );
+                assert!(
+                    retval == 0,
+                    "expecting no error {} {:?}",
+                    retval,
+                    get_cstring(error_string)
+                );
+
+                compressed.extend_from_slice(&compressed_chunk[..(result_size as usize)]);
+            });
+
+            loop {
+                let mut result_size: u64 = 0;
+
+                let retval = compress_buffer(
+                    compression_context,
+                    null(),
+                    0,
+                    true,
+                    compressed_chunk.as_mut_ptr(),
+                    compressed_chunk.len() as u64,
+                    (&mut result_size) as *mut u64,
+                    error_string.as_mut_ptr(),
+                    error_string.len() as u64,
+                );
+                assert!(
+                    retval >= 0,
+                    "expecting no error {} {:?}",
+                    retval,
+                    get_cstring(error_string)
+                );
+
+                compressed.extend_from_slice(&compressed_chunk[..(result_size as usize)]);
+
+                if retval == 1 {
+                    break;
+                }
+            }
+
+            let mut overhead_bytes = 0;
+            let mut uncompressed_size = 0;
+            let mut deflate_compressed_size = 0;
+            let mut zstd_compressed_size = 0;
+            let mut zstd_baseline_size = 0;
+            let mut hash_algorithm = 0;
+
+            get_compression_stats(
+                compression_context,
+                &mut deflate_compressed_size,
+                &mut zstd_compressed_size,
+                &mut zstd_baseline_size,
+                &mut uncompressed_size,
+                &mut overhead_bytes,
+                &mut hash_algorithm,
+            );
+
+            println!(
+                "stats: overhead={overhead_bytes}, uncompressed={uncompressed_size}, deflate_compressed={deflate_compressed_size} zstd_compressed={zstd_compressed_size}, zstd_baseline={zstd_baseline_size} hash_algorithm={hash_algorithm}"
+            );
+
+            free_compression_context(compression_context);
+        }
+
+        let mut recreated = Vec::new();
+
+        unsafe {
+            let decompression_context = create_decompression_context(0, 1024 * 1024 * 50);
+
+            let mut decompressed_chunk = vec![0; 10000];
+
+            compressed.chunks(10000).for_each(|chunk| {
+                let mut result_size: u64 = 0;
+
+                let retval = decompress_buffer(
+                    decompression_context,
+                    chunk.as_ptr(),
+                    chunk.len() as u64,
+                    false,
+                    decompressed_chunk.as_mut_ptr(),
+                    decompressed_chunk.len() as u64,
+                    (&mut result_size) as *mut u64,
+                    error_string.as_mut_ptr(),
+                    error_string.len() as u64,
+                );
+                assert!(
+                    retval == 0,
+                    "expecting no error {} {:?}",
+                    retval,
+                    get_cstring(error_string)
+                );
+
+                recreated.extend_from_slice(&decompressed_chunk[..(result_size as usize)]);
+            });
+
+            loop {
+                let mut result_size: u64 = 0;
+
+                let retval = decompress_buffer(
+                    decompression_context,
+                    null(),
+                    0,
+                    true,
+                    decompressed_chunk.as_mut_ptr(),
+                    decompressed_chunk.len() as u64,
+                    (&mut result_size) as *mut u64,
+                    error_string.as_mut_ptr(),
+                    error_string.len() as u64,
+                );
+
+                assert!(
+                    retval >= 0,
+                    "expecting no error {} {:?}",
+                    retval,
+                    get_cstring(error_string)
+                );
+
+                recreated.extend_from_slice(&decompressed_chunk[..(result_size as usize)]);
+
+                if retval == 1 {
+                    break;
+                }
+            }
+
+            free_decompression_context(decompression_context);
+        }
+
+        assert_eq!(original.len() as u64, recreated.len() as u64);
+        assert_eq!(original[..], recreated[..]);
+    }
+
+    /// tests the error message translation
+    #[test]
+    fn test_error_translation() {
+        unsafe {
+            let compression_context = create_compression_context(1);
+
+            let chunk = [1, 2, 3];
             let mut result_size: u64 = 0;
+            let mut error_string = [0u8; 100];
+
+            let retval = compress_buffer(
+                compression_context,
+                chunk.as_ptr(),
+                chunk.len() as u64,
+                true,
+                null_mut(),
+                0,
+                (&mut result_size) as *mut u64,
+                error_string.as_mut_ptr(),
+                error_string.len() as u64,
+            );
+
+            assert!(
+                retval == 0,
+                "expecting no error {} {:?}",
+                retval,
+                get_cstring(&error_string)
+            );
 
             let retval = compress_buffer(
                 compression_context,
                 chunk.as_ptr(),
                 chunk.len() as u64,
                 false,
-                compressed_chunk.as_mut_ptr(),
-                compressed_chunk.len() as u64,
-                (&mut result_size) as *mut u64,
-                error_string.as_mut_ptr(),
-                error_string.len() as u64,
-            );
-            assert!(
-                retval == 0,
-                "expecting no error {} {:?}",
-                retval,
-                get_cstring(error_string)
-            );
-
-            compressed.extend_from_slice(&compressed_chunk[..(result_size as usize)]);
-        });
-
-        loop {
-            let mut result_size: u64 = 0;
-
-            let retval = compress_buffer(
-                compression_context,
-                null(),
+                null_mut(),
                 0,
-                true,
-                compressed_chunk.as_mut_ptr(),
-                compressed_chunk.len() as u64,
                 (&mut result_size) as *mut u64,
                 error_string.as_mut_ptr(),
                 error_string.len() as u64,
             );
+
+            assert_eq!(retval, -(ExitCode::InvalidParameter as i32));
+
+            let error_string = get_cstring(&error_string);
+
             assert!(
-                retval >= 0,
-                "expecting no error {} {:?}",
-                retval,
-                get_cstring(error_string)
+                error_string
+                    .to_str()
+                    .unwrap()
+                    .starts_with("more data provided after input_complete signaled"),
             );
-
-            compressed.extend_from_slice(&compressed_chunk[..(result_size as usize)]);
-
-            if retval == 1 {
-                break;
-            }
         }
-
-        let mut overhead_bytes = 0;
-        let mut uncompressed_size = 0;
-        let mut deflate_compressed_size = 0;
-        let mut zstd_compressed_size = 0;
-        let mut zstd_baseline_size = 0;
-        let mut hash_algorithm = 0;
-
-        get_compression_stats(
-            compression_context,
-            &mut deflate_compressed_size,
-            &mut zstd_compressed_size,
-            &mut zstd_baseline_size,
-            &mut uncompressed_size,
-            &mut overhead_bytes,
-            &mut hash_algorithm,
-        );
-
-        println!(
-            "stats: overhead={overhead_bytes}, uncompressed={uncompressed_size}, deflate_compressed={deflate_compressed_size} zstd_compressed={zstd_compressed_size}, zstd_baseline={zstd_baseline_size} hash_algorithm={hash_algorithm}"
-        );
-
-        free_compression_context(compression_context);
     }
 
-    let mut recreated = Vec::new();
+    /// helper to get a cstring from a fixed size array for testing (finds zero terminator)
+    fn get_cstring<const N: usize>(error_string: &[u8; N]) -> &std::ffi::CStr {
+        let len = error_string.iter().position(|&x| x == 0).unwrap();
 
-    unsafe {
-        let decompression_context = create_decompression_context(0, 1024 * 1024 * 50);
-
-        let mut decompressed_chunk = vec![0; 10000];
-
-        compressed.chunks(10000).for_each(|chunk| {
-            let mut result_size: u64 = 0;
-
-            let retval = decompress_buffer(
-                decompression_context,
-                chunk.as_ptr(),
-                chunk.len() as u64,
-                false,
-                decompressed_chunk.as_mut_ptr(),
-                decompressed_chunk.len() as u64,
-                (&mut result_size) as *mut u64,
-                error_string.as_mut_ptr(),
-                error_string.len() as u64,
-            );
-            assert!(
-                retval == 0,
-                "expecting no error {} {:?}",
-                retval,
-                get_cstring(error_string)
-            );
-
-            recreated.extend_from_slice(&decompressed_chunk[..(result_size as usize)]);
-        });
-
-        loop {
-            let mut result_size: u64 = 0;
-
-            let retval = decompress_buffer(
-                decompression_context,
-                null(),
-                0,
-                true,
-                decompressed_chunk.as_mut_ptr(),
-                decompressed_chunk.len() as u64,
-                (&mut result_size) as *mut u64,
-                error_string.as_mut_ptr(),
-                error_string.len() as u64,
-            );
-
-            assert!(
-                retval >= 0,
-                "expecting no error {} {:?}",
-                retval,
-                get_cstring(error_string)
-            );
-
-            recreated.extend_from_slice(&decompressed_chunk[..(result_size as usize)]);
-
-            if retval == 1 {
-                break;
-            }
-        }
-
-        free_decompression_context(decompression_context);
+        (std::ffi::CStr::from_bytes_with_nul(&error_string[0..len + 1]).unwrap()) as _
     }
-
-    assert_eq!(original.len() as u64, recreated.len() as u64);
-    assert_eq!(original[..], recreated[..]);
-}
-
-/// tests the error message translation
-#[test]
-fn test_error_translation() {
-    unsafe {
-        let compression_context = create_compression_context(1);
-
-        let chunk = [1, 2, 3];
-        let mut result_size: u64 = 0;
-        let mut error_string = [0u8; 100];
-
-        let retval = compress_buffer(
-            compression_context,
-            chunk.as_ptr(),
-            chunk.len() as u64,
-            true,
-            null_mut(),
-            0,
-            (&mut result_size) as *mut u64,
-            error_string.as_mut_ptr(),
-            error_string.len() as u64,
-        );
-
-        assert!(
-            retval == 0,
-            "expecting no error {} {:?}",
-            retval,
-            get_cstring(&error_string)
-        );
-
-        let retval = compress_buffer(
-            compression_context,
-            chunk.as_ptr(),
-            chunk.len() as u64,
-            false,
-            null_mut(),
-            0,
-            (&mut result_size) as *mut u64,
-            error_string.as_mut_ptr(),
-            error_string.len() as u64,
-        );
-
-        assert_eq!(retval, -(ExitCode::InvalidParameter as i32));
-
-        let error_string = get_cstring(&error_string);
-
-        assert!(
-            error_string
-                .to_str()
-                .unwrap()
-                .starts_with("more data provided after input_complete signaled"),
-        );
-    }
-}
-
-/// helper to get a cstring from a fixed size array for testing (finds zero terminator)
-#[cfg(test)]
-fn get_cstring<const N: usize>(error_string: &[u8; N]) -> &std::ffi::CStr {
-    let len = error_string.iter().position(|&x| x == 0).unwrap();
-
-    (std::ffi::CStr::from_bytes_with_nul(&error_string[0..len + 1]).unwrap()) as _
 }

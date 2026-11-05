@@ -1,3 +1,7 @@
+//! Interfaces for context-adaptive binary arithmetic readers and writers.
+//! Supplies shared integer-coding operations so correction codecs can use
+//! either the arithmetic backend or a diagnostic implementation.
+
 use std::{cmp, io::Result};
 
 /// implementation of a context aware binary arithmetic encoder

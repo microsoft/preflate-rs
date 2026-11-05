@@ -1,11 +1,14 @@
-//! Observe references into earlier match interiors and derive dictionary insertion policies.
+//! Dictionary insertion-policy estimation from back-references.
+//! Observes which positions inside earlier matches are referenced and how match
+//! and window boundaries affect insertion.
+
+use crate::compressors::{miniz::cross_4k_boundary, zlib_ng::is_at_32k_boundary};
 use crate::deflate::deflate_token::{DeflateToken, DeflateTokenBlock, DeflateTokenBlockType};
-use crate::models::{miniz::cross_4k_boundary, zlib_ng::is_at_32k_boundary};
 
 use crate::parameters::DictionaryAddPolicy;
 
 #[derive(Debug, Default, PartialEq, Eq)]
-pub(crate) struct InsertionEvidence {
+pub struct InsertionEvidence {
     max_interior_match_length: u32,
     max_nonfinal_interior_match_length: u32,
     references_cross_4k_boundary: bool,
@@ -13,7 +16,7 @@ pub(crate) struct InsertionEvidence {
 }
 
 impl InsertionEvidence {
-    pub(super) fn inferred_policy(&self, ends_with_final_block: bool) -> DictionaryAddPolicy {
+    pub fn inferred_policy(&self, ends_with_final_block: bool) -> DictionaryAddPolicy {
         if self.max_interior_match_length == 0 && !self.references_cross_4k_boundary {
             DictionaryAddPolicy::AddFirstExcept4kBoundary
         } else if self.max_interior_match_length != 0
@@ -38,7 +41,7 @@ impl InsertionEvidence {
 }
 
 /// Observe references into earlier matches without choosing an insertion policy.
-pub(super) fn observe_insertion(token_blocks: &[DeflateTokenBlock]) -> InsertionEvidence {
+pub fn observe_insertion(token_blocks: &[DeflateTokenBlock]) -> InsertionEvidence {
     const WINDOW_MASK: usize = 0x7fff;
 
     let mut evidence = InsertionEvidence::default();
@@ -123,215 +126,219 @@ pub(super) fn observe_insertion(token_blocks: &[DeflateTokenBlock]) -> Insertion
 }
 
 #[cfg(test)]
-pub(super) fn estimate_add_policy(token_blocks: &[DeflateTokenBlock]) -> DictionaryAddPolicy {
-    observe_insertion(token_blocks)
-        .inferred_policy(token_blocks.last().is_some_and(|block| block.last))
-}
+pub(crate) mod tests {
+    use super::*;
 
-#[test]
-fn insertion_observations_distinguish_interior_and_final_positions() {
-    use crate::deflate::deflate_token::DeflateHuffmanType;
-
-    for (distance, nonfinal_length, expected) in [
-        (3, 4, DictionaryAddPolicy::AddFirst(4)),
-        (1, 0, DictionaryAddPolicy::AddFirstAndLast(0)),
-    ] {
-        let blocks = [DeflateTokenBlock {
-            block_type: DeflateTokenBlockType::Huffman {
-                tokens: vec![
-                    DeflateToken::Literal(b'a'),
-                    DeflateToken::Literal(b'b'),
-                    DeflateToken::new_ref(4, 2),
-                    DeflateToken::new_ref(3, distance),
-                ],
-                huffman_type: DeflateHuffmanType::Static,
-            },
-            last: true,
-        }];
-        let evidence = observe_insertion(&blocks);
-        assert_eq!(
-            evidence,
-            InsertionEvidence {
-                max_interior_match_length: 4,
-                max_nonfinal_interior_match_length: nonfinal_length,
-                references_cross_4k_boundary: false,
-                interior_reference_outside_32k_boundary: true,
-            }
-        );
-        assert_eq!(evidence.inferred_policy(true), expected);
+    pub fn estimate_add_policy(token_blocks: &[DeflateTokenBlock]) -> DictionaryAddPolicy {
+        observe_insertion(token_blocks)
+            .inferred_policy(token_blocks.last().is_some_and(|block| block.last))
     }
-}
 
-#[test]
-fn insertion_policy_preserves_existing_interpretation_and_precedence() {
-    for (max_length, nonfinal_length, crosses_4k, outside_32k, expected) in [
-        (
-            0,
-            0,
-            false,
-            false,
-            DictionaryAddPolicy::AddFirstExcept4kBoundary,
-        ),
-        (0, 0, true, false, DictionaryAddPolicy::AddFirst(0)),
-        (
-            258,
-            0,
-            true,
-            false,
-            DictionaryAddPolicy::AddFirstWith32KBoundary,
-        ),
-        (258, 4, true, true, DictionaryAddPolicy::AddFirstAndLast(4)),
-        (6, 6, true, true, DictionaryAddPolicy::AddFirst(6)),
-        (258, 258, true, true, DictionaryAddPolicy::AddAll),
-    ] {
-        let evidence = InsertionEvidence {
-            max_interior_match_length: max_length,
-            max_nonfinal_interior_match_length: nonfinal_length,
-            references_cross_4k_boundary: crosses_4k,
-            interior_reference_outside_32k_boundary: outside_32k,
-        };
-        assert_eq!(evidence.inferred_policy(true), expected);
-    }
-}
+    #[test]
+    fn insertion_observations_distinguish_interior_and_final_positions() {
+        use crate::deflate::deflate_token::DeflateHuffmanType;
 
-#[test]
-fn four_byte_fast_default_preserves_stronger_insertion_evidence() {
-    for (maximum, nonfinal, outside_boundary, expected) in [
-        (3, 3, true, DictionaryAddPolicy::AddFirst(4)),
-        (4, 3, true, DictionaryAddPolicy::AddFirst(4)),
-        (4, 4, true, DictionaryAddPolicy::AddFirst(4)),
-        (3, 0, true, DictionaryAddPolicy::AddFirstAndLast(0)),
-        (4, 0, true, DictionaryAddPolicy::AddFirstAndLast(0)),
-        (5, 3, true, DictionaryAddPolicy::AddFirstAndLast(3)),
-        (258, 3, true, DictionaryAddPolicy::AddFirstAndLast(3)),
-        (5, 5, true, DictionaryAddPolicy::AddFirst(5)),
-        (6, 6, true, DictionaryAddPolicy::AddFirst(6)),
-        (3, 3, false, DictionaryAddPolicy::AddFirstWith32KBoundary),
-        (4, 3, false, DictionaryAddPolicy::AddFirstWith32KBoundary),
-    ] {
-        let evidence = InsertionEvidence {
-            max_interior_match_length: maximum,
-            max_nonfinal_interior_match_length: nonfinal,
-            references_cross_4k_boundary: true,
-            interior_reference_outside_32k_boundary: outside_boundary,
-        };
-        assert_eq!(evidence.inferred_policy(false), expected, "{evidence:?}");
-    }
-}
-
-#[test]
-fn complete_stream_retains_its_observed_short_insertion_policy() {
-    for (maximum, nonfinal, expected) in [
-        (3, 3, DictionaryAddPolicy::AddFirst(3)),
-        (4, 3, DictionaryAddPolicy::AddFirstAndLast(3)),
-        (4, 4, DictionaryAddPolicy::AddFirst(4)),
-        (258, 3, DictionaryAddPolicy::AddFirstAndLast(3)),
-    ] {
-        let evidence = InsertionEvidence {
-            max_interior_match_length: maximum,
-            max_nonfinal_interior_match_length: nonfinal,
-            references_cross_4k_boundary: true,
-            interior_reference_outside_32k_boundary: true,
-        };
-        assert_eq!(evidence.inferred_policy(true), expected, "{evidence:?}");
-    }
-}
-
-#[test]
-fn boundary_insertion_requires_an_observed_reference_into_a_boundary_match() {
-    use crate::deflate::deflate_token::{DeflateHuffmanType, DeflateTokenBlockType};
-    for (boundary_insertions, expected) in [
-        (false, DictionaryAddPolicy::AddFirst(0)),
-        (true, DictionaryAddPolicy::AddFirstWith32KBoundary),
-    ] {
-        let mut tokens = vec![DeflateToken::Literal(b'@'), DeflateToken::Literal(b'a')];
-        let mut position = 2;
-        let mut distance = 1;
-        for _ in 0..300 {
-            tokens.push(DeflateToken::new_ref(258, distance));
-            distance = if boundary_insertions && is_at_32k_boundary(258, position) {
-                1
-            } else {
-                258
-            };
-            position += 258;
+        for (distance, nonfinal_length, expected) in [
+            (3, 4, DictionaryAddPolicy::AddFirst(4)),
+            (1, 0, DictionaryAddPolicy::AddFirstAndLast(0)),
+        ] {
+            let blocks = [DeflateTokenBlock {
+                block_type: DeflateTokenBlockType::Huffman {
+                    tokens: vec![
+                        DeflateToken::Literal(b'a'),
+                        DeflateToken::Literal(b'b'),
+                        DeflateToken::new_ref(4, 2),
+                        DeflateToken::new_ref(3, distance),
+                    ],
+                    huffman_type: DeflateHuffmanType::Static,
+                },
+                last: true,
+            }];
+            let evidence = observe_insertion(&blocks);
+            assert_eq!(
+                evidence,
+                InsertionEvidence {
+                    max_interior_match_length: 4,
+                    max_nonfinal_interior_match_length: nonfinal_length,
+                    references_cross_4k_boundary: false,
+                    interior_reference_outside_32k_boundary: true,
+                }
+            );
+            assert_eq!(evidence.inferred_policy(true), expected);
         }
-        let blocks = [DeflateTokenBlock {
-            block_type: DeflateTokenBlockType::Huffman {
-                tokens,
-                huffman_type: DeflateHuffmanType::Static,
-            },
-            last: true,
-        }];
-        assert_eq!(estimate_add_policy(&blocks), expected);
     }
-}
 
-#[test]
-fn verify_miniz1_recognition() {
-    use crate::deflate::deflate_reader::parse_deflate_whole;
-
-    let v = crate::utils::read_file("compressed_minizoxide_level1.deflate");
-
-    let (contents, _) = parse_deflate_whole(&v).unwrap();
-
-    let add_policy = estimate_add_policy(&contents.blocks);
-
-    assert_eq!(add_policy, DictionaryAddPolicy::AddFirstExcept4kBoundary);
-}
-
-#[test]
-fn verify_zlib_level_recognition() {
-    use crate::deflate::deflate_reader::parse_deflate_whole;
-
-    let levels = [
-        DictionaryAddPolicy::AddFirst(4),
-        DictionaryAddPolicy::AddFirst(5),
-        DictionaryAddPolicy::AddFirst(6),
-        DictionaryAddPolicy::AddAll,
-    ];
-
-    for i in 1..=4 {
-        let v = crate::utils::read_file(&format!("compressed_zlib_level{}.deflate", i));
-
-        let (contents, _plain_text) = parse_deflate_whole(&v).unwrap();
-        let add_policy = estimate_add_policy(&contents.blocks);
-
-        assert_eq!(add_policy, levels[i - 1]);
+    #[test]
+    fn insertion_policy_preserves_existing_interpretation_and_precedence() {
+        for (max_length, nonfinal_length, crosses_4k, outside_32k, expected) in [
+            (
+                0,
+                0,
+                false,
+                false,
+                DictionaryAddPolicy::AddFirstExcept4kBoundary,
+            ),
+            (0, 0, true, false, DictionaryAddPolicy::AddFirst(0)),
+            (
+                258,
+                0,
+                true,
+                false,
+                DictionaryAddPolicy::AddFirstWith32KBoundary,
+            ),
+            (258, 4, true, true, DictionaryAddPolicy::AddFirstAndLast(4)),
+            (6, 6, true, true, DictionaryAddPolicy::AddFirst(6)),
+            (258, 258, true, true, DictionaryAddPolicy::AddAll),
+        ] {
+            let evidence = InsertionEvidence {
+                max_interior_match_length: max_length,
+                max_nonfinal_interior_match_length: nonfinal_length,
+                references_cross_4k_boundary: crosses_4k,
+                interior_reference_outside_32k_boundary: outside_32k,
+            };
+            assert_eq!(evidence.inferred_policy(true), expected);
+        }
     }
-}
 
-#[test]
-fn verify_zlibng_level_recognition() {
-    use crate::deflate::deflate_reader::parse_deflate_whole;
-    let levels = [
-        DictionaryAddPolicy::AddFirstWith32KBoundary, // 1 quick
-        DictionaryAddPolicy::AddFirstAndLast(4),      // 2 fast
-        DictionaryAddPolicy::AddFirstAndLast(96),     // 3 medium
-        DictionaryAddPolicy::AddFirstAndLast(191),    // 4 medium
-    ];
+    #[test]
+    fn four_byte_fast_default_preserves_stronger_insertion_evidence() {
+        for (maximum, nonfinal, outside_boundary, expected) in [
+            (3, 3, true, DictionaryAddPolicy::AddFirst(4)),
+            (4, 3, true, DictionaryAddPolicy::AddFirst(4)),
+            (4, 4, true, DictionaryAddPolicy::AddFirst(4)),
+            (3, 0, true, DictionaryAddPolicy::AddFirstAndLast(0)),
+            (4, 0, true, DictionaryAddPolicy::AddFirstAndLast(0)),
+            (5, 3, true, DictionaryAddPolicy::AddFirstAndLast(3)),
+            (258, 3, true, DictionaryAddPolicy::AddFirstAndLast(3)),
+            (5, 5, true, DictionaryAddPolicy::AddFirst(5)),
+            (6, 6, true, DictionaryAddPolicy::AddFirst(6)),
+            (3, 3, false, DictionaryAddPolicy::AddFirstWith32KBoundary),
+            (4, 3, false, DictionaryAddPolicy::AddFirstWith32KBoundary),
+        ] {
+            let evidence = InsertionEvidence {
+                max_interior_match_length: maximum,
+                max_nonfinal_interior_match_length: nonfinal,
+                references_cross_4k_boundary: true,
+                interior_reference_outside_32k_boundary: outside_boundary,
+            };
+            assert_eq!(evidence.inferred_policy(false), expected, "{evidence:?}");
+        }
+    }
 
-    for i in 1..=4 {
-        let v = crate::utils::read_file(&format!("compressed_zlibng_level{}.deflate", i));
+    #[test]
+    fn complete_stream_retains_its_observed_short_insertion_policy() {
+        for (maximum, nonfinal, expected) in [
+            (3, 3, DictionaryAddPolicy::AddFirst(3)),
+            (4, 3, DictionaryAddPolicy::AddFirstAndLast(3)),
+            (4, 4, DictionaryAddPolicy::AddFirst(4)),
+            (258, 3, DictionaryAddPolicy::AddFirstAndLast(3)),
+        ] {
+            let evidence = InsertionEvidence {
+                max_interior_match_length: maximum,
+                max_nonfinal_interior_match_length: nonfinal,
+                references_cross_4k_boundary: true,
+                interior_reference_outside_32k_boundary: true,
+            };
+            assert_eq!(evidence.inferred_policy(true), expected, "{evidence:?}");
+        }
+    }
+
+    #[test]
+    fn boundary_insertion_requires_an_observed_reference_into_a_boundary_match() {
+        use crate::deflate::deflate_token::{DeflateHuffmanType, DeflateTokenBlockType};
+        for (boundary_insertions, expected) in [
+            (false, DictionaryAddPolicy::AddFirst(0)),
+            (true, DictionaryAddPolicy::AddFirstWith32KBoundary),
+        ] {
+            let mut tokens = vec![DeflateToken::Literal(b'@'), DeflateToken::Literal(b'a')];
+            let mut position = 2;
+            let mut distance = 1;
+            for _ in 0..300 {
+                tokens.push(DeflateToken::new_ref(258, distance));
+                distance = if boundary_insertions && is_at_32k_boundary(258, position) {
+                    1
+                } else {
+                    258
+                };
+                position += 258;
+            }
+            let blocks = [DeflateTokenBlock {
+                block_type: DeflateTokenBlockType::Huffman {
+                    tokens,
+                    huffman_type: DeflateHuffmanType::Static,
+                },
+                last: true,
+            }];
+            assert_eq!(estimate_add_policy(&blocks), expected);
+        }
+    }
+
+    #[test]
+    fn verify_miniz1_recognition() {
+        use crate::deflate::deflate_reader::tests::parse_deflate_whole;
+
+        let v = crate::utils::read_file("compressed_minizoxide_level1.deflate");
 
         let (contents, _) = parse_deflate_whole(&v).unwrap();
+
         let add_policy = estimate_add_policy(&contents.blocks);
 
-        assert_eq!(add_policy, levels[i - 1]);
+        assert_eq!(add_policy, DictionaryAddPolicy::AddFirstExcept4kBoundary);
     }
-}
 
-/// libflate always adds all matches to the dictionary
-#[test]
-fn verify_libdeflate_level_recognition() {
-    use crate::deflate::deflate_reader::parse_deflate_whole;
+    #[test]
+    fn verify_zlib_level_recognition() {
+        use crate::deflate::deflate_reader::tests::parse_deflate_whole;
 
-    for i in 1..=9 {
-        let v = crate::utils::read_file(&format!("compressed_libdeflate_level{}.deflate", i));
+        let levels = [
+            DictionaryAddPolicy::AddFirst(4),
+            DictionaryAddPolicy::AddFirst(5),
+            DictionaryAddPolicy::AddFirst(6),
+            DictionaryAddPolicy::AddAll,
+        ];
 
-        let (contents, _) = parse_deflate_whole(&v).unwrap();
-        let add_policy = estimate_add_policy(&contents.blocks);
+        for i in 1..=4 {
+            let v = crate::utils::read_file(&format!("compressed_zlib_level{}.deflate", i));
 
-        assert_eq!(add_policy, DictionaryAddPolicy::AddAll);
+            let (contents, _plain_text) = parse_deflate_whole(&v).unwrap();
+            let add_policy = estimate_add_policy(&contents.blocks);
+
+            assert_eq!(add_policy, levels[i - 1]);
+        }
+    }
+
+    #[test]
+    fn verify_zlibng_level_recognition() {
+        use crate::deflate::deflate_reader::tests::parse_deflate_whole;
+        let levels = [
+            DictionaryAddPolicy::AddFirstWith32KBoundary, // 1 quick
+            DictionaryAddPolicy::AddFirstAndLast(4),      // 2 fast
+            DictionaryAddPolicy::AddFirstAndLast(96),     // 3 medium
+            DictionaryAddPolicy::AddFirstAndLast(191),    // 4 medium
+        ];
+
+        for i in 1..=4 {
+            let v = crate::utils::read_file(&format!("compressed_zlibng_level{}.deflate", i));
+
+            let (contents, _) = parse_deflate_whole(&v).unwrap();
+            let add_policy = estimate_add_policy(&contents.blocks);
+
+            assert_eq!(add_policy, levels[i - 1]);
+        }
+    }
+
+    /// libflate always adds all matches to the dictionary
+    #[test]
+    fn verify_libdeflate_level_recognition() {
+        use crate::deflate::deflate_reader::tests::parse_deflate_whole;
+
+        for i in 1..=9 {
+            let v = crate::utils::read_file(&format!("compressed_libdeflate_level{}.deflate", i));
+
+            let (contents, _) = parse_deflate_whole(&v).unwrap();
+            let add_policy = estimate_add_policy(&contents.blocks);
+
+            assert_eq!(add_policy, DictionaryAddPolicy::AddAll);
+        }
     }
 }

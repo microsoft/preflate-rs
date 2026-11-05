@@ -1,3 +1,7 @@
+//! Buffered I/O helpers for container processing.
+//! Adapts streaming processors to fixed-size output buffers and provides sample
+//! loading and comparison helpers for tests.
+
 use std::{
     collections::VecDeque,
     io::{Read, Write},
@@ -6,72 +10,6 @@ use std::{
 use preflate_rs::Result;
 
 use crate::ProcessBuffer;
-
-#[allow(dead_code)]
-#[cfg(test)]
-pub fn write_file(filename: &str, data: &[u8]) {
-    let filename = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("samples")
-        .join(filename);
-
-    let mut writecomp = std::fs::File::create(filename).unwrap();
-    std::io::Write::write_all(&mut writecomp, data).unwrap();
-}
-
-#[cfg(test)]
-pub fn read_file(filename: &str) -> Vec<u8> {
-    use std::fs::File;
-    use std::io::Read;
-    use std::path::Path;
-
-    let filename = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("samples")
-        .join(filename);
-    println!("reading {0}", filename.to_str().unwrap());
-    let mut f = File::open(filename).unwrap();
-
-    let mut content = Vec::new();
-    f.read_to_end(&mut content).unwrap();
-
-    content
-}
-
-/// handy function to compare two arrays, and print the first mismatch. Useful for debugging.
-#[cfg(test)]
-#[track_caller]
-pub fn assert_eq_array<T: PartialEq + std::fmt::Debug>(a: &[T], b: &[T]) {
-    use core::panic;
-
-    if a.len() != b.len() {
-        for i in 0..std::cmp::min(a.len(), b.len()) {
-            assert_eq!(
-                a[i],
-                b[i],
-                "length mismatch {},{} and first mismatch at offset {}",
-                a.len(),
-                b.len(),
-                i
-            );
-        }
-        panic!(
-            "length mismatch {} and {}, but common prefix identical",
-            a.len(),
-            b.len()
-        );
-    } else {
-        for i in 0..a.len() {
-            assert_eq!(
-                a[i],
-                b[i],
-                "length identical {}, but first mismatch at offset {}",
-                a.len(),
-                i
-            );
-        }
-    }
-}
 
 struct LimitedOutputWriter<'a> {
     amount_written: usize,
@@ -136,51 +74,119 @@ pub fn process_limited_buffer(
     Ok((input_complete && w.extra_queue.is_empty(), w.amount_written))
 }
 
-#[test]
-fn test_process_limited_buffer() {
-    let mut p = crate::container_common::test::NopProcessBuffer {};
+#[cfg(test)]
+pub(crate) mod tests {
+    use super::*;
 
-    let input = b"Hello, world!";
-    let mut output = [0u8; 5];
-    let mut extra = VecDeque::new();
+    #[allow(dead_code)]
+    pub fn write_file(filename: &str, data: &[u8]) {
+        let filename = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("samples")
+            .join(filename);
 
-    // first call should write "Hello" and queue up the rest
-    let (complete, written) =
-        process_limited_buffer(&mut p, input, true, &mut output, &mut extra).unwrap();
-    assert!(!complete);
-    assert_eq!(written, 5);
-    assert_eq!(&output, b"Hello");
-    assert_eq!(extra.len(), 8); // ", world!"
+        let mut writecomp = std::fs::File::create(filename).unwrap();
+        std::io::Write::write_all(&mut writecomp, data).unwrap();
+    }
 
-    // second call with no input should write the queued data
-    let (complete, written) =
-        process_limited_buffer(&mut p, &[], true, &mut output, &mut extra).unwrap();
-    assert!(!complete);
-    assert_eq!(written, 5);
-    assert_eq!(&output, b", wor");
-    assert_eq!(extra.len(), 3); // "ld!"
+    pub fn read_file(filename: &str) -> Vec<u8> {
+        use std::fs::File;
+        use std::io::Read;
+        use std::path::Path;
 
-    // third call with no input should write the remaining queued data
-    let (complete, written) =
-        process_limited_buffer(&mut p, &[], true, &mut output, &mut extra).unwrap();
-    assert!(complete);
-    assert_eq!(written, 3);
-    assert_eq!(&output[..3], b"ld!");
-    assert_eq!(extra.len(), 0);
+        let filename = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("samples")
+            .join(filename);
+        println!("reading {0}", filename.to_str().unwrap());
+        let mut f = File::open(filename).unwrap();
 
-    // fourth call with no input should do nothing
-    let (complete, written) =
-        process_limited_buffer(&mut p, &[], true, &mut output, &mut extra).unwrap();
-    assert!(complete);
-    assert_eq!(written, 0);
-    assert_eq!(extra.len(), 0);
+        let mut content = Vec::new();
+        f.read_to_end(&mut content).unwrap();
 
-    // now test with input that fits in the buffer
-    let input = b"Hi!";
-    let (complete, written) =
-        process_limited_buffer(&mut p, input, true, &mut output, &mut extra).unwrap();
-    assert!(complete);
-    assert_eq!(written, 3);
-    assert_eq!(&output[..3], b"Hi!");
-    assert_eq!(extra.len(), 0);
+        content
+    }
+
+    /// handy function to compare two arrays, and print the first mismatch. Useful for debugging.
+    #[track_caller]
+    pub fn assert_eq_array<T: PartialEq + std::fmt::Debug>(a: &[T], b: &[T]) {
+        use core::panic;
+
+        if a.len() != b.len() {
+            for i in 0..std::cmp::min(a.len(), b.len()) {
+                assert_eq!(
+                    a[i],
+                    b[i],
+                    "length mismatch {},{} and first mismatch at offset {}",
+                    a.len(),
+                    b.len(),
+                    i
+                );
+            }
+            panic!(
+                "length mismatch {} and {}, but common prefix identical",
+                a.len(),
+                b.len()
+            );
+        } else {
+            for i in 0..a.len() {
+                assert_eq!(
+                    a[i],
+                    b[i],
+                    "length identical {}, but first mismatch at offset {}",
+                    a.len(),
+                    i
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_process_limited_buffer() {
+        let mut p = crate::container_common::tests::NopProcessBuffer {};
+
+        let input = b"Hello, world!";
+        let mut output = [0u8; 5];
+        let mut extra = VecDeque::new();
+
+        // first call should write "Hello" and queue up the rest
+        let (complete, written) =
+            process_limited_buffer(&mut p, input, true, &mut output, &mut extra).unwrap();
+        assert!(!complete);
+        assert_eq!(written, 5);
+        assert_eq!(&output, b"Hello");
+        assert_eq!(extra.len(), 8); // ", world!"
+
+        // second call with no input should write the queued data
+        let (complete, written) =
+            process_limited_buffer(&mut p, &[], true, &mut output, &mut extra).unwrap();
+        assert!(!complete);
+        assert_eq!(written, 5);
+        assert_eq!(&output, b", wor");
+        assert_eq!(extra.len(), 3); // "ld!"
+
+        // third call with no input should write the remaining queued data
+        let (complete, written) =
+            process_limited_buffer(&mut p, &[], true, &mut output, &mut extra).unwrap();
+        assert!(complete);
+        assert_eq!(written, 3);
+        assert_eq!(&output[..3], b"ld!");
+        assert_eq!(extra.len(), 0);
+
+        // fourth call with no input should do nothing
+        let (complete, written) =
+            process_limited_buffer(&mut p, &[], true, &mut output, &mut extra).unwrap();
+        assert!(complete);
+        assert_eq!(written, 0);
+        assert_eq!(extra.len(), 0);
+
+        // now test with input that fits in the buffer
+        let input = b"Hi!";
+        let (complete, written) =
+            process_limited_buffer(&mut p, input, true, &mut output, &mut extra).unwrap();
+        assert!(complete);
+        assert_eq!(written, 3);
+        assert_eq!(&output[..3], b"Hi!");
+        assert_eq!(extra.len(), 0);
+    }
 }

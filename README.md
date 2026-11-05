@@ -134,13 +134,29 @@ Pass-zero estimation keeps stream facts, candidate evidence, and compressor
 profiles separate. The existing depth walk produces immutable snapshots of the
 selected hash's required search depth, distance policy, and parser inference;
 surviving zlib candidates remain available to the bounded prefix refinement.
+`InitialEstimate` combines the selected evidence with borrowed stream observations and
+inferred block, window, and insertion settings. Family models choose their parser,
+nice length, and search budget from this estimator-only record before constructing
+complete `ReconstructionParameters`; initial recognition does not mutate a
+placeholder executable configuration. Scoring and later refinements still consume
+complete reconstruction candidates. Initial estimates are not serialized.
+MiniZ's initial and refinement paths share a family-local constructor using typed
+dictionary, distance, and search settings; initial history constraints are not
+projected through a provisional chain configuration.
 The profile coordinator delegates coupled matching, nice-length, window, and search
 settings to family policy modules. Its result explicitly distinguishes inferred defaults, compressor
 fingerprints, and accepted prefix-prediction refinements. The evidence-only parser
 resolver cannot overwrite either protected choice, even if the hash is unchanged.
 Prefix validation measures token fit over its bounded sample, not full-stream
-optimality. The existing depth-walk candidate set, traversal count,
-refinement-slot count, and default acceptance thresholds are preserved.
+optimality. The existing depth-walk candidate set, traversal count and
+refinement-slot count are preserved. Refinements normally require a perfect
+prefix. One previously empty slot also compares greedy parsing for unrecognized
+primary-only four-byte-hash lazy defaults with sufficient reference evidence and
+a full canonical token buffer. Only this custom fallback may accept an imperfect
+prefix, requiring at least 75% fewer mismatches and 16 fewer errors over the same
+bounded sample; existing perfect refinements take precedence. Its hash, insertion
+and search budget remain unchanged. A narrower prediction window is proposed only
+when the complete stream's observed references fit it.
 
 Bounded estimation replay advances through full-length distance-one matches
 without spending its informative token/byte budget on them. Their predictions,
@@ -153,9 +169,12 @@ the informative budget is unspent.
 Encoding uses the selected profile once, without an alternative-model retry.
 
 Candidate scoring, correction encoding, and reconstruction share a codec-free
-runtime parameter vocabulary in `preflate/src/parameters.rs`, independent of
-estimation policy. Family-specific parameter projection and insertion behavior
-remain in `models`. They also share a codec-free prediction state in
+runtime parameter vocabulary in `preflate/src/reconstruction_parameters.rs`.
+Shared option enums live in `preflate/src/parameters.rs`; candidates use the same
+typed reconstruction settings, with supplementary evidence and provenance retained
+in the estimator. Family recognition and candidate construction live in
+`estimator/models`; deterministic search and insertion helpers live in the peer
+`compressors` module. They share a codec-free prediction state in
 `preflate/src/prediction_state.rs`. Estimation uses this
 common module directly, without constructing the correction-coding wrapper.
 Scoring, work limits, general profile-refinement acceptance, and refinement stopping belong to
@@ -204,6 +223,17 @@ This is a heuristic for prediction fit, not statistical certainty, compressor
 identification, or a full-stream guarantee. The broader 4096-token / 512 KiB
 profile refinement is unchanged.
 
+Table-hash fallbacks can reuse the existing generic insertion and lazy slots for
+coupled zlib hypotheses. Greedy streams with far-distance three-byte references
+may test a fast tuple; full canonical token buffers support a memory-sized hash
+with the lazy-16 / nice-128 / chain-128 tuple, including smaller windows.
+The lazy parser's 4096-byte short-match cutoff does not exclude fast zlib.
+These hypotheses require compatible observed distances, no references to input
+position zero, a hash surviving the existing depth walk with zlib-compatible
+distances, and the existing perfect-prefix acceptance. Full-window fallback
+flags are narrowed only with complete-stream evidence. Candidate counts, work
+limits and already-perfect-prefix protection remain unchanged.
+
 The absence of three-byte references does not exclude a three-byte hash. For
 ambiguous full-insertion lazy streams with an observed power-of-two token buffer,
 the existing table-hash refinement slot can consider the Windows-style hash and
@@ -215,14 +245,20 @@ This adds no depth-walk hash state, full-stream pass, trial encoding, or refinem
 slot; existing three-byte-reference refinements retain their order. A successful
 prefix is evidence for a model, not proof of producer identity or full-stream fit.
 
-Compressor policies and library-specific runtime behavior live in `preflate/src/models/`, with modules for
-zlib, zlib-ng, libdeflate, miniz, Windows DEFLATE, Chromium, and the generic fallback.
-The family modules own candidate signatures, recognition preferences, evidence
-restrictions, coupled profile settings, and family-specific refinements. They also
-own lazy-match decisions, library-specific search restrictions, adaptive match
-minimums, and insertion-boundary rules. Zlib's
-shipped parser tables live with its policy; internal consumers import them directly
-from `models::zlib`. The generic fallback borrows those tables without asserting zlib
+Family-specific estimator policies live in `preflate/src/estimator/models/`, with
+modules for zlib, zlib-ng, libdeflate, miniz, Windows DEFLATE, Chromium, and the
+generic fallback. They own candidate signatures, recognition preferences,
+evidence restrictions, coupled profile settings, and family-specific refinements.
+`estimator/compressor_profile.rs` owns model identity, candidate ordering,
+refinement slots, and selection provenance.
+
+Deterministic compressor behavior lives separately in `preflate/src/compressors/`:
+lazy-match decisions, library-specific search restrictions, adaptive match
+minimums, and insertion-boundary rules. Prediction and reconstruction import
+these helpers directly, without depending on estimator modules. Zlib's shipped
+parser tables remain with its private estimator policy; hash calculations and
+runtime bounds have one definition in the compressor layer. Test-only policy
+access goes through `estimator::test_support`. The generic fallback borrows those tables without asserting zlib
 identity. Windows also models lazy recomputation, deferred-match token-buffer
 boundaries, and two trailing literals; zlib-ng retains generic inference where
 no stronger fingerprint exists.
@@ -244,15 +280,20 @@ the Windows-specific parser receive its family profile. Shared traversal code
 dispatches to family-owned rules; hash-window distance policy is selected once
 when constructing the matcher, not repeatedly inside its search loop.
 
-One shared profile selector returns `CompressorProfile`, partitioned into
-family-owned `Profile` structs plus `Custom` for unresolved or nonstandard
-combinations. Each selected variant retains its complete parameter tuple through
+One shared profile selector keeps a payload-free `CompressorProfile` model
+hypothesis beside its authoritative `ReconstructionParameters` in `EstimationResult`.
+Family policies construct and refine those settings directly, without
+family-specific parameter wrappers. `Custom` represents unresolved or nonstandard
+combinations. Complete selected tuples stay coupled to their hypothesis through
 parser resolution and bounded prefix refinement; a shared hash does not assign
 producer identity. Inferred family candidates remain refinable, while fingerprint
 and prefix-validation provenance protect accepted choices. The internal
-`estimate_preflate_profile` entry point retains this family information; the
-existing parameter API lowers it to concrete predictor settings at its boundary.
-Family profile tags are not serialized and do not enter matcher dispatch.
+`estimate_preflate_profile` entry point retains this family information inside
+the estimator. Candidates, scoring, prediction, normalization and serialization
+share one authoritative typed reconstruction configuration.
+Family profile tags are not retained by runtime prediction, serialized in
+reconstruction data, or used for matcher dispatch. Diagnostic metadata labels
+the selected model hypothesis without claiming producer identity.
 This organizational change preserves existing profile preferences, parameter
 normalization, candidate order, and probe budgets; it does not introduce preset
 trials or force known presets onto ambiguous tiny streams.
@@ -285,7 +326,7 @@ the precise minimum remain search context until parser resolution; protected
 fingerprints and prefix-validated choices retain their selected behavior.
 Prefix trials project the same evidence for each candidate before scoring.
 Reconstruction and scanner parameter reports carry lazy settings inside
-`matching_type`, not global `zlib_compatible`, `use_filtered_matching`, or
+`behavior.Chain.parser.Lazy`, not global `zlib_compatible`, `use_filtered_matching`, or
 observed `min_len` fields. Exact chain budgets and insertion cutoffs remain
 unchanged. Tiny complete streams can canonicalize reconstruction distance limits
 as described below.
@@ -350,61 +391,137 @@ of equivalent predictions. It adds no estimation passes or prediction replays;
 existing searches retain their chain budgets but may visit more entries before stopping.
 
 Reconstruction parameters describe predictor behavior, not just producer identity.
-Some fields are inactive for a selected model: the chained `MiniZ` parser ignores
-`nice_length`, and `HashAlgorithm::None` has no dictionary search or insertion
-settings. `MiniZFast` uses the ordinary greedy matcher, so its nice-length cutoff
-is still active. `Dynamic` and `Mixed` block strategies currently predict the
+Inapplicable fields are absent from the typed configuration: the chained `MiniZ`
+parser has no `nice_length`, and `HashAlgorithm::None` has no dictionary search or
+insertion settings. `MiniZFast` uses the ordinary greedy matcher, so its
+nice-length cutoff is still active. `Dynamic` and `Mixed` block strategies currently predict the
 same block type, so serialization canonicalizes `Mixed` to `Dynamic` at every
 stream size. This alias removal needs no stream-dependent observations.
 A filtered lazy parser with a minimum match length of six
-does not use the three-byte distance cutoff, including during correction recovery.
-The `inactive_profile_fields` tests compare CABAC bytes and
-verify exact reconstruction for these cases. Estimated window, search, distance,
-and token-count limits are not generally removable: they can change prediction
+has no three-byte distance cutoff, including during correction recovery.
+Behavioral tests exercise active distance policies and the `Dynamic`/`Mixed`
+alias through correction coding and exact reconstruction. Estimated window,
+search, distance, and token-count limits are not generally removable: they can change prediction
 and correction coding. Compact profile serialization must restore effective
 values or prove a model-specific equivalence rather than discard estimates.
 
-The current reconstruction schema nests settings under their selected behavior.
+The current reconstruction schema first selects dictionary-free, chain-based, or
+MiniZ behavior. Chain behavior contains one shared matching struct (dictionary,
+distance policy, and search settings), plus a parser enum selecting greedy, lazy,
+libdeflate greedy/lazy, or Windows lazy settings. MiniZ has its own search and
+distance settings rather than carrying unused chain fields.
 Dictionary-free streams have no hash, history, insertion, or search payload.
 Dictionary behaviors carry only their applicable parser settings: lazy lookahead
 belongs to lazy variants, MiniZ probe settings have no nice-length value, and the
 filtered-six-byte lazy variant has no three-byte cutoff. Hash mask/shift fields
 remain specific to the corresponding hash variant. Common token-count and block
 prediction settings remain independent because they affect every behavior.
-The estimator and diagnostic parameter interface remains flat. Conversion at the
-behavior boundary selects typed settings used by encoding and matching. Enum variants carry
-shared structs: dictionary storage (hash, window, insertion) is reused across
-applicable parsers. Chain and MiniZ common structs each pair their search settings
+Direct `bitcode` encoding stores the executable enum variants and their active
+settings. The current development format and JSON schema intentionally change
+without a backward-compatibility layer; regenerate diagnostic baselines.
+Explicit index, input-tail, and chain window-bound tags have a parameter-byte
+cost, tracked by the fixed-fixture wire-size regression tests.
+The estimator and diagnostic interfaces use these same typed settings, without
+a parallel flat executable configuration or conversion layer. Enum variants carry
+shared structs: dictionary storage (index, window, insertion) is reused across
+applicable parsers. Variant-only payloads use struct-like enum variants directly;
+named structs are retained only for settings shared with other consumers.
+The dictionary index selects either an ordinary chain with an explicit hash
+function or the supported libdeflate four-byte chain with a singleton three-byte
+secondary head. The latter is a layout and lookup rule, not another hash formula.
+Hash arguments belong to the hash function; neither a hash nor a supplementary
+model label activates distance or input-tail restrictions. Chain and MiniZ search
+settings explicitly select the normal-prediction input-tail policy.
+The public `HashAlgorithm` statistic remains a compact index/hash signature for
+diagnostics and estimator observations, not the executable configuration.
+Chain and MiniZ common structs each pair their search settings
 with their own distance policy; a MiniZ branch cannot carry chain distance settings
 or a nice-length field. Model helpers receive typed
-lookahead, chain, or shared search-budget structs rather than the flat estimates.
+lookahead, chain, or shared search-budget structs rather than estimator evidence.
 Source-history limits similarly consume a shared struct after policy dispatch.
-The hash-holder factory dispatches directly from the behavior variant's common
-struct, selecting a concrete chain or MiniZ search type alongside the concrete
-hash. Search and distance helpers consume that engine's common struct and shared
+The hash-holder factory selects chain or MiniZ search from the outer behavior
+variant. Nested parser matches capture the shared chain settings alongside only
+the parser-specific options they need; parser policy still controls normalization
+eligibility and Windows trailing literals. The factory selects a concrete search
+type alongside the concrete hash. Once an enum is matched, downstream helpers
+receive only the captured variant payloads or derived values, never the original
+parent enum. Holder construction reads the explicit search and distance policies;
+parser arms retain their coherent algorithms and Windows trailing literals.
+Token prediction similarly selects its parser once and passes a
+statically dispatched callback capturing only the relevant settings into the
+shared match/cutoff/state-transition logic; this adds no boxed callback or
+per-token allocation. Family policy constructs parser options and cutoffs together
+within the selected branch.
+Search and distance helpers consume that engine's common struct and shared
 transient requests; they do not redispatch an independent engine enum per lookup.
 Holder construction precomputes normal and expanded chain distance ceilings,
-including hash-specific head/chain boundaries and full-window edge exclusions.
+from explicit full-window, oldest-position-excluded, lookahead, or
+one-position-tighter lookahead bounds. Lookahead bounds distinguish the bucket
+head from later links. Search purpose explicitly distinguishes normal prediction
+from correction recovery, even when both use the same depth budget.
 Matching only clamps those ceilings to the currently admitted history. Reset
 boundaries remain position-dependent; MiniZ also retains its input-length-dependent
 window subtraction. These prepared limits are runtime state, not extra serialized
 settings.
 Exhaustive dispatch checks new variants at compile time; behavioral equivalence
-and exact reconstruction still require tests. Decoding can restore the effective
-flat interface, but matching consumes the same typed settings as serialization.
+and exact reconstruction still require tests.
+
+The estimation/execution boundary is explicit:
+
+```text
+estimation: EstimationResult { reconstruction: ReconstructionParameters, model: CompressorProfile }
+    -> score the typed candidate directly
+prediction: ReconstructionParameters + mutable PredictionState
+    -> finalize proven limits on the authoritative typed configuration
+serialization: ReconstructionParameters + correction bytes
+    -> decode directly into from_reconstruction_parameters
+reconstruction: the same typed settings + mutable PredictionState
+```
+
+Each scored candidate has its own prediction instance using its typed settings.
+Decoding reads typed settings directly; there is no flat-to-typed conversion.
+Normalization updates only window, short-match, and token-count limits; it does
+not rebuild the behavior tree or produce a second executable configuration.
+Runtime prediction retains no estimator profile.
+
+Chunk results keep private typed settings and supplementary estimation metadata.
+Two explicit on-demand JSON methods serve different purposes:
+
+- `reconstruction_parameters_json()` returns only the executable configuration,
+  exactly as finalized for wire serialization.
+- `estimator_parameters_json()` returns
+  `{"reconstruction": {...}, "model": "..."}`. The model
+  identifies the selected model hypothesis, not duplicate active settings or
+  proven compressor identity.
+
+Both return `None` for continuation chunks;
+`hash_algorithm()` supplies the small statistic needed by container compression
+without JSON serialization or parsing. Diagnostic traces also provide
+both JSON methods. JSON reporting remains available for basic diagnostics,
+independently of the optional replay/trace feature.
+Feature-gated diagnostic replay accepts only reconstruction JSON and validates
+it alongside the runtime configuration, without compressor estimation.
+It rejects estimator report wrappers and old flat parameter objects. Callers with
+an estimator report must explicitly extract its `reconstruction` object.
+`estimate_first_chunk_estimator_json()` returns the full estimator report before
+encoding-time normalization. Scanner `parameters` fields and SQL `settings_json`
+store that same explicit two-section report shape. Old JSON and SQL baselines
+must be regenerated; no legacy format generation or adapter is provided.
 Active values, including nonstandard search budgets, are retained.
 This step does not introduce preset IDs, parameter sweeps, or new estimation work.
-The existing flat `0x83` path retains its unfiltered three-byte cutoff when
-constructing typed runtime settings; it does not apply the current filtered-six
-serialization omission to legacy behavior.
+Explicit policy selectors add a few fixed bytes to dictionary-using correction
+headers compared with the earlier flat layout. Wire-size and end-to-end overhead
+tests include this cost; token-perfect prediction does not imply identical total
+reconstruction size across layouts.
 
 Distance settings follow the matching consumer's branches rather than compressor
 labels: disabled prediction, MiniZ's specialized distance rule, or ordinary chain
-limits (full window, hash-specific window, or RLE distance one). Full-window chain
+limits (explicit window bounds or RLE distance one). Window bounds select full,
+oldest-excluded, lookahead, or one-position-tighter lookahead limits. Full-window chain
 matching does not store an ignored strategy. MiniZ stores neither an ignored
 full-window flag nor an enabled strategy; without full-window override, HuffOnly
 and Store still select disabled prediction. Source-start admission belongs to
-full-window, hash-window, or enabled MiniZ prediction. RLE distance one has no
+bounded-window or enabled MiniZ prediction. RLE distance one has no
 source-start field: normal matching ignores it, and raw hop recovery uses its
 own history bound. There is only one distance selector within each engine, not
 a repeated chain/MiniZ selector. The window size remains common even for disabled prediction:
@@ -461,7 +578,7 @@ An empty stored block alone never resets history: the following block must
 use only fresh references and provide bounded literal evidence against retained
 history. Prediction-history exclusions retain old dictionary entries for
 correction recovery. Limits and reset decisions are encoded for symmetric
-reconstruction; legacy and untagged records keep their previous behavior.
+reconstruction.
 
 Run the ignored `profile_tiny_parameter_normalization` test in release mode with
 `PREFLATE_DIAGNOSTICS` pointing at local tiny `.deflate` fixtures and
@@ -543,8 +660,8 @@ New corrections use the developing **0.8 / 0x84** format, including the six-byte
 minimum for filtered zlib predictions, adaptive Huffman tree profiles, and nested
 behavior parameters instead of the earlier flat parameter record.
 Breaking changes within 0.8 intentionally retain this tag; older 0.8 builds
-cannot necessarily decode new corrections. Existing **0x83** blobs remain
-readable. Older **0x81**, **0x82**, and unversioned correction blobs are rejected.
+cannot necessarily decode new corrections. Older **0x81**, **0x82**, **0x83**,
+and unversioned correction blobs are rejected; there is no compatibility decoder.
 
 Dynamic Huffman blocks retain the existing prediction when it is perfect.
 Otherwise, at most eight tree profiles compare zlib/miniz/Floyd heap rules,
@@ -572,7 +689,7 @@ Chunks whose stored blocks are exclusively empty internal flush markers select
 a composable `ZeroStored` profile instead, avoiding repeated variable-size
 corrections as the remaining plaintext decreases.
 Huffman-only token limits use the observed block sizes rather than a fixed
-16,386-token limit. Legacy 0x83 decoding retains its original stored-length rule.
+16,386-token limit.
 
 Remaining gaps include zlib-ng levels 5/6 (match-end lookahead and backward match
 adjustment), libdeflate's adaptive minimum lengths in lazy modes, and Huffman-tree details.
@@ -1262,7 +1379,7 @@ For direct use of the core DEFLATE analysis API, see the [`preflate` crate](pref
   estimator scoring reuses the same state without correction coding.
 - **Format tags** — the DLL name identifies the `0_8` release family, not a stable
   development-format contract. Current corrections use `0x84` with behavior-specific
-  parameters; the decoder retains the existing `0x83` path. Containers use version 3.
+  parameters; there is no older-format decoding path. Containers use version 3.
   Other correction tags and older containers are rejected. Breaking changes within
   the developing 0.8 format do not require new tags or compatibility layers.
 - **CABAC coding** — the corrections codec is shared with the [Lepton](https://github.com/microsoft/lepton_jpeg_rust) JPEG re-compression library.

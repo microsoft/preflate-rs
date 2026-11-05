@@ -1,3 +1,14 @@
+//! Comparison of new scan observations with a completed SQLite baseline.
+//!
+//! A difference is attributable to modelling only when the source file still
+//! has the recorded identity and the stream boundaries match. File paths, sizes,
+//! modification times, and stream offsets establish that comparison scope before
+//! correction sizes, settings, and verification outcomes are compared.
+//!
+//! Changed, missing, newly available, or unidentified inputs are reported
+//! separately. Comparisons use the selected run's read-only snapshot and emit a
+//! diagnostic report without recording a new scan run.
+
 use std::{
     collections::BTreeMap,
     fs::{self, OpenOptions},

@@ -4,6 +4,10 @@
  *  This software incorporates material from third parties. See NOTICE.txt for details.
  *--------------------------------------------------------------------------------------------*/
 
+//! Defines shared status codes and errors with contextual messages.
+//! Adds operation context to failures while preserving their status codes for
+//! Rust callers and C bindings.
+
 use std::fmt::Display;
 use std::io::ErrorKind;
 use std::num::TryFromIntError;
@@ -216,19 +220,24 @@ impl From<PreflateError> for std::io::Error {
     }
 }
 
-#[test]
-fn test_error_translation() {
-    // test wrapping inside an io error
-    fn my_std_error() -> core::result::Result<(), std::io::Error> {
-        Err(PreflateError::new(ExitCode::AnalyzeFailed, "test error").into())
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_error_translation() {
+        // test wrapping inside an io error
+        fn my_std_error() -> core::result::Result<(), std::io::Error> {
+            Err(PreflateError::new(ExitCode::AnalyzeFailed, "test error").into())
+        }
+
+        let e: PreflateError = my_std_error().unwrap_err().into();
+        assert_eq!(e.exit_code(), ExitCode::AnalyzeFailed);
+        assert_eq!(e.message(), "test error");
+
+        // an IO error should be translated into an OsError
+        let e: PreflateError =
+            std::io::Error::new(std::io::ErrorKind::NotFound, "file not found").into();
+        assert_eq!(e.exit_code(), ExitCode::OsError);
     }
-
-    let e: PreflateError = my_std_error().unwrap_err().into();
-    assert_eq!(e.exit_code(), ExitCode::AnalyzeFailed);
-    assert_eq!(e.message(), "test error");
-
-    // an IO error should be translated into an OsError
-    let e: PreflateError =
-        std::io::Error::new(std::io::ErrorKind::NotFound, "file not found").into();
-    assert_eq!(e.exit_code(), ExitCode::OsError);
 }

@@ -4,15 +4,23 @@
  *  This software incorporates material from third parties. See NOTICE.txt for details.
  *--------------------------------------------------------------------------------------------*/
 
-//! Responsible for performing preflate and recreation on a chunk by chunk basis
+//! Chunked DEFLATE analysis and exact reconstruction.
+//!
+//! Analysis parses compressed blocks into plaintext and records the corrections
+//! needed to recreate their original encoding. The first chunk estimates the
+//! compressor settings and stores them with its corrections; continuation chunks
+//! reuse the predictor instead of repeating estimation.
+//!
+//! Analysis and reconstruction retain dictionary history across plaintext-limited
+//! chunks, allowing long streams to be processed without keeping all plaintext
+//! in memory. Reconstruction reads the settings and corrections, recovers the
+//! original blocks, and writes their DEFLATE bytes. Optional verification checks
+//! those bytes against the corresponding compressed input.
 
 use std::io::{BufRead, Cursor};
 
 use crate::cabac::vp8::{VP8Reader, VP8Writer};
 use bitcode::{Decode, Encode};
-
-#[cfg(any(test, feature = "diagnostics"))]
-use crate::estimator::preflate_parameter_estimator::estimate_preflate_parameters;
 
 use crate::{
     PreflateConfig, Result,
@@ -22,7 +30,6 @@ use crate::{
         deflate_token::DeflateTokenBlock,
         deflate_writer::DeflateWriter,
     },
-    parameters::TokenPredictorParameters,
     preflate_error::{AddContext, ExitCode, PreflateError},
     preflate_input::{PlainText, PreflateInput},
     reconstruction_parameters::ReconstructionParameters,
@@ -36,17 +43,9 @@ use crate::{
 /// The high bit is set because unversioned blobs from 0.7 and earlier start with a small bitcode
 /// byte (0x00 or 0x01 in practice), so they are rejected here instead of being misinterpreted.
 pub(crate) const RECONSTRUCTION_DATA_VERSION: u8 = 0x84;
-const LEGACY_RECONSTRUCTION_DATA_VERSION: u8 = 0x83;
 
-/// the data required to reconstruct the deflate stream exactly the way that it was
 #[derive(Encode, Decode)]
 struct ReconstructionData {
-    pub parameters: TokenPredictorParameters,
-    pub corrections: Vec<u8>,
-}
-
-#[derive(Encode, Decode)]
-struct EncodedReconstructionData {
     parameters: ReconstructionParameters,
     corrections: Vec<u8>,
 }
@@ -54,44 +53,22 @@ struct EncodedReconstructionData {
 impl ReconstructionData {
     pub fn write(self) -> Vec<u8> {
         let mut data = vec![RECONSTRUCTION_DATA_VERSION];
-        data.extend_from_slice(&bitcode::encode(&EncodedReconstructionData {
-            parameters: ReconstructionParameters::from(&self.parameters),
-            corrections: self.corrections,
-        }));
-        data
-    }
-
-    #[cfg(test)]
-    fn write_legacy(&self) -> Vec<u8> {
-        let mut data = vec![LEGACY_RECONSTRUCTION_DATA_VERSION];
-        data.extend_from_slice(&bitcode::encode(self));
+        data.extend_from_slice(&bitcode::encode(&self));
         data
     }
 
     pub fn read(data: &[u8]) -> Result<Self> {
         match data.split_first() {
             Some((&RECONSTRUCTION_DATA_VERSION, payload)) => {
-                bitcode::decode::<EncodedReconstructionData>(payload)
-                    .map(|encoded| Self {
-                        parameters: encoded.parameters.into_runtime(),
-                        corrections: encoded.corrections,
-                    })
+                bitcode::decode::<Self>(payload)
                     .map_err(|e| {
                         PreflateError::new(ExitCode::InvalidCompressedWrapper, format!("{e:?}"))
                     })
             }
-            Some((&LEGACY_RECONSTRUCTION_DATA_VERSION, payload)) => {
-                bitcode::decode(payload).map_err(|e| {
-                    PreflateError::new(
-                        ExitCode::InvalidCompressedWrapper,
-                        format!("{:?}", e).as_str(),
-                    )
-                })
-            }
             Some((&version, _)) => Err(PreflateError::new(
                 ExitCode::InvalidCompressedWrapper,
                 format!(
-                    "unsupported corrections version {version:#04x}, expected {RECONSTRUCTION_DATA_VERSION:#04x} or {LEGACY_RECONSTRUCTION_DATA_VERSION:#04x}"
+                    "unsupported corrections version {version:#04x}, expected {RECONSTRUCTION_DATA_VERSION:#04x}"
                 )
                 .as_str(),
             )),
@@ -112,14 +89,41 @@ pub struct PreflateStreamChunkResult {
     /// data that will be recreated using the cabac_encoded data)
     pub compressed_size: usize,
 
-    /// the parameters that were used to compress the stream. Only returned for the first
-    /// chunk that is passed in.
-    pub parameters: Option<TokenPredictorParameters>,
+    /// Parameter report retained only for the first chunk.
+    parameters: Option<crate::estimator::EstimationResult>,
 
     pub blocks: Vec<DeflateTokenBlock>,
 }
 
-fn encode_first_chunk(
+impl PreflateStreamChunkResult {
+    /// Serialize the first chunk's parameter report, or return `None` for continuation chunks.
+    ///
+    /// ```compile_fail
+    /// fn inspect(chunk: &preflate_rs::PreflateStreamChunkResult) {
+    ///     let _ = &chunk.parameters;
+    /// }
+    /// ```
+    pub fn estimator_parameters_json(&self) -> Result<Option<String>> {
+        self.parameters
+            .map(crate::estimator::EstimationResult::to_json)
+            .transpose()
+    }
+
+    /// Serialize only the executable settings stored in the reconstruction record.
+    pub fn reconstruction_parameters_json(&self) -> Result<Option<String>> {
+        self.parameters
+            .map(|report| report.reconstruction.to_json())
+            .transpose()
+    }
+
+    /// Hash used by the first chunk, without serializing diagnostic metadata.
+    pub fn hash_algorithm(&self) -> Option<crate::HashAlgorithm> {
+        self.parameters
+            .map(|report| report.reconstruction.hash_algorithm())
+    }
+}
+
+pub(crate) fn encode_first_chunk(
     predictor: &mut TokenPredictor,
     contents: &DeflateContents,
     plain: &PlainText,
@@ -159,7 +163,7 @@ pub(crate) fn encode_first_chunk_observed(
     )?;
     encoder.finish();
     Ok(ReconstructionData {
-        parameters: predictor.reconstruction_parameters(),
+        parameters: predictor.finalize_reconstruction_parameters(),
         corrections,
     }
     .write())
@@ -325,59 +329,16 @@ impl PreflateStreamProcessor {
                 blocks: contents.blocks,
             })
         } else {
-            #[cfg(any(test, feature = "diagnostics"))]
-            if let Some(trace) = &mut self.trace {
-                trace.stage = "estimate";
-            }
-            let profile =
-                crate::estimator::preflate_parameter_estimator::estimate_preflate_profile(
+            let (reconstruction_data, token_predictor, params) =
+                crate::estimator::estimate_and_encode(
                     &contents,
                     self.parser.plain_text(),
-                )
-                .context()?;
-            let params = profile.parameters();
-
-            #[cfg(any(test, feature = "diagnostics"))]
-            if let Some(trace) = &mut self.trace {
-                trace.parameters = Some(params);
-                trace.stage = "chain_limit";
-            }
-            if params.max_chain > self.max_chain_length {
-                return Err(PreflateError::new(
-                    ExitCode::NoCompressionCandidates,
-                    format!(
-                        "max_chain {} is larger than configured max_chain_length {}",
-                        params.max_chain, self.max_chain_length
-                    ),
-                ));
-            }
-
-            let mut token_predictor = TokenPredictor::new_profile(profile);
-
-            #[cfg(any(test, feature = "diagnostics"))]
-            {
-                if let Some(trace) = &mut self.trace {
-                    trace.stage = "predict";
-                }
-                token_predictor.trace = self.trace.take();
-            }
-            let prediction = encode_first_chunk(
-                &mut token_predictor,
-                &contents,
-                self.parser.plain_text(),
-                self.parser.is_done(),
-                counter,
-            );
-            #[cfg(any(test, feature = "diagnostics"))]
-            {
-                self.trace = token_predictor.trace.take();
-            }
-            let reconstruction_data = prediction?;
-            let params = token_predictor.reconstruction_parameters();
-            #[cfg(any(test, feature = "diagnostics"))]
-            if let Some(trace) = &mut self.trace {
-                trace.parameters = Some(params);
-            }
+                    self.parser.is_done(),
+                    self.max_chain_length,
+                    counter,
+                    #[cfg(any(test, feature = "diagnostics"))]
+                    &mut self.trace,
+                )?;
             self.predictor = Some(token_predictor);
 
             if let Some(validator) = &mut self.validator {
@@ -427,15 +388,15 @@ impl PreflateStreamProcessor {
 /// Parse and estimate the first chunk without correction coding or reconstruction.
 /// Estimation may perform bounded candidate prediction scoring, not full-stream replay.
 /// Tiny complete streams may normalize window/cutoff parameters during prediction;
-/// this returns the estimator's original parameters, not those normalized values.
+/// this returns the estimator's original parameters as JSON, not those normalized values.
 #[cfg(feature = "diagnostics")]
-pub fn estimate_first_chunk_parameters(
+pub fn estimate_first_chunk_estimator_json(
     compressed_data: &[u8],
     plain_text_limit: usize,
-) -> Result<TokenPredictorParameters> {
+) -> Result<String> {
     let mut parser = DeflateParser::new(plain_text_limit);
     let contents = parser.parse(compressed_data)?;
-    estimate_preflate_parameters(&contents, parser.plain_text())
+    crate::estimator::estimate_preflate_result(&contents, parser.plain_text())?.to_json()
 }
 
 /// Analyzes one plaintext-limited chunk and returns its plaintext and corrections.
@@ -506,12 +467,7 @@ impl RecreateStreamProcessor {
             Ok((self.writer.detach_output(), blocks))
         } else {
             let r = ReconstructionData::read(corrections)?;
-
-            let mut predictor = if corrections[0] == LEGACY_RECONSTRUCTION_DATA_VERSION {
-                TokenPredictor::new_legacy(&r.parameters)
-            } else {
-                TokenPredictor::new(&r.parameters)
-            };
+            let mut predictor = TokenPredictor::from_reconstruction_parameters(r.parameters);
 
             let mut cabac_decoder =
                 PredictionDecoderCabac::new(VP8Reader::new(Cursor::new(r.corrections)).unwrap());
@@ -554,24 +510,6 @@ pub fn recreate_whole_deflate_stream(
     Ok(recompressed)
 }
 
-/// takes a deflate compressed stream, analyzes it, decoompresses it, and records
-/// any differences in the encoder codec
-#[cfg(test)]
-fn encode_mispredictions(
-    deflate: &crate::deflate::deflate_reader::DeflateContents,
-    plain_text: &PlainText,
-    params: &TokenPredictorParameters,
-    encoder: &mut impl PredictionEncoder,
-) -> Result<()> {
-    let mut input = PreflateInput::new(plain_text);
-
-    let mut token_predictor = TokenPredictor::new(params);
-
-    predict_blocks(&deflate.blocks, &mut token_predictor, encoder, &mut input)?;
-
-    Ok(())
-}
-
 fn predict_blocks(
     blocks: &[DeflateTokenBlock],
     token_predictor: &mut TokenPredictor,
@@ -608,22 +546,6 @@ pub(crate) fn predict_blocks_observed(
     Ok(())
 }
 
-#[cfg(test)]
-fn decode_mispredictions(
-    params: &TokenPredictorParameters,
-    input: &mut PreflateInput,
-    decoder: &mut impl crate::statistical_codec::PredictionDecoder,
-) -> Result<(Vec<u8>, Vec<DeflateTokenBlock>)> {
-    let mut deflate_writer: DeflateWriter = DeflateWriter::new();
-    let mut predictor = TokenPredictor::new(params);
-
-    let output_blocks = recreate_blocks(&mut predictor, decoder, &mut deflate_writer, input)?;
-
-    deflate_writer.flush();
-
-    Ok((deflate_writer.detach_output(), output_blocks))
-}
-
 fn recreate_blocks<D: PredictionDecoder>(
     token_predictor: &mut TokenPredictor,
     decoder: &mut D,
@@ -651,646 +573,6 @@ fn recreate_blocks<D: PredictionDecoder>(
     Ok(output_blocks)
 }
 
-/// decompresses a deflate stream and returns the plaintext and cabac_encoded data that can be used to reconstruct it
-/// This version uses DebugWriter and DebugReader, which are slower but can be used to debug the cabac encoding errors.
-#[cfg(test)]
-fn decompress_deflate_stream_assert(
-    compressed_data: &[u8],
-    verify: bool,
-) -> Result<(PreflateStreamChunkResult, PlainText)> {
-    use crate::cabac::debug::{DebugReader, DebugWriter};
-    use crate::deflate::deflate_reader::parse_deflate_whole;
-
-    use crate::preflate_error::AddContext;
-
-    let mut cabac_encoded = Vec::new();
-
-    let mut cabac_encoder =
-        PredictionEncoderCabac::new(DebugWriter::new(&mut cabac_encoded).unwrap());
-
-    let (contents, plain_text) = parse_deflate_whole(compressed_data)?;
-
-    let params = estimate_preflate_parameters(&contents, &plain_text).context()?;
-
-    encode_mispredictions(&contents, &plain_text, &params, &mut cabac_encoder)?;
-    assert_eq!(contents.compressed_size, compressed_data.len());
-    cabac_encoder.finish();
-
-    let reconstruction_data = ReconstructionData {
-        parameters: params,
-        corrections: cabac_encoded,
-    }
-    .write();
-
-    if verify {
-        let r = ReconstructionData::read(&reconstruction_data)?;
-
-        let mut cabac_decoder =
-            PredictionDecoderCabac::new(DebugReader::new(Cursor::new(&r.corrections)).unwrap());
-
-        let params = r.parameters;
-        let mut input = PreflateInput::new(&plain_text);
-        let (recompressed, _recreated_blocks) =
-            decode_mispredictions(&params, &mut input, &mut cabac_decoder)?;
-
-        if recompressed[..] != compressed_data[..] {
-            return Err(PreflateError::new(
-                ExitCode::RoundtripMismatch,
-                "recompressed data does not match original",
-            ));
-        }
-    }
-
-    Ok((
-        PreflateStreamChunkResult {
-            corrections: reconstruction_data,
-            compressed_size: contents.compressed_size,
-            parameters: Some(params),
-            blocks: contents.blocks,
-        },
-        plain_text,
-    ))
-}
-
-#[test]
-fn verify_roundtrip_assert() {
-    crate::init_logging();
-
-    use crate::utils::read_file;
-
-    let v = read_file("compressed_zlib_level1.deflate");
-
-    let (r, plain_text) = decompress_deflate_stream_assert(&v, true).unwrap();
-    let recompressed = recompress_deflate_stream_assert(&plain_text, &r.corrections).unwrap();
-    assert!(v == recompressed);
-}
-
 #[cfg(test)]
 #[path = "prediction_diagnostics.rs"]
-mod prediction_diagnostics;
-
-#[test]
-fn verify_roundtrip_zlib() {
-    crate::init_logging();
-
-    for i in 0..9 {
-        verify_file(&format!("compressed_zlib_level{}.deflate", i));
-    }
-}
-
-#[test]
-fn verify_roundtrip_flate2() {
-    crate::init_logging();
-
-    for i in 0..9 {
-        verify_file(&format!("compressed_flate2_level{}.deflate", i));
-    }
-}
-
-#[test]
-fn verify_roundtrip_libdeflate() {
-    crate::init_logging();
-
-    for i in 0..9 {
-        verify_file(&format!("compressed_libdeflate_level{}.deflate", i));
-    }
-}
-
-#[test]
-fn reconstruction_data_version() {
-    use crate::utils::read_file;
-
-    let v = read_file("compressed_zlib_level1.deflate");
-    let (r, plain_text) = preflate_whole_deflate_stream(&v, &PreflateConfig::default()).unwrap();
-    assert_eq!(r.corrections[0], RECONSTRUCTION_DATA_VERSION);
-
-    let parsed = ReconstructionData::read(&r.corrections).unwrap();
-
-    // blobs written before the version byte existed are plain bitcode
-    let unversioned = bitcode::encode(&parsed);
-    let mut wrong_version = r.corrections.clone();
-    wrong_version[0] = RECONSTRUCTION_DATA_VERSION + 1;
-    let mut previous_version = r.corrections.clone();
-    previous_version[0] = 0x81;
-    let mut previous_models = r.corrections.clone();
-    previous_models[0] = 0x82;
-
-    for bad in [
-        &unversioned[..],
-        &wrong_version[..],
-        &previous_version[..],
-        &previous_models[..],
-        &[],
-    ] {
-        let e = recreate_whole_deflate_stream(plain_text.text(), bad).unwrap_err();
-        assert_eq!(e.exit_code(), ExitCode::InvalidCompressedWrapper);
-    }
-}
-
-#[test]
-fn truncated_nested_reconstruction_parameters_are_rejected() {
-    let compressed = crate::utils::read_file("compressed_zlib_level1.deflate");
-    let (record, _) =
-        preflate_whole_deflate_stream(&compressed, &PreflateConfig::default()).unwrap();
-    for length in 0..record.corrections.len() {
-        let error = ReconstructionData::read(&record.corrections[..length])
-            .err()
-            .unwrap();
-        assert_eq!(error.exit_code(), ExitCode::InvalidCompressedWrapper);
-    }
-}
-
-/// Adobe PDF Library 25/26 emits libdeflate-style streams whose final token is a
-/// length 3 match covering the last 3 bytes of the plaintext. Stock libdeflate never
-/// matches in the last 4 bytes, but the libdeflate model's length 3 hash table can
-/// still find this match (see `HashChain::min_lookup_bytes`).
-#[test]
-fn verify_roundtrip_adobe_tail3() {
-    crate::init_logging();
-
-    use crate::utils::read_file;
-    let v = read_file("compressed_adobe_tail3.deflate");
-
-    let (r, plain_text) = preflate_whole_deflate_stream(&v, &PreflateConfig::default()).unwrap();
-    let recompressed = recreate_whole_deflate_stream(plain_text.text(), &r.corrections).unwrap();
-
-    assert_eq!(r.compressed_size, v.len());
-    assert!(v == recompressed);
-}
-
-#[cfg(test)]
-fn verify_file(filename: &str) {
-    use crate::utils::read_file;
-    let v = read_file(filename);
-
-    let (r, plain_text) = preflate_whole_deflate_stream(&v, &PreflateConfig::default()).unwrap();
-    let recompressed = recreate_whole_deflate_stream(plain_text.text(), &r.corrections).unwrap();
-    assert!(v == recompressed);
-}
-
-/// recompresses a deflate stream using the cabac_encoded data that was returned from decompress_deflate_stream
-/// This version uses DebugWriter and DebugReader, which are slower and don't compress but can be used to debug the cabac encoding errors.
-#[cfg(test)]
-fn recompress_deflate_stream_assert(
-    plain_text: &PlainText,
-    prediction_corrections: &[u8],
-) -> Result<Vec<u8>> {
-    use crate::cabac::debug::DebugReader;
-
-    let r = ReconstructionData::read(prediction_corrections)?;
-
-    let mut cabac_decoder =
-        PredictionDecoderCabac::new(DebugReader::new(Cursor::new(&r.corrections)).unwrap());
-
-    let mut input = PreflateInput::new(plain_text);
-    let (recompressed, _recreated_blocks) =
-        decode_mispredictions(&r.parameters, &mut input, &mut cabac_decoder)?;
-    Ok(recompressed)
-}
-
-#[cfg(test)]
-fn analyze_compressed_data_fast(
-    compressed_data: &[u8],
-    header_crc32: Option<u32>,
-    uncompressed_size: &mut u64,
-) {
-    use crate::{
-        cabac_codec::{PredictionDecoderCabac, PredictionEncoderCabac},
-        deflate::deflate_reader::parse_deflate_whole,
-    };
-    use std::io::Cursor;
-
-    use crate::cabac::vp8::{VP8Reader, VP8Writer};
-
-    let mut buffer = Vec::new();
-
-    let mut cabac_encoder = PredictionEncoderCabac::new(VP8Writer::new(&mut buffer).unwrap());
-
-    let (contents, plain_text) = parse_deflate_whole(compressed_data).unwrap();
-
-    let params = estimate_preflate_parameters(&contents, &plain_text).unwrap();
-
-    println!("params: {:?}", params);
-
-    encode_mispredictions(&contents, &plain_text, &params, &mut cabac_encoder).unwrap();
-
-    if let Some(crc) = header_crc32 {
-        let result_crc = crc32fast::hash(plain_text.text());
-        assert_eq!(result_crc, crc);
-    }
-
-    assert_eq!(contents.compressed_size, compressed_data.len());
-
-    cabac_encoder.finish();
-
-    cabac_encoder.print();
-
-    println!("buffer size: {}", buffer.len());
-
-    let mut cabac_decoder =
-        PredictionDecoderCabac::new(VP8Reader::new(Cursor::new(&buffer)).unwrap());
-
-    let mut input = PreflateInput::new(&plain_text);
-
-    let (recompressed, _recreated_blocks) =
-        decode_mispredictions(&params, &mut input, &mut cabac_decoder).unwrap();
-
-    assert!(recompressed[..] == compressed_data[..]);
-
-    *uncompressed_size = plain_text.text().len() as u64;
-}
-
-#[cfg(test)]
-fn analyze_compressed_data_verify(
-    compressed_data: &[u8],
-    header_crc32: Option<u32>,
-    _deflate_info_dump_level: i32,
-    uncompressed_size: &mut u64,
-) {
-    use crate::cabac::debug::{DebugReader, DebugWriter};
-    use crate::{
-        cabac_codec::{PredictionDecoderCabac, PredictionEncoderCabac},
-        deflate::{deflate_reader::parse_deflate_whole, deflate_token::DeflateTokenBlockType},
-        statistical_codec::{VerifyPredictionDecoder, VerifyPredictionEncoder},
-        utils::assert_eq_array,
-    };
-    use std::io::Cursor;
-
-    let mut buffer = Vec::new();
-
-    let cabac_encoder = PredictionEncoderCabac::new(DebugWriter::new(&mut buffer).unwrap());
-    let debug_encoder = VerifyPredictionEncoder::new();
-
-    let mut combined_encoder = (debug_encoder, cabac_encoder);
-
-    let (contents, plain_text) = parse_deflate_whole(compressed_data).unwrap();
-
-    let params = estimate_preflate_parameters(&contents, &plain_text).unwrap();
-
-    println!("params: {:?}", params);
-
-    encode_mispredictions(&contents, &plain_text, &params, &mut combined_encoder).unwrap();
-
-    assert_eq!(contents.compressed_size, compressed_data.len());
-
-    combined_encoder.finish();
-
-    combined_encoder.0.print();
-
-    let actions = combined_encoder.0.actions();
-
-    println!("buffer size: {}", buffer.len());
-
-    let debug_decoder = VerifyPredictionDecoder::new(actions);
-    let cabac_decoder =
-        PredictionDecoderCabac::new(DebugReader::new(Cursor::new(&buffer)).unwrap());
-
-    let mut combined_decoder = (debug_decoder, cabac_decoder);
-    let mut input = PreflateInput::new(&plain_text);
-
-    let (recompressed, recreated_blocks) =
-        decode_mispredictions(&params, &mut input, &mut combined_decoder).unwrap();
-
-    assert_eq!(contents.blocks.len(), recreated_blocks.len());
-    contents
-        .blocks
-        .iter()
-        .zip(recreated_blocks)
-        .enumerate()
-        .for_each(|(index, (a, b))| match (&a.block_type, &b.block_type) {
-            (
-                DeflateTokenBlockType::Stored { uncompressed: a },
-                DeflateTokenBlockType::Stored { uncompressed: c },
-            ) => {
-                assert_eq!(a, c, "uncompressed data differs {index}");
-            }
-            (
-                DeflateTokenBlockType::Huffman {
-                    tokens: t1,
-                    huffman_type: h1,
-                },
-                DeflateTokenBlockType::Huffman {
-                    tokens: t2,
-                    huffman_type: h2,
-                },
-            ) => {
-                assert_eq_array(t1, t2);
-                assert_eq!(h1, h2, "huffman type differs {index}");
-            }
-            _ => panic!("block type differs {index}"),
-        });
-
-    assert_eq!(
-        recompressed.len(),
-        compressed_data.len(),
-        "re-compressed version should be same (length)"
-    );
-    assert!(
-        &recompressed[..] == compressed_data,
-        "re-compressed version should be same (content)"
-    );
-
-    let result_crc = crc32fast::hash(plain_text.text());
-
-    if let Some(crc) = header_crc32 {
-        assert_eq!(crc, result_crc, "crc mismatch");
-    }
-
-    *uncompressed_size = plain_text.text().len() as u64;
-}
-
-#[cfg(test)]
-fn do_analyze(crc: Option<u32>, compressed_data: &[u8]) {
-    let mut uncompressed_size = 0;
-
-    analyze_compressed_data_verify(compressed_data, crc, 1, &mut uncompressed_size);
-    analyze_compressed_data_fast(compressed_data, crc, &mut uncompressed_size);
-}
-
-/// verify that levels 1-6 of zlib are compressed without any correction data
-///
-/// Future work: figure out why level 7 and above are not perfect
-#[test]
-fn verify_zlib_perfect_compression() {
-    crate::init_logging();
-
-    use crate::deflate::deflate_reader::parse_deflate_whole;
-    use crate::utils::read_file;
-
-    for i in 1..6 {
-        println!("iteration {}", i);
-        let compressed_data: &[u8] =
-            &read_file(format!("compressed_zlib_level{i}.deflate").as_str());
-
-        let (contents, plain_text) = parse_deflate_whole(compressed_data).unwrap();
-
-        let params = estimate_preflate_parameters(&contents, &plain_text).unwrap();
-
-        println!("params: {:?}", params);
-
-        // this "encoder" just asserts if anything gets passed to it
-        let mut verify_encoder = crate::statistical_codec::AssertDefaultOnlyEncoder {};
-        encode_mispredictions(&contents, &plain_text, &params, &mut verify_encoder).unwrap();
-
-        println!("params buffer length {}", params.serialized_size());
-    }
-}
-
-#[test]
-fn verify_longmatch() {
-    crate::init_logging();
-
-    use crate::utils::read_file;
-    do_analyze(
-        None,
-        &read_file("compressed_flate2_level1_longmatch.deflate"),
-    );
-}
-
-#[test]
-fn verify_zlibng() {
-    crate::init_logging();
-
-    use crate::utils::read_file;
-
-    do_analyze(None, &read_file("compressed_zlibng_level1.deflate"));
-}
-
-#[test]
-fn verify_miniz() {
-    crate::init_logging();
-
-    use crate::utils::read_file;
-
-    do_analyze(None, &read_file("compressed_minizoxide_level1.deflate"));
-}
-
-/// this is the deflate stream extracted out of the png file (minus the idat wrapper)
-#[test]
-fn verify_png_deflate() {
-    crate::init_logging();
-
-    use crate::utils::read_file;
-    do_analyze(None, &read_file("treegdi.extract.deflate"));
-}
-
-#[cfg(test)]
-pub fn analyze_compressed_data_verify_incremental(compressed_data: &[u8], config: &PreflateConfig) {
-    use crate::{deflate::deflate_reader::parse_deflate_whole, utils::assert_eq_array};
-
-    let (original_con, _) = parse_deflate_whole(compressed_data).unwrap();
-
-    let mut start_offset = 0;
-    let mut end_offset = compressed_data.len().min(100001);
-
-    let mut stream = PreflateStreamProcessor::new(config);
-
-    let mut plain_text_offset = 0;
-
-    let mut expanded_contents = Vec::new();
-    while !stream.is_done() {
-        let result = stream.decompress(&compressed_data[start_offset..end_offset]);
-        match result {
-            Ok(r) => {
-                println!(
-                    "chunk cmp_start={} cmp_size={} blocks={} pt_off={}({})",
-                    start_offset,
-                    r.compressed_size,
-                    r.blocks.len(),
-                    plain_text_offset,
-                    stream.plain_text().len()
-                );
-                start_offset += r.compressed_size;
-                end_offset = (start_offset + 10001).min(compressed_data.len());
-
-                plain_text_offset += stream.plain_text().len();
-                expanded_contents.push((r.corrections, stream.plain_text().text().to_vec()));
-
-                stream.shrink_to_dictionary();
-            }
-            Err(e) => {
-                if e.exit_code() == ExitCode::PredictionFailure {
-                    println!(
-                        "Prediction failure for {:?} not great, but some corner cases where the initial estimator isn't totaly right",
-                        e
-                    );
-                    return;
-                }
-                assert_eq!(
-                    e.exit_code(),
-                    ExitCode::ShortRead,
-                    "unexpected error {:?}",
-                    e
-                );
-                end_offset = (end_offset + 10001).min(compressed_data.len());
-            }
-        }
-    }
-
-    // now reconstruct the data and make sure it is identical
-    let mut recompressed = Vec::new();
-    let mut reconstructed_blocks = Vec::new();
-
-    let mut reconstruct = RecreateStreamProcessor::new();
-    for (i, (corrections, plaintext)) in expanded_contents.iter().enumerate() {
-        let (mut r, mut b) = reconstruct
-            .recompress(&mut Cursor::new(plaintext), corrections)
-            .unwrap();
-
-        println!(
-            "reconstruct block offset={} blocks={} pt={}",
-            i,
-            b.len(),
-            plaintext.len()
-        );
-
-        recompressed.append(&mut r);
-        reconstructed_blocks.append(&mut b);
-    }
-
-    //assert_eq!(original_con.blocks.len(), reconstructed_blocks.len());
-    for (i, block) in original_con.blocks.iter().enumerate() {
-        println!("block {}", i);
-        crate::utils::assert_block_eq(block, &reconstructed_blocks[i]);
-    }
-
-    assert_eq_array(compressed_data, &recompressed);
-}
-
-#[test]
-fn verify_plain_text_limit() {
-    crate::init_logging();
-
-    analyze_compressed_data_verify_incremental(
-        &crate::utils::read_file("compressed_zlib_level3.deflate"),
-        &PreflateConfig {
-            plain_text_limit: 1024 * 1024,
-            ..Default::default()
-        },
-    );
-}
-
-/// test partial reading reading
-#[test]
-fn verify_partial_blocks() {
-    crate::init_logging();
-
-    for i in 0..=9 {
-        analyze_compressed_data_verify_incremental(
-            &crate::utils::read_file(&format!("compressed_zlib_level{}.deflate", i)),
-            &PreflateConfig::default(),
-        );
-    }
-}
-
-/// Replicates exactly what `scan_deflate::find_compressable_stream` does when it
-/// encounters a gzip stream in a truncated 200 KiB content buffer:
-///
-/// 1. strip the 10-byte gzip header (and 8-byte footer) to obtain the raw DEFLATE body
-/// 2. call `decompress` with only the first ~190 KB of that body (what fits in the
-///    200 KiB content window after the header)
-/// 3. assert the call returns `Ok` and `is_done() == false`  ← DeflateContinue requires this
-/// 4. call `decompress` again with the remainder of the body, assert `is_done() == true`
-/// 5. reconstruct the original DEFLATE bytes and assert roundtrip identity
-#[test]
-fn verify_decompress_partial_gzip_deflate_body_roundtrip() {
-    crate::init_logging();
-
-    // sample1.bin.gz: 263 972 bytes total; gzip header = 10 bytes, footer = 8 bytes
-    // → raw DEFLATE body = 263 954 bytes
-    let gzip = crate::utils::read_file("sample1.bin.gz");
-    assert!(gzip.len() > 18, "gzip file too short");
-
-    // Gzip header for this file has no extra flags, so it is exactly 10 bytes.
-    let deflate_start: usize = 10;
-    let deflate_end: usize = gzip.len() - 8;
-    let deflate_body = &gzip[deflate_start..deflate_end];
-
-    // Mimic what find_compressable_stream does: content buffer contains the first
-    // 200 000 bytes of the gzip file, and the DEFLATE body starts at offset 10,
-    // so the slice passed to decompress() is bytes [10..200000] = 199 990 bytes.
-    let content_window: usize = 200_000 - deflate_start; // 199 990
-    assert!(
-        content_window < deflate_body.len(),
-        "content window must truncate the DEFLATE body (window={content_window}, body={})",
-        deflate_body.len()
-    );
-
-    let mut state = PreflateStreamProcessor::new(&PreflateConfig::default());
-
-    // ── First call: truncated slice ──────────────────────────────────────────
-    let r1 = state.decompress(&deflate_body[..content_window]);
-    let r1 = match r1 {
-        Ok(r) => r,
-        Err(e) => panic!(
-            "decompress on truncated DEFLATE body ({content_window} B of {} B) returned \
-             Err({e:?}); expected Ok(partial) with is_done()=false",
-            deflate_body.len()
-        ),
-    };
-    assert!(
-        !state.is_done(),
-        "is_done() must be false after truncated first call; compressed_size={}",
-        r1.compressed_size
-    );
-    assert!(
-        r1.compressed_size > 0,
-        "at least one block must have been consumed"
-    );
-    assert!(
-        r1.compressed_size <= content_window,
-        "compressed_size ({}) must not exceed the slice length ({content_window})",
-        r1.compressed_size
-    );
-    println!(
-        "first call: compressed_size={} / {content_window}  blocks={}",
-        r1.compressed_size,
-        r1.blocks.len()
-    );
-
-    let first_corrections = r1.corrections.clone();
-    let first_plain_text = state.plain_text().text().to_vec();
-    state.shrink_to_dictionary();
-
-    // ── Second call: remainder ────────────────────────────────────────────────
-    let offset = r1.compressed_size;
-    let r2 = state.decompress(&deflate_body[offset..]);
-    let r2 = match r2 {
-        Ok(r) => r,
-        Err(e) => panic!(
-            "decompress on remainder ({} B) returned Err({e:?})",
-            deflate_body.len() - offset
-        ),
-    };
-    assert!(
-        state.is_done(),
-        "is_done() must be true after consuming the full body"
-    );
-    println!(
-        "second call: compressed_size={}  blocks={}",
-        r2.compressed_size,
-        r2.blocks.len()
-    );
-
-    let second_corrections = r2.corrections.clone();
-    let second_plain_text = state.plain_text().text().to_vec();
-
-    // ── Roundtrip: reconstruct the original bytes ─────────────────────────────
-    let mut reconstruct = RecreateStreamProcessor::new();
-    let (mut recompressed, _) = reconstruct
-        .recompress(
-            &mut std::io::Cursor::new(&first_plain_text),
-            &first_corrections,
-        )
-        .expect("recompress chunk 1 failed");
-
-    let (mut rest, _) = reconstruct
-        .recompress(
-            &mut std::io::Cursor::new(&second_plain_text),
-            &second_corrections,
-        )
-        .expect("recompress chunk 2 failed");
-
-    recompressed.append(&mut rest);
-    crate::utils::assert_eq_array(deflate_body, &recompressed);
-}
+pub(crate) mod tests;

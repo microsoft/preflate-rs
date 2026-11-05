@@ -1,3 +1,6 @@
+//! Filesystem attribute checks shared by diagnostic commands.
+//! Identifies cloud-only placeholders so files can be skipped without hydration.
+
 use std::fs::Metadata;
 
 #[cfg(windows)]

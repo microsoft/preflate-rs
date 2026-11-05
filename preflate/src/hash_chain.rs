@@ -4,14 +4,27 @@
  *  This software incorporates material from third parties. See NOTICE.txt for details.
  *--------------------------------------------------------------------------------------------*/
 
+//! Stores candidate back-reference positions in sliding-window hash chains.
+//!
+//! Each hash bucket points to its newest position, and predecessor links lead to
+//! older positions with the same hash. These are candidates rather than verified
+//! matches; byte comparisons and search limits are handled by `hash_chain_holder`.
+//!
+//! Positions use compact 16-bit indices, with zero marking the end of a chain.
+//! Periodic shifts discard old entries and renumber the remaining ones while
+//! preserving their distances, keeping storage bounded as the input advances.
+//!
+//! The default implementation uses one hash. The libdeflate variant combines a
+//! four-byte primary chain with a single three-byte candidate, allowing short
+//! matches that the longer hash would miss. Lookahead searches also account for
+//! nearby positions that have not yet been inserted into the stored tables.
+
 use default_boxed::DefaultBoxed;
 
 use crate::{
     bit_helper::DebugHash,
     deflate::deflate_token::DeflateTokenReference,
-    hash_algorithm::{
-        HashAlgorithm, HashImplementation, LibdeflateHash3Secondary, LibdeflateHash4,
-    },
+    hash_algorithm::{HashImplementation, LibdeflateHash3Secondary, LibdeflateHash4},
     preflate_input::PreflateInput,
 };
 
@@ -130,11 +143,8 @@ impl HashTable {
 
 /// Implements a chained hash table that is used to find matches in the input stream
 pub trait HashChain {
+    const HAS_SECONDARY: bool = false;
     fn get_num_hash_bytes() -> usize;
-
-    /// Expose the concrete hash identity so unrelated profile branches can be
-    /// optimized away in each monomorphized matcher.
-    fn algorithm(&self) -> HashAlgorithm;
 
     fn secondary_match(&self, _input: &PreflateInput, _offset: u32) -> Option<u32> {
         None
@@ -193,10 +203,6 @@ impl<H: HashImplementation> HashChainDefault<H> {
 }
 
 impl<H: HashImplementation> HashChain for HashChainDefault<H> {
-    fn algorithm(&self) -> HashAlgorithm {
-        self.hash.algorithm()
-    }
-
     #[inline]
     fn iterate<'a, const OFFSET: u32>(
         &'a self,
@@ -341,10 +347,7 @@ const LIBFLATE_HASH_3: LibdeflateHash3Secondary = LibdeflateHash3Secondary {};
 const LIBFLATE_HASH_4: LibdeflateHash4 = LibdeflateHash4 {};
 
 impl HashChain for HashChainLibflate4 {
-    fn algorithm(&self) -> HashAlgorithm {
-        HashAlgorithm::Libdeflate4
-    }
-
+    const HAS_SECONDARY: bool = true;
     fn secondary_match(&self, input: &PreflateInput, offset: u32) -> Option<u32> {
         let hash = LIBFLATE_HASH_3.get_hash(input.cur_chars(offset as i32));
         // Lookahead must see intervening positions as if they were already inserted.

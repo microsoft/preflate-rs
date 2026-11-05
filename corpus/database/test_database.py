@@ -13,6 +13,37 @@ import ijson
 
 from .database import PROFILE_FIELDS, CorpusDatabase, scan_records
 from .json_scan import json_scan_records
+from .profiles import profile_fields
+
+
+def parameter_report(hash_algorithm="RandomVector", matching="Greedy", *, nice_length=32, max_chain=128):
+    if hash_algorithm == "Libdeflate4":
+        index = "LibdeflateDualHash"
+    else:
+        function = {
+            "Libdeflate4Fast": "Libdeflate4",
+            "Libdeflate4Fast15": "Libdeflate4_15",
+        }.get(hash_algorithm, hash_algorithm) if isinstance(hash_algorithm, str) else hash_algorithm
+        index = {"Chain": {"hash": function}}
+    parser = (
+        {"Lazy": {"lookahead": {"max_lazy": 16, "behavior": {"Zlib": {"good_length": 8}}},
+                  "minimum": {"Three": {"short_match_cutoff": 4096}}}}
+        if matching == "Lazy" else
+        {"LibdeflateLazy": {"two_positions": False, "short_match_cutoff": 4096}}
+        if matching == "LibdeflateLazy" else {"Greedy": {"short_match_cutoff": 4096}}
+    )
+    common = dict(
+        dictionary=dict(index=index, window_bits=15, insertion="AddAll"),
+        distance={"Window": {"history": {"matches_to_start": False}, "bounds": "Lookahead"}},
+        search=dict(budget=dict(max_chain=max_chain), nice_length=nice_length, input_tail="HashMinimum"),
+    )
+    behavior = {"Chain": dict(common=common, parser=parser)}
+    if matching == "MiniZ":
+        common["distance"] = {"Enabled": {"matches_to_start": False}}
+        common["search"] = dict(budget=dict(max_chain=max_chain), max_probes=128, input_tail="HashMinimum")
+        behavior = {"MiniZ": dict(common=common, greedy=False, short_match_cutoff=4096)}
+    return dict(reconstruction=dict(max_token_count=16383, block_type_strategy="Dynamic", behavior=behavior),
+                model="custom")
 
 
 class CorpusDatabaseTests(unittest.TestCase):
@@ -24,6 +55,53 @@ class CorpusDatabaseTests(unittest.TestCase):
     def tearDown(self):
         self.db.close()
         self.temporary.cleanup()
+
+    def test_profile_indexes_only_active_reconstruction_fields(self):
+        report = parameter_report(matching="Lazy")
+        chain = report["reconstruction"]["behavior"]["Chain"]
+        chain["parser"]["Lazy"]["minimum"] = "FilteredSix"
+        indexed = profile_fields(report)
+        self.assertEqual(indexed["max_chain"], 128)
+        self.assertNotIn("max_dist_3_matches", indexed)
+        self.assertNotIn("nice_length", profile_fields(parameter_report(matching="MiniZ")))
+        stored = dict(reconstruction=dict(
+            max_token_count=16383, block_type_strategy="Uncompressed",
+            behavior={"NoDictionary": {"strategy": "Store"}}), model="custom")
+        self.assertEqual(profile_fields(stored), dict(
+            max_token_count=16383, block_type_strategy="Uncompressed",
+            hash_algorithm="None", strategy="Store"))
+        with self.assertRaises(ValueError):
+            self.db._profile(dict(hash_algorithm="RandomVector", max_chain=128))
+        for invalid in (
+            {**report, "model": []},
+            {**report, "reconstruction": []},
+            {"reconstruction": report["reconstruction"], "estimation": {"model": "custom"}},
+        ):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                self.db._profile(invalid)
+
+    def test_profile_index_and_window_summaries_do_not_depend_on_model(self):
+        for index, expected in (
+            ({"Chain": {"hash": "Libdeflate4"}}, "Libdeflate4Fast"),
+            ({"Chain": {"hash": "Libdeflate4_15"}}, "Libdeflate4Fast15"),
+            ("LibdeflateDualHash", "Libdeflate4"),
+        ):
+            for bounds in ("Full", "ExcludeOldest", "Lookahead", "LookaheadMinusOne"):
+                with self.subTest(index=index, bounds=bounds):
+                    report = parameter_report()
+                    common = report["reconstruction"]["behavior"]["Chain"]["common"]
+                    common["dictionary"]["index"] = index
+                    common["distance"] = {"Window": {
+                        "history": {"matches_to_start": True}, "bounds": bounds,
+                    }}
+                    fields = profile_fields(report)
+                    self.assertEqual(fields["hash_algorithm"], expected)
+                    self.assertEqual(fields["strategy"], bounds)
+                    self.assertTrue(fields["matches_to_start_detected"])
+                    self.assertEqual(fields["very_far_matches_detected"],
+                                     bounds in ("Full", "ExcludeOldest"))
+                    report["model"] = "zlib"
+                    self.assertEqual(profile_fields(report), fields)
 
     def test_json_scan_streams_records_and_validates_completion_and_totals(self):
         record = self.file_record()
@@ -59,7 +137,7 @@ class CorpusDatabaseTests(unittest.TestCase):
         stream = dict(
             offset=0, deflate_offset=2, kind="zlib", member_name=None, status="ok",
             verified=True, deflate_bytes=2000, plaintext_bytes=9000, correction_bytes=correction,
-            chunks=1, blocks=1, parameters=dict(hash_algorithm="RandomVector", nice_length=32),
+            chunks=1, blocks=1, parameters=parameter_report(),
             nonzero_corrections={"LenCorrection": 2},
         )
         if traced:
@@ -161,7 +239,7 @@ class CorpusDatabaseTests(unittest.TestCase):
         self.db.merge_scan(self.files_report("multiple.sqlite", [record]), "multiple")
         result = self.db.outliers(["multiple"], settings={"hash_algorithm": "RandomVector", "nice_length": 32})
         self.assertEqual([row["reconstruction_bytes"] for row in result], [80, 40])
-        self.assertEqual(result[0]["settings"]["nice_length"], 32)
+        self.assertEqual(result[0]["settings"]["reconstruction"]["behavior"]["Chain"]["common"]["search"]["nice_length"], 32)
         self.assertEqual(result[0]["size_bytes"], 2200)
         self.assertEqual(result[0]["modified_unix_seconds"], 1)
         self.assertEqual(len(self.db.outliers(["multiple"], one_per_file=True)), 1)
@@ -169,7 +247,7 @@ class CorpusDatabaseTests(unittest.TestCase):
         self.assertEqual(self.db.outliers(["multiple"], max_plaintext_bytes=8999), [])
         self.assertEqual(self.db.outliers(["multiple"], min_deflate_bytes=2001), [])
         self.assertEqual(self.db.outliers(["multiple"], settings={"hash_algorithm": "' OR 1=1 --"}), [])
-        self.assertEqual(len(self.db.outliers(["multiple"], settings={"max_chain": None})), 2)
+        self.assertEqual(len(self.db.outliers(["multiple"], settings={"max_chain": 128})), 2)
         for settings in ({"invalid_sql": 1}, {"hash_algorithm": []}):
             with self.subTest(settings=settings), self.assertRaises(ValueError):
                 self.db.outliers(["multiple"], settings=settings)
@@ -183,7 +261,7 @@ class CorpusDatabaseTests(unittest.TestCase):
         specifications = [
             ("RandomVector", "Lazy", 1024, True, "ok", 10),
             ("RandomVector", "Lazy", 1025, True, "ok", 20),
-            ("Zlib { hash_mask: 32767, hash_shift: 5 }", "MiniZ", 2000, True, "ok", 30),
+            ({"Zlib": {"hash_mask": 32767, "hash_shift": 5}}, "MiniZ", 2000, True, "ok", 30),
             ("Libdeflate4", "LibdeflateLazy", 2000, False, "ok", 999),
             (None, None, 2000, False, "error", 0),
         ]
@@ -191,7 +269,7 @@ class CorpusDatabaseTests(unittest.TestCase):
             stream = copy.deepcopy(template)
             stream.update(offset=index * 100, deflate_offset=index * 100 + 2, deflate_bytes=size,
                           verified=verified, status=status, correction_bytes=cost,
-                          parameters={"hash_algorithm": hash_name, "matching_type": matching})
+                          parameters=parameter_report(hash_name, matching) if hash_name else None)
             record["streams"].append(stream)
         self.db.merge_scan(self.files_report("families.sqlite", [record]), "families")
         rows = self.db.family_overhead(["families"])
@@ -251,11 +329,11 @@ class CorpusDatabaseTests(unittest.TestCase):
         self.assertEqual(self.db.compare_runs("before", "after")["totals"]["compared_streams"], 0)
 
     def test_profile_cache_is_bounded_without_losing_deduplication(self):
-        first = self.db._profile(dict(max_chain=0))
+        first = self.db._profile(parameter_report(max_chain=0))
         for chain in range(1, 4100):
-            self.db._profile(dict(max_chain=chain))
+            self.db._profile(parameter_report(max_chain=chain))
         self.assertLessEqual(len(self.db._profiles), 4096)
-        self.assertEqual(self.db._profile(dict(max_chain=0)), first)
+        self.assertEqual(self.db._profile(parameter_report(max_chain=0)), first)
         self.assertEqual(self.db.connection.execute("SELECT count(*) FROM profiles").fetchone()[0], 4100)
 
     def test_merge_is_atomic_when_source_totals_are_invalid(self):

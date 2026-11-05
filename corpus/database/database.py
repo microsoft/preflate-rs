@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from .scan import scan_records
+from .profiles import profile_fields
 
 
 PROFILE_FIELDS = (
@@ -91,7 +92,8 @@ class CorpusDatabase:
             return None
         key = canonical(settings)
         if key not in self._profiles:
-            values = [settings.get(field) for field in PROFILE_FIELDS]
+            fields = profile_fields(settings)
+            values = [fields.get(field) for field in PROFILE_FIELDS]
             self.connection.execute(
                 f"INSERT OR IGNORE INTO profiles(settings_json,{','.join(PROFILE_FIELDS)}) "
                 f"VALUES ({','.join('?' for _ in range(len(values)+1))})", (key, *values),
@@ -529,7 +531,7 @@ class CorpusDatabase:
                     WHEN p.hash_algorithm IN ('ZlibNG','Crc32cHash') THEN 'zlib-ng-style'
                     WHEN p.hash_algorithm LIKE 'Chromium%' THEN 'Chromium-style'
                     WHEN p.hash_algorithm='None' THEN 'no dictionary'
-                    WHEN p.hash_algorithm LIKE 'Zlib {{%' THEN 'zlib-style / shared hash'
+                    WHEN p.hash_algorithm='Zlib' THEN 'zlib-style / shared hash'
                     ELSE 'unavailable / other' END AS family,
                     CASE WHEN s.deflate_bytes<=1024 THEN 'tiny' ELSE 'larger' END AS size_band,
                     count(*) AS streams,

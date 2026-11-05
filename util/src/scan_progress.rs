@@ -1,3 +1,7 @@
+//! Rate-limited scan progress reporting to stderr.
+//! Tracks processed files and verification failures without mixing progress with
+//! machine-readable scan results.
+
 use std::time::{Duration, Instant};
 
 use crate::Summary;

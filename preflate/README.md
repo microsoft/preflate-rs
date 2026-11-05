@@ -15,7 +15,7 @@ Given those two parts, the original DEFLATE stream can be reconstructed bit-for-
 ### Analysis pipeline
 
 For explicit-parameter experiments without editing Rust tests, use the
-diagnostic-only typed replay API and the utility's
+diagnostic-only JSON-parameter replay API and the utility's
 [JSON replay command](../util/README.md#json-replay). It supports synthetic blocks
 or original DEFLATE, preserves full chunk context when reporting a block range,
 and optionally measures complete reconstruction bytes with exact verification.
@@ -51,11 +51,44 @@ Estimation uses the same state directly through bounded replay in
 `estimator/prediction_scoring.rs`; candidate scoring and stopping remain outside
 the state. The lifecycle is predict, resolve corrections, then accept the actual
 token. Block setup/finish retain one private active context. The state reports
-safe normalization bounds; the wrapper selects profile-specific canonical values.
+safe normalization bounds; typed reconstruction settings select canonical wire values.
 See [AGENTS.md](AGENTS.md) for contributor constraints.
-Shared parameter types live in `parameters.rs`; runtime modules import them
-directly rather than depending on estimator modules. Family-specific behavior
-remains in `models/`, and public parameter re-exports are unchanged.
+Shared option enums live in `parameters.rs`; executable settings live in
+`reconstruction_parameters.rs`. Candidates use those authoritative typed settings;
+compressor profiles, supplementary estimation metadata and family models live
+under `estimator/`. There is no parallel flat executable parameter record.
+Before candidate construction, `InitialEstimate` combines selected hash/depth
+evidence, borrowed stream observations, and inferred block/window/insertion settings.
+Family models consume it to construct complete executable candidates, rather than
+using provisional reconstruction settings as estimation evidence. Scoring and
+refinement continue to operate directly on `ReconstructionParameters`.
+The generic model constructs a complete candidate rather than applying defaults
+to provisional parameters. MiniZ shares typed candidate construction between
+initial recognition and later refinements.
+`CompressorProfile` is a payload-free model enum. `EstimationResult` stores that
+typed hypothesis directly alongside the reconstruction settings; neither the
+enum nor family-specific wrappers own a second configuration.
+Runtime prediction retains only typed settings, not an estimator profile.
+Deterministic search, lookahead, and dictionary insertion live in the peer
+`compressors/` module and consume narrowed runtime settings. Prediction and
+reconstruction import them directly, never through the estimator.
+Family recognition and candidate proposals remain in `estimator/models/`;
+`estimator/compressor_profile.rs` owns model identity, selection, and candidate
+ordering. Model and selection modules are private; encoding
+and feature-gated parameter diagnostics are exposed at the estimator boundary.
+Additional policy access for unit tests lives in `estimator::test_support`, not
+the production exports. Estimator parameter types are not publicly exported.
+Chunk results retain a private report. `reconstruction_parameters_json()` returns
+only executable settings; `estimator_parameters_json()` wraps those settings as
+`{"reconstruction": {...}, "model": "..."}`, with the selected
+model hypothesis as supplementary metadata, never proven producer identity.
+Both serialize only when requested and return `None` for continuation
+chunks. `hash_algorithm()`
+provides the first chunk's hash statistic without JSON. Traces expose their latest
+report through the same two JSON methods. Reporting is available without the optional
+`diagnostics` feature so basic container diagnostics keep working; serialization
+does not run during ordinary compression. Older JSON and SQL parameter reports must
+be regenerated; no compatibility adapter is provided.
 
 ## API
 
@@ -144,8 +177,7 @@ Unknown compressors still round-trip correctly with higher corrections overhead.
 
 | Type | Description |
 |---|---|
-| `PreflateStreamChunkResult` | Output of analysis: corrections blob, compressed size, estimated parameters |
-| `TokenPredictorParameters` | Compressor fingerprint: hash algorithm, nice_length, max_chain, window_bits, add policy |
+| `PreflateStreamChunkResult` | Output of analysis: corrections blob, compressed size, private parameter report accessible as JSON |
 | `HashAlgorithm` | Hash implementations; hash identity alone does not prove producer identity |
 | `PlainText` | Decompressed data with sliding-window dictionary support |
 | `PreflateError` | Rich error type with detailed exit codes |
@@ -155,10 +187,9 @@ Unknown compressors still round-trip correctly with higher corrections overhead.
 Parameters are serialized with [`bitcode`](https://crates.io/crates/bitcode). Corrections use CABAC (Context Adaptive Binary Arithmetic Coding), the same codec used in [Lepton JPEG](https://github.com/microsoft/lepton_jpeg_rust) compression. The format is chunked so memory use is bounded regardless of input size.
 
 The first chunk's corrections blob starts with `0x84`, followed by nested,
-behavior-specific reconstruction parameters and CABAC corrections. The public
-parameter and diagnostic interfaces remain flat. The decoder also accepts the
-existing `0x83` flat-parameter format through its legacy prediction mode; `0x81`,
-`0x82`, unversioned 0.7 blobs and unknown tags are rejected with
+behavior-specific reconstruction parameters and CABAC corrections. The JSON
+reconstruction interface uses the same authoritative typed configuration. Only the current `0x84` tag is
+accepted; `0x81`, `0x82`, `0x83`, unversioned blobs and unknown tags are rejected with
 `ExitCode::InvalidCompressedWrapper`.
 The developing 0.8 format intentionally permits breaking changes under its
 current tag; it is not a stable compatibility promise.
@@ -182,10 +213,20 @@ all reference requirements are already known. Stronger boundary evidence and
 other observed cutoffs are preserved.
 
 The optional `diagnostics` feature exposes bounded token-mismatch traces and
-`estimate_first_chunk_parameters`. The latter parses and estimates only the first
+`estimate_first_chunk_estimator_json`. The latter returns the two-section estimator
+report after parsing and estimating only the first
 chunk, including any bounded candidate scoring; it does not encode corrections
 or verify reconstruction. Tiny complete streams may normalize parameters during
 encoding, so raw estimates can differ from the parameters reported after analysis.
+
+`diagnostics::replay_deflate(compressed, reconstruction_parameters_json, options)`
+accepts only executable reconstruction JSON. Runtime configuration validation
+rejects invalid settings, old flat objects and full estimator report wrappers.
+To replay an estimator report, explicitly extract its `reconstruction` object.
+No model estimation, conversion from estimator settings or retry occurs.
+Replay results remain serializable reports, with private requested/effective
+parameter fields named `reconstruction_parameters` and
+`effective_reconstruction_parameters`.
 
 For an offline insertion-origin audit, set `PREFLATE_REFERENCE` to a local raw
 DEFLATE file and run

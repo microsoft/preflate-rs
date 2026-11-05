@@ -1,11 +1,19 @@
+//! Dictionary hash calculations and compact signatures for estimation and diagnostics.
+//!
+//! A signature can distinguish index layouts that share the same primary hash,
+//! such as libdeflate's ordinary chain and dual-hash index. Reconstruction instead
+//! stores the index and pure hash function separately, alongside explicit search
+//! and distance policies; these signatures do not dispatch runtime behavior.
+
 use bitcode::{Decode, Encode};
 
-/// Dictionary hash fingerprints, not exclusive compressor identities.
+/// Dictionary index/hash fingerprints, not exclusive compressor identities.
 /// A shared hash can have different insertion/search rules; those are recorded separately.
 /// Compressor versions and build options can change the hash, so selection uses observed tokens.
-#[derive(Encode, Decode, Debug, Copy, Clone, Eq, PartialEq, Default)]
-#[cfg_attr(feature = "diagnostics", derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(feature = "diagnostics", serde(deny_unknown_fields))]
+#[derive(
+    Encode, Decode, Debug, Copy, Clone, Eq, PartialEq, Default, serde::Serialize, serde::Deserialize,
+)]
+#[serde(deny_unknown_fields)]
 pub enum HashAlgorithm {
     /// Stored and Huffman-only streams: no back-reference dictionary is needed.
     #[default]
@@ -18,7 +26,7 @@ pub enum HashAlgorithm {
     /// a three-byte, 12-bit hash whose most recent bucket entry predicts the match.
     MiniZFast,
 
-    /// Primary-only, 16-bit libdeflate model retained as the level-1 compatibility fallback.
+    /// Primary-only, 16-bit libdeflate signature retained as a level-1 fallback candidate.
     /// It can also fit a 15-bit stream, so chain depth alone cannot identify the fastest model.
     Libdeflate4Fast,
     /// Libdeflate's four-byte primary chain plus a singleton three-byte secondary table.
@@ -34,7 +42,8 @@ pub enum HashAlgorithm {
     /// Zlib-ng's CRC32C-based four-byte hash, observed in our level 1-4 fixtures.
     /// Replayed portably here, independent of the decoding machine's CPU capabilities.
     Crc32cHash,
-    /// Libdeflate's fastest level-1 profile: a 15-bit primary hash with two entries per bucket.
+    /// Libdeflate's fastest level-1 signature: a 15-bit primary hash.
+    /// The inferred profile normally searches the newest two entries of an ordinary chain.
     /// Selected only while the bounded bucket-rank fingerprint remains consistent.
     Libdeflate4Fast15,
     /// Chromium zlib's non-CRC four-byte multiply-and-add hash.
@@ -105,51 +114,6 @@ impl HashAlgorithm {
             }
             _ => None,
         }
-    }
-}
-
-#[test]
-fn roundtrip_hash_algorithm_to_int() {
-    let test_hashes = [
-        HashAlgorithm::Zlib {
-            hash_mask: 0x7ff,
-            hash_shift: 3,
-        },
-        HashAlgorithm::MiniZFast,
-        HashAlgorithm::Libdeflate4Fast,
-        HashAlgorithm::Libdeflate4,
-        HashAlgorithm::ZlibNG,
-        HashAlgorithm::RandomVector,
-        HashAlgorithm::Crc32cHash,
-        HashAlgorithm::Libdeflate4Fast15,
-        HashAlgorithm::Chromium { hash_mask: 0x7fff },
-        HashAlgorithm::Chromium { hash_mask: 0xffff },
-    ];
-
-    for &hash in test_hashes.iter() {
-        let hash_int = hash.to_u16();
-        let hash2 = HashAlgorithm::from_u16(hash_int).unwrap();
-        assert_eq!(hash, hash2);
-    }
-}
-
-#[test]
-fn chromium_hash_encoding_validates_native_table_widths() {
-    for bits in [15, 16] {
-        let algorithm = HashAlgorithm::Chromium {
-            hash_mask: ((1u32 << bits) - 1) as u16,
-        };
-        assert_eq!(HashAlgorithm::from_u16(algorithm.to_u16()), Some(algorithm));
-        assert_eq!(
-            bitcode::decode::<HashAlgorithm>(&bitcode::encode(&algorithm)).unwrap(),
-            algorithm
-        );
-    }
-    for bits in [0, 1, 14, 17, 255] {
-        assert_eq!(
-            HashAlgorithm::from_u16(HASH_ALGORITHM_CHROMIUM | (bits << 8)),
-            None
-        );
     }
 }
 
@@ -333,23 +297,6 @@ impl HashImplementation for ZlibNGHash {
     }
 }
 
-#[test]
-fn chromium_hash_discards_only_the_fourth_high_bit() {
-    let original = *b"abcd";
-    let hash = ChromiumHash { hash_mask: 0x7fff };
-    assert_eq!(hash.get_hash(&[0, 0, 0, 0]), 1);
-    assert_eq!(hash.get_hash(&[1, 0, 0, 0]), 2);
-    assert_eq!(hash.get_hash(&[255, 255, 255, 255]), 0);
-    let mut high_bit = original;
-    high_bit[3] ^= 0x80;
-    assert_eq!(hash.get_hash(&original), hash.get_hash(&high_bit));
-    let full = ChromiumHash { hash_mask: 0xffff };
-    assert_ne!(full.get_hash(&original), full.get_hash(&high_bit));
-    let mut low_bit = original;
-    low_bit[3] ^= 1;
-    assert_ne!(hash.get_hash(&original), hash.get_hash(&low_bit));
-}
-
 #[derive(Default, Copy, Clone)]
 pub struct ChromiumHash {
     pub hash_mask: u16,
@@ -516,5 +463,72 @@ impl HashImplementation for RandomVectorHash {
 
     fn algorithm(&self) -> HashAlgorithm {
         HashAlgorithm::RandomVector
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn roundtrip_hash_algorithm_to_int() {
+        let test_hashes = [
+            HashAlgorithm::Zlib {
+                hash_mask: 0x7ff,
+                hash_shift: 3,
+            },
+            HashAlgorithm::MiniZFast,
+            HashAlgorithm::Libdeflate4Fast,
+            HashAlgorithm::Libdeflate4,
+            HashAlgorithm::ZlibNG,
+            HashAlgorithm::RandomVector,
+            HashAlgorithm::Crc32cHash,
+            HashAlgorithm::Libdeflate4Fast15,
+            HashAlgorithm::Chromium { hash_mask: 0x7fff },
+            HashAlgorithm::Chromium { hash_mask: 0xffff },
+        ];
+
+        for &hash in test_hashes.iter() {
+            let hash_int = hash.to_u16();
+            let hash2 = HashAlgorithm::from_u16(hash_int).unwrap();
+            assert_eq!(hash, hash2);
+        }
+    }
+
+    #[test]
+    fn chromium_hash_encoding_validates_native_table_widths() {
+        for bits in [15, 16] {
+            let algorithm = HashAlgorithm::Chromium {
+                hash_mask: ((1u32 << bits) - 1) as u16,
+            };
+            assert_eq!(HashAlgorithm::from_u16(algorithm.to_u16()), Some(algorithm));
+            assert_eq!(
+                bitcode::decode::<HashAlgorithm>(&bitcode::encode(&algorithm)).unwrap(),
+                algorithm
+            );
+        }
+        for bits in [0, 1, 14, 17, 255] {
+            assert_eq!(
+                HashAlgorithm::from_u16(HASH_ALGORITHM_CHROMIUM | (bits << 8)),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn chromium_hash_discards_only_the_fourth_high_bit() {
+        let original = *b"abcd";
+        let hash = ChromiumHash { hash_mask: 0x7fff };
+        assert_eq!(hash.get_hash(&[0, 0, 0, 0]), 1);
+        assert_eq!(hash.get_hash(&[1, 0, 0, 0]), 2);
+        assert_eq!(hash.get_hash(&[255, 255, 255, 255]), 0);
+        let mut high_bit = original;
+        high_bit[3] ^= 0x80;
+        assert_eq!(hash.get_hash(&original), hash.get_hash(&high_bit));
+        let full = ChromiumHash { hash_mask: 0xffff };
+        assert_ne!(full.get_hash(&original), full.get_hash(&high_bit));
+        let mut low_bit = original;
+        low_bit[3] ^= 1;
+        assert_ne!(hash.get_hash(&original), hash.get_hash(&low_bit));
     }
 }

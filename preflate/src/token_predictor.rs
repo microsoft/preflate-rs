@@ -4,14 +4,18 @@
  *  This software incorporates material from third parties. See NOTICE.txt for details.
  *--------------------------------------------------------------------------------------------*/
 
-//! Correction encoding and reconstruction around the shared compressor replay state.
+//! Prediction-correction encoding and decoding for DEFLATE blocks.
 //!
-//! The wrapper owns codecs, Huffman-tree coding, diagnostic traces, and finalized
-//! parameter reporting. Matching and token history belong to `PredictionState`;
-//! candidate scoring and stopping belong to `estimator::prediction_scoring`.
-
-#[cfg(test)]
-use crate::estimator::prediction_scoring::{score_predictions, score_refinement};
+//! Replays the selected compressor settings against plaintext and compares each
+//! predicted token with the token parsed from the original stream. Differences
+//! in literal/reference choice, match length, and distance become correction
+//! actions. Reconstruction performs the inverse operation to recover the exact
+//! token sequence rather than merely an equivalent decompressed result.
+//!
+//! `PredictionState` maintains matching history and lazy lookahead. This module
+//! surrounds that state with block framing, correction codecs, Huffman-tree
+//! prediction, and optional traces. It also finalizes the executable settings
+//! after replay has established which parameter values are equivalent.
 
 use crate::{
     bit_helper::DebugHash,
@@ -23,19 +27,12 @@ use crate::{
         },
         huffman_calc::HufftreeBitCalc,
     },
-    parameters::TokenPredictorParameters,
     prediction_state::PredictionState,
     preflate_error::{AddContext, ExitCode, Result, err_exit_code},
     preflate_input::PreflateInput,
+    reconstruction_parameters::{NormalizationBounds, ReconstructionParameters},
     statistical_codec::{CodecCorrection, PredictionDecoder, PredictionEncoder},
     tree_predictor::{predict_tree_for_block, recreate_tree_for_block},
-};
-
-#[cfg(test)]
-use crate::{
-    models::zlib,
-    parameters::{BlockTypeStrategy, DictionaryAddPolicy, LazyBehavior, MatchingType},
-    preflate_input::PlainText,
 };
 
 const VERIFY: bool = false;
@@ -46,13 +43,30 @@ const VERIFY: bool = false;
 pub struct TokenPredictionTrace {
     pub stage: &'static str,
     pub block_profile: &'static str,
-    pub parameters: Option<TokenPredictorParameters>,
+    pub(crate) parameters: Option<crate::estimator::EstimationResult>,
     pub token_count: usize,
     pub mismatch_count: usize,
     pub first_mismatches: Vec<(u32, DeflateToken, DeflateToken)>,
     pub(crate) max_mismatches: usize,
     pub(crate) block_limit: Option<u32>,
     pub(crate) dictionary_reset: Option<bool>,
+}
+
+#[cfg(any(test, feature = "diagnostics"))]
+impl TokenPredictionTrace {
+    /// Serialize the latest available parameter report without exposing estimator types.
+    pub fn estimator_parameters_json(&self) -> Result<Option<String>> {
+        self.parameters
+            .map(crate::estimator::EstimationResult::to_json)
+            .transpose()
+    }
+
+    /// Serialize the latest executable settings without estimation metadata.
+    pub fn reconstruction_parameters_json(&self) -> Result<Option<String>> {
+        self.parameters
+            .map(|report| report.reconstruction.to_json())
+            .transpose()
+    }
 }
 
 #[cfg(any(test, feature = "diagnostics"))]
@@ -74,7 +88,7 @@ impl Default for TokenPredictionTrace {
 
 pub struct TokenPredictor {
     prediction: PredictionState,
-    profile: crate::models::CompressorProfile,
+    finalized_parameters: Option<ReconstructionParameters>,
     #[cfg(any(test, feature = "diagnostics"))]
     pub(crate) trace: Option<TokenPredictionTrace>,
 }
@@ -82,17 +96,16 @@ pub struct TokenPredictor {
 impl std::fmt::Debug for TokenPredictor {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TokenPredictor")
-            .field("profile", &self.profile)
             .field("prediction", &self.prediction)
             .finish()
     }
 }
 
 impl TokenPredictor {
-    fn new_with_mode(params: &TokenPredictorParameters, legacy: bool) -> Self {
+    pub(crate) fn from_reconstruction_parameters(parameters: ReconstructionParameters) -> Self {
         Self {
-            prediction: PredictionState::new_with_mode(params, legacy),
-            profile: crate::models::CompressorProfile::Custom(*params),
+            prediction: PredictionState::from_reconstruction_parameters(parameters),
+            finalized_parameters: None,
             #[cfg(any(test, feature = "diagnostics"))]
             trace: None,
         }
@@ -111,63 +124,35 @@ impl TokenPredictor {
         self.prediction.predict_end_of_chunk(input)
     }
 
-    #[cfg(test)]
-    pub(crate) fn track_short_match_distance(&mut self) {
-        self.prediction.track_short_match_distance();
-    }
-
     pub(crate) fn enable_parameter_normalization(
         &mut self,
         compressed_size: usize,
         complete: bool,
     ) {
+        let parameters = self.prediction.reconstruction_parameters();
         self.prediction.enable_parameter_normalization(
-            &self.profile.parameters(),
+            parameters.behavior.short_match_cutoff(),
+            parameters.behavior.supports_deferred_cutoff(),
             compressed_size,
             complete,
         );
     }
 
-    pub(crate) fn reconstruction_parameters(&self) -> TokenPredictorParameters {
-        let parameters = self.profile.parameters();
-        TokenPredictorParameters {
-            window_bits: self
-                .prediction
-                .normalized_window_bits()
-                .unwrap_or(parameters.window_bits),
-            max_dist_3_matches: self
-                .prediction
-                .short_match_distance_bounds()
-                .map_or(parameters.max_dist_3_matches, |bounds| {
-                    parameters.canonical_short_match_cutoff(bounds)
-                }),
-            max_token_count: self
-                .prediction
-                .token_limit_bounds()
-                .map_or(parameters.max_token_count, |bounds| {
-                    self.profile.canonical_token_limit(bounds)
-                }),
-            ..parameters
-        }
+    pub(crate) fn reconstruction_parameters(&self) -> ReconstructionParameters {
+        self.finalized_parameters
+            .unwrap_or_else(|| self.prediction.reconstruction_parameters())
     }
 
-    #[cfg(test)]
-    pub(crate) fn short_match_distance_bounds(&self) -> Option<(u32, u32)> {
-        self.prediction.short_match_distance_bounds()
-    }
-
-    pub(crate) fn new_profile(profile: crate::models::CompressorProfile) -> Self {
-        let mut predictor = Self::new(&profile.parameters());
-        predictor.profile = profile;
-        predictor
-    }
-
-    pub fn new(params: &TokenPredictorParameters) -> Self {
-        Self::new_with_mode(params, false)
-    }
-
-    pub(crate) fn new_legacy(params: &TokenPredictorParameters) -> Self {
-        Self::new_with_mode(params, true)
+    pub(crate) fn finalize_reconstruction_parameters(&mut self) -> ReconstructionParameters {
+        *self.finalized_parameters.get_or_insert_with(|| {
+            self.prediction
+                .reconstruction_parameters()
+                .normalized(NormalizationBounds {
+                    window_bits: self.prediction.normalized_window_bits(),
+                    short_match_cutoff: self.prediction.short_match_distance_bounds(),
+                    token_count: self.prediction.token_limit_bounds(),
+                })
+        })
     }
 
     fn encode_block_type(
@@ -655,407 +640,7 @@ impl TokenPredictor {
 }
 
 #[cfg(test)]
-pub(crate) fn zlib_level_1_params() -> TokenPredictorParameters {
-    use crate::hash_algorithm::HashAlgorithm;
-    use crate::parameters::DictionaryAddPolicy;
-    use crate::parameters::{BlockTypeStrategy, PreflateStrategy};
-
-    TokenPredictorParameters {
-        matches_to_start_detected: false,
-        very_far_matches_detected: false,
-        window_bits: 15,
-        strategy: PreflateStrategy::Default,
-        nice_length: 8,
-        add_policy: DictionaryAddPolicy::AddFirst(4),
-        max_token_count: 16383,
-        max_dist_3_matches: 32488,
-        matching_type: MatchingType::Greedy,
-        max_chain: 4,
-        block_type_strategy: BlockTypeStrategy::Dynamic,
-        hash_algorithm: HashAlgorithm::Zlib {
-            hash_mask: 32767,
-            hash_shift: 5,
-        },
-    }
-}
-
-#[test]
-fn longer_prefix_resolves_a_table_hash_tie_to_the_memory_sized_zlib_hash() {
-    use crate::deflate::{
-        deflate_reader::parse_deflate_whole, deflate_token::DeflateHuffmanType,
-        deflate_writer::DeflateWriter,
-    };
-    use crate::hash_algorithm::{HashAlgorithm, HashImplementation, ZlibRotatingHashFixed};
-
-    let expected = TokenPredictorParameters {
-        hash_algorithm: HashAlgorithm::Zlib {
-            hash_mask: 4095,
-            hash_shift: 4,
-        },
-        matching_type: MatchingType::Lazy {
-            max_lazy: 16,
-            filtered_matching: false,
-            behavior: LazyBehavior::Zlib { good_length: 8 },
-        },
-        nice_length: 128,
-        max_chain: 128,
-        max_token_count: 2047,
-        max_dist_3_matches: 4096,
-        add_policy: DictionaryAddPolicy::AddAll,
-        ..zlib_level_1_params()
-    };
-    let baseline = TokenPredictorParameters {
-        hash_algorithm: HashAlgorithm::RandomVector,
-        ..expected
-    };
-    let mut bytes = Vec::new();
-    let mut random = 0x1234_5678u32;
-    for _ in 0..1200 {
-        random ^= random << 13;
-        random ^= random >> 17;
-        random ^= random << 5;
-        bytes.push(random as u8);
-    }
-    let pattern: Vec<_> = (b'A'..=b'Z').cycle().take(89).collect();
-    bytes.extend_from_slice(&pattern);
-    let hash = ZlibRotatingHashFixed::<4, 4095>::default();
-    let bucket = hash.get_hash(&pattern);
-    let mut collisions = Vec::new();
-    for first in 0..=255u32 {
-        for second in 0..=255u32 {
-            let third = bucket as u32 ^ ((first << 8) & 4095) ^ (second << 4);
-            if third <= 255 && [first as u8, second as u8, third as u8] != pattern[..3] {
-                collisions.push([first as u8, second as u8, third as u8]);
-            }
-        }
-    }
-    for _ in 0..4 {
-        for triple in collisions.iter().take(192) {
-            bytes.extend_from_slice(triple);
-        }
-        bytes.extend_from_slice(&pattern);
-    }
-    for _ in 0..1200 {
-        random ^= random << 13;
-        random ^= random >> 17;
-        random ^= random << 5;
-        bytes.push(random as u8);
-    }
-    let plain = PlainText::new_with_data(bytes);
-    let mut predictor = TokenPredictor::new(&expected);
-    let mut input = PreflateInput::new(&plain);
-    let mut writer = DeflateWriter::new();
-    while input.remaining() != 0 {
-        predictor
-            .prediction
-            .begin_decoded_huffman_block(&mut input, None, false)
-            .unwrap();
-        let mut tokens = Vec::new();
-        while input.remaining() != 0 && tokens.len() < usize::from(expected.max_token_count) {
-            let token = predictor
-                .prediction
-                .predict(&input, &TokenFrequency::default());
-            predictor.prediction.accept_token(&token, token, &mut input);
-            tokens.push(token);
-        }
-        predictor.prediction.finish_block(&mut input).unwrap();
-        writer
-            .encode_block(&DeflateTokenBlock {
-                block_type: DeflateTokenBlockType::Huffman {
-                    tokens,
-                    huffman_type: DeflateHuffmanType::Static,
-                },
-                last: input.remaining() == 0,
-            })
-            .unwrap();
-    }
-    writer.flush();
-    let compressed = writer.detach_output();
-    let (contents, decoded) = parse_deflate_whole(&compressed).unwrap();
-    let score = |parameters: &TokenPredictorParameters, limit| {
-        score_predictions(
-            &mut crate::prediction_state::PredictionState::new(parameters),
-            &contents.blocks,
-            &decoded,
-            limit,
-            524288,
-        )
-    };
-    assert_eq!(score(&baseline, 1024), (0, 1024));
-    assert!(score(&baseline, 4096).0 >= 2);
-    assert_eq!(score(&expected, 4096).0, 0);
-    let info = crate::estimator::extract_preflate_info(&contents.blocks);
-    assert_eq!(info.max_tokens_per_block, 2047);
-    let selected = crate::estimator::prediction_scoring::refine_ambiguous_profile(
-        baseline, &info, &contents, &decoded,
-    );
-    assert_eq!(selected, expected);
-    let (record, plaintext) = crate::stream_processor::preflate_whole_deflate_stream(
-        &compressed,
-        &crate::PreflateConfig::default(),
-    )
-    .unwrap();
-    assert_eq!(
-        crate::stream_processor::recreate_whole_deflate_stream(
-            plaintext.text(),
-            &record.corrections
-        )
-        .unwrap(),
-        compressed,
-    );
-}
-
-#[test]
-fn longer_prefix_resolves_a_filtered_zlib_hash_alias() {
-    use crate::deflate::{
-        deflate_reader::parse_deflate_whole, deflate_token::DeflateHuffmanType,
-        deflate_writer::DeflateWriter,
-    };
-    use crate::hash_algorithm::HashAlgorithm;
-
-    let expected = TokenPredictorParameters {
-        hash_algorithm: zlib::DEFAULT_HASH,
-        matching_type: MatchingType::Lazy {
-            max_lazy: 16,
-            filtered_matching: true,
-            behavior: LazyBehavior::Zlib { good_length: 8 },
-        },
-        nice_length: 128,
-        max_chain: 128,
-        max_token_count: 8191,
-        max_dist_3_matches: 0,
-        add_policy: DictionaryAddPolicy::AddAll,
-        ..zlib_level_1_params()
-    };
-    let baseline = TokenPredictorParameters {
-        hash_algorithm: HashAlgorithm::Libdeflate4Fast,
-        matching_type: MatchingType::Lazy {
-            max_lazy: 16,
-            filtered_matching: false,
-            behavior: LazyBehavior::Zlib { good_length: 8 },
-        },
-        max_chain: 126,
-        ..expected
-    };
-    let mut bytes = Vec::new();
-    let mut random = 0x1234_5678u32;
-    for _ in 0..1200 {
-        random ^= random << 13;
-        random ^= random >> 17;
-        random ^= random << 5;
-        bytes.push(random as u8);
-    }
-    for index in 0..10000u32 {
-        bytes.extend_from_slice(b"abcde");
-        bytes.extend_from_slice(&index.to_le_bytes()[..3]);
-        bytes.push(b'#');
-    }
-    let plain = PlainText::new_with_data(bytes);
-    let mut predictor = TokenPredictor::new(&expected);
-    let mut input = PreflateInput::new(&plain);
-    let mut writer = DeflateWriter::new();
-    while input.remaining() != 0 {
-        predictor
-            .prediction
-            .begin_decoded_huffman_block(&mut input, None, false)
-            .unwrap();
-        let mut tokens = Vec::new();
-        while input.remaining() != 0 && tokens.len() < usize::from(expected.max_token_count) {
-            let token = predictor
-                .prediction
-                .predict(&input, &TokenFrequency::default());
-            predictor.prediction.accept_token(&token, token, &mut input);
-            tokens.push(token);
-        }
-        predictor.prediction.finish_block(&mut input).unwrap();
-        writer
-            .encode_block(&DeflateTokenBlock {
-                block_type: DeflateTokenBlockType::Huffman {
-                    tokens,
-                    huffman_type: DeflateHuffmanType::Static,
-                },
-                last: input.remaining() == 0,
-            })
-            .unwrap();
-    }
-    writer.flush();
-    let compressed = writer.detach_output();
-    let (contents, decoded) = parse_deflate_whole(&compressed).unwrap();
-    let score = |parameters: &TokenPredictorParameters, limit| {
-        score_predictions(
-            &mut crate::prediction_state::PredictionState::new(parameters),
-            &contents.blocks,
-            &decoded,
-            limit,
-            524288,
-        )
-    };
-    assert_eq!(score(&baseline, 1024), (0, 1024));
-    assert!(score(&baseline, 4096).0 >= 2);
-    assert_eq!(score(&expected, 4096), (0, 4096));
-    let info = crate::estimator::extract_preflate_info(&contents.blocks);
-    assert!(info.min_len >= zlib::FILTERED_MIN_MATCH_LENGTH);
-    assert_eq!(
-        info.max_tokens_per_block,
-        u32::from(expected.max_token_count)
-    );
-    assert_eq!(
-        crate::estimator::prediction_scoring::refine_ambiguous_profile(
-            baseline, &info, &contents, &decoded
-        ),
-        expected,
-    );
-    let (record, plaintext) = crate::stream_processor::preflate_whole_deflate_stream(
-        &compressed,
-        &crate::PreflateConfig::default(),
-    )
-    .unwrap();
-    assert_eq!(
-        crate::stream_processor::recreate_whole_deflate_stream(
-            plaintext.text(),
-            &record.corrections,
-        )
-        .unwrap(),
-        compressed,
-    );
-}
-
-/// test predictor with a standard zlib match that doesn't need any correction
-#[test]
-pub fn test_predictor_block_perfect() {
-    use crate::deflate::deflate_reader;
-    use crate::preflate_input::PreflateInput;
-    use crate::statistical_codec::AssertDefaultOnlyEncoder;
-
-    let compressed_data = crate::utils::read_file("compressed_zlib_level1.deflate");
-
-    let (contents, plain_text) = deflate_reader::parse_deflate_whole(&compressed_data).unwrap();
-
-    let mut predictor = TokenPredictor::new(&zlib_level_1_params());
-
-    // this codec doesn't do anything other than say default value for everything
-    let mut codec = AssertDefaultOnlyEncoder {};
-
-    let mut input = PreflateInput::new(&plain_text);
-
-    for i in 0..contents.blocks.len() {
-        predictor
-            .predict_block(
-                &contents.blocks[i],
-                &mut codec,
-                &mut input,
-                i == contents.blocks.len() - 1,
-            )
-            .unwrap();
-    }
-}
-
-/// test predictor only calleing PredictToken (excludes block prediction)
-#[test]
-pub fn test_predictor_token_only() {
-    use crate::deflate::deflate_reader;
-    use crate::preflate_input::PreflateInput;
-
-    let compressed_data = crate::utils::read_file("compressed_zlib_level1.deflate");
-
-    let (contents, plain_text) = deflate_reader::parse_deflate_whole(&compressed_data).unwrap();
-
-    let mut predictor = TokenPredictor::new(&zlib_level_1_params());
-
-    let mut input = PreflateInput::new(&plain_text);
-
-    for i in 0..contents.blocks.len() {
-        let b = &contents.blocks[i];
-        match &b.block_type {
-            DeflateTokenBlockType::Huffman { tokens, .. } => {
-                for token in tokens {
-                    let predicted = predictor
-                        .prediction
-                        .predict(&input, &TokenFrequency::default());
-                    assert_eq!(predicted, *token);
-                    predictor
-                        .prediction
-                        .accept_token(token, predicted, &mut input);
-                }
-            }
-            _ => {
-                panic!("unexpected block type")
-            }
-        }
-    }
-}
-
-/// test building plain_text incrementally
-#[test]
-pub fn test_predictor_incremental() {
-    use crate::deflate::deflate_reader;
-    use crate::preflate_input::{PlainText, PreflateInput};
-
-    let compressed_data = crate::utils::read_file("compressed_zlib_level1.deflate");
-
-    let (contents, plain_text_original) =
-        deflate_reader::parse_deflate_whole(&compressed_data).unwrap();
-
-    let mut predictor = TokenPredictor::new(&zlib_level_1_params());
-
-    let mut plain_text = PlainText::new();
-
-    let mut start_pos = 0;
-
-    for i in 0..contents.blocks.len() {
-        // build th plain text from the block
-        println!("block {}, plaintext {:?}", i, plain_text);
-        let b = &contents.blocks[i];
-        match &b.block_type {
-            DeflateTokenBlockType::Huffman { tokens, .. } => {
-                for token in tokens {
-                    match *token {
-                        DeflateToken::Literal(l) => {
-                            plain_text.append(&[l]);
-                        }
-
-                        DeflateToken::Reference(r) => {
-                            plain_text.append_reference(r.dist(), r.len()).unwrap();
-                        }
-                    }
-                }
-                crate::utils::assert_eq_array(
-                    plain_text.prefix(),
-                    &plain_text_original.text()[start_pos - plain_text.prefix().len()..start_pos],
-                );
-                crate::utils::assert_eq_array(
-                    plain_text.text(),
-                    &plain_text_original.text()[start_pos..start_pos + plain_text.len()],
-                );
-                let mut input = PreflateInput::new(&plain_text);
-                if !plain_text.prefix().is_empty() {
-                    predictor.add_missing_previous_hash(&input);
-                }
-                for (i, token) in tokens.iter().enumerate() {
-                    let predicted = predictor
-                        .prediction
-                        .predict(&input, &TokenFrequency::default());
-                    assert_eq!(
-                        predicted,
-                        *token,
-                        "token {} input {}",
-                        i,
-                        input.pos() as usize - start_pos
-                    );
-                    predictor
-                        .prediction
-                        .accept_token(token, predicted, &mut input);
-                }
-            }
-            _ => panic!("unexpected block type"),
-        }
-        start_pos += plain_text.len();
-        plain_text.shrink_to_dictionary();
-    }
-}
-
-#[cfg(test)]
-mod flush_tests {
+pub(crate) mod tests {
     use super::*;
     use crate::{
         cabac::vp8::{VP8Reader, VP8Writer},
@@ -1102,13 +687,14 @@ mod flush_tests {
         plain
     }
 
-    fn params() -> TokenPredictorParameters {
-        TokenPredictorParameters {
-            add_policy: DictionaryAddPolicy::AddAll,
-            matching_type: MatchingType::Greedy,
-            max_chain: 32,
-            nice_length: 258,
-            ..zlib_level_1_params()
+    fn params() -> ReconstructionParameters {
+        {
+            let mut canonical_configuration = zlib_level_1_params();
+            canonical_configuration.set_insertion(DictionaryAddPolicy::AddAll);
+            canonical_configuration.set_nice_length(258);
+            canonical_configuration.set_max_chain(32);
+            canonical_configuration.set_matching_type(MatchingType::Greedy);
+            canonical_configuration
         }
     }
 
@@ -1116,9 +702,10 @@ mod flush_tests {
     fn refinement_stopping_retains_state_and_stops_on_distinguishing_errors() {
         let blocks = [huffman(vec![DeflateToken::Literal(b'a'); 128], true)];
         let plain = plaintext(&blocks);
-        let literal = TokenPredictorParameters {
-            strategy: crate::parameters::PreflateStrategy::HuffOnly,
-            ..params()
+        let literal = {
+            let mut canonical_configuration = params();
+            canonical_configuration.set_strategy(crate::parameters::PreflateStrategy::HuffOnly);
+            canonical_configuration
         };
         for parameters in [[literal, params()], [params(), literal]] {
             let scores = score_refinement(&parameters, &blocks, &plain, 0, 1);
@@ -1129,7 +716,9 @@ mod flush_tests {
             for (index, parameters) in parameters.iter().enumerate() {
                 if scores.errors[index] != usize::MAX {
                     let independent = score_predictions(
-                        &mut crate::prediction_state::PredictionState::new(parameters),
+                        &mut crate::prediction_state::PredictionState::from_reconstruction_parameters(
+                            *parameters,
+                        ),
                         &blocks,
                         &plain,
                         scores.tokens,
@@ -1145,9 +734,10 @@ mod flush_tests {
     fn refinement_stopping_does_not_extend_a_distinguished_prefix() {
         let blocks = [huffman(vec![DeflateToken::Literal(b'a'); 128], true)];
         let plain = plaintext(&blocks);
-        let literal = TokenPredictorParameters {
-            strategy: crate::parameters::PreflateStrategy::HuffOnly,
-            ..params()
+        let literal = {
+            let mut canonical_configuration = params();
+            canonical_configuration.set_strategy(crate::parameters::PreflateStrategy::HuffOnly);
+            canonical_configuration
         };
         for parameters in [[literal, params()], [params(), literal]] {
             let scores = score_refinement(&parameters, &blocks, &plain, 64, 1);
@@ -1170,9 +760,10 @@ mod flush_tests {
         tokens.extend(std::iter::repeat_n(DeflateToken::Literal(b'a'), 128));
         let blocks = [huffman(tokens, true)];
         let plain = plaintext(&blocks);
-        let literal = TokenPredictorParameters {
-            strategy: crate::parameters::PreflateStrategy::HuffOnly,
-            ..params()
+        let literal = {
+            let mut canonical_configuration = params();
+            canonical_configuration.set_strategy(crate::parameters::PreflateStrategy::HuffOnly);
+            canonical_configuration
         };
         let scores = score_refinement(&[params(), literal], &blocks, &plain, 1024, 1);
         assert_eq!(scores.prefix_errors, [0, 0]);
@@ -1185,16 +776,19 @@ mod flush_tests {
     fn refinement_stopping_keeps_ties_ambiguous_at_work_caps() {
         let blocks = [huffman(vec![DeflateToken::Literal(b'a'); 40000], true)];
         let plain = plaintext(&blocks);
-        let literal = TokenPredictorParameters {
-            strategy: crate::parameters::PreflateStrategy::HuffOnly,
-            ..params()
+        let literal = {
+            let mut canonical_configuration = params();
+            canonical_configuration.set_strategy(crate::parameters::PreflateStrategy::HuffOnly);
+            canonical_configuration
         };
         let scores = score_refinement(&[literal, literal], &blocks, &plain, 1024, 1);
         assert!(!scores.decisive);
         assert_eq!(scores.tokens, 32768);
         assert_eq!(scores.errors[0], scores.errors[1]);
         let prefix = score_predictions(
-            &mut crate::prediction_state::PredictionState::new(&literal),
+            &mut crate::prediction_state::PredictionState::from_reconstruction_parameters(
+                (&literal).into(),
+            ),
             &blocks,
             &plain,
             1024,
@@ -1229,7 +823,9 @@ mod flush_tests {
         ];
         let plain = plaintext(&blocks);
         let fixed = score_predictions(
-            &mut crate::prediction_state::PredictionState::new(&params()),
+            &mut crate::prediction_state::PredictionState::from_reconstruction_parameters(
+                (&params()).into(),
+            ),
             &blocks,
             &plain,
             usize::MAX,
@@ -1261,9 +857,9 @@ mod flush_tests {
         let blocks = [huffman(tokens, true)];
         let plain = plaintext(&blocks);
         for (hash_algorithm, matching_type) in [
-            (zlib::DEFAULT_HASH, MatchingType::Greedy),
+            (crate::compressors::zlib::DEFAULT_HASH, MatchingType::Greedy),
             (
-                zlib::DEFAULT_HASH,
+                crate::compressors::zlib::DEFAULT_HASH,
                 MatchingType::Lazy {
                     max_lazy: 16,
                     filtered_matching: false,
@@ -1279,7 +875,7 @@ mod flush_tests {
                 },
             ),
             (
-                zlib::DEFAULT_HASH,
+                crate::compressors::zlib::DEFAULT_HASH,
                 MatchingType::MiniZ {
                     max_probes: 16,
                     greedy: false,
@@ -1303,13 +899,16 @@ mod flush_tests {
                 MatchingType::WindowsLazy { max_lazy: 128 },
             ),
         ] {
-            let parameters = TokenPredictorParameters {
-                hash_algorithm,
-                matching_type,
-                ..params()
+            let parameters = {
+                let mut canonical_configuration = params();
+                canonical_configuration.set_hash_algorithm(hash_algorithm);
+                canonical_configuration.set_matching_type(matching_type);
+                canonical_configuration
             };
             let fixed = score_predictions(
-                &mut crate::prediction_state::PredictionState::new(&parameters),
+                &mut crate::prediction_state::PredictionState::from_reconstruction_parameters(
+                    (&parameters).into(),
+                ),
                 &blocks,
                 &plain,
                 usize::MAX,
@@ -1328,10 +927,10 @@ mod flush_tests {
     fn measure(
         blocks: &[DeflateTokenBlock],
         plain: &PlainText,
-        params: &TokenPredictorParameters,
+        params: &ReconstructionParameters,
         flush: bool,
     ) -> (usize, usize, Option<u32>) {
-        let mut predictor = TokenPredictor::new(params);
+        let mut predictor = TokenPredictor::from_parameters(params);
         if flush {
             predictor.begin_chunk(blocks);
         }
@@ -1352,7 +951,7 @@ mod flush_tests {
         }
         assert_eq!(input.remaining(), 0);
         let mismatches = predictor.trace.unwrap().mismatch_count;
-        let mut decoder = TokenPredictor::new(params);
+        let mut decoder = TokenPredictor::from_parameters(params);
         decoder.begin_chunk(&[]);
         let mut input = PreflateInput::new(plain);
         let mut codec = PredictionDecoderCabac::new(VP8Reader::new(&bytes[..]).unwrap());
@@ -1396,18 +995,22 @@ mod flush_tests {
             true,
         )];
         let plain = plaintext(&blocks);
-        let params = TokenPredictorParameters {
-            hash_algorithm: crate::hash_algorithm::HashAlgorithm::RandomVector,
-            matching_type: MatchingType::WindowsLazy { max_lazy: 128 },
-            matches_to_start_detected: true,
-            max_token_count: 4,
-            max_chain: 100,
-            ..params()
+        let params = {
+            let mut canonical_configuration = params();
+            canonical_configuration
+                .set_hash_algorithm(crate::hash_algorithm::HashAlgorithm::RandomVector);
+            canonical_configuration.set_matches_to_start(true);
+            canonical_configuration.set_max_chain(100);
+            canonical_configuration.set_matching_type(MatchingType::WindowsLazy { max_lazy: 128 });
+            canonical_configuration.max_token_count = 4;
+            canonical_configuration
         };
         assert_eq!(measure(&blocks, &plain, &params, true).1, 0);
         assert_eq!(
             score_predictions(
-                &mut crate::prediction_state::PredictionState::new(&params),
+                &mut crate::prediction_state::PredictionState::from_reconstruction_parameters(
+                    (&params).into()
+                ),
                 &blocks,
                 &plain,
                 usize::MAX,
@@ -1435,9 +1038,10 @@ mod flush_tests {
             huffman(reused, true),
         ];
         let plain = plaintext(&blocks);
-        let params = TokenPredictorParameters {
-            max_chain: 64,
-            ..params()
+        let params = {
+            let mut canonical_configuration = params();
+            canonical_configuration.set_max_chain(64);
+            canonical_configuration
         };
         let baseline = measure(&blocks, &plain, &params, false);
         let improved = measure(&blocks, &plain, &params, true);
@@ -1471,9 +1075,10 @@ mod flush_tests {
             crate::hash_algorithm::HashAlgorithm::Chromium { hash_mask: 0x7fff },
             crate::hash_algorithm::HashAlgorithm::Libdeflate4,
         ] {
-            let params = TokenPredictorParameters {
-                hash_algorithm,
-                ..params()
+            let params = {
+                let mut canonical_configuration = params();
+                canonical_configuration.set_hash_algorithm(hash_algorithm);
+                canonical_configuration
             };
             let baseline = measure(&blocks, &plain, &params, false);
             assert_eq!(baseline.1, 0, "{hash_algorithm:?}");
@@ -1482,7 +1087,9 @@ mod flush_tests {
             assert_eq!(improved.2, None);
             assert_eq!(
                 score_predictions(
-                    &mut crate::prediction_state::PredictionState::new(&params),
+                    &mut crate::prediction_state::PredictionState::from_reconstruction_parameters(
+                        (&params).into()
+                    ),
                     &blocks,
                     &plain,
                     usize::MAX,
@@ -1511,7 +1118,9 @@ mod flush_tests {
         assert!(improved.1 < baseline.1, "{} < {}", improved.1, baseline.1);
         assert_eq!(
             score_predictions(
-                &mut crate::prediction_state::PredictionState::new(&params()),
+                &mut crate::prediction_state::PredictionState::from_reconstruction_parameters(
+                    (&params()).into()
+                ),
                 &blocks,
                 &plain,
                 usize::MAX,
@@ -1536,9 +1145,10 @@ mod flush_tests {
             huffman(second, true),
         ];
         let plain = plaintext(&blocks);
-        let params = TokenPredictorParameters {
-            matches_to_start_detected: true,
-            ..params()
+        let params = {
+            let mut canonical_configuration = params();
+            canonical_configuration.set_matches_to_start(true);
+            canonical_configuration
         };
         let baseline = measure(&blocks, &plain, &params, false);
         let improved = measure(&blocks, &plain, &params, true);
@@ -1575,9 +1185,9 @@ mod flush_tests {
         let full = plaintext(&blocks);
         for ranges in [[0..2, 2..4, 4..5], [0..1, 1..3, 3..5]] {
             let mut plain = PlainText::new();
-            let mut encoder_predictor = TokenPredictor::new(&params());
+            let mut encoder_predictor = TokenPredictor::from_parameters(&params());
             encoder_predictor.trace = Some(TokenPredictionTrace::default());
-            let mut decoder_predictor = TokenPredictor::new(&params());
+            let mut decoder_predictor = TokenPredictor::from_parameters(&params());
             for (chunk, range) in ranges.into_iter().enumerate() {
                 plain.append(&full.text()[chunk * 199..(chunk + 1) * 199]);
                 let blocks = &blocks[range];
@@ -1639,46 +1249,6 @@ mod flush_tests {
     }
 
     #[test]
-    fn flush_synthetic_legacy_records_do_not_enable_flush_modelling() {
-        let blocks = [
-            huffman(repeated_segment(), false),
-            empty_stored(),
-            huffman(repeated_segment(), true),
-        ];
-        let plain = plaintext(&blocks);
-        let mut encoder_predictor = TokenPredictor::new_legacy(&params());
-        encoder_predictor.begin_chunk(&blocks);
-        assert!(!encoder_predictor.prediction.flush_enabled());
-        let mut bytes = vec![];
-        {
-            let mut input = PreflateInput::new(&plain);
-            let mut codec = PredictionEncoderCabac::new(VP8Writer::new(&mut bytes).unwrap());
-            for (index, block) in blocks.iter().enumerate() {
-                encoder_predictor
-                    .predict_block(block, &mut codec, &mut input, index + 1 == blocks.len())
-                    .unwrap();
-            }
-            codec.finish();
-        }
-        let mut decoder_predictor = TokenPredictor::new_legacy(&params());
-        decoder_predictor.begin_chunk(&[]);
-        let mut input = PreflateInput::new(&plain);
-        let mut codec = PredictionDecoderCabac::new(VP8Reader::new(&bytes[..]).unwrap());
-        for block in &blocks {
-            assert_eq!(
-                decoder_predictor
-                    .recreate_block(&mut codec, &mut input)
-                    .unwrap(),
-                *block
-            );
-        }
-        assert_eq!(
-            decoder_predictor.prediction.dictionary_reset_position(),
-            None
-        );
-    }
-
-    #[test]
     fn flush_rejects_malformed_limits_reset_tags_and_token_counts() {
         let blocks = [
             huffman(repeated_segment(), false),
@@ -1686,7 +1256,7 @@ mod flush_tests {
             huffman(repeated_segment(), true),
         ];
         let plain = plaintext(&blocks);
-        let mut predictor = TokenPredictor::new(&params());
+        let mut predictor = TokenPredictor::from_parameters(&params());
         predictor.begin_chunk(&blocks);
         let mut input = PreflateInput::new(&plain);
         let mut encoder = VerifyPredictionEncoder::default();
@@ -1718,7 +1288,7 @@ mod flush_tests {
             malformed[index] =
                 CodecAction::Correction(CodecCorrection::UncompressBlockLenCorrection, value);
             let mut codec = VerifyPredictionDecoder::new(malformed);
-            let mut decoder = TokenPredictor::new(&params());
+            let mut decoder = TokenPredictor::from_parameters(&params());
             decoder.begin_chunk(&[]);
             let mut input = PreflateInput::new(&plain);
             assert!(
@@ -1740,7 +1310,7 @@ mod flush_tests {
         malformed[index] = CodecAction::Correction(CodecCorrection::TokenCount, u32::MAX);
         let mut codec = VerifyPredictionDecoder::new(malformed);
         assert!(
-            TokenPredictor::new(&params())
+            TokenPredictor::from_parameters(&params())
                 .recreate_block(&mut codec, &mut PreflateInput::new(&plain))
                 .is_err()
         );
@@ -1753,25 +1323,29 @@ mod flush_tests {
             return;
         };
         let raw = std::fs::read(path).unwrap();
-        let (contents, plain) = crate::deflate::deflate_reader::parse_deflate_whole(&raw).unwrap();
-        let params = TokenPredictorParameters {
-            hash_algorithm: crate::hash_algorithm::HashAlgorithm::Zlib {
-                hash_mask: 16383,
-                hash_shift: 5,
-            },
-            add_policy: DictionaryAddPolicy::AddAll,
-            matching_type: MatchingType::Lazy {
+        let (contents, plain) =
+            crate::deflate::deflate_reader::tests::parse_deflate_whole(&raw).unwrap();
+        let params = {
+            let mut canonical_configuration = zlib_level_1_params();
+            canonical_configuration.set_hash_algorithm(
+                crate::hash_algorithm::HashAlgorithm::Zlib {
+                    hash_mask: 16383,
+                    hash_shift: 5,
+                },
+            );
+            canonical_configuration.set_window_bits(15);
+            canonical_configuration.set_insertion(DictionaryAddPolicy::AddAll);
+            canonical_configuration.set_nice_length(258);
+            canonical_configuration.set_max_chain(32);
+            canonical_configuration.set_short_match_cutoff(4076);
+            canonical_configuration.set_matching_type(MatchingType::Lazy {
                 max_lazy: 4,
                 filtered_matching: false,
                 behavior: LazyBehavior::Zlib { good_length: 8 },
-            },
-            nice_length: 258,
-            max_chain: 32,
-            window_bits: 15,
-            max_token_count: 8191,
-            max_dist_3_matches: 4076,
-            block_type_strategy: BlockTypeStrategy::Mixed,
-            ..zlib_level_1_params()
+            });
+            canonical_configuration.max_token_count = 8191;
+            canonical_configuration.block_type_strategy = BlockTypeStrategy::Mixed;
+            canonical_configuration
         };
         let baseline = measure(&contents.blocks, &plain, &params, false);
         let improved = measure(&contents.blocks, &plain, &params, true);
@@ -1784,5 +1358,444 @@ mod flush_tests {
             improved.2.is_some()
         );
         assert!(improved.1 < baseline.1);
+    }
+
+    use crate::estimator::test_support::{score_predictions, score_refinement};
+
+    use crate::{
+        parameters::{BlockTypeStrategy, DictionaryAddPolicy, LazyBehavior, tests::MatchingType},
+        preflate_input::PlainText,
+    };
+
+    pub(crate) fn zlib_level_1_params() -> ReconstructionParameters {
+        use crate::hash_algorithm::HashAlgorithm;
+        use crate::parameters::DictionaryAddPolicy;
+        use crate::parameters::{BlockTypeStrategy, PreflateStrategy};
+
+        {
+            let mut canonical_configuration =
+                crate::reconstruction_parameters::ReconstructionParameters {
+                    max_token_count: 16383,
+                    block_type_strategy: match BlockTypeStrategy::Dynamic {
+                        crate::parameters::BlockTypeStrategy::Mixed => {
+                            crate::parameters::BlockTypeStrategy::Dynamic
+                        }
+                        value => value,
+                    },
+                    behavior: crate::reconstruction_parameters::BehaviorSettings::NoDictionary {
+                        strategy: crate::parameters::PreflateStrategy::HuffOnly,
+                    },
+                };
+            canonical_configuration.set_hash_algorithm(HashAlgorithm::Zlib {
+                hash_mask: 32767,
+                hash_shift: 5,
+            });
+            canonical_configuration.set_window_bits(15);
+            canonical_configuration.set_insertion(DictionaryAddPolicy::AddFirst(4));
+            canonical_configuration.set_max_chain(4);
+            canonical_configuration.set_nice_length(8);
+            canonical_configuration.set_short_match_cutoff(32488);
+            canonical_configuration.set_matching_type(MatchingType::Greedy);
+            canonical_configuration.set_matches_to_start(false);
+            canonical_configuration.set_strategy(PreflateStrategy::Default);
+            canonical_configuration.set_full_window(false);
+            canonical_configuration
+        }
+    }
+
+    #[test]
+    fn longer_prefix_resolves_a_table_hash_tie_to_the_memory_sized_zlib_hash() {
+        use crate::deflate::{
+            deflate_reader::tests::parse_deflate_whole, deflate_token::DeflateHuffmanType,
+            deflate_writer::DeflateWriter,
+        };
+        use crate::hash_algorithm::{HashAlgorithm, HashImplementation, ZlibRotatingHashFixed};
+
+        let expected = {
+            let mut canonical_configuration = zlib_level_1_params();
+            canonical_configuration.set_hash_algorithm(HashAlgorithm::Zlib {
+                hash_mask: 4095,
+                hash_shift: 4,
+            });
+            canonical_configuration.set_insertion(DictionaryAddPolicy::AddAll);
+            canonical_configuration.set_nice_length(128);
+            canonical_configuration.set_max_chain(128);
+            canonical_configuration.set_short_match_cutoff(4096);
+            canonical_configuration.set_matching_type(MatchingType::Lazy {
+                max_lazy: 16,
+                filtered_matching: false,
+                behavior: LazyBehavior::Zlib { good_length: 8 },
+            });
+            canonical_configuration.max_token_count = 2047;
+            canonical_configuration
+        };
+        let baseline = {
+            let mut canonical_configuration = expected;
+            canonical_configuration.set_hash_algorithm(HashAlgorithm::RandomVector);
+            canonical_configuration
+        };
+        let mut bytes = Vec::new();
+        let mut random = 0x1234_5678u32;
+        for _ in 0..1200 {
+            random ^= random << 13;
+            random ^= random >> 17;
+            random ^= random << 5;
+            bytes.push(random as u8);
+        }
+        let pattern: Vec<_> = (b'A'..=b'Z').cycle().take(89).collect();
+        bytes.extend_from_slice(&pattern);
+        let hash = ZlibRotatingHashFixed::<4, 4095>::default();
+        let bucket = hash.get_hash(&pattern);
+        let mut collisions = Vec::new();
+        for first in 0..=255u32 {
+            for second in 0..=255u32 {
+                let third = bucket as u32 ^ ((first << 8) & 4095) ^ (second << 4);
+                if third <= 255 && [first as u8, second as u8, third as u8] != pattern[..3] {
+                    collisions.push([first as u8, second as u8, third as u8]);
+                }
+            }
+        }
+        for _ in 0..4 {
+            for triple in collisions.iter().take(192) {
+                bytes.extend_from_slice(triple);
+            }
+            bytes.extend_from_slice(&pattern);
+        }
+        for _ in 0..1200 {
+            random ^= random << 13;
+            random ^= random >> 17;
+            random ^= random << 5;
+            bytes.push(random as u8);
+        }
+        let plain = PlainText::new_with_data(bytes);
+        let mut predictor = TokenPredictor::from_parameters(&expected);
+        let mut input = PreflateInput::new(&plain);
+        let mut writer = DeflateWriter::new();
+        while input.remaining() != 0 {
+            predictor
+                .prediction
+                .begin_decoded_huffman_block(&mut input, None, false)
+                .unwrap();
+            let mut tokens = Vec::new();
+            while input.remaining() != 0 && tokens.len() < usize::from(expected.max_token_count) {
+                let token = predictor
+                    .prediction
+                    .predict(&input, &TokenFrequency::default());
+                predictor.prediction.accept_token(&token, token, &mut input);
+                tokens.push(token);
+            }
+            predictor.prediction.finish_block(&mut input).unwrap();
+            writer
+                .encode_block(&DeflateTokenBlock {
+                    block_type: DeflateTokenBlockType::Huffman {
+                        tokens,
+                        huffman_type: DeflateHuffmanType::Static,
+                    },
+                    last: input.remaining() == 0,
+                })
+                .unwrap();
+        }
+        writer.flush();
+        let compressed = writer.detach_output();
+        let (contents, decoded) = parse_deflate_whole(&compressed).unwrap();
+        let score = |parameters: &ReconstructionParameters, limit| {
+            score_predictions(
+                &mut crate::prediction_state::PredictionState::from_reconstruction_parameters(
+                    *parameters,
+                ),
+                &contents.blocks,
+                &decoded,
+                limit,
+                524288,
+            )
+        };
+        assert_eq!(score(&baseline, 1024), (0, 1024));
+        assert!(score(&baseline, 4096).0 >= 2);
+        assert_eq!(score(&expected, 4096).0, 0);
+        let info = crate::estimator::test_support::extract_preflate_info(&contents.blocks);
+        assert_eq!(info.max_tokens_per_block, 2047);
+        let selected = crate::estimator::test_support::refine_ambiguous_profile(
+            baseline, &info, &contents, &decoded,
+        );
+        assert_eq!(selected, expected);
+        let (record, plaintext) = crate::stream_processor::preflate_whole_deflate_stream(
+            &compressed,
+            &crate::PreflateConfig::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            crate::stream_processor::recreate_whole_deflate_stream(
+                plaintext.text(),
+                &record.corrections
+            )
+            .unwrap(),
+            compressed,
+        );
+    }
+
+    #[test]
+    fn longer_prefix_resolves_a_filtered_zlib_hash_alias() {
+        use crate::deflate::{
+            deflate_reader::tests::parse_deflate_whole, deflate_token::DeflateHuffmanType,
+            deflate_writer::DeflateWriter,
+        };
+        use crate::hash_algorithm::HashAlgorithm;
+
+        let expected = {
+            let mut canonical_configuration = zlib_level_1_params();
+            canonical_configuration.set_hash_algorithm(crate::compressors::zlib::DEFAULT_HASH);
+            canonical_configuration.set_insertion(DictionaryAddPolicy::AddAll);
+            canonical_configuration.set_nice_length(128);
+            canonical_configuration.set_max_chain(128);
+            canonical_configuration.set_short_match_cutoff(0);
+            canonical_configuration.set_matching_type(MatchingType::Lazy {
+                max_lazy: 16,
+                filtered_matching: true,
+                behavior: LazyBehavior::Zlib { good_length: 8 },
+            });
+            canonical_configuration.max_token_count = 8191;
+            canonical_configuration
+        };
+        let baseline = {
+            let mut canonical_configuration = expected;
+            canonical_configuration.set_hash_algorithm(HashAlgorithm::Libdeflate4Fast);
+            canonical_configuration.set_max_chain(126);
+            canonical_configuration.set_matching_type(MatchingType::Lazy {
+                max_lazy: 16,
+                filtered_matching: false,
+                behavior: LazyBehavior::Zlib { good_length: 8 },
+            });
+            canonical_configuration
+        };
+        let mut bytes = Vec::new();
+        let mut random = 0x1234_5678u32;
+        for _ in 0..1200 {
+            random ^= random << 13;
+            random ^= random >> 17;
+            random ^= random << 5;
+            bytes.push(random as u8);
+        }
+        for index in 0..10000u32 {
+            bytes.extend_from_slice(b"abcde");
+            bytes.extend_from_slice(&index.to_le_bytes()[..3]);
+            bytes.push(b'#');
+        }
+        let plain = PlainText::new_with_data(bytes);
+        let mut predictor = TokenPredictor::from_parameters(&expected);
+        let mut input = PreflateInput::new(&plain);
+        let mut writer = DeflateWriter::new();
+        while input.remaining() != 0 {
+            predictor
+                .prediction
+                .begin_decoded_huffman_block(&mut input, None, false)
+                .unwrap();
+            let mut tokens = Vec::new();
+            while input.remaining() != 0 && tokens.len() < usize::from(expected.max_token_count) {
+                let token = predictor
+                    .prediction
+                    .predict(&input, &TokenFrequency::default());
+                predictor.prediction.accept_token(&token, token, &mut input);
+                tokens.push(token);
+            }
+            predictor.prediction.finish_block(&mut input).unwrap();
+            writer
+                .encode_block(&DeflateTokenBlock {
+                    block_type: DeflateTokenBlockType::Huffman {
+                        tokens,
+                        huffman_type: DeflateHuffmanType::Static,
+                    },
+                    last: input.remaining() == 0,
+                })
+                .unwrap();
+        }
+        writer.flush();
+        let compressed = writer.detach_output();
+        let (contents, decoded) = parse_deflate_whole(&compressed).unwrap();
+        let score = |parameters: &ReconstructionParameters, limit| {
+            score_predictions(
+                &mut crate::prediction_state::PredictionState::from_reconstruction_parameters(
+                    *parameters,
+                ),
+                &contents.blocks,
+                &decoded,
+                limit,
+                524288,
+            )
+        };
+        assert_eq!(score(&baseline, 1024), (0, 1024));
+        assert!(score(&baseline, 4096).0 >= 2);
+        assert_eq!(score(&expected, 4096), (0, 4096));
+        let info = crate::estimator::test_support::extract_preflate_info(&contents.blocks);
+        assert!(info.min_len >= crate::compressors::zlib::FILTERED_MIN_MATCH_LENGTH);
+        assert_eq!(
+            info.max_tokens_per_block,
+            u32::from(expected.max_token_count)
+        );
+        assert_eq!(
+            crate::estimator::test_support::refine_ambiguous_profile(
+                baseline, &info, &contents, &decoded
+            ),
+            expected,
+        );
+        let (record, plaintext) = crate::stream_processor::preflate_whole_deflate_stream(
+            &compressed,
+            &crate::PreflateConfig::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            crate::stream_processor::recreate_whole_deflate_stream(
+                plaintext.text(),
+                &record.corrections,
+            )
+            .unwrap(),
+            compressed,
+        );
+    }
+
+    /// test predictor with a standard zlib match that doesn't need any correction
+    #[test]
+    fn test_predictor_block_perfect() {
+        use crate::deflate::deflate_reader;
+        use crate::preflate_input::PreflateInput;
+        use crate::statistical_codec::tests::AssertDefaultOnlyEncoder;
+
+        let compressed_data = crate::utils::read_file("compressed_zlib_level1.deflate");
+
+        let (contents, plain_text) =
+            deflate_reader::tests::parse_deflate_whole(&compressed_data).unwrap();
+
+        let mut predictor = TokenPredictor::from_parameters(&zlib_level_1_params());
+
+        // this codec doesn't do anything other than say default value for everything
+        let mut codec = AssertDefaultOnlyEncoder {};
+
+        let mut input = PreflateInput::new(&plain_text);
+
+        for i in 0..contents.blocks.len() {
+            predictor
+                .predict_block(
+                    &contents.blocks[i],
+                    &mut codec,
+                    &mut input,
+                    i == contents.blocks.len() - 1,
+                )
+                .unwrap();
+        }
+    }
+
+    /// test predictor only calleing PredictToken (excludes block prediction)
+    #[test]
+    fn test_predictor_token_only() {
+        use crate::deflate::deflate_reader;
+        use crate::preflate_input::PreflateInput;
+
+        let compressed_data = crate::utils::read_file("compressed_zlib_level1.deflate");
+
+        let (contents, plain_text) =
+            deflate_reader::tests::parse_deflate_whole(&compressed_data).unwrap();
+
+        let mut predictor = TokenPredictor::from_parameters(&zlib_level_1_params());
+
+        let mut input = PreflateInput::new(&plain_text);
+
+        for i in 0..contents.blocks.len() {
+            let b = &contents.blocks[i];
+            match &b.block_type {
+                DeflateTokenBlockType::Huffman { tokens, .. } => {
+                    for token in tokens {
+                        let predicted = predictor
+                            .prediction
+                            .predict(&input, &TokenFrequency::default());
+                        assert_eq!(predicted, *token);
+                        predictor
+                            .prediction
+                            .accept_token(token, predicted, &mut input);
+                    }
+                }
+                _ => {
+                    panic!("unexpected block type")
+                }
+            }
+        }
+    }
+
+    /// test building plain_text incrementally
+    #[test]
+    fn test_predictor_incremental() {
+        use crate::deflate::deflate_reader;
+        use crate::preflate_input::{PlainText, PreflateInput};
+
+        let compressed_data = crate::utils::read_file("compressed_zlib_level1.deflate");
+
+        let (contents, plain_text_original) =
+            deflate_reader::tests::parse_deflate_whole(&compressed_data).unwrap();
+
+        let mut predictor = TokenPredictor::from_parameters(&zlib_level_1_params());
+
+        let mut plain_text = PlainText::new();
+
+        let mut start_pos = 0;
+
+        for i in 0..contents.blocks.len() {
+            // build th plain text from the block
+            println!("block {}, plaintext {:?}", i, plain_text);
+            let b = &contents.blocks[i];
+            match &b.block_type {
+                DeflateTokenBlockType::Huffman { tokens, .. } => {
+                    for token in tokens {
+                        match *token {
+                            DeflateToken::Literal(l) => {
+                                plain_text.append(&[l]);
+                            }
+
+                            DeflateToken::Reference(r) => {
+                                plain_text.append_reference(r.dist(), r.len()).unwrap();
+                            }
+                        }
+                    }
+                    crate::utils::assert_eq_array(
+                        plain_text.prefix(),
+                        &plain_text_original.text()
+                            [start_pos - plain_text.prefix().len()..start_pos],
+                    );
+                    crate::utils::assert_eq_array(
+                        plain_text.text(),
+                        &plain_text_original.text()[start_pos..start_pos + plain_text.len()],
+                    );
+                    let mut input = PreflateInput::new(&plain_text);
+                    if !plain_text.prefix().is_empty() {
+                        predictor.add_missing_previous_hash(&input);
+                    }
+                    for (i, token) in tokens.iter().enumerate() {
+                        let predicted = predictor
+                            .prediction
+                            .predict(&input, &TokenFrequency::default());
+                        assert_eq!(
+                            predicted,
+                            *token,
+                            "token {} input {}",
+                            i,
+                            input.pos() as usize - start_pos
+                        );
+                        predictor
+                            .prediction
+                            .accept_token(token, predicted, &mut input);
+                    }
+                }
+                _ => panic!("unexpected block type"),
+            }
+            start_pos += plain_text.len();
+            plain_text.shrink_to_dictionary();
+        }
+    }
+
+    impl TokenPredictor {
+        pub(crate) fn track_short_match_distance(&mut self) {
+            self.prediction.track_short_match_distance();
+        }
+
+        pub(crate) fn short_match_distance_bounds(&self) -> Option<(u32, u32)> {
+            self.prediction.short_match_distance_bounds()
+        }
     }
 }

@@ -4,6 +4,9 @@
  *  This software incorporates material from third parties. See NOTICE.txt for details.
  *--------------------------------------------------------------------------------------------*/
 
+//! Incremental parsing of DEFLATE blocks into tokens and plaintext.
+//! Preserves tree encodings and padding for reconstruction while bounding plaintext growth.
+
 use byteorder::{LittleEndian, ReadBytesExt};
 
 use crate::{
@@ -404,86 +407,89 @@ impl std::fmt::Debug for DeflateContents {
     }
 }
 
-/// parses an entire deflate stream and asserts if it isn't complete
 #[cfg(test)]
-pub fn parse_deflate_whole(compressed_data: &[u8]) -> Result<(DeflateContents, PlainText)> {
-    let mut parse = DeflateParser::new(usize::MAX);
-    let deflate_content = parse.parse(compressed_data)?;
+pub(crate) mod tests {
+    use super::*;
 
-    match parse.state {
-        DeflateParserState::Done => (),
-        _ => panic!("Deflate stream not complete"),
+    /// parses an entire deflate stream and asserts if it isn't complete
+    pub fn parse_deflate_whole(compressed_data: &[u8]) -> Result<(DeflateContents, PlainText)> {
+        let mut parse = DeflateParser::new(usize::MAX);
+        let deflate_content = parse.parse(compressed_data)?;
+
+        match parse.state {
+            DeflateParserState::Done => (),
+            _ => panic!("Deflate stream not complete"),
+        }
+
+        Ok((deflate_content, parse.plain_text))
     }
 
-    Ok((deflate_content, parse.plain_text))
-}
+    /// tests the partial read which allows for blocks to be read incrementally
+    #[test]
+    fn test_partial_read() {
+        test_partial_read_for_buffer(&crate::utils::read_file("compressed_zlib_level1.deflate"));
+    }
 
-/// tests the partial read which allows for blocks to be read incrementally
-#[test]
-fn test_partial_read() {
-    test_partial_read_for_buffer(&crate::utils::read_file("compressed_zlib_level1.deflate"));
-}
+    /// tests the partial read which allows for blocks to be read incrementally
+    #[test]
+    fn test_partial_read_plaintext() {
+        test_partial_read_for_buffer(&crate::utils::read_file("pptxplaintext.deflate"));
+    }
 
-/// tests the partial read which allows for blocks to be read incrementally
-#[test]
-fn test_partial_read_plaintext() {
-    test_partial_read_for_buffer(&crate::utils::read_file("pptxplaintext.deflate"));
-}
+    pub fn test_partial_read_for_buffer(d: &[u8]) {
+        use crate::utils::{assert_block_eq, assert_eq_array};
 
-#[cfg(test)]
-pub fn test_partial_read_for_buffer(d: &[u8]) {
-    use crate::utils::{assert_block_eq, assert_eq_array};
+        let (complete, _plain_text_complete) = parse_deflate_whole(d).unwrap();
 
-    let (complete, _plain_text_complete) = parse_deflate_whole(d).unwrap();
+        let mut start_offset = 0;
+        let mut end_offset = 1;
+        let mut allblocks = Vec::new();
 
-    let mut start_offset = 0;
-    let mut end_offset = 1;
-    let mut allblocks = Vec::new();
+        let mut deflate_parser = DeflateParser::new(1024 * 1024);
 
-    let mut deflate_parser = DeflateParser::new(1024 * 1024);
+        while !deflate_parser.is_done() {
+            match deflate_parser.parse(&d[start_offset..end_offset]) {
+                Ok(mut dc) => {
+                    assert!(dc.compressed_size != 0);
+                    println!(
+                        "segment blocks={} plaintext={} comp={}",
+                        dc.blocks.len(),
+                        deflate_parser.plain_text().len(),
+                        dc.compressed_size
+                    );
+                    allblocks.append(&mut dc.blocks);
 
-    while !deflate_parser.is_done() {
-        match deflate_parser.parse(&d[start_offset..end_offset]) {
-            Ok(mut dc) => {
-                assert!(dc.compressed_size != 0);
-                println!(
-                    "segment blocks={} plaintext={} comp={}",
-                    dc.blocks.len(),
-                    deflate_parser.plain_text().len(),
-                    dc.compressed_size
-                );
-                allblocks.append(&mut dc.blocks);
+                    // advance by the amount of data we just read
+                    start_offset += dc.compressed_size;
 
-                // advance by the amount of data we just read
-                start_offset += dc.compressed_size;
+                    // end offset plus a bit
+                    end_offset = (start_offset + 50977).min(d.len());
 
-                // end offset plus a bit
-                end_offset = (start_offset + 50977).min(d.len());
+                    deflate_parser.shrink_to_dictionary();
+                }
+                Err(e) => {
+                    assert!(
+                        end_offset != d.len(),
+                        "shouldnt have reached the end with an error {:?}",
+                        e
+                    );
 
-                deflate_parser.shrink_to_dictionary();
-            }
-            Err(e) => {
-                assert!(
-                    end_offset != d.len(),
-                    "shouldnt have reached the end with an error {:?}",
-                    e
-                );
-
-                assert!(e.exit_code() == ExitCode::ShortRead);
-                // get some more this buffer was readable due to lack of data
-                end_offset = (end_offset + 50997).min(d.len());
+                    assert!(e.exit_code() == ExitCode::ShortRead);
+                    // get some more this buffer was readable due to lack of data
+                    end_offset = (end_offset + 50997).min(d.len());
+                }
             }
         }
+
+        assert_eq!(allblocks.len(), complete.blocks.len());
+        for (actual, expected) in allblocks.iter().zip(&complete.blocks) {
+            assert_block_eq(actual, expected);
+        }
+
+        let reconstruct = crate::deflate::deflate_writer::tests::write_deflate_blocks(&allblocks);
+
+        // data we reconstruct should be the same, minus if there was extra data passed
+        // start_offset that we dedidn't decode
+        assert_eq_array(&reconstruct, &d[..start_offset]);
     }
-
-    assert_eq!(allblocks.len(), complete.blocks.len());
-    for (actual, expected) in allblocks.iter().zip(&complete.blocks) {
-        assert_block_eq(actual, expected);
-    }
-
-    let reconstruct = crate::deflate::deflate_writer::write_deflate_blocks(&allblocks);
-
-    // data we reconstruct should be the same, minus if there was extra data passed
-    // start_offset that we dedidn't decode
-    assert_eq_array(&reconstruct, &d[..start_offset]);
 }

@@ -4,6 +4,18 @@
  *  This software incorporates material from third parties. See NOTICE.txt for details.
  *--------------------------------------------------------------------------------------------*/
 
+//! Huffman-tree prediction and correction coding.
+//!
+//! Token frequencies suggest a Huffman tree, but compressors differ in how they
+//! break ties and run-length encode code lengths. The predictor models those
+//! details and records deviations so reconstruction recovers the original tree description,
+//! not just a tree capable of decoding the same data.
+//!
+//! When the default prediction needs corrections, a bounded set of tree profiles
+//! is compared using encoded size, including the profile selector. Reconstruction
+//! applies the chosen tree-building rules and corrections to restore the
+//! original alphabet sizes, code lengths, and repeat operations.
+
 use crate::{
     cabac::vp8::VP8Writer,
     cabac_codec::{PredictionEncoderCabac, decode_difference, encode_difference},
@@ -30,107 +42,6 @@ enum TreeProfile {
     Floyd,
     MinizSplit,
     LegacyZlibSplit,
-}
-
-#[test]
-fn tree_profile_selection_preserves_perfect_encodings() {
-    let mut freq = TokenFrequency::default();
-    freq.literal_codes[0] = 100;
-    freq.literal_codes[1] = 50;
-    freq.literal_codes[2] = 25;
-    freq.distance_codes[0] = 1;
-    let encoding = recreate_tree_with_rules(
-        &freq,
-        &mut crate::statistical_codec::AssertDefaultOnlyDecoder {},
-        HufftreeBitCalc::Zlib,
-        false,
-    )
-    .unwrap();
-    let mut expected = Vec::new();
-    let mut legacy = PredictionEncoderCabac::new(VP8Writer::new(&mut expected).unwrap());
-    predict_tree_with_rules(&encoding, &freq, &mut legacy, HufftreeBitCalc::Zlib, false).unwrap();
-    legacy.finish();
-    drop(legacy);
-    let mut actual = Vec::new();
-    let mut modern = PredictionEncoderCabac::new(VP8Writer::new(&mut actual).unwrap());
-    predict_tree_for_block(&encoding, &freq, &mut modern, HufftreeBitCalc::Zlib).unwrap();
-    modern.finish();
-    drop(modern);
-    assert_eq!(actual, expected);
-}
-
-#[test]
-fn tree_profiles_roundtrip_and_selection_includes_selector_cost() {
-    use crate::statistical_codec::VerifyPredictionDecoder;
-
-    for seed in 1..=12u16 {
-        for distance in [None, Some(0), Some(1), Some(5)] {
-            let mut freq = TokenFrequency::default();
-            for (index, count) in freq.literal_codes.iter_mut().take(64).enumerate() {
-                *count = (index as u16 * seed + 17) % 29;
-            }
-            if let Some(distance) = distance {
-                freq.distance_codes[distance] = 5;
-            }
-            for source in TreeProfile::ALL {
-                let (calc, split) = source.rules(HufftreeBitCalc::Zlib);
-                let encoding = recreate_tree_with_rules(
-                    &freq,
-                    &mut crate::statistical_codec::AssertDefaultOnlyDecoder {},
-                    calc,
-                    split,
-                )
-                .unwrap();
-                for profile in TreeProfile::ALL {
-                    let recorded =
-                        record_tree(&encoding, &freq, HufftreeBitCalc::Zlib, profile).unwrap();
-                    let mut decoder = VerifyPredictionDecoder::new(recorded.actions());
-                    assert_eq!(
-                        recreate_tree_for_block(&freq, &mut decoder, HufftreeBitCalc::Zlib)
-                            .unwrap(),
-                        encoding,
-                        "{seed} {distance:?} {source:?} {profile:?}",
-                    );
-                }
-                let baseline = record_tree(
-                    &encoding,
-                    &freq,
-                    HufftreeBitCalc::Zlib,
-                    TreeProfile::Default,
-                )
-                .unwrap();
-                let mut selected = VerifyPredictionEncoder::new();
-                predict_tree_for_block(&encoding, &freq, &mut selected, HufftreeBitCalc::Zlib)
-                    .unwrap();
-                assert!(encoded_tree_size(&selected) <= encoded_tree_size(&baseline));
-                let mut decoder = VerifyPredictionDecoder::new(selected.actions());
-                assert_eq!(
-                    recreate_tree_for_block(&freq, &mut decoder, HufftreeBitCalc::Zlib).unwrap(),
-                    encoding,
-                );
-            }
-        }
-    }
-}
-
-#[test]
-fn invalid_tree_profiles_are_reported() {
-    use crate::statistical_codec::{CodecAction, VerifyPredictionDecoder};
-
-    for code in [8, 255, u32::MAX] {
-        let mut decoder = VerifyPredictionDecoder::new(vec![CodecAction::Correction(
-            CodecCorrection::TreeProfile,
-            code,
-        )]);
-        let error = recreate_tree_for_block(
-            &TokenFrequency::default(),
-            &mut decoder,
-            HufftreeBitCalc::Zlib,
-        )
-        .unwrap_err();
-        assert_eq!(error.exit_code(), ExitCode::RecompressFailed);
-        assert!(error.to_string().contains("invalid Huffman tree profile"));
-    }
 }
 
 impl TreeProfile {
@@ -399,13 +310,6 @@ fn calc_tc_lengths_without_trailing_zeros(bit_lengths: &[u8]) -> usize {
     len
 }
 
-#[test]
-fn trimmed_code_alphabet_handles_permuted_missing_symbols() {
-    assert_eq!(calc_tc_lengths_without_trailing_zeros(&[1; 11]), 10);
-    assert_eq!(calc_tc_lengths_without_trailing_zeros(&[1; 19]), 19);
-    assert_eq!(calc_tc_lengths_without_trailing_zeros(&[0; 19]), 4);
-}
-
 fn predict_ld_trees<D: PredictionEncoder>(
     encoder: &mut D,
     predicted_bit_len: &[u8],
@@ -642,12 +546,222 @@ fn predict_code_data(sym_bit_len: &[u8], code_type: TreeCodeType) -> u8 {
     }
 }
 
-#[test]
-fn encode_roundtrip_perfect() {
-    use crate::statistical_codec::AssertDefaultOnlyDecoder;
-    use crate::statistical_codec::VerifyPredictionEncoder;
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    for huffcalc in [HufftreeBitCalc::Miniz, HufftreeBitCalc::Zlib] {
+    #[test]
+    fn tree_profile_selection_preserves_perfect_encodings() {
+        let mut freq = TokenFrequency::default();
+        freq.literal_codes[0] = 100;
+        freq.literal_codes[1] = 50;
+        freq.literal_codes[2] = 25;
+        freq.distance_codes[0] = 1;
+        let encoding = recreate_tree_with_rules(
+            &freq,
+            &mut crate::statistical_codec::tests::AssertDefaultOnlyDecoder {},
+            HufftreeBitCalc::Zlib,
+            false,
+        )
+        .unwrap();
+        let mut expected = Vec::new();
+        let mut legacy = PredictionEncoderCabac::new(VP8Writer::new(&mut expected).unwrap());
+        predict_tree_with_rules(&encoding, &freq, &mut legacy, HufftreeBitCalc::Zlib, false)
+            .unwrap();
+        legacy.finish();
+        drop(legacy);
+        let mut actual = Vec::new();
+        let mut modern = PredictionEncoderCabac::new(VP8Writer::new(&mut actual).unwrap());
+        predict_tree_for_block(&encoding, &freq, &mut modern, HufftreeBitCalc::Zlib).unwrap();
+        modern.finish();
+        drop(modern);
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn tree_profiles_roundtrip_and_selection_includes_selector_cost() {
+        use crate::statistical_codec::VerifyPredictionDecoder;
+
+        for seed in 1..=12u16 {
+            for distance in [None, Some(0), Some(1), Some(5)] {
+                let mut freq = TokenFrequency::default();
+                for (index, count) in freq.literal_codes.iter_mut().take(64).enumerate() {
+                    *count = (index as u16 * seed + 17) % 29;
+                }
+                if let Some(distance) = distance {
+                    freq.distance_codes[distance] = 5;
+                }
+                for source in TreeProfile::ALL {
+                    let (calc, split) = source.rules(HufftreeBitCalc::Zlib);
+                    let encoding = recreate_tree_with_rules(
+                        &freq,
+                        &mut crate::statistical_codec::tests::AssertDefaultOnlyDecoder {},
+                        calc,
+                        split,
+                    )
+                    .unwrap();
+                    for profile in TreeProfile::ALL {
+                        let recorded =
+                            record_tree(&encoding, &freq, HufftreeBitCalc::Zlib, profile).unwrap();
+                        let mut decoder = VerifyPredictionDecoder::new(recorded.actions());
+                        assert_eq!(
+                            recreate_tree_for_block(&freq, &mut decoder, HufftreeBitCalc::Zlib)
+                                .unwrap(),
+                            encoding,
+                            "{seed} {distance:?} {source:?} {profile:?}",
+                        );
+                    }
+                    let baseline = record_tree(
+                        &encoding,
+                        &freq,
+                        HufftreeBitCalc::Zlib,
+                        TreeProfile::Default,
+                    )
+                    .unwrap();
+                    let mut selected = VerifyPredictionEncoder::new();
+                    predict_tree_for_block(&encoding, &freq, &mut selected, HufftreeBitCalc::Zlib)
+                        .unwrap();
+                    assert!(encoded_tree_size(&selected) <= encoded_tree_size(&baseline));
+                    let mut decoder = VerifyPredictionDecoder::new(selected.actions());
+                    assert_eq!(
+                        recreate_tree_for_block(&freq, &mut decoder, HufftreeBitCalc::Zlib)
+                            .unwrap(),
+                        encoding,
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn invalid_tree_profiles_are_reported() {
+        use crate::statistical_codec::{CodecAction, VerifyPredictionDecoder};
+
+        for code in [8, 255, u32::MAX] {
+            let mut decoder = VerifyPredictionDecoder::new(vec![CodecAction::Correction(
+                CodecCorrection::TreeProfile,
+                code,
+            )]);
+            let error = recreate_tree_for_block(
+                &TokenFrequency::default(),
+                &mut decoder,
+                HufftreeBitCalc::Zlib,
+            )
+            .unwrap_err();
+            assert_eq!(error.exit_code(), ExitCode::RecompressFailed);
+            assert!(error.to_string().contains("invalid Huffman tree profile"));
+        }
+    }
+
+    #[test]
+    fn trimmed_code_alphabet_handles_permuted_missing_symbols() {
+        assert_eq!(calc_tc_lengths_without_trailing_zeros(&[1; 11]), 10);
+        assert_eq!(calc_tc_lengths_without_trailing_zeros(&[1; 19]), 19);
+        assert_eq!(calc_tc_lengths_without_trailing_zeros(&[0; 19]), 4);
+    }
+
+    #[test]
+    fn encode_roundtrip_perfect() {
+        use crate::statistical_codec::VerifyPredictionEncoder;
+        use crate::statistical_codec::tests::AssertDefaultOnlyDecoder;
+
+        for huffcalc in [HufftreeBitCalc::Miniz, HufftreeBitCalc::Zlib] {
+            let mut freq = TokenFrequency::default();
+            freq.literal_codes[0] = 100;
+            freq.literal_codes[1] = 50;
+            freq.literal_codes[2] = 25;
+
+            freq.distance_codes[0] = 100;
+            freq.distance_codes[1] = 50;
+            freq.distance_codes[2] = 25;
+
+            let mut empty_decoder = AssertDefaultOnlyDecoder {};
+            let regenerated_header =
+                recreate_tree_for_block(&freq, &mut empty_decoder, huffcalc).unwrap();
+
+            assert_eq!(regenerated_header.num_literals, 257);
+            assert_eq!(regenerated_header.num_dist, 3);
+            assert_eq!(regenerated_header.lengths[0], (TreeCodeType::Code, 1));
+            assert_eq!(regenerated_header.lengths[1], (TreeCodeType::Code, 2));
+            assert_eq!(regenerated_header.lengths[2], (TreeCodeType::Code, 3));
+
+            let mut empty_encoder = VerifyPredictionEncoder::default();
+            predict_tree_for_block(&regenerated_header, &freq, &mut empty_encoder, huffcalc)
+                .unwrap();
+            assert_eq!(empty_encoder.count_nondefault_actions(), 0);
+        }
+    }
+
+    #[test]
+    fn diagnostic_rle_boundaries_reset_runs_and_preserve_crossing_corrections() {
+        use crate::statistical_codec::{VerifyPredictionDecoder, VerifyPredictionEncoder};
+        use TreeCodeType::{Code, Repeat};
+
+        let lengths = [1, 2, 2, 2, 2, 2];
+        let separate = [
+            (Code, 1),
+            (Code, 2),
+            (Code, 2),
+            (Code, 2),
+            (Code, 2),
+            (Code, 2),
+        ];
+        let crossing = [(Code, 1), (Code, 2), (Repeat, 4)];
+        for (codes, boundary, expected_zero) in [
+            (&separate[..], Some(3), true),
+            (&separate[..], None, false),
+            (&crossing[..], Some(3), false),
+            (&crossing[..], None, true),
+        ] {
+            let mut encoder = VerifyPredictionEncoder::new();
+            predict_ld_trees(&mut encoder, &lengths, codes, boundary).unwrap();
+            assert_eq!(encoder.count_nondefault_actions() == 0, expected_zero);
+            let mut decoder = VerifyPredictionDecoder::new(encoder.actions());
+            assert_eq!(
+                reconstruct_ld_trees(&mut decoder, &lengths, boundary).unwrap(),
+                codes,
+            );
+        }
+    }
+
+    #[test]
+    fn encode_perfect_encoding() {
+        use crate::statistical_codec::{VerifyPredictionEncoder, tests::AssertDefaultOnlyDecoder};
+
+        let mut freq = TokenFrequency::default();
+        // fill with random frequencies
+        let mut v: u16 = 10;
+        freq.literal_codes.fill_with(|| {
+            v = v.wrapping_add(997);
+            v
+        });
+        freq.distance_codes.fill_with(|| {
+            v = v.wrapping_add(997);
+            v
+        });
+
+        // use the default encoder the says that everything is ok
+        let mut default_only_decoder = AssertDefaultOnlyDecoder {};
+        let default_encoding =
+            recreate_tree_for_block(&freq, &mut default_only_decoder, HufftreeBitCalc::Zlib)
+                .unwrap();
+
+        // now predict the encoding using the default encoding and it should be perfect
+        let mut empty_encoder = VerifyPredictionEncoder::default();
+        predict_tree_for_block(
+            &default_encoding,
+            &freq,
+            &mut empty_encoder,
+            HufftreeBitCalc::Zlib,
+        )
+        .unwrap();
+        assert_eq!(empty_encoder.count_nondefault_actions(), 0);
+    }
+
+    #[test]
+    fn encode_tree_roundtrip() {
+        use crate::statistical_codec::{VerifyPredictionDecoder, VerifyPredictionEncoder};
+
         let mut freq = TokenFrequency::default();
         freq.literal_codes[0] = 100;
         freq.literal_codes[1] = 50;
@@ -657,137 +771,44 @@ fn encode_roundtrip_perfect() {
         freq.distance_codes[1] = 50;
         freq.distance_codes[2] = 25;
 
-        let mut empty_decoder = AssertDefaultOnlyDecoder {};
-        let regenerated_header =
-            recreate_tree_for_block(&freq, &mut empty_decoder, huffcalc).unwrap();
+        let huff_origin = HuffmanOriginalEncoding {
+            lengths: vec![
+                (TreeCodeType::Code, 4),
+                (TreeCodeType::Code, 4),
+                (TreeCodeType::Code, 4),
+                (TreeCodeType::ZeroLong, 138),
+                (TreeCodeType::ZeroLong, 115),
+                (TreeCodeType::Code, 3),
+                (TreeCodeType::Code, 1),
+                (TreeCodeType::Code, 2),
+                (TreeCodeType::Code, 2),
+            ],
+            code_lengths: [0, 3, 2, 3, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            num_literals: 257,
+            num_dist: 3,
+            num_code_lengths: 19,
+        };
 
-        assert_eq!(regenerated_header.num_literals, 257);
-        assert_eq!(regenerated_header.num_dist, 3);
-        assert_eq!(regenerated_header.lengths[0], (TreeCodeType::Code, 1));
-        assert_eq!(regenerated_header.lengths[1], (TreeCodeType::Code, 2));
-        assert_eq!(regenerated_header.lengths[2], (TreeCodeType::Code, 3));
+        let mut encoder = VerifyPredictionEncoder::default();
 
-        let mut empty_encoder = VerifyPredictionEncoder::default();
-        predict_tree_for_block(&regenerated_header, &freq, &mut empty_encoder, huffcalc).unwrap();
-        assert_eq!(empty_encoder.count_nondefault_actions(), 0);
-    }
-}
+        predict_tree_for_block(&huff_origin, &freq, &mut encoder, HufftreeBitCalc::Zlib).unwrap();
 
-#[test]
-fn diagnostic_rle_boundaries_reset_runs_and_preserve_crossing_corrections() {
-    use crate::statistical_codec::{VerifyPredictionDecoder, VerifyPredictionEncoder};
-    use TreeCodeType::{Code, Repeat};
-
-    let lengths = [1, 2, 2, 2, 2, 2];
-    let separate = [
-        (Code, 1),
-        (Code, 2),
-        (Code, 2),
-        (Code, 2),
-        (Code, 2),
-        (Code, 2),
-    ];
-    let crossing = [(Code, 1), (Code, 2), (Repeat, 4)];
-    for (codes, boundary, expected_zero) in [
-        (&separate[..], Some(3), true),
-        (&separate[..], None, false),
-        (&crossing[..], Some(3), false),
-        (&crossing[..], None, true),
-    ] {
-        let mut encoder = VerifyPredictionEncoder::new();
-        predict_ld_trees(&mut encoder, &lengths, codes, boundary).unwrap();
-        assert_eq!(encoder.count_nondefault_actions() == 0, expected_zero);
         let mut decoder = VerifyPredictionDecoder::new(encoder.actions());
-        assert_eq!(
-            reconstruct_ld_trees(&mut decoder, &lengths, boundary).unwrap(),
-            codes,
-        );
+
+        let regenerated_header =
+            recreate_tree_for_block(&freq, &mut decoder, HufftreeBitCalc::Zlib).unwrap();
+
+        assert_eq!(huff_origin, regenerated_header);
     }
-}
-#[test]
-fn encode_perfect_encoding() {
-    use crate::statistical_codec::{AssertDefaultOnlyDecoder, VerifyPredictionEncoder};
 
-    let mut freq = TokenFrequency::default();
-    // fill with random frequencies
-    let mut v: u16 = 10;
-    freq.literal_codes.fill_with(|| {
-        v = v.wrapping_add(997);
-        v
-    });
-    freq.distance_codes.fill_with(|| {
-        v = v.wrapping_add(997);
-        v
-    });
+    /// test that we can reconstruct the tree from the predicted bit lengths where
+    /// the predicted lengths are totally wrong
+    #[test]
+    fn encode_totally_different_tree() {
+        use crate::statistical_codec::{VerifyPredictionDecoder, VerifyPredictionEncoder};
+        use TreeCodeType::*;
 
-    // use the default encoder the says that everything is ok
-    let mut default_only_decoder = AssertDefaultOnlyDecoder {};
-    let default_encoding =
-        recreate_tree_for_block(&freq, &mut default_only_decoder, HufftreeBitCalc::Zlib).unwrap();
-
-    // now predict the encoding using the default encoding and it should be perfect
-    let mut empty_encoder = VerifyPredictionEncoder::default();
-    predict_tree_for_block(
-        &default_encoding,
-        &freq,
-        &mut empty_encoder,
-        HufftreeBitCalc::Zlib,
-    )
-    .unwrap();
-    assert_eq!(empty_encoder.count_nondefault_actions(), 0);
-}
-
-#[test]
-fn encode_tree_roundtrip() {
-    use crate::statistical_codec::{VerifyPredictionDecoder, VerifyPredictionEncoder};
-
-    let mut freq = TokenFrequency::default();
-    freq.literal_codes[0] = 100;
-    freq.literal_codes[1] = 50;
-    freq.literal_codes[2] = 25;
-
-    freq.distance_codes[0] = 100;
-    freq.distance_codes[1] = 50;
-    freq.distance_codes[2] = 25;
-
-    let huff_origin = HuffmanOriginalEncoding {
-        lengths: vec![
-            (TreeCodeType::Code, 4),
-            (TreeCodeType::Code, 4),
-            (TreeCodeType::Code, 4),
-            (TreeCodeType::ZeroLong, 138),
-            (TreeCodeType::ZeroLong, 115),
-            (TreeCodeType::Code, 3),
-            (TreeCodeType::Code, 1),
-            (TreeCodeType::Code, 2),
-            (TreeCodeType::Code, 2),
-        ],
-        code_lengths: [0, 3, 2, 3, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-        num_literals: 257,
-        num_dist: 3,
-        num_code_lengths: 19,
-    };
-
-    let mut encoder = VerifyPredictionEncoder::default();
-
-    predict_tree_for_block(&huff_origin, &freq, &mut encoder, HufftreeBitCalc::Zlib).unwrap();
-
-    let mut decoder = VerifyPredictionDecoder::new(encoder.actions());
-
-    let regenerated_header =
-        recreate_tree_for_block(&freq, &mut decoder, HufftreeBitCalc::Zlib).unwrap();
-
-    assert_eq!(huff_origin, regenerated_header);
-}
-
-/// test that we can reconstruct the tree from the predicted bit lengths where
-/// the predicted lengths are totally wrong
-#[test]
-fn encode_totally_different_tree() {
-    use crate::statistical_codec::{VerifyPredictionDecoder, VerifyPredictionEncoder};
-    use TreeCodeType::*;
-
-    #[rustfmt::skip]
+        #[rustfmt::skip]
     let predicted_bit_len = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6, 0, 5, 0, 0, 0, 0, 0, 0, 0, 0, 8, 0, 6, 6, 5, 7, 7, 8,
         0, 0, 0, 8, 0, 8, 0, 8, 0, 7, 6, 7, 7, 0, 0, 0, 8, 8, 7, 0, 0, 0, 0, 0, 0, 0, 0, 8, 8, 7, 0,
@@ -800,7 +821,7 @@ fn encode_totally_different_tree() {
         0, 7, 7, 7, 6, 6, 7, 8, 8, 7, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 7, 0, 0, 7, 7, 4, 4, 3, 3,
         2, 3, 3, 7, 6, 6, 0, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0];
 
-    #[rustfmt::skip]
+        #[rustfmt::skip]
     let actual_target_codes  =
         [(Code, 14), (Repeat, 6), (Code, 14), (Code, 14), (Code, 12), (Code, 6), (Code, 14),
         (Repeat, 6), (Repeat, 6), (Repeat, 6), (Code, 13), (Code, 14), (Code, 6), (Code, 14),
@@ -828,13 +849,15 @@ fn encode_totally_different_tree() {
         (Code, 4), (Code, 5), (Code, 4), (Code, 5), (Code, 4), (Code, 5), (Code, 4), (Repeat, 6),
         (Code, 5), (Code, 4), (Code, 5), (Code, 5), (Code, 5)];
 
-    let mut encoder = VerifyPredictionEncoder::default();
+        let mut encoder = VerifyPredictionEncoder::default();
 
-    predict_ld_trees(&mut encoder, &predicted_bit_len, &actual_target_codes, None).unwrap();
+        predict_ld_trees(&mut encoder, &predicted_bit_len, &actual_target_codes, None).unwrap();
 
-    let mut decoder = VerifyPredictionDecoder::new(encoder.actions());
+        let mut decoder = VerifyPredictionDecoder::new(encoder.actions());
 
-    let regenerated_header = reconstruct_ld_trees(&mut decoder, &predicted_bit_len, None).unwrap();
+        let regenerated_header =
+            reconstruct_ld_trees(&mut decoder, &predicted_bit_len, None).unwrap();
 
-    assert_eq!(actual_target_codes, regenerated_header.as_slice());
+        assert_eq!(actual_target_codes, regenerated_header.as_slice());
+    }
 }

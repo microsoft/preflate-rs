@@ -4,6 +4,9 @@
  *  This software incorporates material from third parties. See NOTICE.txt for details.
  *--------------------------------------------------------------------------------------------*/
 
+//! Token, block, and symbol-frequency representations of parsed DEFLATE data.
+//! Retains references, tree encodings, and framing details needed for exact bitstream reconstruction.
+
 use crate::deflate::huffman_encoding::HuffmanOriginalEncoding;
 
 use super::deflate_constants::{
@@ -18,12 +21,7 @@ pub enum DeflateToken {
     Reference(DeflateTokenReference),
 }
 
-impl DeflateToken {
-    #[cfg(test)]
-    pub fn new_ref(len: u32, dist: u32) -> DeflateToken {
-        DeflateToken::Reference(DeflateTokenReference::new(len, dist))
-    }
-}
+impl DeflateToken {}
 
 /// In the case of a distance and length, the length is the number of bytes to copy from the
 /// previous bytes, and the distance is the number of bytes back to start copying from.
@@ -151,6 +149,17 @@ impl TokenFrequency {
                     [NONLEN_CODE_COUNT + usize::from(quantize_length(t.len()).get())] += 1;
                 self.distance_codes[usize::from(quantize_distance(t.dist()).get())] += 1;
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    impl DeflateToken {
+        pub fn new_ref(len: u32, dist: u32) -> DeflateToken {
+            DeflateToken::Reference(DeflateTokenReference::new(len, dist))
         }
     }
 }

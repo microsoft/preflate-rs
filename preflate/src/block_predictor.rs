@@ -3,6 +3,16 @@
  *  Licensed under the Apache License, Version 2.0. See LICENSE.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
+//! Prediction of DEFLATE block types, stream tails, and flush markers.
+//!
+//! Compressors often finish streams or flush input using short sequences of
+//! empty stored and Huffman blocks. Recognizing these sequences avoids treating
+//! every structural block as an unrelated framing correction.
+//!
+//! `BlockPrediction` tracks the selected tail pattern, prior stored-block lengths, and flush
+//! boundaries. Encoding and reconstruction use the same state to predict block
+//! types and sizes while retaining corrections for streams that differ.
+
 use crate::{
     cabac_codec::encode_difference,
     deflate::deflate_token::{
@@ -29,7 +39,6 @@ pub(crate) struct BlockPrediction {
     first_block: bool,
     zero_stored: bool,
     previous_stored_length: Option<u32>,
-    pub(crate) legacy: bool,
     pub(crate) flush: bool,
     flush_limits: Vec<(usize, u32)>,
     block_index: usize,
@@ -44,12 +53,11 @@ impl BlockPrediction {
         self.flush = false;
         self.flush_limits.clear();
         self.block_index = 0;
-        if !self.legacy {
-            let last_data = blocks.iter().rposition(|block| match &block.block_type {
-                DeflateTokenBlockType::Stored { uncompressed } => !uncompressed.is_empty(),
-                DeflateTokenBlockType::Huffman { tokens, .. } => !tokens.is_empty(),
-            });
-            let flush_count = blocks
+        let last_data = blocks.iter().rposition(|block| match &block.block_type {
+            DeflateTokenBlockType::Stored { uncompressed } => !uncompressed.is_empty(),
+            DeflateTokenBlockType::Huffman { tokens, .. } => !tokens.is_empty(),
+        });
+        let flush_count = blocks
                 .iter()
                 .enumerate()
                 .filter(|(index, block)| {
@@ -58,55 +66,46 @@ impl BlockPrediction {
                 })
                 .take(65)
                 .count();
-            // Bound metadata even for adversarial streams with many empty blocks.
-            for (index, pair) in blocks.windows(2).enumerate() {
-                if let DeflateTokenBlockType::Huffman { tokens, .. } = &pair[0].block_type
-                    && !tokens.is_empty()
-                    && matches!(&pair[1].block_type,
+        // Bound metadata even for adversarial streams with many empty blocks.
+        for (index, pair) in blocks.windows(2).enumerate() {
+            if let DeflateTokenBlockType::Huffman { tokens, .. } = &pair[0].block_type
+                && !tokens.is_empty()
+                && matches!(&pair[1].block_type,
                         DeflateTokenBlockType::Stored { uncompressed } if uncompressed.is_empty())
-                    && !pair[0].last
-                    && last_data.is_some_and(|last| index + 1 < last)
-                {
-                    if self.flush_limits.len() == 64 {
-                        self.flush_limits.clear();
-                        break;
-                    }
-                    self.flush_limits.push((
-                        index,
-                        tokens
-                            .iter()
-                            .map(|t| match t {
-                                crate::deflate::deflate_token::DeflateToken::Literal(_) => 1,
-                                crate::deflate::deflate_token::DeflateToken::Reference(r) => {
-                                    r.len()
-                                }
-                            })
-                            .sum(),
-                    ));
+                && !pair[0].last
+                && last_data.is_some_and(|last| index + 1 < last)
+            {
+                if self.flush_limits.len() == 64 {
+                    self.flush_limits.clear();
+                    break;
                 }
-            }
-            self.flush = (1..=64).contains(&flush_count);
-            if !self.flush {
-                self.flush_limits.clear();
+                self.flush_limits.push((
+                    index,
+                    tokens
+                        .iter()
+                        .map(|t| match t {
+                            crate::deflate::deflate_token::DeflateToken::Literal(_) => 1,
+                            crate::deflate::deflate_token::DeflateToken::Reference(r) => r.len(),
+                        })
+                        .sum(),
+                ));
             }
         }
-        if !self.legacy {
-            let last_data = blocks.iter().rposition(|block| match &block.block_type {
-                DeflateTokenBlockType::Stored { uncompressed } => !uncompressed.is_empty(),
-                DeflateTokenBlockType::Huffman { tokens, .. } => !tokens.is_empty(),
-            });
-            let all_stored_empty = blocks.iter().all(|block| match &block.block_type {
-                DeflateTokenBlockType::Stored { uncompressed } => uncompressed.is_empty(),
-                _ => true,
-            });
-            self.zero_stored = all_stored_empty
-                && last_data.is_some_and(|last| {
-                    blocks[..last].iter().any(|block| {
-                        matches!(block.block_type, DeflateTokenBlockType::Stored { .. })
-                    })
-                });
+        self.flush = (1..=64).contains(&flush_count);
+        if !self.flush {
+            self.flush_limits.clear();
         }
-        if !self.legacy && blocks.last().is_some_and(|block| block.last) {
+        let all_stored_empty = blocks.iter().all(|block| match &block.block_type {
+            DeflateTokenBlockType::Stored { uncompressed } => uncompressed.is_empty(),
+            _ => true,
+        });
+        self.zero_stored = all_stored_empty
+            && last_data.is_some_and(|last| {
+                blocks[..last]
+                    .iter()
+                    .any(|block| matches!(block.block_type, DeflateTokenBlockType::Stored { .. }))
+            });
+        if blocks.last().is_some_and(|block| block.last) {
             for (profile, tail) in TAILS.iter().enumerate().skip(1) {
                 if blocks.len() > tail.len()
                     && match &blocks[blocks.len() - tail.len() - 1].block_type {
@@ -179,9 +178,7 @@ impl BlockPrediction {
     }
 
     pub(crate) fn stored_length(&self, remaining: u32) -> u32 {
-        if self.legacy {
-            65535
-        } else if self.zero_stored {
+        if self.zero_stored {
             0
         } else {
             remaining.min(self.previous_stored_length.unwrap_or(65535))
@@ -217,7 +214,7 @@ impl BlockPrediction {
     ) -> Result<u32> {
         if self.first_block {
             let profile = (correction / 6) as usize;
-            if profile >= 4 * TAILS.len() || (self.legacy && profile != 0) {
+            if profile >= 4 * TAILS.len() {
                 return err_exit_code(ExitCode::InvalidDeflate, "Invalid block prediction profile");
             }
             self.profile = profile % TAILS.len();
@@ -383,27 +380,16 @@ mod tests {
             prediction.begin_chunk(&[]);
             assert!(prediction.decode_type(invalid, 0, 100).is_err());
         }
-        let mut legacy = BlockPrediction {
-            legacy: true,
-            ..Default::default()
-        };
-        legacy.begin_chunk(&[]);
-        assert!(legacy.decode_type(6, 0, 100).is_err());
         let mut prediction = BlockPrediction::default();
         prediction.begin_chunk(&[]);
         assert!(prediction.decode_type(2, 0, 100).is_err());
     }
 
     #[test]
-    fn stored_lengths_use_remaining_input_except_in_legacy_mode() {
+    fn stored_lengths_use_remaining_input_and_preserve_learned_lengths() {
         let current = BlockPrediction::default();
-        let legacy = BlockPrediction {
-            legacy: true,
-            ..Default::default()
-        };
         for remaining in [0, 1, 123, 65535, 65536, u32::MAX] {
             assert_eq!(current.stored_length(remaining), remaining.min(65535));
-            assert_eq!(legacy.stored_length(remaining), 65535);
         }
         let flush = BlockPrediction {
             zero_stored: true,
@@ -417,8 +403,5 @@ mod tests {
         learned.record_stored_length(0);
         learned.begin_chunk(&[]);
         assert_eq!(learned.stored_length(10000), 2047);
-        let mut legacy = legacy;
-        legacy.record_stored_length(2047);
-        assert_eq!(legacy.stored_length(10000), 65535);
     }
 }

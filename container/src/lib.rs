@@ -4,6 +4,10 @@
  *  This software incorporates material from third parties. See NOTICE.txt for details.
  *--------------------------------------------------------------------------------------------*/
 
+//! Recompression of files containing embedded DEFLATE streams and images.
+//! Provides streaming compression and reconstruction, with Zstd for shared
+//! payloads and specialized handling for PNG and JPEG data.
+
 // forbid lints that we already have eliminated from the codebase so they don't show up in the future
 #![forbid(unsafe_code)]
 #![forbid(trivial_casts)]
@@ -71,15 +75,4 @@ pub fn recreate_whole_from_container(
         preflate_rs::PreflateError::new(preflate_rs::ExitCode::GeneralFailure, e.to_string())
     })?;
     processor.process_buffer(&buf, true, output)
-}
-
-#[cfg(test)]
-static INIT: std::sync::Once = std::sync::Once::new();
-
-/// Initialize the logger for tests. This is a no-op if the logger is already initialized.
-#[cfg(test)]
-pub fn init_logging() {
-    INIT.call_once(|| {
-        let _ = env_logger::builder().is_test(true).try_init();
-    });
 }

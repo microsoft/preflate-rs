@@ -1,3 +1,14 @@
+//! Bounded parallel file inspection with deterministic result ordering.
+//!
+//! A fixed worker pool inspects files independently and tags each result with its
+//! submission order. The coordinator holds out-of-order results until the next
+//! expected result arrives, then passes them to the report writer in input order.
+//!
+//! Submission is throttled by the number of results not yet emitted, bounding
+//! both queued work and completed results behind a slow file. Worker panics
+//! become file failures, and shutdown drops the queues and joins workers so a
+//! writer error does not leave blocked background work behind.
+
 use std::{
     collections::BTreeMap,
     fs::Metadata,
