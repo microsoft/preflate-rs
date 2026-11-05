@@ -7,21 +7,17 @@
  *  This software incorporates material from third parties. See NOTICE.txt for details.
  *--------------------------------------------------------------------------------------------*/
 
-use crate::{
-    bit_helper::bit_length,
-    deflate::{deflate_constants, deflate_reader::DeflateContents},
-    estimator::models::zlib::refine_parameters as refine_zlib_parameters,
-    preflate_error::Result,
-    preflate_input::PlainText,
-};
-
 use super::{
     complevel_estimator::estimate_preflate_depth, compressor_profile::select_compressor_profile,
     initial_estimate::InitialEstimate, models::zlib, preflate_stream_info::PreflateStreamInfo,
 };
-
 use crate::{
+    bit_helper::bit_length,
+    deflate::{deflate_constants, deflate_reader::DeflateContents},
+    estimator::models::zlib::refine_parameters as refine_zlib_parameters,
     parameters::{BlockTypeStrategy, DictionaryAddPolicy, PreflateStrategy},
+    preflate_error::Result,
+    preflate_input::PlainText,
     reconstruction_parameters::ReconstructionParameters,
 };
 
@@ -208,13 +204,8 @@ fn canonicalize_first_only_insertion(
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use super::*;
-    use crate::estimator::depth_estimator::DistancePolicy;
-
-    use crate::parameters::tests::MatchingType;
-
-    use {
-        super::super::{
+    use super::{
+        super::{
             complevel_estimator::DepthEstimate,
             compressor_profile::{
                 CompressorProfile, EstimateProvenance, ParameterEstimate, ParserContext,
@@ -222,7 +213,11 @@ pub(crate) mod tests {
             estimation_result::EstimationResult,
             preflate_stream_info::tests::extract_preflate_info,
         },
-        crate::{estimator::models::zlib::SLOW_PREFLATE_PARSER_SETTINGS, parameters::LazyBehavior},
+        *,
+    };
+    use crate::{
+        estimator::{depth_estimator::DistancePolicy, models::zlib::SLOW_PREFLATE_PARSER_SETTINGS},
+        parameters::{LazyBehavior, tests::MatchingType},
     };
 
     /// From the plain text and the preflate blocks, estimate the preflate parameters
@@ -370,8 +365,9 @@ pub(crate) mod tests {
 
     #[test]
     fn skipped_prefix_refinement_preserves_fingerprint_provenance() {
-        use super::super::complevel_estimator::CandidateEvidence;
-        use super::super::parser_estimator::ParserInference;
+        use super::super::{
+            complevel_estimator::CandidateEvidence, parser_estimator::ParserInference,
+        };
 
         let parameters = crate::token_predictor::tests::zlib_level_1_params();
         let contents = DeflateContents {

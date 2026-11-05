@@ -8,10 +8,7 @@
 //! and streams produced by native compressors. Covers compressor profiles,
 //! chunk boundaries, flush behavior, and diagnostic parameter replay.
 
-use std::fs::File;
-use std::io::Read;
-use std::path::Path;
-use std::ptr;
+use std::{fs::File, io::Read, path::Path, ptr};
 
 use libdeflate_sys::{
     libdeflate_alloc_compressor, libdeflate_deflate_compress, libdeflate_deflate_compress_bound,
@@ -1061,8 +1058,9 @@ fn miniz_shallow_fingerprint_preserves_canonical_native_profiles() {
 
 #[test]
 fn miniz_low_probe_profiles_roundtrip_synthetic() {
-    use miniz_oxide::deflate::core::deflate_flags::TDEFL_GREEDY_PARSING_FLAG;
     use std::io::Write;
+
+    use miniz_oxide::deflate::core::deflate_flags::TDEFL_GREEDY_PARSING_FLAG;
 
     let mut inputs = vec![
         ("records".to_owned(), pdf_style_test_bytes()),

@@ -15,23 +15,20 @@
 //! Coupled settings such as parser policy, search budget, and early-exit length
 //! are assigned later by the profile models.
 
+use super::{
+    depth_estimator::{
+        DistancePolicy, HashTableDepthEstimator, new_depth_estimator, run_depth_candidates,
+    },
+    parser_estimator::{InsertionConstraint, ParserInference},
+    preflate_stream_info::PreflateStreamInfo,
+};
 use crate::{
     deflate::deflate_reader::DeflateContents,
     estimator::models::{self, zlib::refine_depth_candidate},
     hash_algorithm::HashAlgorithm,
+    parameters::DictionaryAddPolicy,
     preflate_error::{ExitCode, Result, err_exit_code},
     preflate_input::PlainText,
-};
-
-use {
-    super::{
-        depth_estimator::{
-            DistancePolicy, HashTableDepthEstimator, new_depth_estimator, run_depth_candidates,
-        },
-        parser_estimator::{InsertionConstraint, ParserInference},
-        preflate_stream_info::PreflateStreamInfo,
-    },
-    crate::parameters::DictionaryAddPolicy,
 };
 
 /// Snapshot the existing walk's evidence before assigning compressor defaults.

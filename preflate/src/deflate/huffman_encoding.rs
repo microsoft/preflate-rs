@@ -18,14 +18,16 @@
 
 use std::io::BufRead;
 
-use crate::preflate_error::{ExitCode, Result, err_exit_code};
-
-use crate::deflate::{
-    bit_reader::ReadBits, bit_writer::BitWriter, deflate_constants::TREE_CODE_ORDER_TABLE,
+use super::{
+    bit_reader::BitReader,
+    deflate_constants::{DistCode, LITLEN_CODE_COUNT, MAX_DIST_CODE},
 };
-
-use super::bit_reader::BitReader;
-use super::deflate_constants::{DistCode, LITLEN_CODE_COUNT, MAX_DIST_CODE};
+use crate::{
+    deflate::{
+        bit_reader::ReadBits, bit_writer::BitWriter, deflate_constants::TREE_CODE_ORDER_TABLE,
+    },
+    preflate_error::{ExitCode, Result, err_exit_code},
+};
 
 /// Calculates Huffman code array given an array of Huffman Code Lengths using the RFC 1951 algorithm
 pub fn calc_huffman_codes(code_lengths: &[u8]) -> Result<Vec<u16>> {
@@ -731,9 +733,9 @@ mod tests {
 
     #[test]
     fn roundtrip_huffman_bitreadwrite() {
-        use crate::deflate::bit_reader::BitReader;
-
         use std::io::Cursor;
+
+        use crate::deflate::bit_reader::BitReader;
 
         let code_lengths = [1, 0, 3, 3, 4, 4, 3, 0];
 
@@ -833,8 +835,9 @@ mod tests {
     }
 
     fn rountrip_test(encoding: HuffmanOriginalEncoding) {
-        use super::super::bit_reader::BitReader;
         use std::io::Cursor;
+
+        use super::super::bit_reader::BitReader;
 
         let mut output_buffer = Vec::new();
         let mut bit_writer = BitWriter::default();

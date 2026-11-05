@@ -80,13 +80,11 @@ mod tree_predictor;
 #[cfg(test)]
 mod utils;
 
-pub use hash_algorithm::HashAlgorithm;
-pub use preflate_error::ExitCode;
-pub use preflate_error::{AddContext, PreflateError, Result, err_exit_code};
-pub use preflate_input::{PlainText, PreflateInput};
-
 #[cfg(feature = "diagnostics")]
 pub use deflate::deflate_token::{DeflateHuffmanType, DeflateToken, DeflateTokenBlockType};
+pub use hash_algorithm::HashAlgorithm;
+pub use preflate_error::{AddContext, ExitCode, PreflateError, Result, err_exit_code};
+pub use preflate_input::{PlainText, PreflateInput};
 pub use statistical_codec::{CodecCorrection, CountNonDefaultActions};
 #[cfg(feature = "diagnostics")]
 pub use stream_processor::estimate_first_chunk_estimator_json;

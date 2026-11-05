@@ -7,9 +7,10 @@
  *  Licensed under the Apache License, Version 2.0. See LICENSE.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-use crate::estimator::initial_estimate::InitialEstimate;
-use crate::hash_algorithm::HashAlgorithm;
-use crate::{parameters::DictionaryAddPolicy, reconstruction_parameters::ReconstructionParameters};
+use crate::{
+    estimator::initial_estimate::InitialEstimate, hash_algorithm::HashAlgorithm,
+    parameters::DictionaryAddPolicy, reconstruction_parameters::ReconstructionParameters,
+};
 
 pub fn inferred(parameters: ReconstructionParameters) -> Option<ReconstructionParameters> {
     if !matches!(
@@ -48,7 +49,6 @@ pub fn greedy_nice_length(initial: &InitialEstimate<'_>) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
     use crate::parameters::tests::MatchingType;
 
     #[test]

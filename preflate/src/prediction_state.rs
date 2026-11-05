@@ -133,8 +133,10 @@ impl PredictionState {
     }
 
     fn predict_block_type(&self) -> u32 {
-        use crate::deflate::deflate_token::{BT_DYNAMICHUFF, BT_STATICHUFF, BT_STORED};
-        use crate::parameters::BlockTypeStrategy;
+        use crate::{
+            deflate::deflate_token::{BT_DYNAMICHUFF, BT_STATICHUFF, BT_STORED},
+            parameters::BlockTypeStrategy,
+        };
         match self.settings.block_type_strategy {
             BlockTypeStrategy::Dynamic | BlockTypeStrategy::Mixed => BT_DYNAMICHUFF,
             BlockTypeStrategy::Static => BT_STATICHUFF,
@@ -735,9 +737,11 @@ impl PredictionState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::parameters::{LazyBehavior, tests::MatchingType};
-    use crate::preflate_input::PlainText;
-    use crate::token_predictor::tests::zlib_level_1_params;
+    use crate::{
+        parameters::{LazyBehavior, tests::MatchingType},
+        preflate_input::PlainText,
+        token_predictor::tests::zlib_level_1_params,
+    };
 
     #[test]
     fn token_count_observation_uses_its_own_prediction() {

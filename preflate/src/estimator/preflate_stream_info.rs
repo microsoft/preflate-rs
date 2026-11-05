@@ -7,12 +7,14 @@
 //! Observations about DEFLATE tokens, block boundaries, and source references.
 //! Collects evidence shared by hash, insertion-policy, and compressor-profile estimation.
 
-use crate::deflate::deflate_token::{
-    DeflateHuffmanType, DeflateToken, DeflateTokenBlock, DeflateTokenBlockType,
-};
-use crate::{estimator::models::chromium::ShortMatchEvidence, preflate_input::PlainText};
-
 use super::add_policy_estimator::{InsertionEvidence, observe_insertion};
+use crate::{
+    deflate::deflate_token::{
+        DeflateHuffmanType, DeflateToken, DeflateTokenBlock, DeflateTokenBlockType,
+    },
+    estimator::models::chromium::ShortMatchEvidence,
+    preflate_input::PlainText,
+};
 
 /// Candidate-independent observations; inferred settings are derived by consumers.
 pub struct PreflateStreamInfo {

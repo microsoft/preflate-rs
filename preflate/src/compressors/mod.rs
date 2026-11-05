@@ -10,8 +10,6 @@ pub mod windows;
 pub mod zlib;
 pub mod zlib_ng;
 
-use crate::parameters::DictionaryAddPolicy;
-
 pub use libdeflate::{LazyMinimum, predict_lazy as predict_libdeflate_lazy};
 pub use miniz::{
     cross_4k_boundary, is_zero_chain_link, match_chain as match_miniz_chain, maximum_distance,
@@ -22,6 +20,8 @@ pub use windows::{
     predict_lazy as predict_windows_lazy,
 };
 pub use zlib::{DeferredCutoff, WindowConstraint, predict_lazy as predict_zlib_lazy};
+
+use crate::parameters::DictionaryAddPolicy;
 
 pub enum MatchPrediction {
     Reference,
@@ -35,10 +35,7 @@ pub fn block_minimum_match_length(
     parameters: &crate::reconstruction_parameters::BehaviorSettings,
     bytes: &[u8],
 ) -> u32 {
-    use {
-        crate::reconstruction_parameters::LazyMinimum,
-        crate::reconstruction_parameters::{BehaviorSettings, ChainParser},
-    };
+    use crate::reconstruction_parameters::{BehaviorSettings, ChainParser, LazyMinimum};
     match parameters {
         BehaviorSettings::Chain { common, parser } => match parser {
             ChainParser::LibdeflateGreedy { .. } | ChainParser::LibdeflateLazy { .. } => {

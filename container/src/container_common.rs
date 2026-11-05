@@ -198,20 +198,21 @@ pub trait ProcessBuffer {
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use super::*;
-
     use std::io::Write;
 
     use preflate_rs::{AddContext, Result};
 
-    use crate::container_common::{
-        BLOCK_COMPRESSION_MASK, BLOCK_COMPRESSION_NONE, BLOCK_COMPRESSION_ZSTD, BLOCK_TYPE_DEFLATE,
-        BLOCK_TYPE_DEFLATE_CONTINUE, BLOCK_TYPE_JPEG_LEPTON, BLOCK_TYPE_LITERAL, BLOCK_TYPE_MASK,
-        BLOCK_TYPE_PNG, BLOCK_TYPE_WEBP, COMPRESSED_WRAPPER_VERSION_3, PreflateContainerConfig,
-        ProcessBuffer, read_varint,
+    use super::*;
+    use crate::{
+        container_common::{
+            BLOCK_COMPRESSION_MASK, BLOCK_COMPRESSION_NONE, BLOCK_COMPRESSION_ZSTD,
+            BLOCK_TYPE_DEFLATE, BLOCK_TYPE_DEFLATE_CONTINUE, BLOCK_TYPE_JPEG_LEPTON,
+            BLOCK_TYPE_LITERAL, BLOCK_TYPE_MASK, BLOCK_TYPE_PNG, BLOCK_TYPE_WEBP,
+            COMPRESSED_WRAPPER_VERSION_3, PreflateContainerConfig, ProcessBuffer, read_varint,
+        },
+        container_read::RecreateContainerProcessor,
+        container_write::PreflateContainerProcessor,
     };
-    use crate::container_read::RecreateContainerProcessor;
-    use crate::container_write::PreflateContainerProcessor;
 
     trait ProcessBufferTestExt: ProcessBuffer {
         fn process_vec(&mut self, input: &[u8]) -> Result<Vec<u8>> {
@@ -304,7 +305,7 @@ pub(crate) mod tests {
 
     #[test]
     fn roundtrip_small_chunk() {
-        use crate::utils::{tests::assert_eq_array, tests::read_file};
+        use crate::utils::tests::{assert_eq_array, read_file};
 
         let original = read_file("pptxplaintext.zip");
 
@@ -329,7 +330,7 @@ pub(crate) mod tests {
 
     #[test]
     fn roundtrip_small_plain_text() {
-        use crate::utils::{tests::assert_eq_array, tests::read_file};
+        use crate::utils::tests::{assert_eq_array, read_file};
 
         let original = read_file("pptxplaintext.zip");
 
@@ -354,7 +355,7 @@ pub(crate) mod tests {
 
     #[test]
     fn roundtrip_zstd_per_block() {
-        use crate::utils::{tests::assert_eq_array, tests::read_file};
+        use crate::utils::tests::{assert_eq_array, read_file};
 
         let original = read_file("samplezip.zip");
 
@@ -501,7 +502,7 @@ pub(crate) mod tests {
     /// through to the error arm and the round-trip would fail.
     #[test]
     fn test_decoder_strips_compression_bits_before_dispatch() {
-        use crate::utils::{tests::assert_eq_array, tests::read_file};
+        use crate::utils::tests::{assert_eq_array, read_file};
         // A zip file exercises DEFLATE blocks (wire type 0x41 = ZSTD|DEFLATE).
         // A successful round-trip proves the decoder is matching on 0x01, not 0x41.
         let original = read_file("samplezip.zip");
@@ -530,7 +531,7 @@ pub(crate) mod tests {
     /// `webp` feature is enabled, may store pixels as WebP lossless instead of raw.
     #[test]
     fn test_png_produces_idat_block_and_roundtrips() {
-        use crate::utils::{tests::assert_eq_array, tests::read_file};
+        use crate::utils::tests::{assert_eq_array, read_file};
         let original = read_file("treegdi.png");
         let mut enc =
             PreflateContainerProcessor::new(&PreflateContainerConfig::default(), 1, false);
@@ -556,7 +557,7 @@ pub(crate) mod tests {
     /// streams. Both must survive a full round-trip.
     #[test]
     fn test_pdf_with_jpegs_produces_lepton_and_deflate_blocks_and_roundtrips() {
-        use crate::utils::{tests::assert_eq_array, tests::read_file};
+        use crate::utils::tests::{assert_eq_array, read_file};
         let original = read_file("embedded-images.pdf");
         let mut enc =
             PreflateContainerProcessor::new(&PreflateContainerConfig::default(), 1, false);
@@ -596,7 +597,7 @@ pub(crate) mod tests {
     /// blocks that must all round-trip correctly.
     #[test]
     fn test_deflate_continue_blocks_appear_and_roundtrip() {
-        use crate::utils::{tests::assert_eq_array, tests::read_file};
+        use crate::utils::tests::{assert_eq_array, read_file};
         let original = read_file("sample1.bin.gz");
         // min_chunk_size: 0 so the loop processes data immediately after Start,
         // letting Searching run with the first truncated chunk rather than waiting
@@ -647,7 +648,7 @@ pub(crate) mod tests {
     /// unprocessed portion.
     #[test]
     fn test_total_plain_text_limit_forces_literal_fallback_and_roundtrips() {
-        use crate::utils::{tests::assert_eq_array, tests::read_file};
+        use crate::utils::tests::{assert_eq_array, read_file};
         // samplezip.zip has several DEFLATE entries; setting the limit to 1 byte
         // ensures that after the first DEFLATE entry's plaintext is accumulated,
         // every subsequent scan sees total_plain_text_seen > limit and falls back
@@ -915,7 +916,7 @@ pub(crate) mod tests {
     /// The round-trip result must be byte-exact regardless of where chunk boundaries fall.
     #[test]
     fn test_two_gzip_streams_incremental_small_chunks_roundtrip() {
-        use crate::utils::{tests::assert_eq_array, tests::read_file};
+        use crate::utils::tests::{assert_eq_array, read_file};
         let original = read_file("test_two_gzip_streams.bin");
 
         let mut enc = PreflateContainerProcessor::new(
@@ -946,7 +947,7 @@ pub(crate) mod tests {
     /// the incremental path handles mixed literal padding + zlib streams correctly.
     #[test]
     fn test_two_zlib_streams_incremental_small_chunks_roundtrip() {
-        use crate::utils::{tests::assert_eq_array, tests::read_file};
+        use crate::utils::tests::{assert_eq_array, read_file};
         let original = read_file("test_two_zlib_streams.bin");
 
         let mut enc = PreflateContainerProcessor::new(
@@ -977,7 +978,7 @@ pub(crate) mod tests {
     /// inside the ZIP local-file headers and DEFLATE bodies are handled gracefully.
     #[test]
     fn test_zip_three_entries_incremental_small_chunks_roundtrip() {
-        use crate::utils::{tests::assert_eq_array, tests::read_file};
+        use crate::utils::tests::{assert_eq_array, read_file};
         let original = read_file("test_zip_3entries.zip");
 
         let mut enc = PreflateContainerProcessor::new(
@@ -1009,7 +1010,7 @@ pub(crate) mod tests {
     /// Uses `test_zip_stored_then_deflated.zip` (mixed STORED + DEFLATED entries).
     #[test]
     fn test_zip_stored_then_deflated_decoder_small_chunks_roundtrip() {
-        use crate::utils::{tests::assert_eq_array, tests::read_file};
+        use crate::utils::tests::{assert_eq_array, read_file};
         let original = read_file("test_zip_stored_then_deflated.zip");
 
         let mut enc =

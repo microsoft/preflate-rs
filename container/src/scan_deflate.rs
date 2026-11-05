@@ -2,23 +2,22 @@
 //! Recognizes wrapper signatures and PNG chunk boundaries, then prepares supported
 //! streams for container encoding.
 
-use std::{io::Cursor, ops::Range};
+use std::{
+    io::{Cursor, Read, Seek},
+    ops::Range,
+};
+
+use byteorder::{LittleEndian, ReadBytesExt};
+use lepton_jpeg::{DEFAULT_THREAD_POOL, EnabledFeatures};
+use preflate_rs::{
+    ExitCode, HashAlgorithm, PlainText, PreflateConfig, PreflateStreamChunkResult,
+    PreflateStreamProcessor, Result, err_exit_code,
+};
 
 use crate::{
     PreflateContainerConfig,
     idat_parse::{IdatContents, PngHeader, parse_idat, parse_ihdr},
 };
-
-use lepton_jpeg::{DEFAULT_THREAD_POOL, EnabledFeatures};
-use preflate_rs::{
-    ExitCode, HashAlgorithm, PlainText, PreflateConfig, PreflateStreamChunkResult,
-    PreflateStreamProcessor, err_exit_code,
-};
-
-use byteorder::{LittleEndian, ReadBytesExt};
-use std::io::{Read, Seek};
-
-use preflate_rs::Result;
 
 /// The minimum size of a block that is considered for splitting into chunks
 const MIN_BLOCKSIZE: usize = 1024;

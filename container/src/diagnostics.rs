@@ -695,8 +695,9 @@ mod tests {
         }
     }
 
-    use super::*;
     use miniz_oxide::deflate::{compress_to_vec, compress_to_vec_zlib};
+
+    use super::*;
 
     fn scan(src: &[u8], raw: bool) -> Vec<DeflateDiagnostic> {
         let mut results = Vec::new();

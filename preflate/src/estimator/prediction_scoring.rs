@@ -17,19 +17,18 @@
 //! advance dictionary history without consuming the informative-sample budget,
 //! while separate total-work limits still bound the replay.
 
+use super::{complevel_estimator::CandidateEvidence, preflate_stream_info::PreflateStreamInfo};
 use crate::{
     deflate::deflate_token::{
         DeflateToken, DeflateTokenBlock, DeflateTokenBlockType, TokenFrequency,
     },
-    estimator::compressor_profile::CompressorProfile,
-    estimator::estimation_result::EstimationResult,
-    estimator::models,
+    estimator::{
+        compressor_profile::CompressorProfile, estimation_result::EstimationResult, models,
+    },
     prediction_state::PredictionState,
     preflate_input::{PlainText, PreflateInput},
     reconstruction_parameters::ReconstructionParameters,
 };
-
-use super::{complevel_estimator::CandidateEvidence, preflate_stream_info::PreflateStreamInfo};
 
 #[derive(Default)]
 struct ScoringBudget {
@@ -398,11 +397,13 @@ pub(crate) mod tests {
 
     #[test]
     fn generic_greedy_refinement_accepts_an_imperfect_but_much_better_parser() {
-        use crate::deflate::{
-            deflate_reader::DeflateContents, deflate_token::DeflateHuffmanType,
-            deflate_writer::DeflateWriter,
+        use crate::{
+            deflate::{
+                deflate_reader::DeflateContents, deflate_token::DeflateHuffmanType,
+                deflate_writer::DeflateWriter,
+            },
+            parameters::{DictionaryAddPolicy, LazyBehavior, tests::MatchingType},
         };
-        use crate::parameters::{DictionaryAddPolicy, LazyBehavior, tests::MatchingType};
 
         fn literal(tokens: &mut Vec<DeflateToken>, bytes: &mut Vec<u8>, value: u8) {
             tokens.push(DeflateToken::Literal(value));

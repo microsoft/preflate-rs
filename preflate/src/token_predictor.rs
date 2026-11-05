@@ -1360,17 +1360,17 @@ pub(crate) mod tests {
         assert!(improved.1 < baseline.1);
     }
 
-    use crate::estimator::test_support::{score_predictions, score_refinement};
-
     use crate::{
+        estimator::test_support::{score_predictions, score_refinement},
         parameters::{BlockTypeStrategy, DictionaryAddPolicy, LazyBehavior, tests::MatchingType},
         preflate_input::PlainText,
     };
 
     pub(crate) fn zlib_level_1_params() -> ReconstructionParameters {
-        use crate::hash_algorithm::HashAlgorithm;
-        use crate::parameters::DictionaryAddPolicy;
-        use crate::parameters::{BlockTypeStrategy, PreflateStrategy};
+        use crate::{
+            hash_algorithm::HashAlgorithm,
+            parameters::{BlockTypeStrategy, DictionaryAddPolicy, PreflateStrategy},
+        };
 
         {
             let mut canonical_configuration =
@@ -1405,11 +1405,13 @@ pub(crate) mod tests {
 
     #[test]
     fn longer_prefix_resolves_a_table_hash_tie_to_the_memory_sized_zlib_hash() {
-        use crate::deflate::{
-            deflate_reader::tests::parse_deflate_whole, deflate_token::DeflateHuffmanType,
-            deflate_writer::DeflateWriter,
+        use crate::{
+            deflate::{
+                deflate_reader::tests::parse_deflate_whole, deflate_token::DeflateHuffmanType,
+                deflate_writer::DeflateWriter,
+            },
+            hash_algorithm::{HashAlgorithm, HashImplementation, ZlibRotatingHashFixed},
         };
-        use crate::hash_algorithm::{HashAlgorithm, HashImplementation, ZlibRotatingHashFixed};
 
         let expected = {
             let mut canonical_configuration = zlib_level_1_params();
@@ -1535,11 +1537,13 @@ pub(crate) mod tests {
 
     #[test]
     fn longer_prefix_resolves_a_filtered_zlib_hash_alias() {
-        use crate::deflate::{
-            deflate_reader::tests::parse_deflate_whole, deflate_token::DeflateHuffmanType,
-            deflate_writer::DeflateWriter,
+        use crate::{
+            deflate::{
+                deflate_reader::tests::parse_deflate_whole, deflate_token::DeflateHuffmanType,
+                deflate_writer::DeflateWriter,
+            },
+            hash_algorithm::HashAlgorithm,
         };
-        use crate::hash_algorithm::HashAlgorithm;
 
         let expected = {
             let mut canonical_configuration = zlib_level_1_params();
@@ -1655,9 +1659,10 @@ pub(crate) mod tests {
     /// test predictor with a standard zlib match that doesn't need any correction
     #[test]
     fn test_predictor_block_perfect() {
-        use crate::deflate::deflate_reader;
-        use crate::preflate_input::PreflateInput;
-        use crate::statistical_codec::tests::AssertDefaultOnlyEncoder;
+        use crate::{
+            deflate::deflate_reader, preflate_input::PreflateInput,
+            statistical_codec::tests::AssertDefaultOnlyEncoder,
+        };
 
         let compressed_data = crate::utils::read_file("compressed_zlib_level1.deflate");
 
@@ -1686,8 +1691,7 @@ pub(crate) mod tests {
     /// test predictor only calleing PredictToken (excludes block prediction)
     #[test]
     fn test_predictor_token_only() {
-        use crate::deflate::deflate_reader;
-        use crate::preflate_input::PreflateInput;
+        use crate::{deflate::deflate_reader, preflate_input::PreflateInput};
 
         let compressed_data = crate::utils::read_file("compressed_zlib_level1.deflate");
 
@@ -1722,8 +1726,10 @@ pub(crate) mod tests {
     /// test building plain_text incrementally
     #[test]
     fn test_predictor_incremental() {
-        use crate::deflate::deflate_reader;
-        use crate::preflate_input::{PlainText, PreflateInput};
+        use crate::{
+            deflate::deflate_reader,
+            preflate_input::{PlainText, PreflateInput},
+        };
 
         let compressed_data = crate::utils::read_file("compressed_zlib_level1.deflate");
 

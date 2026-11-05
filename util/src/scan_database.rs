@@ -418,10 +418,12 @@ impl ScanDatabase {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::fs;
+
     use clap::Parser;
     use miniz_oxide::deflate::compress_to_vec;
-    use std::fs;
+
+    use super::*;
 
     #[test]
     fn profile_indexes_describe_only_active_reconstruction_settings() {

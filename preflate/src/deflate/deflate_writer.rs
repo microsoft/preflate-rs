@@ -7,19 +7,16 @@
 //! Reconstruction of DEFLATE bytes from tokenized blocks.
 //! Writes stored, fixed-tree, and dynamic-tree blocks using their preserved encoding details.
 
-use crate::preflate_error::Result;
-
-use super::deflate_token::{DeflateHuffmanType, DeflateTokenBlockType};
 use super::{
+    bit_writer::BitWriter,
     deflate_constants::{
         DIST_BASE_TABLE, DIST_EXTRA_TABLE, LENGTH_BASE_TABLE, LENGTH_EXTRA_TABLE, MIN_MATCH,
         NONLEN_CODE_COUNT, quantize_distance, quantize_length,
     },
-    deflate_token::{DeflateToken, DeflateTokenBlock},
+    deflate_token::{DeflateHuffmanType, DeflateToken, DeflateTokenBlock, DeflateTokenBlockType},
+    huffman_encoding::HuffmanWriter,
 };
-
-use super::bit_writer::BitWriter;
-use super::huffman_encoding::HuffmanWriter;
+use crate::preflate_error::Result;
 
 /// Takes a tokenized block and writes it to the original compressed output.
 pub struct DeflateWriter {

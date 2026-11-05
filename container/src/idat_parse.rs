@@ -11,7 +11,6 @@
 use std::io::{Read, Write};
 
 use byteorder::{ReadBytesExt, WriteBytesExt};
-
 use preflate_rs::{ExitCode, Result, err_exit_code};
 
 use crate::container_common::{read_varint, write_varint};

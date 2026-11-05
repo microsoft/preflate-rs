@@ -1,6 +1,9 @@
 //! Parameter estimation and prediction-correction encoding for the first chunk.
 //! Returns the predictor for continuation chunks and the finalized settings for parameter reports.
 
+use super::{
+    estimation_result::EstimationResult, preflate_parameter_estimator::estimate_preflate_profile,
+};
 use crate::{
     CountNonDefaultActions,
     deflate::deflate_reader::DeflateContents,
@@ -8,9 +11,6 @@ use crate::{
     preflate_input::PlainText,
     token_predictor::TokenPredictor,
 };
-
-use super::estimation_result::EstimationResult;
-use super::preflate_parameter_estimator::estimate_preflate_profile;
 
 pub fn estimate_and_encode(
     contents: &DeflateContents,

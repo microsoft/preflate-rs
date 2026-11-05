@@ -10,13 +10,17 @@
 //! A running CRC covers every output byte and is checked against the final
 //! container marker.
 
-use byteorder::ReadBytesExt;
-use crc32fast::Hasher as CrcHasher;
-use lepton_jpeg::{DEFAULT_THREAD_POOL, EnabledFeatures};
-
 use std::{
     collections::VecDeque,
     io::{Cursor, Read, Write},
+};
+
+use byteorder::ReadBytesExt;
+use crc32fast::Hasher as CrcHasher;
+use lepton_jpeg::{DEFAULT_THREAD_POOL, EnabledFeatures};
+use preflate_rs::{
+    AddContext, ExitCode, PreflateError, RecreateStreamProcessor, Result, err_exit_code,
+    recreate_whole_deflate_stream,
 };
 
 use crate::{
@@ -27,11 +31,6 @@ use crate::{
     },
     idat_parse::{IdatContents, recreate_idat},
     scoped_read::ScopedRead,
-};
-
-use preflate_rs::{
-    AddContext, ExitCode, PreflateError, RecreateStreamProcessor, Result, err_exit_code,
-    recreate_whole_deflate_stream,
 };
 
 /// Write wrapper that computes a running CRC-32 of every byte written.
@@ -526,8 +525,9 @@ fn webp_decompress(
 
     #[cfg(feature = "webp")]
     if let Some(result) = webp::Decoder::new(webp.as_slice()).decode() {
-        use crate::idat_parse::apply_png_filters_with_types;
         use std::ops::Deref;
+
+        use crate::idat_parse::apply_png_filters_with_types;
 
         let m = result.deref();
 

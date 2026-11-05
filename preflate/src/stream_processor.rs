@@ -19,11 +19,11 @@
 
 use std::io::{BufRead, Cursor};
 
-use crate::cabac::vp8::{VP8Reader, VP8Writer};
 use bitcode::{Decode, Encode};
 
 use crate::{
     PreflateConfig, Result,
+    cabac::vp8::{VP8Reader, VP8Writer},
     cabac_codec::{PredictionDecoderCabac, PredictionEncoderCabac},
     deflate::{
         deflate_reader::{DeflateContents, DeflateParser},

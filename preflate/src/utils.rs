@@ -13,9 +13,7 @@ pub fn write_file(filename: &str, data: &[u8]) {
 }
 
 pub fn read_file(filename: &str) -> Vec<u8> {
-    use std::fs::File;
-    use std::io::Read;
-    use std::path::Path;
+    use std::{fs::File, io::Read, path::Path};
 
     let filename = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("..")

@@ -1,26 +1,25 @@
 //! Default settings and parser refinements for streams without a decisive family fingerprint.
 //! Uses insertion and search evidence to propose conservative compressor behavior.
 
-use crate::reconstruction_parameters::{ChainParser, LazyLookaheadSettings, LazyMinimum};
 /*---------------------------------------------------------------------------------------------
  *  Copyright (c) Microsoft Corporation. All rights reserved.
  *  Licensed under the Apache License, Version 2.0. See LICENSE.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
-
 use super::{zlib, zlib_ng};
 use crate::{
-    deflate::deflate_token::DeflateTokenReference, hash_chain_holder::prefix_compare,
-    preflate_input::PreflateInput,
-};
-use crate::{
+    deflate::deflate_token::DeflateTokenReference,
     estimator::{
         initial_estimate::InitialEstimate,
         parser_estimator::{InsertionConstraint, ParserInference},
         preflate_stream_info::PreflateStreamInfo,
     },
     hash_algorithm::HashAlgorithm,
+    hash_chain_holder::prefix_compare,
     parameters::{DictionaryAddPolicy, LazyBehavior},
-    reconstruction_parameters::ReconstructionParameters,
+    preflate_input::PreflateInput,
+    reconstruction_parameters::{
+        ChainParser, LazyLookaheadSettings, LazyMinimum, ReconstructionParameters,
+    },
 };
 
 pub fn primary_only_greedy(
@@ -309,12 +308,13 @@ pub fn candidate(initial: &InitialEstimate<'_>, compatible: bool) -> Reconstruct
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::estimator::test_support::initial_stream_info;
-    use crate::estimator::{
-        complevel_estimator::CandidateEvidence, depth_estimator::DistancePolicy,
+    use crate::{
+        estimator::{
+            complevel_estimator::CandidateEvidence, depth_estimator::DistancePolicy,
+            test_support::initial_stream_info,
+        },
+        parameters::{PreflateStrategy, tests::MatchingType},
     };
-
-    use crate::parameters::{PreflateStrategy, tests::MatchingType};
 
     #[test]
     fn primary_only_greedy_preserves_evidence_and_requires_an_unrecognized_parser() {

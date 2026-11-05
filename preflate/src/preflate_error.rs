@@ -8,9 +8,7 @@
 //! Adds operation context to failures while preserving their status codes for
 //! Rust callers and C bindings.
 
-use std::fmt::Display;
-use std::io::ErrorKind;
-use std::num::TryFromIntError;
+use std::{fmt::Display, io::ErrorKind, num::TryFromIntError};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[non_exhaustive]

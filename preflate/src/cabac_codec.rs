@@ -15,10 +15,9 @@
 //! decoder returns zero directly for absent categories and consumes run counts
 //! for the others, preserving the caller's sequence of correction requests.
 
-use crate::cabac::{CabacReader, CabacWriter};
-
 use crate::{
     bit_helper::bit_length,
+    cabac::{CabacReader, CabacWriter},
     statistical_codec::{
         CodecCorrection, CountNonDefaultActions, PredictionDecoder, PredictionEncoder,
     },
@@ -315,9 +314,15 @@ mod tests {
 
     #[test]
     fn roundtree_cabac_decoding() {
-        use crate::cabac::vp8::{VP8Reader, VP8Writer};
-        use crate::statistical_codec::{CodecAction, tests::drive_encoder, tests::verify_decoder};
         use std::io::Cursor;
+
+        use crate::{
+            cabac::vp8::{VP8Reader, VP8Writer},
+            statistical_codec::{
+                CodecAction,
+                tests::{drive_encoder, verify_decoder},
+            },
+        };
 
         let mut buffer = Vec::new();
 
@@ -342,9 +347,15 @@ mod tests {
 
     #[test]
     fn roundtrip_cabac_interleaved_default_runs() {
-        use crate::cabac::vp8::{VP8Reader, VP8Writer};
-        use crate::statistical_codec::{CodecAction, tests::drive_encoder, tests::verify_decoder};
         use std::io::Cursor;
+
+        use crate::{
+            cabac::vp8::{VP8Reader, VP8Writer},
+            statistical_codec::{
+                CodecAction,
+                tests::{drive_encoder, verify_decoder},
+            },
+        };
 
         let corrections = [
             (CodecCorrection::TokenCount, 0),
@@ -383,8 +394,9 @@ mod tests {
     #[test]
     fn roundtree_cabac_correction() {
         // use the debug version of the cabac writer/reader to make sure that the we don't mix up contexts anywhere
-        use crate::cabac::debug::{DebugReader, DebugWriter};
         use std::io::Cursor;
+
+        use crate::cabac::debug::{DebugReader, DebugWriter};
 
         // generate a random set of operations
         let operations = [
@@ -438,8 +450,9 @@ mod tests {
 
     #[test]
     fn roundtrip_cabac_write_value() {
-        use crate::cabac::vp8::{VP8Context, VP8Reader, VP8Writer};
         use std::io::Cursor;
+
+        use crate::cabac::vp8::{VP8Context, VP8Reader, VP8Writer};
 
         let mut buffer = Vec::new();
 

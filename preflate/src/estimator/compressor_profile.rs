@@ -13,24 +13,19 @@
 //! while allowing inferred defaults to follow stronger parser evidence.
 
 use super::{
+    complevel_estimator::CandidateEvidence,
     depth_estimator::HashTableDepthEstimator,
+    estimation_result::EstimationResult,
     evidence_policy::ParserEvidencePolicy,
-    models::{chromium, generic, libdeflate, miniz, windows, zlib, zlib_ng},
+    initial_estimate::InitialEstimate,
+    models::{self, chromium, generic, libdeflate, miniz, windows, zlib, zlib_ng},
+    parser_estimator::{InsertionConstraint, ParserInference},
     preflate_stream_info::PreflateStreamInfo,
 };
-use crate::{hash_algorithm::HashAlgorithm, parameters::DictionaryAddPolicy};
-
-use {
-    super::{
-        complevel_estimator::CandidateEvidence,
-        estimation_result::EstimationResult,
-        initial_estimate::InitialEstimate,
-        parser_estimator::{InsertionConstraint, ParserInference},
-    },
-    crate::reconstruction_parameters::ReconstructionParameters,
+use crate::{
+    hash_algorithm::HashAlgorithm, parameters::DictionaryAddPolicy,
+    reconstruction_parameters::ReconstructionParameters,
 };
-
-use crate::estimator::models;
 
 impl ReconstructionParameters {
     pub(crate) fn with_lazy_behavior(self, compatible: bool, observed_min_len: u32) -> Self {
@@ -304,21 +299,23 @@ fn inferred_profile(parameters: ReconstructionParameters) -> EstimationResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::compressors::{
-        windows::HASH as WINDOWS_HASH,
-        zlib::{DEFAULT_HASH, SHORT_MATCH_CUTOFF},
-    };
-    use crate::estimator::{depth_estimator::DistancePolicy, test_support::initial_stream_info};
-    use crate::parameters::DictionaryAddPolicy;
-    use crate::reconstruction_parameters::BehaviorSettings;
-    use crate::token_predictor::tests::zlib_level_1_params;
     use crate::{
-        estimator::models::zlib::{
-            SLOW_PREFLATE_PARSER_SETTINGS, ZLIB_PREFLATE_PARSER_SETTINGS,
-            compatible as zlib_compatible,
+        compressors::{
+            windows::HASH as WINDOWS_HASH,
+            zlib::{DEFAULT_HASH, SHORT_MATCH_CUTOFF},
+        },
+        estimator::{
+            depth_estimator::DistancePolicy,
+            models::zlib::{
+                SLOW_PREFLATE_PARSER_SETTINGS, ZLIB_PREFLATE_PARSER_SETTINGS,
+                compatible as zlib_compatible,
+            },
+            test_support::initial_stream_info,
         },
         hash_algorithm::HashAlgorithm,
-        parameters::tests::MatchingType,
+        parameters::{DictionaryAddPolicy, tests::MatchingType},
+        reconstruction_parameters::BehaviorSettings,
+        token_predictor::tests::zlib_level_1_params,
     };
 
     fn stream_info() -> PreflateStreamInfo {
@@ -1173,9 +1170,9 @@ mod tests {
 
     #[test]
     fn complete_estimation_retains_family_profiles() {
-        use {
-            crate::deflate::deflate_reader::tests::parse_deflate_whole,
-            crate::estimator::preflate_parameter_estimator::estimate_preflate_profile,
+        use crate::{
+            deflate::deflate_reader::tests::parse_deflate_whole,
+            estimator::preflate_parameter_estimator::estimate_preflate_profile,
         };
         let profile = |name| {
             let compressed = crate::utils::read_file(name);

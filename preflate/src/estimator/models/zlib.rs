@@ -13,7 +13,6 @@ use crate::reconstruction_parameters::{ChainParser, LazyLookaheadSettings, LazyM
  *  Copyright (c) Microsoft Corporation. All rights reserved.
  *  Licensed under the Apache License, Version 2.0. See LICENSE.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
-
 use crate::{
     compressors::zlib::{DEFAULT_HASH, FILTERED_MIN_MATCH_LENGTH, SHORT_MATCH_CUTOFF, memory_hash},
     deflate::{deflate_constants::MIN_LOOKAHEAD, deflate_reader::DeflateContents},
@@ -947,7 +946,6 @@ pub const SLOW_PREFLATE_PARSER_SETTINGS: [PreflateParserConfig; 6] = [
 #[cfg(test)]
 mod tests {
     use super::*;
-
     use crate::parameters::{PreflateStrategy, tests::MatchingType};
 
     #[test]
@@ -1310,10 +1308,12 @@ mod tests {
 
     #[test]
     fn short_match_policy_requires_sparse_references_and_repeated_contradictions() {
-        use crate::deflate::deflate_token::{
-            DeflateHuffmanType, DeflateToken, DeflateTokenBlock, DeflateTokenBlockType,
+        use crate::{
+            deflate::deflate_token::{
+                DeflateHuffmanType, DeflateToken, DeflateTokenBlock, DeflateTokenBlockType,
+            },
+            estimator::preflate_stream_info::tests::extract_preflate_info,
         };
-        use crate::estimator::preflate_stream_info::tests::extract_preflate_info;
 
         let blocks = [DeflateTokenBlock {
             block_type: DeflateTokenBlockType::Huffman {

@@ -7,7 +7,6 @@ use crate::reconstruction_parameters::{ChainParser, LazyLookaheadSettings, LazyM
  *  Copyright (c) Microsoft Corporation. All rights reserved.
  *  Licensed under the Apache License, Version 2.0. See LICENSE.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
-
 use crate::{
     compressors::windows::HASH,
     estimator::preflate_stream_info::PreflateStreamInfo,
@@ -242,7 +241,6 @@ pub fn shallow_greedy_alternative(
 #[cfg(test)]
 mod tests {
     use super::*;
-
     use crate::parameters::tests::MatchingType;
 
     #[test]

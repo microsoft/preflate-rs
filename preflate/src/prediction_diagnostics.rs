@@ -7,7 +7,7 @@
 //! Measures token and tree mismatches, compares parameter variants, and verifies
 //! correction data through exact bitstream reconstruction.
 
-use crate::hash_chain_holder::SearchPurpose;
+use std::path::{Path, PathBuf};
 
 use super::*;
 use crate::{
@@ -16,13 +16,14 @@ use crate::{
         deflate_reader::{DeflateContents, tests::parse_deflate_whole},
         deflate_token::{DeflateHuffmanType, DeflateToken, DeflateTokenBlockType},
     },
-    estimator::test_support::zlib::SLOW_PREFLATE_PARSER_SETTINGS,
-    estimator::test_support::{extract_preflate_info, zlib_compatible},
+    estimator::test_support::{
+        extract_preflate_info, zlib::SLOW_PREFLATE_PARSER_SETTINGS, zlib_compatible,
+    },
+    hash_chain_holder::SearchPurpose,
     parameters::{BlockTypeStrategy, DictionaryAddPolicy, LazyBehavior, tests::MatchingType},
     statistical_codec::CountNonDefaultActions,
     token_predictor::TokenPredictionTrace,
 };
-use std::path::{Path, PathBuf};
 
 #[test]
 fn filtered_six_table_hash_parameters_and_corrections_roundtrip() {
@@ -2632,6 +2633,8 @@ fn stored_block_lengths_roundtrip() {
 #[test]
 #[ignore = "offline Huffman investigation; requires local .deflate fixtures"]
 fn diagnose_huffman_trees() {
+    use std::io::Write;
+
     use crate::{
         deflate::{
             deflate_token::TokenFrequency,
@@ -2640,7 +2643,6 @@ fn diagnose_huffman_trees() {
         statistical_codec::{VerifyPredictionDecoder, VerifyPredictionEncoder},
         tree_predictor::{predict_tree_with_rules, recreate_tree_with_rules},
     };
-    use std::io::Write;
 
     let output = std::env::var_os("PREFLATE_HUFFMAN_RESULTS")
         .expect("set PREFLATE_HUFFMAN_RESULTS to a new TSV output file");
@@ -4266,8 +4268,9 @@ fn diagnose_three_byte_backup_insertion() {
 #[test]
 #[ignore = "bounded offline insertion-origin audit; requires PREFLATE_REFERENCE"]
 fn diagnose_dictionary_insertion_origins() {
-    use crate::hash_chain::{HashChain, HashChainLibflate4};
     use std::{collections::VecDeque, io::Read};
+
+    use crate::hash_chain::{HashChain, HashChainLibflate4};
 
     let path = std::env::var_os("PREFLATE_REFERENCE").expect("set PREFLATE_REFERENCE");
     let mut compressed = Vec::new();
@@ -7796,10 +7799,11 @@ fn decompress_deflate_stream_assert(
     compressed_data: &[u8],
     verify: bool,
 ) -> Result<(PreflateStreamChunkResult, PlainText)> {
-    use crate::cabac::debug::{DebugReader, DebugWriter};
-    use crate::deflate::deflate_reader::tests::parse_deflate_whole;
-
-    use crate::preflate_error::AddContext;
+    use crate::{
+        cabac::debug::{DebugReader, DebugWriter},
+        deflate::deflate_reader::tests::parse_deflate_whole,
+        preflate_error::AddContext,
+    };
 
     let mut cabac_encoded = Vec::new();
 
@@ -8024,13 +8028,13 @@ fn analyze_compressed_data_fast(
     header_crc32: Option<u32>,
     uncompressed_size: &mut u64,
 ) {
+    use std::io::Cursor;
+
     use crate::{
+        cabac::vp8::{VP8Reader, VP8Writer},
         cabac_codec::{PredictionDecoderCabac, PredictionEncoderCabac},
         deflate::deflate_reader::tests::parse_deflate_whole,
     };
-    use std::io::Cursor;
-
-    use crate::cabac::vp8::{VP8Reader, VP8Writer};
 
     let mut buffer = Vec::new();
 
@@ -8076,8 +8080,10 @@ fn analyze_compressed_data_verify(
     _deflate_info_dump_level: i32,
     uncompressed_size: &mut u64,
 ) {
-    use crate::cabac::debug::{DebugReader, DebugWriter};
+    use std::io::Cursor;
+
     use crate::{
+        cabac::debug::{DebugReader, DebugWriter},
         cabac_codec::{PredictionDecoderCabac, PredictionEncoderCabac},
         deflate::{
             deflate_reader::tests::parse_deflate_whole, deflate_token::DeflateTokenBlockType,
@@ -8085,7 +8091,6 @@ fn analyze_compressed_data_verify(
         statistical_codec::{VerifyPredictionDecoder, VerifyPredictionEncoder},
         utils::assert_eq_array,
     };
-    use std::io::Cursor;
 
     let mut buffer = Vec::new();
 
@@ -8184,8 +8189,7 @@ fn do_analyze(crc: Option<u32>, compressed_data: &[u8]) {
 fn verify_zlib_perfect_compression() {
     crate::utils::init_logging();
 
-    use crate::deflate::deflate_reader::tests::parse_deflate_whole;
-    use crate::utils::read_file;
+    use crate::{deflate::deflate_reader::tests::parse_deflate_whole, utils::read_file};
 
     for i in 1..6 {
         println!("iteration {}", i);

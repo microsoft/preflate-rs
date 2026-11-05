@@ -18,12 +18,10 @@ mod preflate_stream_info;
 
 pub use estimation_result::EstimationResult;
 pub use prediction_encoding::estimate_and_encode;
-
-#[cfg(test)]
-pub use preflate_parameter_estimator::tests::estimate_preflate_parameters;
-
 #[cfg(feature = "diagnostics")]
 pub use preflate_parameter_estimator::estimate_preflate_result;
+#[cfg(test)]
+pub use preflate_parameter_estimator::tests::estimate_preflate_parameters;
 
 #[cfg(test)]
 pub mod test_support;

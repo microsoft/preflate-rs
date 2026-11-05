@@ -69,7 +69,6 @@ impl InsertionConstraint {
 #[cfg(test)]
 mod tests {
     use super::*;
-
     use crate::{
         estimator::models::generic::resolve_matching_policy, reconstruction_parameters::ChainParser,
     };

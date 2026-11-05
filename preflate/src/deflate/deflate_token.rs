@@ -7,11 +7,10 @@
 //! Token, block, and symbol-frequency representations of parsed DEFLATE data.
 //! Retains references, tree encodings, and framing details needed for exact bitstream reconstruction.
 
-use crate::deflate::huffman_encoding::HuffmanOriginalEncoding;
-
 use super::deflate_constants::{
     DIST_CODE_COUNT, LITLENDIST_CODE_COUNT, NONLEN_CODE_COUNT, quantize_distance, quantize_length,
 };
+use crate::deflate::huffman_encoding::HuffmanOriginalEncoding;
 
 /// In a DEFLATE stream, tokens are either literals (bytes) or references to previous bytes
 /// with a distance and length.

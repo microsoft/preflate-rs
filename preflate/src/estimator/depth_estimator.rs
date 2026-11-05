@@ -12,6 +12,7 @@
 
 use default_boxed::DefaultBoxed;
 
+use super::{evidence_policy::ParserEvidencePolicy, parser_estimator::ParserEvidence};
 use crate::{
     deflate::{
         deflate_constants,
@@ -19,12 +20,8 @@ use crate::{
         deflate_token::{DeflateToken, DeflateTokenBlockType, DeflateTokenReference},
     },
     hash_algorithm::*,
+    parameters::DictionaryAddPolicy,
     preflate_input::{PlainText, PreflateInput},
-};
-
-use {
-    super::{evidence_policy::ParserEvidencePolicy, parser_estimator::ParserEvidence},
-    crate::parameters::DictionaryAddPolicy,
 };
 
 /// Whether the model reserves zlib's lookahead space or permits the full window.
@@ -936,12 +933,13 @@ mod tests {
 
     #[test]
     fn literal_probes_are_capped_in_the_existing_depth_walk() {
+        use std::{cell::Cell, rc::Rc};
+
         use crate::deflate::{
             deflate_reader::tests::parse_deflate_whole,
             deflate_token::{DeflateHuffmanType, DeflateTokenBlock},
             deflate_writer::DeflateWriter,
         };
-        use std::{cell::Cell, rc::Rc};
 
         struct CountingEstimator(Rc<Cell<(u32, u32, u32)>>);
         impl HashTableDepthEstimator for CountingEstimator {
@@ -1006,8 +1004,9 @@ mod tests {
 
     #[test]
     fn short_literal_run_probes_are_bounded_in_the_existing_walk() {
-        use crate::deflate::deflate_token::{DeflateHuffmanType, DeflateTokenBlock};
         use std::{cell::Cell, rc::Rc};
+
+        use crate::deflate::deflate_token::{DeflateHuffmanType, DeflateTokenBlock};
 
         struct Counter(Rc<Cell<usize>>);
         impl HashTableDepthEstimator for Counter {

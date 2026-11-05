@@ -175,12 +175,14 @@ pub fn run(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use clap::Parser;
     use std::sync::{
         Barrier,
         atomic::{AtomicUsize, Ordering},
     };
+
+    use clap::Parser;
+
+    use super::*;
 
     #[test]
     fn workers_run_concurrently_with_bounded_ordered_results() {

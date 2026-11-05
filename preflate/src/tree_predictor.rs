@@ -19,9 +19,9 @@
 use crate::{
     cabac::vp8::VP8Writer,
     cabac_codec::{PredictionEncoderCabac, decode_difference, encode_difference},
-    deflate::deflate_constants::{CODETREE_CODE_COUNT, TREE_CODE_ORDER_TABLE},
-    deflate::deflate_token::TokenFrequency,
     deflate::{
+        deflate_constants::{CODETREE_CODE_COUNT, TREE_CODE_ORDER_TABLE},
+        deflate_token::TokenFrequency,
         huffman_calc::{HufftreeBitCalc, calc_bit_lengths},
         huffman_encoding::{HuffmanOriginalEncoding, TreeCodeType},
     },
@@ -662,8 +662,7 @@ mod tests {
 
     #[test]
     fn encode_roundtrip_perfect() {
-        use crate::statistical_codec::VerifyPredictionEncoder;
-        use crate::statistical_codec::tests::AssertDefaultOnlyDecoder;
+        use crate::statistical_codec::{VerifyPredictionEncoder, tests::AssertDefaultOnlyDecoder};
 
         for huffcalc in [HufftreeBitCalc::Miniz, HufftreeBitCalc::Zlib] {
             let mut freq = TokenFrequency::default();
@@ -694,8 +693,9 @@ mod tests {
 
     #[test]
     fn diagnostic_rle_boundaries_reset_runs_and_preserve_crossing_corrections() {
-        use crate::statistical_codec::{VerifyPredictionDecoder, VerifyPredictionEncoder};
         use TreeCodeType::{Code, Repeat};
+
+        use crate::statistical_codec::{VerifyPredictionDecoder, VerifyPredictionEncoder};
 
         let lengths = [1, 2, 2, 2, 2, 2];
         let separate = [
@@ -805,8 +805,9 @@ mod tests {
     /// the predicted lengths are totally wrong
     #[test]
     fn encode_totally_different_tree() {
-        use crate::statistical_codec::{VerifyPredictionDecoder, VerifyPredictionEncoder};
         use TreeCodeType::*;
+
+        use crate::statistical_codec::{VerifyPredictionDecoder, VerifyPredictionEncoder};
 
         #[rustfmt::skip]
     let predicted_bit_len = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,

@@ -11,8 +11,6 @@ mod scan_parallel;
 mod scan_perf;
 mod scan_progress;
 mod scan_source;
-use scan_fs::cloud_only;
-
 use std::{
     collections::BTreeMap,
     fs::{self, File, Metadata, OpenOptions},
@@ -26,6 +24,7 @@ use preflate_container::{
     DeflateDiagnostic, DiagnosticScanOptions, scan_deflate_diagnostics_with_options,
 };
 use preflate_rs::PreflateConfig;
+use scan_fs::cloud_only;
 use serde::Serialize;
 
 const MIB: u64 = 1024 * 1024;
@@ -729,9 +728,10 @@ fn main() -> std::process::ExitCode {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use miniz_oxide::deflate::compress_to_vec;
     use serde_json::Value;
+
+    use super::*;
 
     #[test]
     fn performance_jsonl_repeats_files_and_excludes_both_reports() {

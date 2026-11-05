@@ -12,9 +12,10 @@
 //! calls, allowing large embedded streams to span continuation blocks rather
 //! than requiring the entire stream to fit in one input buffer.
 
-use crc32fast::Hasher as CrcHasher;
-
 use std::io::Write;
+
+use crc32fast::Hasher as CrcHasher;
+use preflate_rs::{AddContext, ExitCode, PreflateError, PreflateStreamProcessor, Result};
 
 use crate::{
     container_common::{
@@ -25,8 +26,6 @@ use crate::{
     idat_parse::{IdatContents, PngHeader},
     scan_deflate::{FindStreamResult, FoundStream, FoundStreamType, find_compressable_stream},
 };
-
-use preflate_rs::{AddContext, ExitCode, PreflateError, PreflateStreamProcessor, Result};
 
 /// used to measure the length of the output without storing it
 pub(crate) struct MeasureWriteSink {
@@ -476,9 +475,12 @@ fn webp_compress(
 
     #[cfg(feature = "webp")]
     if let Some(png_header) = idat.png_header {
-        use crate::container_common::BLOCK_TYPE_PNG;
-        use crate::idat_parse::{PngColorType, undo_png_filters};
         use std::ops::Deref;
+
+        use crate::{
+            container_common::BLOCK_TYPE_PNG,
+            idat_parse::{PngColorType, undo_png_filters},
+        };
 
         let bbp = png_header.color_type.bytes_per_pixel();
         let w = png_header.width as usize;

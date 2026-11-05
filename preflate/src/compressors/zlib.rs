@@ -154,7 +154,6 @@ pub fn memory_hash(mem_level: u32) -> HashAlgorithm {
 #[cfg(test)]
 mod tests {
     use super::*;
-
     use crate::{
         parameters::{DictionaryAddPolicy, tests::MatchingType},
         preflate_input::PlainText,

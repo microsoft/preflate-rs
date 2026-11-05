@@ -14,7 +14,6 @@ use crate::reconstruction_parameters::ChainParser;
  *  Copyright (c) Microsoft Corporation. All rights reserved.
  *  Licensed under the Apache License, Version 2.0. See LICENSE.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
-
 use crate::{
     compressors::libdeflate::CHAIN_HASH,
     estimator::{
@@ -158,7 +157,6 @@ pub fn fingerprint(initial: &InitialEstimate<'_>) -> Option<ReconstructionParame
 #[cfg(test)]
 mod tests {
     use super::*;
-
     use crate::parameters::tests::MatchingType;
 
     #[test]
@@ -322,10 +320,10 @@ mod tests {
 
     #[test]
     fn verify_libdeflate_greedy_recognition() {
-        use {
-            crate::deflate::deflate_reader::tests::parse_deflate_whole,
-            crate::estimator::preflate_parameter_estimator::tests::estimate_preflate_parameters,
-            crate::utils::read_file,
+        use crate::{
+            deflate::deflate_reader::tests::parse_deflate_whole,
+            estimator::preflate_parameter_estimator::tests::estimate_preflate_parameters,
+            utils::read_file,
         };
 
         for (level, nice_length) in [(2, 10), (3, 14), (4, 30)] {

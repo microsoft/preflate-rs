@@ -2,10 +2,11 @@
 //! Observes which positions inside earlier matches are referenced and how match
 //! and window boundaries affect insertion.
 
-use crate::compressors::{miniz::cross_4k_boundary, zlib_ng::is_at_32k_boundary};
-use crate::deflate::deflate_token::{DeflateToken, DeflateTokenBlock, DeflateTokenBlockType};
-
-use crate::parameters::DictionaryAddPolicy;
+use crate::{
+    compressors::{miniz::cross_4k_boundary, zlib_ng::is_at_32k_boundary},
+    deflate::deflate_token::{DeflateToken, DeflateTokenBlock, DeflateTokenBlockType},
+    parameters::DictionaryAddPolicy,
+};
 
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct InsertionEvidence {

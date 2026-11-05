@@ -41,7 +41,6 @@ pub use diagnostics::{
     DeflateDiagnostic, DiagnosticParameters, DiagnosticScanOptions, scan_deflate_diagnostics,
     scan_deflate_diagnostics_with_options,
 };
-
 pub use utils::process_limited_buffer;
 
 /// Compresses an entire input stream into the preflate container format.

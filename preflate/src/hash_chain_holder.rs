@@ -19,31 +19,28 @@
 //! Index capabilities determine secondary-slot handling; serialized policies
 //! determine tail and window exclusions, never a hash or inferred family label.
 
-use crate::bit_helper::DebugHash;
-use crate::compressors::{
-    WINDOWS_TRAILING_LITERALS, WindowConstraint, is_zero_chain_link, match_miniz_chain,
-    maximum_distance, probe_limit,
-};
-use crate::deflate::deflate_constants::{MAX_MATCH, MIN_LOOKAHEAD, MIN_MATCH};
-use crate::deflate::deflate_token::DeflateTokenReference;
-use crate::hash_algorithm::{
-    ChromiumHash, Crc32cHash, LibdeflateHash4Fast, LibdeflateHash4Fast15, MiniZHash,
-    RandomVectorHash, ZlibNGHash, ZlibRotatingHash, ZlibRotatingHashFixed,
-};
-use crate::hash_chain::{HashChain, HashChainDefault, HashChainLibflate4, MAX_UPDATE_HASH_BATCH};
-use crate::preflate_error::{ExitCode, Result, err_exit_code};
-use crate::preflate_input::PreflateInput;
-use {
-    crate::reconstruction_parameters::BehaviorSettings,
-    crate::reconstruction_parameters::ChainDistancePolicy,
-    crate::reconstruction_parameters::ChainMatchSettings,
-    crate::reconstruction_parameters::ChainParser,
-    crate::reconstruction_parameters::DictionarySettings,
-    crate::reconstruction_parameters::InputTailPolicy,
-    crate::reconstruction_parameters::MiniZDistancePolicy,
-    crate::reconstruction_parameters::MiniZMatchSettings,
-    crate::reconstruction_parameters::SourceHistorySettings,
-    crate::reconstruction_parameters::WindowBounds,
+use crate::{
+    bit_helper::DebugHash,
+    compressors::{
+        WINDOWS_TRAILING_LITERALS, WindowConstraint, is_zero_chain_link, match_miniz_chain,
+        maximum_distance, probe_limit,
+    },
+    deflate::{
+        deflate_constants::{MAX_MATCH, MIN_LOOKAHEAD, MIN_MATCH},
+        deflate_token::DeflateTokenReference,
+    },
+    hash_algorithm::{
+        ChromiumHash, Crc32cHash, LibdeflateHash4Fast, LibdeflateHash4Fast15, MiniZHash,
+        RandomVectorHash, ZlibNGHash, ZlibRotatingHash, ZlibRotatingHashFixed,
+    },
+    hash_chain::{HashChain, HashChainDefault, HashChainLibflate4, MAX_UPDATE_HASH_BATCH},
+    preflate_error::{ExitCode, Result, err_exit_code},
+    preflate_input::PreflateInput,
+    reconstruction_parameters::{
+        BehaviorSettings, ChainDistancePolicy, ChainMatchSettings, ChainParser, DictionarySettings,
+        InputTailPolicy, MiniZDistancePolicy, MiniZMatchSettings, SourceHistorySettings,
+        WindowBounds,
+    },
 };
 
 #[derive(Debug, Copy, Clone)]
@@ -1028,14 +1025,12 @@ fn calc_diff(diff: u64) -> u32 {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-
     use crate::{
+        compressors::match_miniz_chain as match_miniz,
         hash_algorithm::HashAlgorithm,
         parameters::{PreflateStrategy, tests::MatchingType},
         reconstruction_parameters::ReconstructionParameters,
     };
-
-    use crate::compressors::match_miniz_chain as match_miniz;
 
     pub fn new_hash_chain_holder(params: &ReconstructionParameters) -> Box<dyn HashChainHolder> {
         new_hash_chain_holder_for_behavior(&params.behavior)

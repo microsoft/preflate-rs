@@ -287,13 +287,13 @@ fn parser_behavior(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::estimator::test_support::initial_stream_info;
-    use crate::estimator::{
-        complevel_estimator::CandidateEvidence, depth_estimator::DistancePolicy,
+    use crate::{
+        estimator::{
+            complevel_estimator::CandidateEvidence, depth_estimator::DistancePolicy,
+            test_support::initial_stream_info,
+        },
+        parameters::{PreflateStrategy, tests::MatchingType},
     };
-
-    use crate::parameters::PreflateStrategy;
-    use crate::parameters::tests::MatchingType;
 
     #[test]
     fn initial_and_refinement_paths_share_complete_miniz_settings() {

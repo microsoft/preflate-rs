@@ -379,9 +379,9 @@ pub unsafe extern "C" fn decompress_buffer(
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use super::*;
-
     use std::ptr::null;
+
+    use super::*;
 
     #[test]
     fn test_copy_cstring_utf8_to_buffer() {
@@ -400,9 +400,7 @@ pub(crate) mod tests {
     }
 
     pub fn read_file(filename: &str) -> Vec<u8> {
-        use std::fs::File;
-        use std::io::Read;
-        use std::path::Path;
+        use std::{fs::File, io::Read, path::Path};
 
         let filename = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("..")

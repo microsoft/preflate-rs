@@ -7,25 +7,20 @@
 //! Incremental parsing of DEFLATE blocks into tokens and plaintext.
 //! Preserves tree encodings and padding for reconstruction while bounding plaintext growth.
 
+use std::io::Cursor;
+
 use byteorder::{LittleEndian, ReadBytesExt};
 
+use super::{
+    bit_reader::{BitReader, ReadBits},
+    deflate_constants,
+    deflate_token::{DeflateTokenBlock, DeflateTokenBlockType},
+    huffman_encoding::{HuffmanOriginalEncoding, HuffmanReader},
+};
 use crate::{
     deflate::deflate_token::{DeflateHuffmanType, DeflateToken, DeflateTokenReference},
     preflate_error::{AddContext, ExitCode, Result, err_exit_code},
     preflate_input::PlainText,
-};
-
-use std::io::Cursor;
-
-use super::{
-    bit_reader::ReadBits,
-    deflate_constants,
-    deflate_token::{DeflateTokenBlock, DeflateTokenBlockType},
-};
-
-use super::{
-    bit_reader::BitReader,
-    huffman_encoding::{HuffmanOriginalEncoding, HuffmanReader},
 };
 
 struct Checkpoint {
