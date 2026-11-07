@@ -41,6 +41,13 @@ fn end_to_end_compressed() {
 }
 
 #[test]
+fn go_single_code_tree() {
+    // Go writes a one-code distance tree for blocks with a single distance or none.
+    verifyresult(&read_file("compressed_go_level6_one_distance.deflate"));
+    verifyresult(&read_file("compressed_go_level6_no_match.deflate"));
+}
+
+#[test]
 fn test_treepng() {
     test_container("treegdi.png");
 }
