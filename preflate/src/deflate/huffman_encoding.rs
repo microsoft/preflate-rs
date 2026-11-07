@@ -70,10 +70,27 @@ pub fn calc_huffman_codes(code_lengths: &[u8]) -> Result<Vec<u16>> {
     Ok(result)
 }
 
+/// Symbol of a tree with a single one-bit code (RFC 1951 3.2.7), as written by Go's compress/flate.
+fn single_one_bit_code(code_lengths: &[u8]) -> Option<usize> {
+    let mut symbol = None;
+    for (i, &length) in code_lengths.iter().enumerate() {
+        match length {
+            0 => {}
+            1 if symbol.is_none() => symbol = Some(i),
+            _ => return None,
+        }
+    }
+    symbol
+}
+
 fn is_valid_huffman_code_lengths(code_lengths: &[u8]) -> bool {
     // Ensure that the array is not empty
     if code_lengths.is_empty() {
         return false;
+    }
+
+    if single_one_bit_code(code_lengths).is_some() {
+        return true;
     }
 
     // Count the number of codes for each code length using an array
@@ -111,6 +128,15 @@ fn is_valid_huffman_code_lengths(code_lengths: &[u8]) -> bool {
 fn calculate_huffman_code_tree(code_lengths: &[u8]) -> Result<HuffmanTree> {
     if !is_valid_huffman_code_lengths(code_lengths) {
         return err_exit_code(ExitCode::InvalidDeflate, "Invalid Huffman code lengths");
+    }
+
+    if let Some(symbol) = single_one_bit_code(code_lengths) {
+        // Both branches map to the one symbol; valid streams never use the '1' code.
+        let leaf = !(symbol as u16);
+        return Ok(HuffmanTree {
+            tree: vec![leaf, leaf],
+            fast_decode: [(1, leaf); 256],
+        });
     }
 
     let mut c_codes: i32 = 0;
