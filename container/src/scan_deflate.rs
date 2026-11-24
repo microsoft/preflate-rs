@@ -26,7 +26,7 @@ pub struct FoundStream {
 
 pub enum FoundStreamType {
     /// Deflate stream
-    DeflateStream(TokenPredictorParameters, PreflateStreamProcessor),
+    DeflateStream(TokenPredictorParameters, Box<PreflateStreamProcessor>),
 
     /// PNG IDAT, which is a concatenated Zlib stream of IDAT chunks. This
     /// is special since the Deflate stream is split into IDAT chunks.
@@ -121,7 +121,7 @@ pub fn find_compressable_stream(
                             FoundStream {
                                 chunk_type: FoundStreamType::DeflateStream(
                                     res.parameters.unwrap(),
-                                    state,
+                                    Box::new(state),
                                 ),
                                 corrections: res.corrections,
                             },
@@ -143,7 +143,7 @@ pub fn find_compressable_stream(
                                 FoundStream {
                                     chunk_type: FoundStreamType::DeflateStream(
                                         res.parameters.unwrap(),
-                                        state,
+                                        Box::new(state),
                                     ),
                                     corrections: res.corrections,
                                 },
@@ -163,7 +163,7 @@ pub fn find_compressable_stream(
                             FoundStream {
                                 chunk_type: FoundStreamType::DeflateStream(
                                     res.parameters.unwrap(),
-                                    state,
+                                    Box::new(state),
                                 ),
                                 corrections: res.corrections,
                             },
@@ -358,8 +358,8 @@ impl ZipLocalFileHeader {
             last_mod_file_time: binary_reader.read_u16::<LittleEndian>()?,
             last_mod_file_date: binary_reader.read_u16::<LittleEndian>()?,
             crc32: binary_reader.read_u32::<LittleEndian>()?,
-            compressed_size: binary_reader.read_u32::<LittleEndian>()? as u64,
-            uncompressed_size: binary_reader.read_u32::<LittleEndian>()? as u64,
+            compressed_size: u64::from(binary_reader.read_u32::<LittleEndian>()?),
+            uncompressed_size: u64::from(binary_reader.read_u32::<LittleEndian>()?),
             file_name_length: binary_reader.read_u16::<LittleEndian>()?,
             extra_field_length: binary_reader.read_u16::<LittleEndian>()?,
         };

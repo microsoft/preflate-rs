@@ -4,6 +4,10 @@
  *  This software incorporates material from third parties. See NOTICE.txt for details.
  *--------------------------------------------------------------------------------------------*/
 
+#![forbid(trivial_casts)]
+#![forbid(trivial_numeric_casts)]
+#![deny(clippy::cast_lossless)]
+
 use std::fs::File;
 use std::io::Read;
 use std::path::Path;
@@ -267,7 +271,7 @@ fn libzsys_compress(input_data: &[u8], level: i32, strategy: Strategy) -> Vec<u8
         z_stream.avail_out = output.len() as u32;
 
         assert_eq!(Z_STREAM_END, deflate(&mut z_stream, Z_FINISH));
-        output.set_len(z_stream.total_out as usize);
+        output.set_len(usize::try_from(z_stream.total_out).unwrap());
 
         assert_eq!(Z_OK, deflateEnd(&mut z_stream));
     }
@@ -345,7 +349,9 @@ fn libngzsys_compress(input_data: &[u8], level: i32) -> Vec<u8> {
         z_stream.avail_out = output.len() as u32;
 
         assert_eq!(Z_STREAM_END, deflate(&mut z_stream, Z_FINISH));
-        output.set_len(z_stream.total_out as usize);
+        // total_out is usize for native zlib-ng but c_ulong in its zlib-compat mode
+        #[allow(clippy::useless_conversion)]
+        output.set_len(usize::try_from(z_stream.total_out).unwrap());
 
         assert_eq!(Z_OK, deflateEnd(&mut z_stream));
     }

@@ -15,8 +15,8 @@ use crate::{
     PreflateConfig, Result,
     cabac_codec::{PredictionDecoderCabac, PredictionEncoderCabac},
     deflate::{
-        deflate_reader::DeflateParser, deflate_token::DeflateTokenBlock,
-        deflate_writer::DeflateWriter,
+        deflate_constants::MAX_BLOCKS_PER_CHUNK, deflate_reader::DeflateParser,
+        deflate_token::DeflateTokenBlock, deflate_writer::DeflateWriter,
     },
     estimator::preflate_parameter_estimator::{
         TokenPredictorParameters, estimate_preflate_parameters,
@@ -49,7 +49,7 @@ impl ReconstructionData {
     }
 
     pub fn read(data: &[u8]) -> Result<Self> {
-        match data.split_first() {
+        let result: Self = match data.split_first() {
             Some((&RECONSTRUCTION_DATA_VERSION, payload)) => {
                 bitcode::decode(payload).map_err(|e| {
                     PreflateError::new(
@@ -69,7 +69,9 @@ impl ReconstructionData {
                 ExitCode::InvalidCompressedWrapper,
                 "empty corrections",
             )),
-        }
+        }?;
+        result.parameters.validate()?;
+        Ok(result)
     }
 }
 
@@ -97,6 +99,7 @@ pub struct PreflateStreamProcessor {
     validator: Option<RecreateStreamProcessor>,
     parser: DeflateParser,
     max_chain_length: u32,
+    correction_limit: usize,
 }
 
 impl PreflateStreamProcessor {
@@ -108,8 +111,9 @@ impl PreflateStreamProcessor {
             predictor: None,
             parser: DeflateParser::new(config.plain_text_limit),
             max_chain_length: config.max_chain_length,
+            correction_limit: config.correction_limit,
             validator: if config.verify_compression {
-                Some(RecreateStreamProcessor::new())
+                Some(RecreateStreamProcessor::with_config(*config))
             } else {
                 None
             },
@@ -151,6 +155,12 @@ impl PreflateStreamProcessor {
             predict_blocks(&contents.blocks, predictor, &mut cabac_encoder, &mut input)?;
 
             cabac_encoder.finish();
+            if cabac_encoded.len() > self.correction_limit {
+                return Err(PreflateError::new(
+                    ExitCode::InvalidPredictionData,
+                    "Correction size limit exceeded",
+                ));
+            }
 
             if let Some(validator) = &mut self.validator {
                 let (recompressed, _rec_blocks) = validator.recompress(
@@ -210,12 +220,24 @@ impl PreflateStreamProcessor {
             )?;
 
             cabac_encoder.finish();
+            if cabac_encoded.len() > self.correction_limit {
+                return Err(PreflateError::new(
+                    ExitCode::InvalidPredictionData,
+                    "Correction size limit exceeded",
+                ));
+            }
 
             let reconstruction_data = ReconstructionData {
                 parameters: params,
                 corrections: cabac_encoded,
             }
             .write();
+            if reconstruction_data.len() > self.correction_limit {
+                return Err(PreflateError::new(
+                    ExitCode::InvalidPredictionData,
+                    "Correction size limit exceeded",
+                ));
+            }
 
             self.predictor = Some(token_predictor);
 
@@ -273,14 +295,20 @@ pub struct RecreateStreamProcessor {
     predictor: Option<TokenPredictor>,
     writer: DeflateWriter,
     plain_text: PlainText,
+    config: PreflateConfig,
 }
 
 impl RecreateStreamProcessor {
     pub fn new() -> Self {
+        Self::with_config(PreflateConfig::default())
+    }
+
+    pub fn with_config(config: PreflateConfig) -> Self {
         Self {
             predictor: None,
             writer: DeflateWriter::new(),
             plain_text: PlainText::new(),
+            config,
         }
     }
 
@@ -289,6 +317,12 @@ impl RecreateStreamProcessor {
         plain_text: &mut impl BufRead,
         corrections: &[u8],
     ) -> Result<(Vec<u8>, Vec<DeflateTokenBlock>)> {
+        if corrections.len() > self.config.correction_limit {
+            return Err(PreflateError::new(
+                ExitCode::InvalidPredictionData,
+                "Correction size limit exceeded",
+            ));
+        }
         loop {
             let buf = plain_text.fill_buf().context()?;
             let buf_len = buf.len();
@@ -296,7 +330,19 @@ impl RecreateStreamProcessor {
                 break;
             }
 
-            self.plain_text.append(&buf);
+            if buf_len
+                > self
+                    .config
+                    .plain_text_limit
+                    .saturating_sub(self.plain_text.len())
+            {
+                return Err(PreflateError::new(
+                    ExitCode::PlainTextLimit,
+                    "Reconstruction plaintext limit exceeded",
+                ));
+            }
+            self.plain_text.check_growth(buf_len)?;
+            self.plain_text.append(buf);
 
             plain_text.consume(buf_len);
         }
@@ -305,7 +351,7 @@ impl RecreateStreamProcessor {
 
         if let Some(predictor) = &mut self.predictor {
             let mut cabac_decoder =
-                PredictionDecoderCabac::new(VP8Reader::new(Cursor::new(corrections)).unwrap());
+                PredictionDecoderCabac::new(VP8Reader::new(Cursor::new(corrections))?)?;
 
             predictor.add_missing_previous_hash(&input);
 
@@ -320,11 +366,17 @@ impl RecreateStreamProcessor {
             Ok((self.writer.detach_output(), blocks))
         } else {
             let r = ReconstructionData::read(corrections)?;
+            if r.corrections.len() > self.config.correction_limit {
+                return Err(PreflateError::new(
+                    ExitCode::InvalidPredictionData,
+                    "Decoded correction size limit exceeded",
+                ));
+            }
 
             let mut predictor = TokenPredictor::new(&r.parameters);
 
             let mut cabac_decoder =
-                PredictionDecoderCabac::new(VP8Reader::new(Cursor::new(r.corrections)).unwrap());
+                PredictionDecoderCabac::new(VP8Reader::new(Cursor::new(r.corrections))?)?;
 
             let blocks = recreate_blocks(
                 &mut predictor,
@@ -382,6 +434,12 @@ fn predict_blocks(
     encoder: &mut impl PredictionEncoder,
     input: &mut PreflateInput,
 ) -> Result<()> {
+    if blocks.len() > MAX_BLOCKS_PER_CHUNK {
+        return Err(PreflateError::new(
+            ExitCode::InvalidPredictionData,
+            "Block count exceeds per-chunk limit",
+        ));
+    }
     for i in 0..blocks.len() {
         token_predictor.predict_block(&blocks[i], encoder, input, i == blocks.len() - 1)?;
         // end of stream normally is the last block
@@ -419,6 +477,12 @@ fn recreate_blocks<D: PredictionDecoder>(
 ) -> Result<Vec<DeflateTokenBlock>> {
     let mut output_blocks = Vec::new();
     loop {
+        if output_blocks.len() == MAX_BLOCKS_PER_CHUNK {
+            return Err(PreflateError::new(
+                ExitCode::InvalidPredictionData,
+                "Block count exceeds per-chunk limit",
+            ));
+        }
         let block = token_predictor.recreate_block(decoder, input)?;
 
         deflate_writer.encode_block(&block)?;
@@ -427,9 +491,15 @@ fn recreate_blocks<D: PredictionDecoder>(
 
         // end of stream normally is the last block
         let last =
-            decoder.decode_correction_bool(CodecCorrection::EndOfChunk, input.remaining() == 0);
+            decoder.decode_correction_bool(CodecCorrection::EndOfChunk, input.remaining() == 0)?;
 
         if last {
+            if input.remaining() != 0 {
+                return Err(PreflateError::new(
+                    ExitCode::InvalidPredictionData,
+                    "Chunk leaves plaintext unconsumed",
+                ));
+            }
             break;
         }
     }
@@ -471,7 +541,7 @@ fn decompress_deflate_stream_assert(
         let r = ReconstructionData::read(&reconstruction_data)?;
 
         let mut cabac_decoder =
-            PredictionDecoderCabac::new(DebugReader::new(Cursor::new(&r.corrections)).unwrap());
+            PredictionDecoderCabac::new(DebugReader::new(Cursor::new(&r.corrections)).unwrap())?;
 
         let params = r.parameters;
         let mut input = PreflateInput::new(&plain_text);
@@ -598,7 +668,7 @@ fn recompress_deflate_stream_assert(
     let r = ReconstructionData::read(prediction_corrections)?;
 
     let mut cabac_decoder =
-        PredictionDecoderCabac::new(DebugReader::new(Cursor::new(&r.corrections)).unwrap());
+        PredictionDecoderCabac::new(DebugReader::new(Cursor::new(&r.corrections)).unwrap())?;
 
     let mut input = PreflateInput::new(plain_text);
     let (recompressed, _recreated_blocks) =
@@ -646,7 +716,7 @@ fn analyze_compressed_data_fast(
     println!("buffer size: {}", buffer.len());
 
     let mut cabac_decoder =
-        PredictionDecoderCabac::new(VP8Reader::new(Cursor::new(&buffer)).unwrap());
+        PredictionDecoderCabac::new(VP8Reader::new(Cursor::new(&buffer)).unwrap()).unwrap();
 
     let mut input = PreflateInput::new(&plain_text);
 
@@ -701,7 +771,7 @@ fn analyze_compressed_data_verify(
 
     let debug_decoder = VerifyPredictionDecoder::new(actions);
     let cabac_decoder =
-        PredictionDecoderCabac::new(DebugReader::new(Cursor::new(&buffer)).unwrap());
+        PredictionDecoderCabac::new(DebugReader::new(Cursor::new(&buffer)).unwrap()).unwrap();
 
     let mut combined_decoder = (debug_decoder, cabac_decoder);
     let mut input = PreflateInput::new(&plain_text);
@@ -1056,4 +1126,264 @@ fn verify_decompress_partial_gzip_deflate_body_roundtrip() {
 
     recompressed.append(&mut rest);
     crate::utils::assert_eq_array(deflate_body, &recompressed);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::deflate::{
+        deflate_reader::parse_deflate_whole,
+        deflate_token::{BT_STATICHUFF, BT_STORED, DeflateHuffmanType, DeflateTokenBlockType},
+    };
+    use crate::hash_algorithm::HashAlgorithm;
+    use std::io::BufReader;
+
+    fn empty_stream_parameters() -> TokenPredictorParameters {
+        let (contents, plain_text) = parse_deflate_whole(&[1, 0, 0, 255, 255]).unwrap();
+        estimate_preflate_parameters(&contents, &plain_text).unwrap()
+    }
+
+    #[test]
+    fn stored_blocks_obey_plaintext_limit_and_continue() {
+        let compressed = [0, 2, 0, 253, 255, b'a', b'b', 1, 1, 0, 254, 255, b'c'];
+        let config = PreflateConfig {
+            plain_text_limit: 2,
+            ..PreflateConfig::default()
+        };
+        let mut processor = PreflateStreamProcessor::new(&config);
+        let first = processor.decompress(&compressed).unwrap();
+        assert_eq!(processor.plain_text().text(), b"ab");
+        assert_eq!(first.compressed_size, 7);
+        let mut recreator = RecreateStreamProcessor::with_config(config);
+        let (mut output, _) = recreator
+            .recompress(
+                &mut Cursor::new(processor.plain_text().text()),
+                &first.corrections,
+            )
+            .unwrap();
+        processor.shrink_to_dictionary();
+        let second = processor
+            .decompress(&compressed[first.compressed_size..])
+            .unwrap();
+        let (rest, _) = recreator
+            .recompress(
+                &mut Cursor::new(processor.plain_text().text()),
+                &second.corrections,
+            )
+            .unwrap();
+        output.extend(rest);
+        assert_eq!(output, compressed);
+
+        let error = preflate_whole_deflate_stream(
+            &compressed,
+            &PreflateConfig {
+                plain_text_limit: 1,
+                ..config
+            },
+        )
+        .err()
+        .unwrap();
+        assert_eq!(error.exit_code(), ExitCode::PlainTextLimit);
+    }
+
+    #[test]
+    fn reconstruction_limits_input_and_corrections() {
+        let (chunk, _) = preflate_whole_deflate_stream(
+            &[1, 2, 0, 253, 255, b'a', b'b'],
+            &PreflateConfig::default(),
+        )
+        .unwrap();
+        let config = PreflateConfig {
+            plain_text_limit: 2,
+            ..PreflateConfig::default()
+        };
+        assert!(
+            RecreateStreamProcessor::with_config(config)
+                .recompress(&mut Cursor::new(b"ab"), &chunk.corrections)
+                .is_ok()
+        );
+        let mut reader = BufReader::with_capacity(1, Cursor::new(b"abc"));
+        let mut recreator = RecreateStreamProcessor::with_config(config);
+        let error = recreator
+            .recompress(&mut reader, &chunk.corrections)
+            .unwrap_err();
+        assert_eq!(error.exit_code(), ExitCode::PlainTextLimit);
+        assert_eq!(recreator.plain_text.len(), 2);
+
+        let mut reader = Cursor::new(b"ab");
+        let error = RecreateStreamProcessor::with_config(PreflateConfig {
+            correction_limit: chunk.corrections.len() - 1,
+            ..config
+        })
+        .recompress(&mut reader, &chunk.corrections)
+        .unwrap_err();
+        assert_eq!(error.exit_code(), ExitCode::InvalidPredictionData);
+        assert_eq!(reader.position(), 0);
+
+        let data = bitcode::encode(&ReconstructionData {
+            parameters: empty_stream_parameters(),
+            corrections: vec![0; 1024],
+        });
+        assert!(data.len() < 1024);
+        let error = RecreateStreamProcessor::with_config(PreflateConfig {
+            correction_limit: data.len(),
+            ..config
+        })
+        .recompress(&mut Cursor::new([]), &data)
+        .unwrap_err();
+        assert_eq!(error.exit_code(), ExitCode::InvalidPredictionData);
+    }
+
+    #[test]
+    fn reconstruction_rejects_invalid_dictionary_parameters() {
+        for (window_bits, hash_algorithm, max_token_count) in [
+            (32, HashAlgorithm::None, 1),
+            (
+                15,
+                HashAlgorithm::Zlib {
+                    hash_mask: 32767,
+                    hash_shift: 32,
+                },
+                1,
+            ),
+            (15, HashAlgorithm::None, 0),
+        ] {
+            let mut parameters = empty_stream_parameters();
+            parameters.window_bits = window_bits;
+            parameters.hash_algorithm = hash_algorithm;
+            parameters.max_token_count = max_token_count;
+            let corrections = bitcode::encode(&ReconstructionData {
+                parameters,
+                corrections: Vec::new(),
+            });
+            let error = recreate_whole_deflate_stream(&[], &corrections).unwrap_err();
+            assert_eq!(error.exit_code(), ExitCode::InvalidPredictionData);
+        }
+    }
+
+    #[test]
+    fn reconstruction_rejects_unconsumed_plaintext() {
+        let parameters = empty_stream_parameters();
+        let mut corrections = Vec::new();
+        let mut encoder = PredictionEncoderCabac::new(VP8Writer::new(&mut corrections).unwrap());
+        encoder.encode_correction(CodecCorrection::BlockTypeCorrection, 0);
+        encoder.encode_correction_diff(CodecCorrection::UncompressBlockLenCorrection, 0, 65_535);
+        encoder.encode_correction_bool(CodecCorrection::Last, true, false);
+        encoder.encode_correction_bool(CodecCorrection::EndOfChunk, true, false);
+        encoder.finish();
+        let data = bitcode::encode(&ReconstructionData {
+            parameters,
+            corrections,
+        });
+        let error = recreate_whole_deflate_stream(b"unused", &data).unwrap_err();
+        assert_eq!(error.exit_code(), ExitCode::InvalidPredictionData);
+    }
+
+    fn empty_block_corrections(count: usize) -> Vec<u8> {
+        let parameters = empty_stream_parameters();
+        let mut corrections = Vec::new();
+        let mut encoder = PredictionEncoderCabac::new(VP8Writer::new(&mut corrections).unwrap());
+        for i in 0..count {
+            encoder.encode_correction(CodecCorrection::BlockTypeCorrection, 0);
+            encoder.encode_correction_diff(
+                CodecCorrection::UncompressBlockLenCorrection,
+                0,
+                65_535,
+            );
+            encoder.encode_correction_bool(CodecCorrection::Last, i == count - 1, true);
+            encoder.encode_correction_bool(CodecCorrection::EndOfChunk, i == count - 1, true);
+        }
+        encoder.finish();
+        bitcode::encode(&ReconstructionData {
+            parameters,
+            corrections,
+        })
+    }
+
+    #[test]
+    fn reconstruction_block_limit() {
+        let mut recreator = RecreateStreamProcessor::new();
+        let (output, blocks) = recreator
+            .recompress(
+                &mut Cursor::new([]),
+                &empty_block_corrections(MAX_BLOCKS_PER_CHUNK),
+            )
+            .unwrap();
+        assert_eq!(blocks.len(), MAX_BLOCKS_PER_CHUNK);
+        assert_eq!(output.len(), MAX_BLOCKS_PER_CHUNK * 5);
+        assert_eq!(&output[output.len() - 5..], &[1, 0, 0, 255, 255]);
+
+        let error =
+            recreate_whole_deflate_stream(&[], &empty_block_corrections(MAX_BLOCKS_PER_CHUNK + 1))
+                .unwrap_err();
+        assert_eq!(error.exit_code(), ExitCode::InvalidPredictionData);
+    }
+
+    #[test]
+    fn analysis_block_limit_and_empty_block_roundtrip() {
+        let mut compressed = [0, 0, 0, 255, 255].repeat(MAX_BLOCKS_PER_CHUNK);
+        let last = compressed.len() - 5;
+        compressed[last] = 1;
+        let (chunk, plain_text) =
+            preflate_whole_deflate_stream(&compressed, &PreflateConfig::default()).unwrap();
+        let recreated =
+            recreate_whole_deflate_stream(plain_text.text(), &chunk.corrections).unwrap();
+        assert_eq!(compressed, recreated);
+
+        compressed[last] = 0;
+        compressed.extend_from_slice(&[1, 0, 0, 255, 255]);
+        let error = preflate_whole_deflate_stream(&compressed, &PreflateConfig::default())
+            .err()
+            .unwrap();
+        assert_eq!(error.exit_code(), ExitCode::InvalidPredictionData);
+    }
+
+    #[test]
+    fn reconstruction_allows_empty_blocks_between_data_blocks() {
+        let compressed = [
+            0, 1, 0, 254, 255, b'a', 0, 0, 0, 255, 255, 1, 1, 0, 254, 255, b'b',
+        ];
+        let (chunk, plain_text) =
+            preflate_whole_deflate_stream(&compressed, &PreflateConfig::default()).unwrap();
+        assert_eq!(plain_text.text(), b"ab");
+        assert_eq!(
+            recreate_whole_deflate_stream(plain_text.text(), &chunk.corrections).unwrap(),
+            compressed,
+        );
+    }
+
+    #[test]
+    fn reconstruction_token_capacity_is_bounded_by_plaintext() {
+        let parameters = empty_stream_parameters();
+        let mut corrections = Vec::new();
+        let mut encoder = PredictionEncoderCabac::new(VP8Writer::new(&mut corrections).unwrap());
+        encoder.encode_correction_diff(
+            CodecCorrection::BlockTypeCorrection,
+            BT_STATICHUFF,
+            BT_STORED,
+        );
+        encoder.encode_correction(CodecCorrection::TokenCount, 1_000_001);
+        encoder.encode_correction(CodecCorrection::Last, 0);
+        encoder.encode_correction(CodecCorrection::EndOfChunk, 0);
+        encoder.finish();
+
+        let mut recreator = RecreateStreamProcessor::new();
+        let (_, blocks) = recreator
+            .recompress(
+                &mut Cursor::new([]),
+                &bitcode::encode(&ReconstructionData {
+                    parameters,
+                    corrections,
+                }),
+            )
+            .unwrap();
+        let DeflateTokenBlockType::Huffman {
+            tokens,
+            huffman_type: DeflateHuffmanType::Static,
+        } = &blocks[0].block_type
+        else {
+            panic!("Expected a static Huffman block");
+        };
+        assert_eq!(tokens.capacity(), 0);
+    }
 }

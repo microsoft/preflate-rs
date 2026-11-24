@@ -86,7 +86,7 @@ impl<W: Write> CabacWriter<DebugContext> for DebugWriter<W> {
         self.counter += 1;
         branch.value = self.counter;
 
-        self.writer.write_u8(value as u8)?;
+        self.writer.write_u8(u8::from(value))?;
         Ok(())
     }
 
@@ -96,7 +96,7 @@ impl<W: Write> CabacWriter<DebugContext> for DebugWriter<W> {
 
     fn put_bypass(&mut self, value: bool) -> Result<()> {
         self.writer.write_u32::<LittleEndian>(0xdead)?;
-        self.writer.write_u8(value as u8)?;
+        self.writer.write_u8(u8::from(value))?;
         Ok(())
     }
 }

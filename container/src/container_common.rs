@@ -1,6 +1,62 @@
-use std::io::{BufRead, Read, Write};
+use std::{
+    io::{BufRead, Read, Write},
+    num::Saturating,
+};
 
-use preflate_rs::{AddContext, HashAlgorithm, PreflateConfig, Result};
+use crate::utils::DEFAULT_MAX_PENDING_OUTPUT;
+use preflate_rs::{
+    AddContext, ExitCode, HashAlgorithm, PreflateConfig, PreflateError, Result, err_exit_code,
+};
+
+/// A size or length, either exact or computed with `Saturating` arithmetic.
+///
+/// Conversions return errors instead of truncating or overflowing, so a value that
+/// does not fit can never reach a limit check or the wire format.
+pub(crate) trait SizeValue: Sized {
+    fn to_usize(self) -> Result<usize>;
+
+    fn to_u32(self) -> Result<u32> {
+        u32::try_from(self.to_usize()?).map_err(|_| size_out_of_range())
+    }
+}
+
+macro_rules! exact_size_value {
+    ($($t:ty),*) => {$(
+        impl SizeValue for $t {
+            fn to_usize(self) -> Result<usize> {
+                usize::try_from(self).map_err(|_| size_out_of_range())
+            }
+        }
+    )*};
+}
+
+exact_size_value!(usize, u32, u64);
+
+/// Saturating `+` and `*` stop at exactly `usize::MAX`, which no real size can reach.
+impl SizeValue for Saturating<usize> {
+    fn to_usize(self) -> Result<usize> {
+        if self.0 == usize::MAX {
+            return Err(size_out_of_range());
+        }
+        Ok(self.0)
+    }
+}
+
+fn size_out_of_range() -> PreflateError {
+    PreflateError::new(ExitCode::InvalidParameter, "Size exceeds integer range")
+}
+
+/// Returns the size if it is within the limit.
+pub(crate) fn check_size(size: impl SizeValue, limit: usize, name: &str) -> Result<usize> {
+    let size = size.to_usize()?;
+    if size > limit {
+        return err_exit_code(
+            ExitCode::InvalidCompressedWrapper,
+            format!("{name} limit exceeded"),
+        );
+    }
+    Ok(size)
+}
 
 /// Configuration for the deflate process
 #[derive(Debug, Clone)]
@@ -15,6 +71,9 @@ pub struct PreflateContainerConfig {
     /// just write it out as a literal block.
     pub max_chunk_size: usize,
 
+    /// Maximum compressed bytes in one container block.
+    pub compressed_block_limit: usize,
+
     /// The maximum overall size of plain text that we will compress. This is
     /// global to the entire container and limits the amount of processing that
     /// we will do to avoid running out of CPU time on a single file. Once we
@@ -25,6 +84,18 @@ pub struct PreflateContainerConfig {
     /// The maximum size of a plain text chunk that we will decompress at a time. This limits
     /// the memory usage of the decompression process.
     pub chunk_plain_text_limit: usize,
+
+    /// Maximum encoded or decoded correction bytes per chunk.
+    pub correction_limit: usize,
+
+    /// Maximum decompressed container payload bytes per block.
+    pub decoded_block_limit: usize,
+
+    /// Maximum decoded pixel bytes per image.
+    pub image_limit: usize,
+
+    /// Maximum queued output bytes when using fixed-size output buffers.
+    pub max_pending_output: usize,
 
     /// true if we should verify that the decompressed data can be recompressed to the same bytes.
     /// This is important since there may be corner cases where the data may not yield the same bytes.
@@ -45,8 +116,13 @@ impl Default for PreflateContainerConfig {
         PreflateContainerConfig {
             min_chunk_size: 1024 * 1024,
             max_chunk_size: 64 * 1024 * 1024,
+            compressed_block_limit: 256 * 1024 * 1024,
             total_plain_text_limit: 512 * 1024 * 1024,
             chunk_plain_text_limit: 128 * 1024 * 1024,
+            correction_limit: 128 * 1024 * 1024,
+            decoded_block_limit: 256 * 1024 * 1024,
+            image_limit: 128 * 1024 * 1024,
+            max_pending_output: DEFAULT_MAX_PENDING_OUTPUT,
             max_chain_length: 4096,
             validate_compression: true,
         }
@@ -58,6 +134,7 @@ impl PreflateContainerConfig {
         PreflateConfig {
             max_chain_length: self.max_chain_length,
             plain_text_limit: self.chunk_plain_text_limit,
+            correction_limit: self.correction_limit,
             verify_compression: self.validate_compression,
         }
     }
@@ -101,18 +178,22 @@ pub(crate) fn write_varint(destination: &mut impl Write, value: u32) -> std::io:
 
 pub(crate) fn read_varint(source: &mut impl Read) -> std::io::Result<u32> {
     let mut result = 0;
-    let mut shift = 0;
-    loop {
+    for shift in (0..35).step_by(7) {
         let mut byte = [0u8; 1];
         source.read_exact(&mut byte)?;
         let byte = byte[0];
-        result |= ((byte & 0x7F) as u32) << shift;
-        shift += 7;
+        if shift == 28 && byte > 0x0f {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "Container varint exceeds u32",
+            ));
+        }
+        result |= u32::from(byte & 0x7F) << shift;
         if byte & 0x80 == 0 {
-            break;
+            return Ok(result);
         }
     }
-    Ok(result)
+    unreachable!()
 }
 
 #[test]
@@ -146,6 +227,10 @@ pub struct PreflateStats {
 
 /// Processes an input buffer and writes the output to a writer
 pub trait ProcessBuffer {
+    fn pending_output_limit(&self) -> usize {
+        DEFAULT_MAX_PENDING_OUTPUT
+    }
+
     fn process_buffer(
         &mut self,
         input: &[u8],
@@ -191,6 +276,12 @@ pub trait ProcessBuffer {
         output: &mut impl Write,
         read_chunk_size: usize,
     ) -> Result<()> {
+        if read_chunk_size == 0 {
+            return err_exit_code(
+                ExitCode::InvalidParameter,
+                "Read chunk size must be nonzero",
+            );
+        }
         let mut input_complete = false;
         loop {
             let buffer: &[u8];
@@ -237,7 +328,8 @@ pub trait ProcessBuffer {
 
 #[cfg(test)]
 pub(crate) mod test {
-    use std::io::Write;
+    use std::io::{Cursor, Write};
+    use std::num::Saturating;
 
     use preflate_rs::{AddContext, Result};
 
@@ -245,12 +337,32 @@ pub(crate) mod test {
         BLOCK_COMPRESSION_MASK, BLOCK_COMPRESSION_NONE, BLOCK_COMPRESSION_ZSTD, BLOCK_TYPE_DEFLATE,
         BLOCK_TYPE_DEFLATE_CONTINUE, BLOCK_TYPE_JPEG_LEPTON, BLOCK_TYPE_LITERAL, BLOCK_TYPE_MASK,
         BLOCK_TYPE_PNG, BLOCK_TYPE_WEBP, COMPRESSED_WRAPPER_VERSION_3, PreflateContainerConfig,
-        ProcessBuffer, read_varint,
+        ProcessBuffer, SizeValue, check_size, read_varint,
     };
     use crate::container_read::RecreateContainerProcessor;
     use crate::container_write::PreflateContainerProcessor;
 
     pub struct NopProcessBuffer {}
+
+    #[test]
+    fn rejects_zero_read_chunk_size() {
+        assert!(
+            NopProcessBuffer {}
+                .copy_to_end_size(&mut Cursor::new(b"input"), &mut Vec::new(), 0)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn size_values_reject_truncation_and_saturation() {
+        assert_eq!(u32::MAX.to_usize().unwrap(), u32::MAX as usize);
+        assert_eq!((u32::MAX as usize).to_u32().unwrap(), u32::MAX);
+        assert!((u64::from(u32::MAX) + 1).to_u32().is_err());
+
+        let saturated = Saturating(usize::MAX) + Saturating(1);
+        assert!(saturated.to_u32().is_err());
+        assert!(check_size(saturated, usize::MAX, "Saturated").is_err());
+    }
 
     impl ProcessBuffer for NopProcessBuffer {
         fn process_buffer(
@@ -398,7 +510,7 @@ pub(crate) mod test {
             let compression = type_byte & BLOCK_COMPRESSION_MASK;
             let block_type = type_byte & BLOCK_TYPE_MASK;
             blocks.push((compression, block_type));
-            let size = read_varint(&mut cursor).unwrap() as u64;
+            let size = u64::from(read_varint(&mut cursor).unwrap());
             cursor.set_position(cursor.position() + size);
         }
         blocks

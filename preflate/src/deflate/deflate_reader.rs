@@ -17,6 +17,7 @@ use std::io::Cursor;
 use super::{
     bit_reader::ReadBits,
     deflate_constants,
+    deflate_constants::MAX_BLOCKS_PER_CHUNK,
     deflate_token::{DeflateTokenBlock, DeflateTokenBlockType},
 };
 
@@ -162,6 +163,13 @@ impl DeflateParser {
                 }
             };
 
+            if blocks.len() == MAX_BLOCKS_PER_CHUNK {
+                return err_exit_code(
+                    ExitCode::InvalidPredictionData,
+                    "Block count exceeds per-chunk limit",
+                );
+            }
+
             match mode {
                 0 => {
                     let padding_bits = self.bit_reader.read_padding_bits();
@@ -183,6 +191,13 @@ impl DeflateParser {
                         return err_exit_code(ExitCode::InvalidDeflate, "Block length mismatch");
                     }
 
+                    if len as usize > self.plain_text_limit.saturating_sub(self.plain_text.len()) {
+                        return err_exit_code(
+                            ExitCode::PlainTextLimit,
+                            "Plain text limit exceeded",
+                        );
+                    }
+                    self.plain_text.check_growth(len as usize)?;
                     let mut uncompressed = Vec::with_capacity(len as usize);
 
                     for _i in 0..len {
@@ -289,6 +304,10 @@ fn decode_tokens(
 
         let lit_len: u32 = decoder.fetch_next_literal_code(bit_reader, reader)?.into();
         if lit_len < 256 {
+            if plain_text.len() >= plain_text_limit {
+                return err_exit_code(ExitCode::PlainTextLimit, "Plain text limit exceeded");
+            }
+            plain_text.check_growth(1)?;
             plain_text.push(lit_len as u8);
             tokens.push(DeflateToken::Literal(lit_len as u8));
             cur_pos += 1;
@@ -300,7 +319,7 @@ fn decode_tokens(
                 return err_exit_code(ExitCode::InvalidDeflate, "Invalid length code");
             }
             let len: u32 = deflate_constants::MIN_MATCH
-                + deflate_constants::LENGTH_BASE_TABLE[lcode as usize] as u32
+                + u32::from(deflate_constants::LENGTH_BASE_TABLE[lcode as usize])
                 + bit_reader.get(
                     deflate_constants::LENGTH_EXTRA_TABLE[lcode as usize].into(),
                     reader,
@@ -311,18 +330,22 @@ fn decode_tokens(
                 return err_exit_code(ExitCode::InvalidDeflate, "Non-standard 258 length code");
             }
 
-            let dcode = decoder.fetch_next_distance_char(bit_reader, reader)? as u32;
+            let dcode = u32::from(decoder.fetch_next_distance_char(bit_reader, reader)?);
             if dcode >= deflate_constants::DIST_CODE_COUNT as u32 {
                 return err_exit_code(ExitCode::InvalidDeflate, "Invalid distance code");
             }
 
             let dist = 1
-                + deflate_constants::DIST_BASE_TABLE[dcode as usize] as u32
+                + u32::from(deflate_constants::DIST_BASE_TABLE[dcode as usize])
                 + bit_reader.get(
                     deflate_constants::DIST_EXTRA_TABLE[dcode as usize].into(),
                     reader,
                 )?;
 
+            if len as usize > plain_text_limit.saturating_sub(plain_text.len()) {
+                return err_exit_code(ExitCode::PlainTextLimit, "Plain text limit exceeded");
+            }
+            plain_text.check_growth(len as usize)?;
             plain_text.append_reference(dist, len)?;
             tokens.push(DeflateToken::Reference(DeflateTokenReference::new(
                 len, dist,

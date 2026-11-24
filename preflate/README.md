@@ -23,6 +23,14 @@ Given those two parts, the original DEFLATE stream can be reconstructed bit-for-
 
 Feed the plaintext and corrections back into the predictor. It replays every compression decision, applying corrections where recorded, and writes the resulting tokens back to a DEFLATE bitstream using the original Huffman trees.
 
+Reconstruction validates corrected Huffman header counts, code lengths, and repeat
+lengths before allocating or indexing. Analysis and reconstruction support at most
+65,536 blocks per chunk, including empty blocks; exceeding this limit returns an
+`InvalidPredictionData` error without changing the corrections format.
+Invalid correction arithmetic, dictionary parameters, and oversubscribed Huffman
+trees return errors. The signed input-position range is checked before growing
+plaintext buffers.
+
 ## API
 
 ### Whole-stream (simple)
@@ -71,10 +79,17 @@ pub struct PreflateConfig {
     /// Maximum plaintext held in memory at once. Default: 128 MB.
     pub plain_text_limit: usize,
 
+    /// Maximum encoded or decoded corrections per chunk. Default: 128 MiB.
+    pub correction_limit: usize,
+
     /// Verify round-trip correctness after analysis. Default: true.
     pub verify_compression: bool,
 }
 ```
+
+`RecreateStreamProcessor::with_config(config)` reuses `PreflateConfig` for its
+plaintext and correction limits. `new()` uses the defaults. These limits are
+runtime policy only and are not serialized.
 
 ## Supported Compressors
 
@@ -102,7 +117,7 @@ Unknown compressors still round-trip correctly with higher corrections overhead.
 
 ## Encoding Format
 
-Parameters are serialized with [`bitcode`](https://crates.io/crates/bitcode). Corrections use CABAC (Context Adaptive Binary Arithmetic Coding), the same codec used in [Lepton JPEG](https://github.com/microsoft/lepton_jpeg_rust) compression. The format is chunked so memory use is bounded regardless of input size.
+Parameters are serialized with [`bitcode`](https://crates.io/crates/bitcode). Corrections use CABAC (Context Adaptive Binary Arithmetic Coding), the same codec used in [Lepton JPEG](https://github.com/microsoft/lepton_jpeg_rust) compression. The format supports chunked processing, but callers must still bound plaintext and correction sizes; chunking alone is not a total-memory limit.
 
 The first chunk's corrections blob starts with a format version byte (currently `0x81`). Blobs with a different version, including unversioned blobs from 0.7 and earlier, are rejected with `ExitCode::InvalidCompressedWrapper`.
 

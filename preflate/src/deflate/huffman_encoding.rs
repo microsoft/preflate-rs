@@ -17,6 +17,10 @@ use super::deflate_constants::{DistCode, LITLEN_CODE_COUNT, MAX_DIST_CODE};
 
 /// Calculates Huffman code array given an array of Huffman Code Lengths using the RFC 1951 algorithm
 pub fn calc_huffman_codes(code_lengths: &[u8]) -> Result<Vec<u16>> {
+    if code_lengths.len() > 288 || code_lengths.iter().any(|&length| length > 15) {
+        return err_exit_code(ExitCode::InvalidDeflate, "Invalid Huffman code lengths");
+    }
+
     let mut result: Vec<u16> = vec![0; code_lengths.len()];
 
     // The following algorithm generates the codes as integers, intended to be read
@@ -36,12 +40,15 @@ pub fn calc_huffman_codes(code_lengths: &[u8]) -> Result<Vec<u16>> {
 
     //	2)  Find the numerical value of the smallest code for each code length:
 
-    let mut code: u16 = 0;
+    let mut code: u32 = 0;
     bl_count[0] = 0;
     let mut next_code: [u16; 32] = [0; 32];
     for bits in 1..=maxbits {
-        code = (code + bl_count[bits as usize - 1]) << 1;
-        next_code[bits as usize] = code;
+        code = (code + u32::from(bl_count[bits as usize - 1])) << 1;
+        if code + u32::from(bl_count[bits as usize]) > 1u32 << bits {
+            return err_exit_code(ExitCode::InvalidDeflate, "Oversubscribed Huffman tree");
+        }
+        next_code[bits as usize] = code as u16;
     }
 
     // 3)  Assign numerical values to all codes, using consecutive
@@ -195,7 +202,7 @@ fn decode_symbol(
     }
 
     let (num_bits, mut node) = huffman_tree.fast_decode[bit_reader.peek_byte() as usize];
-    bit_reader.consume(num_bits as u32);
+    bit_reader.consume(u32::from(num_bits));
 
     loop {
         // High bit indicates a leaf node, return alphabet char for this leaf
@@ -684,7 +691,11 @@ fn roundtrip_huffman_bitreadwrite() {
     let mut data_buffer = Vec::new();
     for i in 0..code_lengths.len() {
         if code_lengths[i] != 0 {
-            bit_writer.write(codes[i] as u32, code_lengths[i] as u32, &mut data_buffer);
+            bit_writer.write(
+                u32::from(codes[i]),
+                u32::from(code_lengths[i]),
+                &mut data_buffer,
+            );
         }
     }
     // write a sentinal to make sure that we read everything properly
@@ -801,4 +812,16 @@ fn rountrip_test(encoding: HuffmanOriginalEncoding) {
         0x1234,
         "sentinal value didn't match"
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn invalid_huffman_lengths_return_errors() {
+        assert!(calc_huffman_codes(&[32]).is_err());
+        assert!(calc_huffman_codes(&[1, 1, 1, 15]).is_err());
+        assert_eq!(calc_huffman_codes(&[1]).unwrap(), vec![0]);
+    }
 }

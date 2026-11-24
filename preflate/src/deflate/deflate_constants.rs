@@ -13,6 +13,7 @@ pub const LITLEN_CODE_COUNT: usize = NONLEN_CODE_COUNT + LEN_CODE_COUNT;
 pub const DIST_CODE_COUNT: usize = 30;
 pub const LITLENDIST_CODE_COUNT: usize = LITLEN_CODE_COUNT + DIST_CODE_COUNT;
 pub const CODETREE_CODE_COUNT: usize = 19;
+pub(crate) const MAX_BLOCKS_PER_CHUNK: usize = 65_536;
 
 pub const MIN_MATCH: u32 = 3;
 pub const MAX_MATCH: u32 = 258;

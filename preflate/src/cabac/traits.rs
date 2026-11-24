@@ -61,6 +61,7 @@ pub trait CabacReader<Context> {
 
     /// reads as unary encoded which mean that the number of true bits is equal to the value with
     /// a terminating false bit
+    #[cfg(test)]
     fn get_unary_encoded<const A: usize>(&mut self, contexts: &mut [Context; A]) -> Result<usize> {
         let mut value = 0;
 
@@ -84,7 +85,7 @@ pub trait CabacReader<Context> {
     ) -> Result<u64> {
         let mut coef = 0;
         for i in (0..num_bits).rev() {
-            coef |= (self.get(&mut contexts[cmp::min(A - 1, i)])? as u64) << i;
+            coef |= u64::from(self.get(&mut contexts[cmp::min(A - 1, i)])?) << i;
         }
 
         return Ok(coef);

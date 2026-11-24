@@ -161,7 +161,10 @@ impl HashChainHolder for () {
     }
 
     fn hop_match(&self, _len: u32, _hops: u32, _input: &PreflateInput) -> Result<u32> {
-        unimplemented!()
+        err_exit_code(
+            ExitCode::InvalidPredictionData,
+            "Reference correction requires a dictionary",
+        )
     }
 
     fn add_missing_previous_hash(&mut self, _input: &PreflateInput) {}

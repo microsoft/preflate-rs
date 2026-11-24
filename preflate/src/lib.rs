@@ -8,6 +8,7 @@
 #![forbid(unsafe_code)]
 #![forbid(trivial_casts)]
 #![forbid(trivial_numeric_casts)]
+#![deny(clippy::cast_lossless)]
 #![forbid(non_ascii_idents)]
 #![forbid(redundant_lifetimes)]
 #![forbid(single_use_lifetimes)]
@@ -61,6 +62,10 @@ pub struct PreflateConfig {
     /// for files that are extremely compressed (eg zip bombs)
     pub plain_text_limit: usize,
 
+    /// Maximum encoded or decoded correction bytes per chunk. Default: 128 MiB, matching
+    /// the plaintext limit so records written by earlier releases remain readable.
+    pub correction_limit: usize,
+
     /// Decompress the data and verify that it can be recompressed to exactly the same bytes.
     /// This will slow down processing is isn't necessary if you are already doing end-to-end
     /// verification of the data.
@@ -72,6 +77,7 @@ impl Default for PreflateConfig {
         Self {
             max_chain_length: 4096,
             plain_text_limit: 128 * 1024 * 1024,
+            correction_limit: 128 * 1024 * 1024,
             verify_compression: true,
         }
     }
