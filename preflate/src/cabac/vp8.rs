@@ -98,7 +98,7 @@ impl VP8Context {
         // branches are a better idea if the branch very predictable vs
         // this case where it is better to always pay the price of the
         // extra rotation to avoid the branch.
-        let orig = self.counts.rotate_left(bit as u32 * 8);
+        let orig = self.counts.rotate_left(u32::from(bit) * 8);
         let (mut sum, o) = orig.overflowing_add(0x100);
         if o {
             // normalize, except in special case where we have 0xff or more same bits in a row
@@ -113,7 +113,7 @@ impl VP8Context {
         }
 
         Self {
-            counts: sum.rotate_left(bit as u32 * 8),
+            counts: sum.rotate_left(u32::from(bit) * 8),
         }
     }
 }
@@ -136,10 +136,10 @@ impl<R: Read> CabacReader<VP8Context> for VP8Reader<R> {
             Self::vpx_reader_fill(&mut tmp_value, &mut tmp_count, &mut self.upstream_reader)?;
         }
 
-        let probability = branch.get_probability().get() as u32;
+        let probability = u32::from(branch.get_probability().get());
 
         let split = 1 + (((tmp_range - 1) * probability) >> BITS_IN_BYTE);
-        let big_split = (split as u64) << BITS_IN_LONG_MINUS_LAST_BYTE;
+        let big_split = u64::from(split) << BITS_IN_LONG_MINUS_LAST_BYTE;
         let bit = tmp_value >= big_split;
 
         let shift;
@@ -184,7 +184,7 @@ impl<R: Read> CabacReader<VP8Context> for VP8Reader<R> {
         }
 
         let split = 1 + (tmp_range >> 1);
-        let big_split = (split as u64) << BITS_IN_LONG_MINUS_LAST_BYTE;
+        let big_split = u64::from(split) << BITS_IN_LONG_MINUS_LAST_BYTE;
         let bit = tmp_value >= big_split;
 
         let shift;
@@ -251,7 +251,7 @@ impl<R: Read> VP8Reader<R> {
                 break;
             }
 
-            *tmp_value |= (v[0] as u64) << shift;
+            *tmp_value |= u64::from(v[0]) << shift;
             shift -= BITS_IN_BYTE;
             *tmp_count += BITS_IN_BYTE;
         }
@@ -339,7 +339,7 @@ impl<W: Write> VP8Writer<W> {
 impl<W: Write> CabacWriter<VP8Context> for VP8Writer<W> {
     #[inline(always)]
     fn put(&mut self, value: bool, branch: &mut VP8Context) -> Result<()> {
-        let probability = branch.get_probability().get() as u32;
+        let probability = u32::from(branch.get_probability().get());
 
         let mut tmp_range = self.range;
         let split = 1 + (((tmp_range - 1) * probability) >> 8);
@@ -473,32 +473,33 @@ fn test_all_probabilities() {
 
     impl OriginalImplForTest {
         fn true_count(&self) -> u32 {
-            return self.counts[1] as u32;
+            return u32::from(self.counts[1]);
         }
         fn false_count(&self) -> u32 {
-            return self.counts[0] as u32;
+            return u32::from(self.counts[0]);
         }
 
         fn record_obs_and_update(&mut self, obs: bool) {
-            let fcount = self.counts[0] as u32;
-            let tcount = self.counts[1] as u32;
+            let fcount = u32::from(self.counts[0]);
+            let tcount = u32::from(self.counts[1]);
 
-            let overflow = self.counts[obs as usize] == 0xff;
+            let overflow = self.counts[usize::from(obs)] == 0xff;
 
             if overflow {
                 // check less than 512
-                let neverseen = self.counts[!obs as usize] == 1;
+                let neverseen = self.counts[usize::from(!obs)] == 1;
                 if neverseen {
-                    self.counts[obs as usize] = 0xff;
+                    self.counts[usize::from(obs)] = 0xff;
                     self.probability = if obs { 0 } else { 255 };
                 } else {
                     self.counts[0] = ((1 + fcount) >> 1) as u8;
                     self.counts[1] = ((1 + tcount) >> 1) as u8;
-                    self.counts[obs as usize] = 129;
-                    self.probability = self.optimize(self.counts[0] as u32 + self.counts[1] as u32);
+                    self.counts[usize::from(obs)] = 129;
+                    self.probability =
+                        self.optimize(u32::from(self.counts[0]) + u32::from(self.counts[1]));
                 }
             } else {
-                self.counts[obs as usize] += 1;
+                self.counts[usize::from(obs)] += 1;
                 self.probability = self.optimize(fcount + tcount + 1);
             }
         }

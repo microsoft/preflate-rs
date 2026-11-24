@@ -320,7 +320,7 @@ mod calc_zlib {
         for (index, &freq) in sym_freq.iter().enumerate() {
             if freq > 0 {
                 heap.push(HuffTreeNode {
-                    freq: freq as u32,
+                    freq: u32::from(freq),
                     depth: 0,
                     tree: HuffTree::Leaf(index),
                 });

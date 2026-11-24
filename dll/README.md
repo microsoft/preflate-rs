@@ -74,12 +74,18 @@ Both compress and decompress follow the same loop:
 5. Continue calling until return value is `1` (done).
 
 The DLL buffers any output that does not fit in the provided output buffer internally, so the output buffer can be any convenient size.
+Pending output is limited by the container's default budget (256 MiB); feed bounded
+input chunks and drain output regularly. Discard a context after an error.
 
 ## Safety
 
 - Magic numbers (`0x4K3CFF2E` for compression, `0x053D2AB1` for decompression contexts) are validated on every call to catch dangling or mismatched pointers.
 - All entry points use `catch_unwind` to prevent Rust panics from crossing the FFI boundary.
 - Error messages are copied as UTF-8 into the caller-provided buffer with null termination.
+- Buffer calls reject null contexts/results, nonzero lengths with null data
+  pointers, and lengths above `isize::MAX`. An omitted error buffer must use a
+  null pointer and zero length. Callers remain responsible for valid, live,
+  correctly sized and non-overlapping allocations for every non-null pointer.
 - All logic outside the FFI boundary layer is safe Rust (`#![forbid(unsafe_code)]` on all dependencies).
 
 ## Building

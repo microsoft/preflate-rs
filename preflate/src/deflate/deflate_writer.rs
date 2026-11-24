@@ -55,7 +55,8 @@ impl DeflateWriter {
     pub fn encode_block(&mut self, block: &DeflateTokenBlock) -> Result<()> {
         match &block.block_type {
             DeflateTokenBlockType::Stored { uncompressed, .. } => {
-                self.bitwriter.write(block.last as u32, 1, &mut self.output);
+                self.bitwriter
+                    .write(u32::from(block.last), 1, &mut self.output);
                 self.bitwriter.write(0, 2, &mut self.output);
                 self.bitwriter.pad(0, &mut self.output);
                 self.bitwriter.flush_whole_bytes(&mut self.output);
@@ -73,7 +74,8 @@ impl DeflateWriter {
             } => {
                 match huffman_type {
                     DeflateHuffmanType::Static => {
-                        self.bitwriter.write(block.last as u32, 1, &mut self.output);
+                        self.bitwriter
+                            .write(u32::from(block.last), 1, &mut self.output);
                         self.bitwriter.write(1, 2, &mut self.output);
                         let huffman_writer = HuffmanWriter::start_fixed_huffman_table();
                         self.encode_huffman(tokens, &huffman_writer);
@@ -81,7 +83,8 @@ impl DeflateWriter {
                     DeflateHuffmanType::Dynamic {
                         huffman_encoding, ..
                     } => {
-                        self.bitwriter.write(block.last as u32, 1, &mut self.output);
+                        self.bitwriter
+                            .write(u32::from(block.last), 1, &mut self.output);
                         self.bitwriter.write(2, 2, &mut self.output);
 
                         let huffman_writer = HuffmanWriter::start_dynamic_huffman_table(
@@ -130,7 +133,7 @@ impl DeflateWriter {
                         self.bitwriter.write(
                             reference.len()
                                 - MIN_MATCH
-                                - LENGTH_BASE_TABLE[usize::from(lencode.get())] as u32,
+                                - u32::from(LENGTH_BASE_TABLE[usize::from(lencode.get())]),
                             lenextra.into(),
                             &mut self.output,
                         );
@@ -144,7 +147,7 @@ impl DeflateWriter {
                         self.bitwriter.write(
                             reference.dist()
                                 - 1
-                                - DIST_BASE_TABLE[usize::from(distcode.get())] as u32,
+                                - u32::from(DIST_BASE_TABLE[usize::from(distcode.get())]),
                             distextra.into(),
                             &mut self.output,
                         );

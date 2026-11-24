@@ -77,6 +77,19 @@ impl PlainText {
         self.data.len() - (self.prefix_length as usize)
     }
 
+    pub fn check_growth(&self, amount: usize) -> Result<()> {
+        let remaining = (i32::MAX as usize)
+            .saturating_sub(self.pos_offset as usize)
+            .saturating_sub(self.data.len());
+        if amount > remaining {
+            return err_exit_code(
+                ExitCode::PlainTextLimit,
+                "Plaintext position range exceeded",
+            );
+        }
+        Ok(())
+    }
+
     /// the total length of the data from the beginning
     pub fn total_length(&self) -> u32 {
         self.pos_offset as u32 + self.len() as u32
@@ -112,7 +125,7 @@ impl PlainText {
     /// cases where there is overlap between the source and destination.
     #[inline(always)]
     pub fn append_reference(&mut self, dist: u32, len: u32) -> Result<()> {
-        if dist as usize > self.data.len() {
+        if dist == 0 || dist as usize > self.data.len() {
             return err_exit_code(ExitCode::InvalidDeflate, "Invalid distance in reference");
         }
 
@@ -224,4 +237,26 @@ fn test_length_behavior() {
 
     assert_eq!(input.cur_char(-1), 1);
     assert_eq!(input.cur_char(-1000), 1);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn plaintext_growth_checks_signed_position_range() {
+        let mut data = PlainText::new();
+        data.pos_offset = i32::MAX - 1;
+        assert!(data.check_growth(1).is_ok());
+        assert!(data.check_growth(2).is_err());
+        data.append(&[1]);
+        assert!(data.check_growth(1).is_err());
+    }
+
+    #[test]
+    fn zero_reference_distance_returns_error() {
+        let mut data = PlainText::new_with_data(vec![1]);
+        assert!(data.append_reference(0, 3).is_err());
+        assert_eq!(data.text(), &[1]);
+    }
 }

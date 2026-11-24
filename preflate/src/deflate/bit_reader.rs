@@ -52,7 +52,7 @@ impl BitReader {
             if buffer.len() > 8 {
                 let mut i = 0;
                 while self.bits_left <= 56 {
-                    let b = buffer[i] as u64;
+                    let b = u64::from(buffer[i]);
 
                     self.bits |= b << self.bits_left;
                     self.bits_left += 8;
@@ -96,7 +96,7 @@ impl BitReader {
         self.read_ahead = 0;
 
         while self.bits_left < cbit {
-            let b = reader.read_u8()? as u64;
+            let b = u64::from(reader.read_u8()?);
 
             self.bits |= b << self.bits_left;
             self.bits_left += 8;

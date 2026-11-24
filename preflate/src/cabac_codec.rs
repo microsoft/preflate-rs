@@ -5,6 +5,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 use crate::cabac::{CabacReader, CabacWriter};
+use crate::preflate_error::{ExitCode, PreflateError, Result};
 
 use crate::{
     bit_helper::bit_length,
@@ -24,20 +25,29 @@ pub fn encode_difference(pred_val: u32, act_val: u32) -> u32 {
 }
 
 /// decodes the result of the previous calculation
-pub fn decode_difference(pred_val: u32, encoded_val: u32) -> u32 {
-    if encoded_val & 1 == 0 {
-        pred_val - (encoded_val >> 1)
+pub fn decode_difference(pred_val: u32, encoded_val: u32) -> Result<u32> {
+    let value = if encoded_val & 1 == 0 {
+        pred_val.checked_sub(encoded_val >> 1)
     } else {
-        pred_val + (encoded_val >> 1)
-    }
+        pred_val.checked_add(encoded_val >> 1)
+    };
+    value.ok_or_else(|| {
+        PreflateError::new(
+            ExitCode::InvalidPredictionData,
+            "Correction arithmetic overflow",
+        )
+    })
 }
 
 #[test]
 fn test_encode_decode_difference() {
     for i in 0..10 {
-        assert_eq!(i, decode_difference(0, encode_difference(0, i)));
-        assert_eq!(i, decode_difference(10, encode_difference(10, i)));
-        assert_eq!(i, decode_difference(100, encode_difference(100, i)));
+        assert_eq!(i, decode_difference(0, encode_difference(0, i)).unwrap());
+        assert_eq!(i, decode_difference(10, encode_difference(10, i)).unwrap());
+        assert_eq!(
+            i,
+            decode_difference(100, encode_difference(100, i)).unwrap()
+        );
     }
 }
 
@@ -66,7 +76,7 @@ impl<CTX> PredictionCabacContext<CTX> {
 
         if bl > 1 {
             writer
-                .put_n_bits((value & ((1 << bl) - 1)).into(), bl - 1, context_bits)
+                .put_n_bits(value.into(), bl - 1, context_bits)
                 .unwrap();
         }
     }
@@ -75,17 +85,23 @@ impl<CTX> PredictionCabacContext<CTX> {
         context: &mut [CTX; N],
         context_bits: &mut [CTX; N],
         reader: &mut R,
-    ) -> u32 {
-        let bits_found = reader.get_unary_encoded(context).unwrap();
+    ) -> Result<u32> {
+        let mut bits_found = 0;
+        while reader.get(&mut context[bits_found.min(N - 1)])? {
+            if bits_found == 32 {
+                return Err(PreflateError::new(
+                    ExitCode::InvalidPredictionData,
+                    "Correction exceeds u32",
+                ));
+            }
+            bits_found += 1;
+        }
 
-        match bits_found {
+        Ok(match bits_found {
             0 => 0,
             1 => 1,
-            _ => {
-                reader.get_n_bits(bits_found - 1, context_bits).unwrap() as u32
-                    | (1 << (bits_found - 1))
-            }
-        }
+            _ => reader.get_n_bits(bits_found - 1, context_bits)? as u32 | (1 << (bits_found - 1)),
+        })
     }
 }
 
@@ -218,44 +234,51 @@ pub struct PredictionDecoderCabac<R, CTX> {
 }
 
 impl<R: CabacReader<CTX>, CTX: Default> PredictionDecoderCabac<R, CTX> {
-    pub fn new(mut reader: R) -> Self {
+    pub fn new(mut reader: R) -> Result<Self> {
         let mut actions_seen = [false; CodecCorrection::MAX as usize];
         let mut actions_seen_ctx = CTX::default();
         for i in 0..actions_seen.len() {
-            actions_seen[i] = reader.get(&mut actions_seen_ctx).unwrap();
+            actions_seen[i] = reader.get(&mut actions_seen_ctx)?;
         }
 
-        Self {
+        Ok(Self {
             context: PredictionCabacContext::<CTX>::default(),
             default_actions: Default::default(),
             actions_seen,
             reader,
-        }
+        })
     }
 
     #[cold]
-    fn decode_correction_slow(&mut self, c: usize) -> Result<u32, u32> {
-        if self
-            .reader
-            .get(&mut self.context.default_signal_ctx[c])
-            .unwrap()
-        {
+    fn decode_correction_slow(&mut self, c: usize) -> Result<u32> {
+        if self.reader.get(&mut self.context.default_signal_ctx[c])? {
             let value = PredictionCabacContext::read_exp_value(
                 &mut self.context.default_ctx[c],
                 &mut self.context.default_ctx_bits[c],
                 &mut self.reader,
-            ) + 1;
+            )?
+            .checked_add(1)
+            .ok_or_else(|| {
+                PreflateError::new(
+                    ExitCode::InvalidPredictionData,
+                    "Correction run exceeds u32",
+                )
+            })?;
 
             self.default_actions[c] = value - 1;
-            return Err(0);
+            return Ok(0);
         } else {
             let value = PredictionCabacContext::read_exp_value(
                 &mut self.context.correction_ctx[c],
                 &mut self.context.correction_ctx_bits[c],
                 &mut self.reader,
-            ) + 1;
+            )?
+            .checked_add(1)
+            .ok_or_else(|| {
+                PreflateError::new(ExitCode::InvalidPredictionData, "Correction exceeds u32")
+            })?;
 
-            return Err(value);
+            return Ok(value);
         }
     }
 }
@@ -264,23 +287,20 @@ impl<R: CabacReader<CTX>, CTX: Default> PredictionDecoder for PredictionDecoderC
     fn decode_verify_state(&mut self, _message: &'static str, _checksum: u64) {}
 
     #[inline]
-    fn decode_correction(&mut self, correction: CodecCorrection) -> u32 {
+    fn decode_correction(&mut self, correction: CodecCorrection) -> Result<u32> {
         // if the action hasn't been seen at all, then always return 0
         if !self.actions_seen[correction as usize] {
-            return 0;
+            return Ok(0);
         }
 
         // otherwise if we still have default actions left, use those
         let c = correction as usize;
         if self.default_actions[c] > 0 {
             self.default_actions[c] -= 1;
-            return 0;
+            return Ok(0);
         }
 
-        match self.decode_correction_slow(c) {
-            Ok(value) => value,
-            Err(value) => return value,
-        }
+        self.decode_correction_slow(c)
     }
 }
 
@@ -305,7 +325,8 @@ fn roundtree_cabac_decoding() {
 
     encoder.finish();
 
-    let mut decoder = PredictionDecoderCabac::new(VP8Reader::new(Cursor::new(&buffer)).unwrap());
+    let mut decoder =
+        PredictionDecoderCabac::new(VP8Reader::new(Cursor::new(&buffer)).unwrap()).unwrap();
 
     verify_decoder(&mut decoder, &test_codec_actions);
 }
@@ -356,14 +377,14 @@ fn roundtree_cabac_correction() {
 
     let reader = DebugReader::new(Cursor::new(&buffer)).unwrap();
 
-    let mut decoder = PredictionDecoderCabac::new(reader);
+    let mut decoder = PredictionDecoderCabac::new(reader).unwrap();
 
     for (i, &o) in operations.iter().enumerate() {
         match o {
             Operation::Correction(val, context_type) => {
                 assert_eq!(
                     val,
-                    decoder.decode_correction(context_type),
+                    decoder.decode_correction(context_type).unwrap(),
                     "operation {}",
                     i
                 );
@@ -425,6 +446,68 @@ fn roundtrip_cabac_write_value() {
         assert_eq!(
             i * 13,
             PredictionCabacContext::read_exp_value(&mut context, &mut context_bits, &mut reader)
+                .unwrap()
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cabac::vp8::{VP8Context, VP8Reader, VP8Writer};
+    use std::io::{Cursor, Error, ErrorKind, Result as IoResult};
+
+    struct ConstantReader(bool);
+
+    impl CabacReader<()> for ConstantReader {
+        fn get_bypass(&mut self) -> IoResult<bool> {
+            self.get(&mut ())
+        }
+
+        fn get(&mut self, _: &mut ()) -> IoResult<bool> {
+            if self.0 {
+                Ok(true)
+            } else {
+                Err(Error::new(ErrorKind::UnexpectedEof, "truncated correction"))
+            }
+        }
+    }
+
+    #[test]
+    fn invalid_correction_arithmetic_and_unary_lengths_return_errors() {
+        assert!(decode_difference(0, 2).is_err());
+        assert!(decode_difference(u32::MAX, 3).is_err());
+        assert!(
+            PredictionCabacContext::read_exp_value(
+                &mut [(); 32],
+                &mut [(); 32],
+                &mut ConstantReader(true),
+            )
+            .is_err()
+        );
+        assert!(PredictionDecoderCabac::new(ConstantReader(false)).is_err());
+    }
+
+    #[test]
+    fn full_width_correction_values_roundtrip() {
+        let values = [0, 1, 1 << 31, u32::MAX];
+        let mut bytes = Vec::new();
+        let mut writer = VP8Writer::new(&mut bytes).unwrap();
+        let mut context = [VP8Context::default(); 32];
+        let mut bits = context;
+        for value in values {
+            PredictionCabacContext::write_exp_encoded(value, &mut context, &mut bits, &mut writer);
+        }
+        writer.finish().unwrap();
+        let mut reader = VP8Reader::new(Cursor::new(&bytes)).unwrap();
+        context = [VP8Context::default(); 32];
+        bits = context;
+        for value in values {
+            assert_eq!(
+                PredictionCabacContext::read_exp_value(&mut context, &mut bits, &mut reader)
+                    .unwrap(),
+                value
+            );
+        }
     }
 }
