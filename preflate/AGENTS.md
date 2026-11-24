@@ -90,6 +90,7 @@ src/
   prediction_state.rs         ← common codec-free state used directly by estimation and token prediction
   parameters.rs               ← shared compressor option enums
   reconstruction_parameters.rs ← typed behavior settings and serialized parameters
+  parameter_codec.rs          ← generated Naia wire view, checked variable integers and framing
   reconstruction_validation.rs ← feature-gated strict canonical JSON replay validation
   block_predictor.rs          ← block strategy and tail predictions
   tree_predictor.rs
@@ -225,12 +226,22 @@ src/
   policies select family-owned lengths. Keep lazy tuples and validated profiles coupled.
 - Generic primary-only four-byte-hash lazy defaults may reuse an empty refinement
   slot for greedy parsing when references and a full canonical token buffer support
-  it. Preserve hash, insertion, nice length and chain budget. Only this custom
+  it. Preserve hash, insertion, nice length and chain budget. This custom
   fallback may accept a non-perfect sample: require at least 75% fewer mismatches
   and 16 fewer errors, with identical sampled token counts. Keep perfect-prefix
   protection and existing perfect refinements' precedence. Restrict its prediction
   window only with complete-stream distance evidence; do not extend this acceptance
   policy to recognized compressor profiles or add encoding retries.
+- The otherwise-empty generic parser slot can also test first-valid matching
+  (`nice_length=3`) for custom greedy RandomVector streams with `AddFirst(0)` or
+  `AddFirstWith32KBoundary`. Preserve every other setting. Require at least 75%
+  fewer actual-reference mismatches and 16 fewer reference errors, without
+  increasing total mismatches over the same bounded sample; preserve
+  already-perfect prefixes and the precedence of perfect refinements. Do not
+  apply this acceptance policy to other insertion policies or recognized
+  profiles, add refinement slots, or equate prefix fit with full-stream savings.
+  Exclude streams below 4 KiB compressed. Retain the existing 4096-token /
+  512 KiB comparison budget and all hard work caps.
 - Infer 32 KiB slide-boundary insertion only from references into earlier matches
   at that boundary. Without any interior-match insertion evidence, retain the
   generic first-only policy rather than inventing boundary insertions.
@@ -276,10 +287,17 @@ src/
   encoder-only estimation evidence.
 
 - `#![forbid(unsafe_code)]` — strictly enforced.
-- Serialization: parameters via `bitcode`; correction data via CABAC (`src/cabac/`).
-- Candidates, scoring, runtime prediction and serialization all use
-  `ReconstructionParameters` directly. Do not reintroduce a parallel flat
-  executable configuration or a conversion adapter.
+- Serialization: parameters via `naia-serde`; correction data via CABAC (`src/cabac/`).
+  `build.rs` generates a serialization-only view and typed conversions from the
+  authoritative parameter declarations. Naia derives pack enum discriminants;
+  the codec adapts integers with compact zero/power-of-two/power-minus-one forms
+  and a seven-bit-group literal fallback with bounded, canonical decoding.
+  Normalization must not replace a compact integer with a larger literal.
+  Preserve exact
+  CABAC length checks, zero header padding, and valid empty CABAC payloads.
+- Candidates, scoring and runtime prediction all use `ReconstructionParameters`
+  directly. Do not reintroduce a parallel flat executable configuration or
+  manually duplicate the wire schema. Runtime numeric types and JSON stay unchanged.
   `reconstruction_parameters_json()` serializes only those settings;
   `estimator_parameters_json()` serializes `{"reconstruction": {...}, "model": "..."}`.
   Keep metadata genuinely supplementary, never duplicate active settings.

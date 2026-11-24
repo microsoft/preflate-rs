@@ -19,8 +19,6 @@
 
 use std::io::{BufRead, Cursor};
 
-use bitcode::{Decode, Encode};
-
 use crate::{
     PreflateConfig, Result,
     cabac::vp8::{VP8Reader, VP8Writer},
@@ -40,11 +38,9 @@ use crate::{
 /// Version byte written in front of the serialized `ReconstructionData`.
 /// The developing 0.8 format intentionally permits breaking changes under the same tag.
 ///
-/// The high bit is set because unversioned blobs from 0.7 and earlier start with a small bitcode
-/// byte (0x00 or 0x01 in practice), so they are rejected here instead of being misinterpreted.
+/// The high bit rejects unversioned blobs from 0.7 and earlier.
 pub(crate) const RECONSTRUCTION_DATA_VERSION: u8 = 0x84;
 
-#[derive(Encode, Decode)]
 struct ReconstructionData {
     parameters: ReconstructionParameters,
     corrections: Vec<u8>,
@@ -53,17 +49,18 @@ struct ReconstructionData {
 impl ReconstructionData {
     pub fn write(self) -> Vec<u8> {
         let mut data = vec![RECONSTRUCTION_DATA_VERSION];
-        data.extend_from_slice(&bitcode::encode(&self));
+        data.extend_from_slice(&crate::parameter_codec::encode(
+            &self.parameters,
+            &self.corrections,
+        ));
         data
     }
 
     pub fn read(data: &[u8]) -> Result<Self> {
         match data.split_first() {
             Some((&RECONSTRUCTION_DATA_VERSION, payload)) => {
-                bitcode::decode::<Self>(payload)
-                    .map_err(|e| {
-                        PreflateError::new(ExitCode::InvalidCompressedWrapper, format!("{e:?}"))
-                    })
+                let (parameters, corrections) = crate::parameter_codec::decode(payload)?;
+                Ok(Self { parameters, corrections: corrections.to_vec() })
             }
             Some((&version, _)) => Err(PreflateError::new(
                 ExitCode::InvalidCompressedWrapper,

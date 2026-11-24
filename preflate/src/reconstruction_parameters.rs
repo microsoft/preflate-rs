@@ -24,6 +24,7 @@ use bitcode::{Decode, Encode};
 
 use crate::{
     hash_algorithm::HashAlgorithm,
+    parameter_codec::variable_integer_bit_length,
     parameters::{BlockTypeStrategy, DictionaryAddPolicy, LazyBehavior, PreflateStrategy},
 };
 
@@ -46,9 +47,11 @@ pub(crate) struct NormalizationBounds {
 
 pub(crate) fn canonical_short_match_cutoff(original: u32, bounds: (u32, u32)) -> u32 {
     debug_assert!(bounds.0 <= original && original <= bounds.1);
-    // Keep the singleton bitcode integer within its original width.
-    let maximum = if original <= u32::from(u8::MAX) {
-        u32::from(u8::MAX)
+    // Keep literal fallbacks within the original number of seven-bit groups.
+    let maximum = if original < 128 {
+        127
+    } else if original < 16384 {
+        16383
     } else {
         32768
     };
@@ -61,13 +64,22 @@ pub(crate) fn canonical_short_match_cutoff(original: u32, bounds: (u32, u32)) ->
         return original;
     }
     let alignment = ((lower - 1) ^ upper).ilog2();
-    upper & (u32::MAX << alignment)
+    let candidate = upper & (u32::MAX << alignment);
+    if variable_integer_bit_length(u64::from(candidate), u32::BITS)
+        <= variable_integer_bit_length(u64::from(original), u32::BITS)
+    {
+        candidate
+    } else {
+        original
+    }
 }
 
 pub(crate) fn canonical_token_limit(original: u16, bounds: (u32, u32)) -> u16 {
     debug_assert!(bounds.0 <= u32::from(original) && u32::from(original) <= bounds.1);
-    let maximum = if original <= u16::from(u8::MAX) {
-        u16::from(u8::MAX)
+    let maximum = if original < 128 {
+        127
+    } else if original < 16384 {
+        16383
     } else {
         u16::MAX
     };
@@ -375,7 +387,10 @@ impl ReconstructionParameters {
                 ..
             } => (&mut common.dictionary, Some(cutoff)),
         };
-        if let Some(window_bits) = bounds.window_bits {
+        if let Some(window_bits) = bounds.window_bits
+            && variable_integer_bit_length(u64::from(window_bits), u32::BITS)
+                <= variable_integer_bit_length(u64::from(dictionary.window_bits), u32::BITS)
+        {
             dictionary.window_bits = window_bits;
         }
         if let (Some(cutoff), Some(bounds)) = (cutoff, bounds.short_match_cutoff) {
@@ -462,7 +477,9 @@ impl ChainParser {
 mod tests {
     use super::*;
     use crate::{
-        parameters::tests::MatchingType, reconstruction_parameters::ReconstructionParameters,
+        parameter_codec::{encode_parameters as encode, parameter_bit_length},
+        parameters::tests::MatchingType,
+        reconstruction_parameters::ReconstructionParameters,
     };
 
     #[test]
@@ -487,8 +504,8 @@ mod tests {
         ] {
             let settings = parameters;
             assert_eq!(
-                bitcode::encode(&settings),
-                bitcode::encode(&settings.normalized(NormalizationBounds {
+                encode(&settings),
+                encode(&settings.normalized(NormalizationBounds {
                     short_match_cutoff: Some((4, 8192)),
                     ..NormalizationBounds::default()
                 }))
@@ -496,8 +513,28 @@ mod tests {
         }
     }
 
+    #[test]
+    fn normalization_does_not_grow_compact_window_exponents() {
+        let base = crate::token_predictor::tests::zlib_level_1_params();
+        for (original, bound, expected) in [(15, 9, 15), (14, 9, 9), (15, 12, 15)] {
+            let mut parameters = base;
+            parameters.set_window_bits(original);
+            let bounds = NormalizationBounds {
+                window_bits: Some(bound),
+                ..NormalizationBounds::default()
+            };
+            let normalized = parameters.normalized(bounds);
+            assert_eq!(normalized.dictionary().unwrap().window_bits, expected);
+            assert!(parameter_bit_length(&normalized) <= parameter_bit_length(&parameters));
+            assert_eq!(normalized.normalized(bounds), normalized);
+        }
+    }
+
     fn round_trip(parameters: &ReconstructionParameters) -> ReconstructionParameters {
-        bitcode::decode::<ReconstructionParameters>(&bitcode::encode(parameters)).unwrap()
+        let encoded = crate::parameter_codec::encode(parameters, b"corrections");
+        let (decoded, corrections) = crate::parameter_codec::decode(&encoded).unwrap();
+        assert_eq!(corrections, b"corrections");
+        decoded
     }
 
     #[test]
@@ -592,7 +629,7 @@ mod tests {
                     "{hash_algorithm:?} {matching_type:?}"
                 );
                 assert_eq!(round_trip(&normalized), normalized);
-                assert!(bitcode::encode(&normalized).len() <= bitcode::encode(&parameters).len());
+                assert!(encode(&normalized).len() <= encode(&parameters).len());
             }
         }
     }
@@ -606,7 +643,7 @@ mod tests {
                 canonical_configuration.block_type_strategy = strategy;
                 canonical_configuration
             };
-            bitcode::encode(&parameters.normalized(NormalizationBounds::default()))
+            encode(&parameters.normalized(NormalizationBounds::default()))
         };
         assert_eq!(
             encode(BlockTypeStrategy::Dynamic),
@@ -666,7 +703,7 @@ mod tests {
             assert_eq!(round_trip(&parameters), parameters);
             let mut altered = parameters;
             altered.dictionary_mut().unwrap().window_bits = 10;
-            assert_ne!(bitcode::encode(&parameters), bitcode::encode(&altered));
+            assert_ne!(encode(&parameters), encode(&altered));
             let json = serde_json::to_value(parameters).unwrap();
             let distance_json = &json["behavior"]["Chain"]["common"]["distance"];
             assert_eq!(
@@ -723,9 +760,8 @@ mod tests {
     #[test]
     fn engine_distance_selector_costs_only_include_active_window_and_history() {
         let base = crate::token_predictor::tests::zlib_level_1_params();
-        let size = |parameters: &ReconstructionParameters| bitcode::encode(parameters).len();
-        for (matching_type, active_bytes) in [
-            (MatchingType::Greedy, 2),
+        for (matching_type, active_bits) in [
+            (MatchingType::Greedy, 3),
             (
                 MatchingType::MiniZ {
                     max_probes: 32,
@@ -746,20 +782,26 @@ mod tests {
                 canonical_configuration.set_strategy(PreflateStrategy::Default);
                 canonical_configuration
             };
-            assert_eq!(size(&enabled), size(&disabled) + active_bytes);
+            assert_eq!(
+                parameter_bit_length(&enabled),
+                parameter_bit_length(&disabled) + active_bits
+            );
             let full_window = {
                 let mut canonical_configuration = enabled;
                 canonical_configuration.set_full_window(true);
                 canonical_configuration
             };
-            assert_eq!(size(&full_window), size(&enabled));
+            assert_eq!(
+                parameter_bit_length(&full_window),
+                parameter_bit_length(&enabled)
+            );
             if matching_type == MatchingType::Greedy {
                 let rle = {
                     let mut canonical_configuration = enabled;
                     canonical_configuration.set_strategy(PreflateStrategy::RleOnly);
                     canonical_configuration
                 };
-                assert_eq!(size(&rle), size(&disabled));
+                assert_eq!(parameter_bit_length(&rle), parameter_bit_length(&disabled));
             }
         }
     }
@@ -767,12 +809,12 @@ mod tests {
     #[test]
     fn canonical_parameter_wire_sizes() {
         let cases = [
-            ("compressed_zlib_level0.deflate", 5),
-            ("compressed_zlib_level1.deflate", 27),
-            ("compressed_zlib_level6.deflate", 31),
-            ("compressed_libdeflate_level5.deflate", 21),
-            ("compressed_flate2_level3.deflate", 24),
-            ("treegdi.extract.deflate", 24),
+            ("compressed_zlib_level0.deflate", 2),
+            ("compressed_zlib_level1.deflate", 12),
+            ("compressed_zlib_level6.deflate", 12),
+            ("compressed_libdeflate_level5.deflate", 7),
+            ("compressed_flate2_level3.deflate", 9),
+            ("treegdi.extract.deflate", 11),
         ];
         let mut actual_sizes = Vec::new();
         for (name, _) in cases {
@@ -781,7 +823,7 @@ mod tests {
                 crate::deflate::deflate_reader::tests::parse_deflate_whole(&compressed).unwrap();
             let parameters =
                 crate::estimator::estimate_preflate_parameters(&contents, &plain).unwrap();
-            let nested_size = bitcode::encode(&parameters).len();
+            let nested_size = encode(&parameters).len();
             actual_sizes.push(nested_size);
         }
         assert_eq!(actual_sizes, cases.map(|(_, size)| size));

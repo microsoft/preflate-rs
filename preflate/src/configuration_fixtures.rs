@@ -357,7 +357,7 @@ impl ReconstructionParameters {
     }
 
     pub(crate) fn serialized_size(&self) -> usize {
-        bitcode::encode(self).len()
+        crate::parameter_codec::encode_parameters(self).len()
     }
 
     pub(crate) fn canonical_short_match_cutoff(&self, bounds: (u32, u32)) -> u32 {

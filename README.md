@@ -152,11 +152,22 @@ optimality. The existing depth-walk candidate set, traversal count and
 refinement-slot count are preserved. Refinements normally require a perfect
 prefix. One previously empty slot also compares greedy parsing for unrecognized
 primary-only four-byte-hash lazy defaults with sufficient reference evidence and
-a full canonical token buffer. Only this custom fallback may accept an imperfect
+a full canonical token buffer. This custom fallback may accept an imperfect
 prefix, requiring at least 75% fewer mismatches and 16 fewer errors over the same
 bounded sample; existing perfect refinements take precedence. Its hash, insertion
 and search budget remain unchanged. A narrower prediction window is proposed only
 when the complete stream's observed references fit it.
+
+For custom greedy RandomVector streams with `AddFirst(0)` or 32 KiB-boundary
+insertion, the otherwise-empty generic parser slot can instead test first-valid
+matching (`nice_length=3`). It preserves the hash, insertion, parser and search
+budget. Selection requires at least 75% fewer actual-reference mismatches and
+16 fewer reference errors, without increasing total mismatches over the same
+bounded prefix; already-perfect prefixes and existing perfect
+refinements retain precedence. Other insertion policies are excluded. This
+measures prediction fit, not full-stream optimality or compressor identity.
+This proposal is limited to streams of at least 4 KiB compressed and retains
+the existing 4096-token / 512 KiB comparison budget.
 
 Bounded estimation replay advances through full-length distance-one matches
 without spending its informative token/byte budget on them. Their predictions,
@@ -416,11 +427,23 @@ belongs to lazy variants, MiniZ probe settings have no nice-length value, and th
 filtered-six-byte lazy variant has no three-byte cutoff. Hash mask/shift fields
 remain specific to the corresponding hash variant. Common token-count and block
 prediction settings remain independent because they affect every behavior.
-Direct `bitcode` encoding stores the executable enum variants and their active
-settings. The current development format and JSON schema intentionally change
+`naia-serde` encodes a generated serialization-only view of these executable
+variants and their active settings. Enum discriminants share a bit stream;
+Integers use a compact exponent form for zero, powers of two, and powers of two
+minus one, with a checked seven-payload-bit-group literal fallback. Including
+selectors, compact values take 6, 7, or 8 bits for `u16`, `u32`, or the `u64`
+CABAC byte count; other values cost one bit beyond the ordinary variable integer.
+Decoding is bounded and rejects overflow, overlong literals, and literals that
+should use the compact form. The build script derives the wire
+view and typed conversions from the existing declarations, without a manually
+maintained second schema or changes to runtime numeric types. The first chunk
+stores the parameters and CABAC byte count, pads with zero bits to a byte boundary,
+then appends the unchanged CABAC payload. Decode checks padding and exact length;
+empty CABAC data remains valid for perfectly predicted chunks.
+The current development format and JSON schema intentionally change
 without a backward-compatibility layer; regenerate diagnostic baselines.
-Explicit index, input-tail, and chain window-bound tags have a parameter-byte
-cost, tracked by the fixed-fixture wire-size regression tests.
+Explicit index, input-tail, and chain window-bound tags have a packed-bit cost,
+tracked by the fixed-fixture wire-size regression tests.
 The estimator and diagnostic interfaces use these same typed settings, without
 a parallel flat executable configuration or conversion layer. Enum variants carry
 shared structs: dictionary storage (index, window, insertion) is reused across
@@ -596,17 +619,13 @@ verifies unchanged CABAC bytes and exact reconstruction after canonicalization,
 and separately tests a shared zlib-style profile. These are offline experiments,
 not production selectors or promised savings.
 
-The ignored `profile_tiny_standard_cutoffs` diagnostic tests replacing observed
-three-byte distance maxima with zlib-style parser defaults: 4096 for lazy parsing
-and no additional cutoff for fast greedy parsing. Larger observed maxima are
-retained; other profiles remain unchanged. Set `PREFLATE_TINY_DEFAULT_RESULTS` to
-a new TSV file and use the same local fixtures in release mode. The report includes
-complete record sizes, CABAC sizes, corrections, rejected trials, and parameter
-states. Every successful trial is reconstructed exactly. A zlib-style parser is
-an inferred model, not proof of compressor identity; this remains an offline test.
-The baseline and default columns also permit evaluating a deterministic exception
-that retains cutoff zero when no three-byte matches were emitted, without replaying
-either verified configuration.
+Use [JSON replay](util/README.md#json-replay) to compare observed three-byte distance
+maxima with explicit zlib-style parser defaults: 4096 for lazy parsing and no
+additional cutoff for fast greedy parsing. Retain larger observed maxima and
+leave unrelated settings unchanged. Compare complete reconstruction sizes,
+nonzero correction counts and mismatch counts with encoding enabled so each
+trial is verified byte-for-byte. A zlib-style parser is an inferred model, not
+proof of compressor identity; these trials do not change production selection.
 
 The ignored `profile_tiny_distance_windows` diagnostic extends that study to
 libdeflate-style cutoffs (4096 for greedy, 8192 for lazy), Windows-style hash
@@ -700,42 +719,51 @@ or adding trial encodes.
 
 ### Isolating prediction overhead
 
-The ignored diagnostic tests separate token prediction errors from Huffman-tree
-corrections without changing production parameters or the reconstruction format.
-Generate raw streams for every compressor at levels 0-9, then analyze them:
+Use [JSON replay](util/README.md#json-replay) for offline parameter comparisons,
+selected-stream reports and bounded token/block traces without changing production
+parameters or the reconstruction format. Generate raw streams for every compressor
+at levels 0-9 if needed:
 
 ```shell
 cargo test --release --test end_to_end export_compression_diagnostics -- --ignored --nocapture
-cargo test --release -p preflate-rs diagnose_compression -- --ignored --nocapture
 ```
 
-Fixtures default to `target/prediction-diagnostics`. Set `PREFLATE_DIAGNOSTICS`
-to use another directory (or an existing directory of raw `.deflate` streams).
+Exported fixtures default to `target/prediction-diagnostics`.
 Set `PREFLATE_DIAGNOSTICS_INPUT` when exporting to use plaintext other than
 `samples/sample1.bin`. Use a separate fixture directory for each input.
 
-The report ranks reconstruction overhead relative to the original DEFLATE size,
-prints estimated parameters and nonzero correction counts, and shows the first
-eight token mismatches with plaintext offsets and actual/predicted tokens.
-Reported token mismatches precede reference re-prediction; correction counts
-reflect the subsequent recovery and encoding. Every baseline is verified against
-the original bytes. Unsupported parameter estimates are reported separately.
+Replay accepts one JSON request from a file or stdin. For a complete public
+synthetic example:
 
-For a focused experiment in PowerShell:
-
-```powershell
-$env:PREFLATE_DIAGNOSTICS_FILTER = "miniz_2"
-$env:PREFLATE_DIAGNOSTICS_SWEEP = "1"
-cargo test --release -p preflate-rs diagnose_compression -- --ignored --nocapture
-Remove-Item Env:PREFLATE_DIAGNOSTICS_FILTER, Env:PREFLATE_DIAGNOSTICS_SWEEP
+```shell
+cargo run --release -p preflate_util --bin preflate_replay -- util/examples/replay.json
 ```
 
-The filter is a filename substring. Sweeps first change one parameter at a time,
-then combine matching mode, nice length, and chain-budget candidates while holding
-the dictionary policy and hash algorithm fixed. Isolated variants and improving
-combined candidates are verified byte-for-byte; rejected candidates are printed
-explicitly. "Best tested" is not an exhaustive optimum. The normal overhead
-benchmark remains `cargo test --release --test end_to_end compression_benchmark_overhead_size`.
+For exported fixtures, use a `file` source with the raw DEFLATE path and explicit
+`reconstruction_parameters`. Obtain baseline settings from a scanner report's
+`parameters.reconstruction` or the `reconstruction` field returned by
+`estimate_first_chunk_estimator_json()`; replay itself never estimates parameters.
+Filter files, generate candidates and rank results in the calling script rather
+than adding another ignored Rust investigation. Keep coupled hash/parser settings
+valid and report rejected requests explicitly.
+
+With `encode:true` (the default), results include complete reconstruction sizes,
+exact verification, nonzero correction counts, token mismatch counts and bounded
+actual/predicted token shapes with plaintext offsets. Set `max_mismatches` explicitly
+to request examples (at most 1024); per-block mismatch totals are not sample-limited.
+Reported token mismatches precede reference re-prediction; correction counts reflect
+subsequent recovery and encoding. Use `normalize_parameters:true` to compare safe
+normalization and inspect `effective_reconstruction_parameters`.
+For whole-stream comparisons require `stream_complete:true` and
+`compressed_bytes` equal to the selected source length: replay handles only the
+first plaintext-limited chunk and verifies only consumed bytes.
+
+Correction counts are not CABAC byte costs. The remaining ignored Rust diagnostics
+cover internal state, bounded estimator-prefix scoring, larger residual samples,
+raw correction-byte equivalence/attribution, snapshots, throughput and multi-chunk
+processing that replay does not expose. Set `PREFLATE_DIAGNOSTICS` to select their
+fixture directory. The normal overhead benchmark remains
+`cargo test --release --test end_to_end compression_benchmark_overhead_size`.
 
 For a bounded profile investigation, run the ignored
 `diagnose_fixed_family_profiles` test in release mode with `PREFLATE_DIAGNOSTICS`
@@ -781,11 +809,10 @@ verified trials, not every scored candidate or an exhaustive parameter optimum.
 The `.residuals.tsv` file retains up to 4096 residual positions with actual and
 predicted lengths/distances, never literal values. Outputs are never overwritten.
 
-The ignored `diagnose_chromium_profiles` test compares Chromium's non-CRC hash
-with six standard slow-zlib profiles and 15/16-bit masks. Use release mode and
-`PREFLATE_DIAGNOSTICS` with its optional filter to select raw `.deflate` fixtures.
-Every encodable complete record is verified byte-for-byte; rejected profiles are
-reported explicitly. This test remains an offline comparison.
+Use JSON replay to compare Chromium's non-CRC hash with explicit slow-zlib search
+profiles and 15/16-bit masks. Keep insertion, distance and parser policies explicit,
+verify each encodable complete record, and report rejected profiles separately.
+These comparisons remain offline hypotheses, not production selection results.
 
 Chromium's [non-CRC hash](https://github.com/chromium/chromium/blob/main/third_party/zlib/contrib/optimizations/insert_string.h)
 is `((word * 66521 + 66521) >> 16) & mask`, using a little-endian four-byte word
@@ -1383,7 +1410,8 @@ For direct use of the core DEFLATE analysis API, see the [`preflate` crate](pref
   Other correction tags and older containers are rejected. Breaking changes within
   the developing 0.8 format do not require new tags or compatibility layers.
 - **CABAC coding** — the corrections codec is shared with the [Lepton](https://github.com/microsoft/lepton_jpeg_rust) JPEG re-compression library.
-- Parameters are serialized via [`bitcode`](https://crates.io/crates/bitcode); corrections via CABAC.
+- Parameters are bit-packed via [`naia-serde`](https://crates.io/crates/naia-serde)
+  with checked variable integers; corrections use CABAC.
 
 ---
 

@@ -60,6 +60,7 @@ mod estimator;
 mod hash_algorithm;
 mod hash_chain;
 mod hash_chain_holder;
+mod parameter_codec;
 mod parameters;
 
 mod preflate_error;

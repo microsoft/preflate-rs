@@ -333,7 +333,10 @@ mod tests {
                             generic::candidate(&initial, zlib::compatible_initial(&initial));
                         expected.chain_common_mut().unwrap().search.nice_length = 258;
                         assert_eq!(actual, expected);
-                        assert_eq!(bitcode::encode(&actual), bitcode::encode(&expected));
+                        assert_eq!(
+                            crate::parameter_codec::encode_parameters(&actual),
+                            crate::parameter_codec::encode_parameters(&expected)
+                        );
                         assert!(matches!(actual.behavior, BehaviorSettings::Chain { .. }));
                     } else {
                         assert!(matches!(actual.behavior, BehaviorSettings::MiniZ { .. }));

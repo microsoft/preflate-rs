@@ -589,6 +589,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "naia-serde"
+version = "0.25.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "127a474680cc1d9e53ab3615d046cfc722f596078faa4bb9c81e73de0aae8509"
+dependencies = [
+ "cfg-if",
+ "log",
+ "naia-serde-derive",
+]
+
+[[package]]
+name = "naia-serde-derive"
+version = "0.25.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "73556e4bf6d8a4700785c8ca902b69218d7608ec3aa2710677f8f3989647212b"
+dependencies = [
+ "cfg-if",
+ "log",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
+]
+
+[[package]]
 name = "num-traits"
 version = "0.2.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -657,8 +681,12 @@ dependencies = [
  "default-boxed",
  "deranged",
  "env_logger",
+ "naia-serde",
+ "proc-macro2",
+ "quote",
  "serde",
  "serde_json",
+ "syn 2.0.117",
 ]
 
 [[package]]

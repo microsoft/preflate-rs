@@ -76,6 +76,18 @@ Refinement proposals form an ordered list of at most eleven applicable candidate
 Family append helpers attach their model labels; the coordinator retains cross-family
 fallback precedence. Only the first applicable fallback in each refinement role is
 proposed, and scoring still accepts the first perfect candidate in list order.
+The otherwise-empty generic parser slot can propose first-valid matching for
+custom greedy RandomVector streams with no match-interior insertion
+(`AddFirst(0)` or `AddFirstWith32KBoundary`). Only the nice length changes to
+three; the hash, insertion, parser and search budget remain intact. This
+proposal may retain shared literal errors, but must remove at least 75% of
+actual-reference mismatches and at least 16 reference errors without increasing
+total mismatches over the same sample. Already-perfect
+prefixes and existing perfect refinements take precedence. Other insertion
+policies are not eligible, and bounded prediction fit is not a full-stream
+size guarantee.
+Streams below 4 KiB compressed are excluded from this proposal. Comparisons
+retain the existing 4096-informative-token / 512 KiB limit and hard work caps.
 The generic model resolves its parser and search settings before wrapping them
 in reconstruction parameters. MiniZ's generic fallback selects its final nice
 length on those typed settings before the same wrapping step. MiniZ shares typed
@@ -199,10 +211,24 @@ Unknown compressors still round-trip correctly with higher corrections overhead.
 
 ## Encoding Format
 
-Parameters are serialized with [`bitcode`](https://crates.io/crates/bitcode). Corrections use CABAC (Context Adaptive Binary Arithmetic Coding), the same codec used in [Lepton JPEG](https://github.com/microsoft/lepton_jpeg_rust) compression. The format is chunked so memory use is bounded regardless of input size.
+Parameters are serialized with [`naia-serde`](https://crates.io/crates/naia-serde).
+Its derives automatically bit-pack enum discriminants across nested fields.
+The build script generates a serialization-only view and typed conversions from
+the authoritative parameter declarations, adapting `u16`/`u32` fields to
+variable-length integers without changing their runtime types. Zero, powers of
+two, and powers of two minus one use compact exponent forms (6 bits for `u16`,
+7 for `u32`, and 8 for the `u64` CABAC length). Other values use a one-bit escape
+followed by seven-payload-bit variable-integer groups. Integer decoding is bounded
+and rejects overflow, overlong encodings, and noncanonical literal aliases.
+Corrections use CABAC (Context Adaptive Binary Arithmetic Coding), the same codec
+used in [Lepton JPEG](https://github.com/microsoft/lepton_jpeg_rust) compression.
+The format is chunked so memory use is bounded regardless of input size.
 
 The first chunk's corrections blob starts with `0x84`, followed by nested,
-behavior-specific reconstruction parameters and CABAC corrections. The JSON
+behavior-specific reconstruction parameters, a variable-length CABAC byte count,
+zero padding to the next byte, and unchanged CABAC bytes. Decode checks the exact
+payload length and padding before reconstruction. An empty CABAC payload is valid
+for perfectly predicted chunks. The JSON
 reconstruction interface uses the same authoritative typed configuration. Only the current `0x84` tag is
 accepted; `0x81`, `0x82`, `0x83`, unversioned blobs and unknown tags are rejected with
 `ExitCode::InvalidCompressedWrapper`.

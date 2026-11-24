@@ -67,6 +67,24 @@ pub fn primary_only_greedy(
     Some(parameters.with_estimated_chain(common, ChainParser::Greedy { short_match_cutoff }))
 }
 
+pub fn first_match(parameters: ReconstructionParameters) -> Option<ReconstructionParameters> {
+    let BehaviorSettings::Chain { mut common, parser } = parameters.behavior else {
+        return None;
+    };
+    if common.dictionary.index.into_algorithm() != HashAlgorithm::RandomVector
+        || !matches!(parser, ChainParser::Greedy { .. })
+        || !matches!(
+            common.dictionary.insertion,
+            DictionaryAddPolicy::AddFirst(0) | DictionaryAddPolicy::AddFirstWith32KBoundary
+        )
+        || common.search.nice_length <= 3
+    {
+        return None;
+    }
+    common.search.nice_length = 3;
+    Some(parameters.with_estimated_chain(common, parser))
+}
+
 #[derive(Default)]
 pub struct GreedyNiceObservations {
     samples: u16,
@@ -138,11 +156,13 @@ pub fn alternatives(parameters: ReconstructionParameters) -> [Option<Reconstruct
         && common.dictionary.insertion == DictionaryAddPolicy::AddAll
         && matches!(parser, ChainParser::Lazy { .. });
     let slow = &zlib::SLOW_PREFLATE_PARSER_SETTINGS[2];
-    let lazy = (noncanonical_greedy || table_lazy).then(|| {
-        let mut common = common;
-        common.search.nice_length = slow.nice_length;
-        common.search.budget.max_chain = slow.max_chain;
-        parameters.with_estimated_chain(common, slow.parser.with_cutoff(short_match_cutoff))
+    let lazy = first_match(parameters).or_else(|| {
+        (noncanonical_greedy || table_lazy).then(|| {
+            let mut common = common;
+            common.search.nice_length = slow.nice_length;
+            common.search.budget.max_chain = slow.max_chain;
+            parameters.with_estimated_chain(common, slow.parser.with_cutoff(short_match_cutoff))
+        })
     });
     let fast = &zlib::ZLIB_PREFLATE_PARSER_SETTINGS[0];
     let insertion = (hash == crate::compressors::windows::HASH
@@ -344,7 +364,10 @@ mod tests {
                                 let expected = reference_candidate(&initial, compatible);
                                 let actual = candidate(&initial, compatible);
                                 assert_eq!(actual, expected);
-                                assert_eq!(bitcode::encode(&actual), bitcode::encode(&expected));
+                                assert_eq!(
+                                    crate::parameter_codec::encode_parameters(&actual),
+                                    crate::parameter_codec::encode_parameters(&expected)
+                                );
                             }
                         }
                     }
@@ -458,6 +481,51 @@ mod tests {
                     .unwrap()
                     .very_far_matches_detected()
             );
+        }
+    }
+
+    #[test]
+    fn first_match_preserves_settings_and_excludes_other_insertion_and_parser_profiles() {
+        let mut parameters = crate::token_predictor::tests::zlib_level_1_params();
+        parameters.set_hash_algorithm(HashAlgorithm::RandomVector);
+        for policy in [
+            DictionaryAddPolicy::AddFirst(0),
+            DictionaryAddPolicy::AddFirstWith32KBoundary,
+        ] {
+            parameters.set_insertion(policy);
+            let mut expected = parameters;
+            expected.set_nice_length(3);
+            assert_eq!(first_match(parameters), Some(expected));
+            assert_eq!(alternatives(parameters), [None, Some(expected)]);
+        }
+        for policy in [
+            DictionaryAddPolicy::AddAll,
+            DictionaryAddPolicy::AddFirst(1),
+            DictionaryAddPolicy::AddFirst(4),
+            DictionaryAddPolicy::AddFirstAndLast(0),
+        ] {
+            parameters.set_insertion(policy);
+            assert!(first_match(parameters).is_none());
+        }
+        parameters.set_insertion(DictionaryAddPolicy::AddFirst(0));
+        for hash in [
+            crate::compressors::zlib::DEFAULT_HASH,
+            HashAlgorithm::Libdeflate4Fast,
+        ] {
+            let mut other = parameters;
+            other.set_hash_algorithm(hash);
+            assert!(first_match(other).is_none());
+        }
+        let mut lazy = parameters;
+        lazy.set_matching_type(MatchingType::Lazy {
+            max_lazy: 16,
+            filtered_matching: false,
+            behavior: LazyBehavior::Zlib { good_length: 4 },
+        });
+        assert!(first_match(lazy).is_none());
+        for nice_length in [2, 3] {
+            parameters.set_nice_length(nice_length);
+            assert!(first_match(parameters).is_none());
         }
     }
 

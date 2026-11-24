@@ -109,7 +109,9 @@ dedicated test targets.
 
 The core pipeline parses DEFLATE tokens, estimates compressor parameters, predicts
 tokens and Huffman trees, and encodes prediction differences with CABAC.
-Parameters use `bitcode`; processing is chunked to bound memory use.
+Parameters use a generated `naia-serde` wire view with packed enum tags and checked
+variable integers; runtime settings keep their ordinary numeric types.
+Processing is chunked to bound memory use.
 See [preflate/AGENTS.md](preflate/AGENTS.md) for the shared prediction state,
 estimator, correction codec, and streaming API boundaries.
 

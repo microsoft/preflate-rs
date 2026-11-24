@@ -217,6 +217,7 @@ pub(crate) mod tests {
     };
     use crate::{
         estimator::{depth_estimator::DistancePolicy, models::zlib::SLOW_PREFLATE_PARSER_SETTINGS},
+        parameter_codec::parameter_bit_length,
         parameters::{LazyBehavior, tests::MatchingType},
     };
 
@@ -259,12 +260,18 @@ pub(crate) mod tests {
         }
         for (original, bounds, expected) in [
             (4, (4, 8), 8),
-            (255, (255, 32768), 255),
-            (256, (256, 32768), 32768),
+            (127, (127, 32768), 127),
+            (128, (128, 32768), 8192),
+            (255, (255, 32768), 8192),
+            (256, (256, 32768), 8192),
             (8193, (8193, 9000), 8704),
-            (4097, (4097, 32768), 32768),
+            (4097, (4097, 32768), 8192),
+            (16383, (16383, 32768), 16383),
+            (16384, (16384, 32768), 32768),
             (3000, (2500, 3500), 3072),
             (5, (4, 7), 4),
+            (7, (5, 7), 7),
+            (4095, (4094, 4095), 4095),
             (32769, (32769, u32::MAX), 32769),
         ] {
             params.set_short_match_cutoff(original);
@@ -273,7 +280,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn canonical_short_match_cutoffs_choose_the_coarsest_binary_grid() {
+    fn canonical_short_match_cutoffs_choose_the_coarsest_grid_without_growing_wire() {
         let mut params = crate::token_predictor::tests::zlib_level_1_params();
         for lower in 0u32..=512 {
             let mut expected = lower;
@@ -282,6 +289,14 @@ pub(crate) mod tests {
                     expected = upper;
                 }
                 params.set_short_match_cutoff(upper);
+                let mut candidate = params;
+                candidate.set_short_match_cutoff(expected);
+                let expected = if parameter_bit_length(&candidate) <= parameter_bit_length(&params)
+                {
+                    expected
+                } else {
+                    upper
+                };
                 assert_eq!(
                     params.canonical_short_match_cutoff((lower, upper)),
                     expected,

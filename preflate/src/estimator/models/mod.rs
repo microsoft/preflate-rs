@@ -223,7 +223,10 @@ mod tests {
                             complete, incremental,
                             "{hash:?} {parser:?} {distance:?} full={full}"
                         );
-                        assert_eq!(bitcode::encode(&complete), bitcode::encode(&incremental));
+                        assert_eq!(
+                            crate::parameter_codec::encode_parameters(&complete),
+                            crate::parameter_codec::encode_parameters(&incremental)
+                        );
                     }
                 }
             }

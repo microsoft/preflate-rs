@@ -3,9 +3,10 @@
  *  Licensed under the Apache License, Version 2.0. See LICENSE.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-//! Streaming reconstruction tests, prediction regressions, and offline diagnostics.
+//! Streaming reconstruction tests, prediction regressions, and internal diagnostics.
 //! Measures token and tree mismatches, compares parameter variants, and verifies
-//! correction data through exact bitstream reconstruction.
+//! correction data through exact bitstream reconstruction. General offline parameter
+//! comparisons and bounded traces use the JSON replay API instead.
 
 use std::path::{Path, PathBuf};
 
@@ -908,7 +909,7 @@ fn lazy_cutoff_equivalence_reuses_the_next_fresh_search() {
             verify(&after, &plain, &compressed);
             assert_eq!(after.short_match_distance_bounds, Some((4, 32768)));
             let record = InspectedReconstructionData::read(&after.corrections).unwrap();
-            assert_eq!(record.parameters.max_dist_3_matches(), 128);
+            assert_eq!(record.parameters.max_dist_3_matches(), 64);
             let original = InspectedReconstructionData::read(&before.corrections)
                 .unwrap()
                 .corrections;
@@ -1508,69 +1509,6 @@ fn profile_tiny_state_collapse() {
     }
 }
 
-#[test]
-#[ignore = "offline standard-cutoff study; requires local .deflate fixtures"]
-fn profile_tiny_standard_cutoffs() {
-    use std::io::Write;
-
-    let path = std::env::var_os("PREFLATE_TINY_DEFAULT_RESULTS")
-        .expect("set PREFLATE_TINY_DEFAULT_RESULTS to a new TSV output file");
-    let mut output = std::io::BufWriter::new(
-        std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(path)
-            .unwrap(),
-    );
-    writeln!(output, "case\tdeflate\tplaintext\tblocks\tperfect\tbytes\tcabac\tcorrections\tmismatches\toriginal_limit\tprofile\tdefault_limit\tparams\tdefault_params\tdefault_bytes\tdefault_cabac\tdefault_corrections\tdefault_mismatches\tdefault_perfect\terror").unwrap();
-    let mut files: Vec<_> = std::fs::read_dir(fixture_directory())
-        .unwrap()
-        .map(|entry| entry.unwrap().path())
-        .filter(|path| path.extension().is_some_and(|ext| ext == "deflate"))
-        .collect();
-    files.sort();
-    assert!(!files.is_empty(), "no .deflate fixtures found");
-    for file in files {
-        let name = file.file_stem().unwrap().to_string_lossy();
-        let compressed = std::fs::read(&file).unwrap();
-        assert!(compressed.len() < 1024, "{name}: not a tiny stream");
-        let (contents, plain) = parse_deflate_whole(&compressed).unwrap();
-        assert_eq!(contents.compressed_size, compressed.len(), "{name}");
-        let params = estimate_preflate_parameters(&contents, &plain).unwrap();
-        let baseline = measure(&contents, &plain, &params).unwrap();
-        verify(&baseline, &plain, &compressed);
-        let (profile, default, candidate) = standard_short_match_cutoff(params);
-        write!(
-            output,
-            "{name}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{profile}\t{}\t{params:?}\t{candidate:?}\t",
-            compressed.len(), plain.len(), contents.blocks.len(),
-            baseline.count.total_non_default == 0, baseline.corrections.len(),
-            baseline.cabac_size, baseline.count.total_non_default,
-            baseline.trace.mismatch_count, params.max_dist_3_matches(),
-            default.map_or(String::new(), |limit| limit.to_string()),
-        ).unwrap();
-        match measure(&contents, &plain, &candidate) {
-            Ok(measurement) => {
-                verify(&measurement, &plain, &compressed);
-                writeln!(
-                    output,
-                    "{}\t{}\t{}\t{}\t{}\t",
-                    measurement.corrections.len(),
-                    measurement.cabac_size,
-                    measurement.count.total_non_default,
-                    measurement.trace.mismatch_count,
-                    measurement.count.total_non_default == 0,
-                )
-                .unwrap();
-            }
-            Err(error) => {
-                writeln!(output, "\t\t\t\t\t{:?}", error.exit_code()).unwrap();
-            }
-        }
-        output.flush().unwrap();
-    }
-}
-
 fn distance_window_variants(
     params: ReconstructionParameters,
     plaintext_length: usize,
@@ -1959,10 +1897,10 @@ fn token_limit_normalization_merges_equivalent_final_block_profiles() {
 fn token_limit_normalization_preserves_nonfinal_boundaries_and_windows_parsing() {
     use crate::deflate::deflate_token::DeflateTokenBlock;
     for (count, final_block, matching_type, expected) in [
-        (126, false, MatchingType::Greedy, 255),
+        (126, false, MatchingType::Greedy, 127),
         (127, false, MatchingType::Greedy, 127),
         (128, false, MatchingType::Greedy, 127),
-        (127, true, MatchingType::Greedy, 255),
+        (127, true, MatchingType::Greedy, 127),
         (127, true, MatchingType::WindowsLazy { max_lazy: 128 }, 127),
     ] {
         let mut writer = DeflateWriter::new();
@@ -2037,7 +1975,15 @@ fn admissible_window_normalization_preserves_records_and_skips_partial_streams()
         15
     );
     assert_eq!(baseline.cabac_size, normalized.cabac_size);
-    assert_eq!(baseline.corrections.len(), normalized.corrections.len());
+    assert_eq!(
+        InspectedReconstructionData::read(&baseline.corrections)
+            .unwrap()
+            .corrections,
+        InspectedReconstructionData::read(&normalized.corrections)
+            .unwrap()
+            .corrections
+    );
+    assert!(normalized.corrections.len() <= baseline.corrections.len());
 
     contents.compressed_size = 1024;
     let large = measure_normalized(&contents, &plain, &params).unwrap();
@@ -3980,7 +3926,7 @@ fn diagnose_short_match_policy() {
         }
         let mut measured = std::collections::HashSet::new();
         for candidate in candidates {
-            if !measured.insert(bitcode::encode(&candidate)) {
+            if !measured.insert(crate::parameter_codec::encode_parameters(&candidate)) {
                 continue;
             }
             let trial =
@@ -4036,78 +3982,6 @@ fn diagnose_short_match_policy() {
                 trial.trace.mismatch_count,
                 &ranked[..ranked.len().min(10)],
             );
-        }
-    }
-    assert!(matched > 0, "no .deflate fixtures matched");
-}
-
-#[test]
-#[ignore = "offline Chromium hash/profile comparison; requires selected raw .deflate fixtures"]
-fn diagnose_chromium_profiles() {
-    let filter = std::env::var("PREFLATE_DIAGNOSTICS_FILTER").unwrap_or_default();
-    let mut matched = 0;
-    for entry in std::fs::read_dir(fixture_directory()).unwrap() {
-        let file = entry.unwrap().path();
-        if !file.extension().is_some_and(|ext| ext == "deflate") {
-            continue;
-        }
-        let name = file.file_stem().unwrap().to_string_lossy();
-        if !name.contains(&filter) {
-            continue;
-        }
-        matched += 1;
-        let compressed = std::fs::read(&file).unwrap();
-        let (contents, plain) = parse_deflate_whole(&compressed).unwrap();
-        assert_eq!(contents.compressed_size, compressed.len());
-        let baseline = estimate_preflate_parameters(&contents, &plain).unwrap();
-        for hash_mask in [0x7fff, 0xffff] {
-            for config in &SLOW_PREFLATE_PARSER_SETTINGS {
-                let parameters = {
-                    let mut canonical_configuration = baseline;
-                    canonical_configuration
-                        .set_hash_algorithm(HashAlgorithm::Chromium { hash_mask });
-                    canonical_configuration.set_insertion(DictionaryAddPolicy::AddAll);
-                    canonical_configuration.set_nice_length(config.nice_length);
-                    canonical_configuration.set_max_chain(config.max_chain);
-                    canonical_configuration.set_short_match_cutoff(4096);
-                    canonical_configuration.set_matching_type(config.parser.matching_type());
-                    canonical_configuration
-                };
-                let trial =
-                    match measure_with_tracking(&contents, &plain, &parameters, false, false, 4096)
-                    {
-                        Ok(trial) => trial,
-                        Err(error)
-                            if matches!(
-                                error.exit_code(),
-                                ExitCode::MatchNotFound | ExitCode::PredictionFailure
-                            ) =>
-                        {
-                            println!(
-                                "CHROMIUM_REJECTED {name}: params={parameters:?} error={error:?}"
-                            );
-                            continue;
-                        }
-                        Err(error) => panic!("{name}: {parameters:?}: {error:?}"),
-                    };
-                verify(&trial, &plain, &compressed);
-                let shape = |token: DeflateToken| match token {
-                    DeflateToken::Literal(_) => (0, 0),
-                    DeflateToken::Reference(reference) => (reference.len(), reference.dist()),
-                };
-                let first: Vec<_> = trial
-                    .trace
-                    .first_mismatches
-                    .iter()
-                    .take(8)
-                    .map(|&(offset, actual, predicted)| (offset, shape(actual), shape(predicted)))
-                    .collect();
-                println!(
-                    "CHROMIUM {name}: bytes={} mismatches={} params={parameters:?} first={first:?}",
-                    trial.corrections.len(),
-                    trial.trace.mismatch_count
-                );
-            }
         }
     }
     assert!(matched > 0, "no .deflate fixtures matched");
@@ -4905,14 +4779,14 @@ fn oracle_search(compressed: &[u8]) -> serde_json::Value {
             );
         }
     }
-    let mut seen = HashSet::from([bitcode::encode(&baseline)]);
+    let mut seen = HashSet::from([crate::parameter_codec::encode_parameters(&baseline)]);
     let mut scored = 1;
     let mut evaluated = 1;
     let mut rejected = 0;
     for stage in 0..2 {
         let mut ranked = Vec::new();
         for parameters in candidates.drain(..) {
-            if !seen.insert(bitcode::encode(&parameters)) {
+            if !seen.insert(crate::parameter_codec::encode_parameters(&parameters)) {
                 continue;
             }
             let (errors, _) = crate::estimator::test_support::score_predictions(
@@ -5088,120 +4962,6 @@ fn noncanonical_insertion_refinement_requires_a_perfect_prefix_and_roundtrips() 
         ),
         selected
     );
-}
-
-#[test]
-#[ignore = "bounded release replay; requires PREFLATE_REPLAY_MANIFEST and PREFLATE_REPLAY_RESULTS"]
-fn diagnose_selected_streams() {
-    use std::io::Read;
-
-    let files: Vec<std::path::PathBuf> = serde_json::from_slice(
-        &std::fs::read(std::env::var_os("PREFLATE_REPLAY_MANIFEST").unwrap()).unwrap(),
-    )
-    .unwrap();
-    assert!(!files.is_empty() && files.len() <= 512);
-    let start = std::time::Instant::now();
-    let mut rows = Vec::new();
-    for file in files {
-        let mut compressed = Vec::new();
-        std::fs::File::open(&file)
-            .unwrap()
-            .take(8 * 1024 * 1024 + 1)
-            .read_to_end(&mut compressed)
-            .unwrap();
-        assert!(compressed.len() <= 8 * 1024 * 1024);
-        let mut parser = crate::deflate::deflate_reader::DeflateParser::new(8 * 1024 * 1024);
-        let contents = parser.parse(&compressed).unwrap();
-        assert!(parser.is_done(), "incomplete or oversized stream: {file:?}");
-        let plain = parser.detach_plain_text();
-        assert_eq!(contents.compressed_size, compressed.len());
-        let params = estimate_preflate_parameters(&contents, &plain).unwrap();
-        let measured = measure_normalized(&contents, &plain, &params)
-            .unwrap_or_else(|error| panic!("{file:?}: {params:?}: {error:?}"));
-        verify(&measured, &plain, &compressed);
-        rows.push(serde_json::json!({
-            "file": file,
-            "deflate_bytes": compressed.len(),
-            "reconstruction_bytes": measured.corrections.len(),
-            "correction_coded_bytes": measured.cabac_size,
-            "mismatches": measured.trace.mismatch_count,
-            "first_mismatches": measured.trace.first_mismatches.iter()
-                .map(|(offset, actual, predicted)| serde_json::json!({
-                    "offset": offset,
-                    "actual": format!("{actual:?}"),
-                    "predicted": format!("{predicted:?}"),
-                })).collect::<Vec<_>>(),
-            "parameters": format!("{params:?}"),
-        }));
-    }
-    let output = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(std::env::var_os("PREFLATE_REPLAY_RESULTS").unwrap())
-        .unwrap();
-    serde_json::to_writer(
-        output,
-        &serde_json::json!({
-            "rows": rows, "wall_seconds": start.elapsed().as_secs_f64(),
-        }),
-    )
-    .unwrap();
-}
-
-#[test]
-#[ignore = "bounded token boundary trace; requires PREFLATE_REFERENCE"]
-fn diagnose_prediction_boundary() {
-    use std::io::Read;
-
-    let path = std::env::var_os("PREFLATE_REFERENCE").expect("set PREFLATE_REFERENCE");
-    let mut compressed = Vec::new();
-    std::fs::File::open(path)
-        .unwrap()
-        .take(8 * 1024 * 1024 + 1)
-        .read_to_end(&mut compressed)
-        .unwrap();
-    assert!(compressed.len() <= 8 * 1024 * 1024);
-    let mut parser = crate::deflate::deflate_reader::DeflateParser::new(8 * 1024 * 1024);
-    let contents = parser.parse(&compressed).unwrap();
-    assert!(parser.is_done());
-    let plain = parser.detach_plain_text();
-    let parameters = estimate_preflate_parameters(&contents, &plain).unwrap();
-    let measured =
-        measure_with_tracking(&contents, &plain, &parameters, false, false, 8192).unwrap();
-    verify(&measured, &plain, &compressed);
-    println!("BOUNDARY parameters={parameters:?}");
-    print_measurement("BOUNDARY", &measured, compressed.len());
-    for (offset, actual, predicted) in measured.trace.first_mismatches.iter().take(32) {
-        println!("BOUNDARY offset={offset} actual={actual:?} predicted={predicted:?}");
-    }
-    let mut position = 0;
-    for (index, block) in contents.blocks.iter().enumerate() {
-        let start = position;
-        match &block.block_type {
-            DeflateTokenBlockType::Huffman { tokens, .. } => {
-                for token in tokens {
-                    position += match token {
-                        DeflateToken::Literal(_) => 1,
-                        DeflateToken::Reference(reference) => reference.len(),
-                    };
-                }
-                let errors = measured
-                    .trace
-                    .first_mismatches
-                    .iter()
-                    .filter(|entry| (start..position).contains(&entry.0))
-                    .count();
-                println!(
-                    "BOUNDARY block={index} start={start} end={position} tokens={} sampled_errors={errors}",
-                    tokens.len()
-                );
-            }
-            DeflateTokenBlockType::Stored { uncompressed } => {
-                position += uncompressed.len() as u32;
-                println!("BOUNDARY stored={index} start={start} end={position}");
-            }
-        }
-    }
 }
 
 #[test]
@@ -5504,7 +5264,7 @@ fn sweep_compressor_parameters() {
     let mut ranked = Vec::new();
     for stage in 0..3 {
         for candidate in candidates.drain(..) {
-            if !seen.insert(bitcode::encode(&candidate)) {
+            if !seen.insert(crate::parameter_codec::encode_parameters(&candidate)) {
                 continue;
             }
             let (mismatches, tokens) = crate::estimator::test_support::score_predictions(
@@ -5553,7 +5313,7 @@ fn sweep_compressor_parameters() {
         if verified_count >= 64 {
             break;
         }
-        if !measured.insert(bitcode::encode(&candidate)) {
+        if !measured.insert(crate::parameter_codec::encode_parameters(&candidate)) {
             continue;
         }
         let score = ranked.iter().find(|row| row.1 == candidate).unwrap().0;
@@ -6148,117 +5908,6 @@ fn benchmark_prediction_throughput() {
             elapsed * 1000.0 / iterations as f64
         );
     }
-}
-
-// Poor ratios need attributable token/tree diagnostics rather than blind parameter changes.
-// This manual harness verifies supported baselines and accepted trials before reporting them.
-#[test]
-#[ignore = "run export_compression_diagnostics first; optionally filter or sweep parameters"]
-fn diagnose_compression() {
-    let directory = fixture_directory();
-    let filter = std::env::var("PREFLATE_DIAGNOSTICS_FILTER").unwrap_or_default();
-    let sweep = std::env::var_os("PREFLATE_DIAGNOSTICS_SWEEP").is_some();
-    let mut files: Vec<_> = std::fs::read_dir(&directory)
-        .expect("run the root export_compression_diagnostics test first")
-        .map(|entry| entry.unwrap().path())
-        .filter(|path| {
-            path.extension().is_some_and(|ext| ext == "deflate")
-                && path
-                    .file_stem()
-                    .unwrap()
-                    .to_string_lossy()
-                    .contains(&filter)
-        })
-        .collect();
-    files.sort();
-    assert!(
-        !files.is_empty(),
-        "no .deflate fixtures matched in {}",
-        directory.display()
-    );
-    let mut ranking = Vec::new();
-    let mut unsupported = 0;
-    for file in files {
-        let name = file.file_stem().unwrap().to_string_lossy();
-        let compressed = std::fs::read(&file).unwrap();
-        let (contents, plain_text) = parse_deflate_whole(&compressed)
-            .unwrap_or_else(|error| panic!("{}: {error:?}", file.display()));
-        assert_eq!(contents.compressed_size, compressed.len());
-        let params = match estimate_preflate_parameters(&contents, &plain_text) {
-            Ok(params) => params,
-            Err(error) if error.exit_code() == ExitCode::NoCompressionCandidates => {
-                println!("UNSUPPORTED {name}: {error:?}");
-                unsupported += 1;
-                continue;
-            }
-            Err(error) => panic!("{name}: {error:?}"),
-        };
-        let baseline = measure(&contents, &plain_text, &params)
-            .unwrap_or_else(|error| panic!("{name}: {error:?}"));
-        verify(&baseline, &plain_text, &compressed);
-        println!(
-            "\n{name}: plaintext={}, deflate={}, blocks={}, params={params:?}",
-            plain_text.len(),
-            compressed.len(),
-            contents.blocks.len()
-        );
-        print_measurement("BASELINE", &baseline, compressed.len());
-        print_details(&baseline);
-        ranking.push((
-            name.into_owned(),
-            baseline.corrections.len(),
-            compressed.len(),
-        ));
-        if !sweep || params.max_chain() == 0 {
-            continue;
-        }
-        let mut best = baseline;
-        let mut best_params = params;
-        let observed_min_len = extract_preflate_info(&contents.blocks).min_len;
-        for candidate in parameter_variants(params, observed_min_len, false) {
-            match measure(&contents, &plain_text, &candidate) {
-                Ok(measurement) => {
-                    verify(&measurement, &plain_text, &compressed);
-                    println!(
-                        "  ISOLATED match={:?} nice={} chain={}",
-                        candidate.matching_type(),
-                        candidate.nice_length(),
-                        candidate.max_chain()
-                    );
-                    print_measurement("  RESULT", &measurement, compressed.len());
-                    if measurement.corrections.len() < best.corrections.len() {
-                        best = measurement;
-                        best_params = candidate;
-                    }
-                }
-                Err(error) => println!("  REJECTED {candidate:?}: {error:?}"),
-            }
-        }
-        for candidate in parameter_variants(params, observed_min_len, true) {
-            match measure(&contents, &plain_text, &candidate) {
-                Ok(measurement) => {
-                    if measurement.corrections.len() < best.corrections.len() {
-                        verify(&measurement, &plain_text, &compressed);
-                        best = measurement;
-                        best_params = candidate;
-                    }
-                }
-                Err(error) => println!("  REJECTED {candidate:?}: {error:?}"),
-            }
-        }
-        println!("BEST TESTED params={best_params:?}");
-        print_measurement("BEST TESTED", &best, compressed.len());
-        print_details(&best);
-    }
-    ranking.sort_by(|a, b| (b.1 as u128 * a.2 as u128).cmp(&(a.1 as u128 * b.2 as u128)));
-    println!("\nOverhead ranking (corrections / original deflate bytes):");
-    for (name, corrections, compressed) in ranking {
-        println!(
-            "{name}: {corrections}/{compressed} = {:.3}%",
-            100.0 * corrections as f64 / compressed as f64
-        );
-    }
-    println!("Unsupported streams: {unsupported}");
 }
 
 // The isolation harness must measure the real format without changing predictor behavior.
@@ -7915,14 +7564,18 @@ fn typed_parameters_normalize_and_roundtrip() {
     assert!(contents.compressed_size < 1024);
     let mut predictor =
         TokenPredictor::from_parameters(&crate::token_predictor::tests::zlib_level_1_params());
-    let original = bitcode::encode(&predictor.reconstruction_parameters());
+    let original =
+        crate::parameter_codec::encode_parameters(&predictor.reconstruction_parameters());
     let encoded = encode_first_chunk(&mut predictor, &contents, &plain, true, None).unwrap();
     let record = ReconstructionData::read(&encoded).unwrap();
-    assert_ne!(original, bitcode::encode(&record.parameters));
+    assert_ne!(
+        original,
+        crate::parameter_codec::encode_parameters(&record.parameters)
+    );
     let decoder = TokenPredictor::from_reconstruction_parameters(record.parameters);
     assert_eq!(
-        bitcode::encode(&decoder.reconstruction_parameters()),
-        bitcode::encode(&record.parameters)
+        crate::parameter_codec::encode_parameters(&decoder.reconstruction_parameters()),
+        crate::parameter_codec::encode_parameters(&record.parameters)
     );
     assert_eq!(
         recreate_whole_deflate_stream(plain.text(), &encoded).unwrap(),
@@ -7938,10 +7591,7 @@ fn reconstruction_data_version() {
     let (r, plain_text) = preflate_whole_deflate_stream(&v, &PreflateConfig::default()).unwrap();
     assert_eq!(r.corrections[0], RECONSTRUCTION_DATA_VERSION);
 
-    let parsed = InspectedReconstructionData::read(&r.corrections).unwrap();
-
-    // blobs written before the version byte existed are plain bitcode
-    let unversioned = bitcode::encode(&parsed);
+    let unversioned = &r.corrections[1..];
     let mut wrong_version = r.corrections.clone();
     wrong_version[0] = RECONSTRUCTION_DATA_VERSION + 1;
     let mut previous_version = r.corrections.clone();
@@ -7952,7 +7602,7 @@ fn reconstruction_data_version() {
     previous_flat[0] = 0x83;
 
     for bad in [
-        &unversioned[..],
+        unversioned,
         &wrong_version[..],
         &previous_version[..],
         &previous_models[..],
