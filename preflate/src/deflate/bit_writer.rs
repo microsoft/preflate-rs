@@ -4,6 +4,9 @@
  *  This software incorporates material from third parties. See NOTICE.txt for details.
  *--------------------------------------------------------------------------------------------*/
 
+//! Least-significant-bit-first output for DEFLATE reconstruction.
+//! Packs variable-width codes into bytes and restores the original boundary padding.
+
 /// Used to write a variable number of bits to a byte buffer.
 #[derive(Debug, Default)]
 pub struct BitWriter {
@@ -46,64 +49,69 @@ impl BitWriter {
     }
 }
 
-// write a fixed pattern and see if it matches the expected fixed output
-#[test]
-fn write_simple() {
-    let mut b = BitWriter::default();
-    let mut data_buffer = Vec::new();
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    b.write(1, 4, &mut data_buffer);
-    b.write(2, 4, &mut data_buffer);
-    b.write(3, 4, &mut data_buffer);
-    b.write(4, 4, &mut data_buffer);
-    b.write(4, 4, &mut data_buffer);
-    b.write(0x56, 8, &mut data_buffer);
-    b.write(0x78, 8, &mut data_buffer);
-    b.write(0x9f, 8, &mut data_buffer);
-    b.write(0xfe, 8, &mut data_buffer);
-    b.write(0xe, 4, &mut data_buffer);
+    // write a fixed pattern and see if it matches the expected fixed output
+    #[test]
+    fn write_simple() {
+        let mut b = BitWriter::default();
+        let mut data_buffer = Vec::new();
 
-    b.flush_whole_bytes(&mut data_buffer);
+        b.write(1, 4, &mut data_buffer);
+        b.write(2, 4, &mut data_buffer);
+        b.write(3, 4, &mut data_buffer);
+        b.write(4, 4, &mut data_buffer);
+        b.write(4, 4, &mut data_buffer);
+        b.write(0x56, 8, &mut data_buffer);
+        b.write(0x78, 8, &mut data_buffer);
+        b.write(0x9f, 8, &mut data_buffer);
+        b.write(0xfe, 8, &mut data_buffer);
+        b.write(0xe, 4, &mut data_buffer);
 
-    assert_eq!(data_buffer[..], [0x21, 0x43, 0x64, 0x85, 0xf7, 0xe9, 0xef]);
-}
+        b.flush_whole_bytes(&mut data_buffer);
 
-/// write various bit patterns and see if the result matches the input
-#[test]
-fn write_roundtrip() {
-    use super::bit_reader::{BitReader, ReadBits};
-
-    let mut b = BitWriter::default();
-    let mut data_buffer = Vec::new();
-
-    let pattern = [
-        (0, 1),
-        (1, 1),
-        (1, 2),
-        (2, 3),
-        (3, 4),
-        (4, 5),
-        (4, 6),
-        (0x156, 9),
-        (0x78, 8),
-        (0x9f, 8),
-        (0xfe, 8),
-        (0x7fff, 15),
-        (0xffff, 16),
-        (0xe, 4),
-    ];
-
-    for &(bits, len) in pattern.iter() {
-        b.write(bits, len, &mut data_buffer);
+        assert_eq!(data_buffer[..], [0x21, 0x43, 0x64, 0x85, 0xf7, 0xe9, 0xef]);
     }
 
-    b.pad(0, &mut data_buffer);
-    b.flush_whole_bytes(&mut data_buffer);
+    /// write various bit patterns and see if the result matches the input
+    #[test]
+    fn write_roundtrip() {
+        use super::super::bit_reader::{BitReader, ReadBits};
 
-    let mut cursor = std::io::Cursor::new(data_buffer);
-    let mut reader = BitReader::new();
+        let mut b = BitWriter::default();
+        let mut data_buffer = Vec::new();
 
-    for &(bits, len) in pattern.iter() {
-        assert_eq!(reader.get(len, &mut cursor).unwrap(), bits);
+        let pattern = [
+            (0, 1),
+            (1, 1),
+            (1, 2),
+            (2, 3),
+            (3, 4),
+            (4, 5),
+            (4, 6),
+            (0x156, 9),
+            (0x78, 8),
+            (0x9f, 8),
+            (0xfe, 8),
+            (0x7fff, 15),
+            (0xffff, 16),
+            (0xe, 4),
+        ];
+
+        for &(bits, len) in pattern.iter() {
+            b.write(bits, len, &mut data_buffer);
+        }
+
+        b.pad(0, &mut data_buffer);
+        b.flush_whole_bytes(&mut data_buffer);
+
+        let mut cursor = std::io::Cursor::new(data_buffer);
+        let mut reader = BitReader::new();
+
+        for &(bits, len) in pattern.iter() {
+            assert_eq!(reader.get(len, &mut cursor).unwrap(), bits);
+        }
     }
 }

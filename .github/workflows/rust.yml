@@ -5,8 +5,12 @@ on:
     branches: [ "main", "release/*" ]
   pull_request:
 
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
+  RUSTDOCFLAGS: "-D warnings"
 
 jobs:
   build:
@@ -26,6 +30,24 @@ jobs:
     - name: Build debug
       run: cargo build --verbose --locked --all
     - name: Run tests
-      run: cargo test --verbose --all
+      run: cargo test --verbose --locked --release --workspace --all-features
+    - name: Check Clippy
+      run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+    - name: Check minimal container features
+      run: cargo clippy --locked -p preflate-container --no-default-features --all-targets -- -D warnings
+    - name: Check minimal core features
+      run: cargo clippy --locked -p preflate-rs --no-default-features --all-targets -- -D warnings
+    - name: Build API documentation
+      run: cargo doc --locked --workspace --all-features --no-deps
     - name: Build release
       run: cargo build --verbose --locked --release --all
+
+  msrv:
+    runs-on: windows-latest
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+    - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+      with:
+        toolchain: "1.89.0"
+    - name: Check minimum supported Rust
+      run: cargo check --locked --workspace --all-targets --all-features

@@ -1,7 +1,16 @@
+//! Extraction and reconstruction of PNG IDAT streams.
+//!
+//! PNG splits a single zlib stream across IDAT chunks, inserting length fields,
+//! chunk tags, and CRCs between parts of the compressed data. Parsing joins the
+//! payloads so the DEFLATE processor can see a contiguous stream.
+//!
+//! Chunk sizes, the zlib header, Adler-32 checksum, and available image metadata
+//! are stored for reassembly. Reconstruction restores the chunk boundaries and
+//! recalculates their CRCs instead of treating the joined payload as a new PNG.
+
 use std::io::{Read, Write};
 
 use byteorder::{ReadBytesExt, WriteBytesExt};
-
 use preflate_rs::{ExitCode, Result, err_exit_code};
 
 use crate::container_common::{read_varint, write_varint};
@@ -92,31 +101,6 @@ impl IdatContents {
     }
 }
 
-/// test that we can read and write the serialized info
-#[test]
-fn test_idat_header_roundtrip() {
-    let idat = IdatContents {
-        chunk_sizes: vec![1, 2, 30000],
-        zlib_header: [4, 5],
-        total_chunk_length: 1 + 2 + 30000 + 2 + 4,
-        addler32: 0x12345678,
-        png_header: Some(PngHeader {
-            width: 5,
-            height: 5,
-            color_type: PngColorType::RGB,
-        }),
-    };
-
-    let mut buffer = Vec::new();
-    idat.write_to_bytestream(&mut buffer).unwrap();
-
-    let mut cur = std::io::Cursor::new(&buffer);
-
-    let idat2 = IdatContents::read_from_bytestream(&mut cur).unwrap();
-
-    assert_eq!(idat, idat2);
-}
-
 #[derive(Debug, PartialEq, Copy, Clone)]
 pub struct PngHeader {
     pub width: u32,
@@ -127,19 +111,19 @@ pub struct PngHeader {
 #[derive(Debug, PartialEq, Copy, Clone)]
 pub enum PngColorType {
     // Grayscale = 0,
-    RGB = 2,
+    Rgb = 2,
     // 3 = Pallete not supported
     //GrayscaleAlpha = 4,
-    RGBA = 6,
+    Rgba = 6,
 }
 
 impl PngColorType {
     fn parse(byte: u8) -> Option<Self> {
         match byte {
             //0 => Some(PngColorType::Grayscale),
-            2 => Some(PngColorType::RGB),
+            2 => Some(PngColorType::Rgb),
             //4 => Some(PngColorType::GrayscaleAlpha),
-            6 => Some(PngColorType::RGBA),
+            6 => Some(PngColorType::Rgba),
             _ => None,
         }
     }
@@ -148,9 +132,9 @@ impl PngColorType {
     pub fn bytes_per_pixel(&self) -> usize {
         match self {
             //PngColorType::Grayscale => 1,
-            PngColorType::RGB => 3,
+            PngColorType::Rgb => 3,
             //PngColorType::GrayscaleAlpha => 2,
-            PngColorType::RGBA => 4,
+            PngColorType::Rgba => 4,
         }
     }
 }
@@ -184,7 +168,7 @@ pub fn parse_ihdr(ihdr_chunk: &[u8]) -> Result<PngHeader> {
         })
     } else {
         log::debug!("IHDR unsupported color type {}", ihdr_data[9]);
-        return err_exit_code(ExitCode::InvalidIDat, "IHDR unsupported color type");
+        err_exit_code(ExitCode::InvalidIDat, "IHDR unsupported color type")
     }
 }
 
@@ -412,8 +396,7 @@ pub fn apply_png_filters_with_types(
     let mut rgba = vec![0u8; target_stride];
     let mut encoded = vec![0u8; target_stride];
 
-    for row in 0..height {
-        let filter_type = filter_types[row];
+    for (row, &filter_type) in filter_types[..height].iter().enumerate() {
         let offset = row * source_stride;
 
         let scanline = if source_bbp == 3 && target_bpp == 4 {
@@ -478,60 +461,91 @@ fn process_line(
     }
 }
 
-#[test]
-fn parse_and_recreate_png() {
-    let f = crate::utils::read_file("treegdi.png");
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    // we know the first IDAT chunk starts at 83 (avoid testing the scan_deflate code in a unit test)
-    let (idat_contents, deflate_stream) =
-        parse_idat(Some(parse_ihdr(&f[8..8 + 8 + 13]).unwrap()), &f[83..]).unwrap();
+    /// test that we can read and write the serialized info
+    #[test]
+    fn test_idat_header_roundtrip() {
+        let idat = IdatContents {
+            chunk_sizes: vec![1, 2, 30000],
+            zlib_header: [4, 5],
+            total_chunk_length: 1 + 2 + 30000 + 2 + 4,
+            addler32: 0x12345678,
+            png_header: Some(PngHeader {
+                width: 5,
+                height: 5,
+                color_type: PngColorType::Rgb,
+            }),
+        };
 
-    println!("locations found: {:?}", idat_contents);
-    assert_eq!(idat_contents.chunk_sizes, [65445, 65524, 40164]);
-    assert_eq!(idat_contents.zlib_header, [120, 94]);
+        let mut buffer = Vec::new();
+        idat.write_to_bytestream(&mut buffer).unwrap();
 
-    let contents = miniz_oxide::inflate::decompress_to_vec(&deflate_stream).unwrap();
-    assert_eq!(
-        adler32::adler32(std::io::Cursor::new(&contents)).unwrap(),
-        idat_contents.addler32
-    );
+        let mut cur = std::io::Cursor::new(&buffer);
 
-    let total_chunk_length = idat_contents.total_chunk_length;
+        let idat2 = IdatContents::read_from_bytestream(&mut cur).unwrap();
 
-    let mut recreated = Vec::new();
-    recreate_idat(&idat_contents, &deflate_stream, &mut recreated).unwrap();
-
-    assert_eq!(total_chunk_length, recreated.len());
-
-    assert!(f[83..83 + total_chunk_length] == recreated);
-}
-
-#[test]
-fn test_png_filter_round_trip_with_explicit_filters() {
-    let width = 6;
-    let height = 5;
-    let bpp = 3;
-    let mut bitmap = vec![0u8; width * height * bpp];
-
-    for (i, byte) in bitmap.iter_mut().enumerate() {
-        *byte = (i % 256) as u8;
+        assert_eq!(idat, idat2);
     }
 
-    // Encode using all filter types
-    // 0 = None, 1 = Sub, 2 = Up, 3 = Average, 4 = Paeth
-    let filter_types = [0, 1, 2, 3, 4].to_vec();
-    let filtered = apply_png_filters_with_types(&bitmap, width, height, bpp, bpp, &filter_types);
+    #[test]
+    fn parse_and_recreate_png() {
+        let f = crate::utils::tests::read_file("treegdi.png");
 
-    // Decode and extract actual used filters
-    let (decoded, extracted_filters) = undo_png_filters(&filtered, width, height, bpp);
-    assert_eq!(bitmap, decoded, "Decoding did not recover original bitmap");
-    assert_eq!(filter_types, extracted_filters, "Filter tracking mismatch");
+        // we know the first IDAT chunk starts at 83 (avoid testing the scan_deflate code in a unit test)
+        let (idat_contents, deflate_stream) =
+            parse_idat(Some(parse_ihdr(&f[8..8 + 8 + 13]).unwrap()), &f[83..]).unwrap();
 
-    // Re-encode using extracted filters
-    let reencoded =
-        apply_png_filters_with_types(&decoded, width, height, bpp, bpp, &extracted_filters);
-    assert_eq!(
-        filtered, reencoded,
-        "Re-encoding did not match original filtered data"
-    );
+        println!("locations found: {:?}", idat_contents);
+        assert_eq!(idat_contents.chunk_sizes, [65445, 65524, 40164]);
+        assert_eq!(idat_contents.zlib_header, [120, 94]);
+
+        let contents = miniz_oxide::inflate::decompress_to_vec(&deflate_stream).unwrap();
+        assert_eq!(
+            adler32::adler32(std::io::Cursor::new(&contents)).unwrap(),
+            idat_contents.addler32
+        );
+
+        let total_chunk_length = idat_contents.total_chunk_length;
+
+        let mut recreated = Vec::new();
+        recreate_idat(&idat_contents, &deflate_stream, &mut recreated).unwrap();
+
+        assert_eq!(total_chunk_length, recreated.len());
+
+        assert!(f[83..83 + total_chunk_length] == recreated);
+    }
+
+    #[test]
+    fn test_png_filter_round_trip_with_explicit_filters() {
+        let width = 6;
+        let height = 5;
+        let bpp = 3;
+        let mut bitmap = vec![0u8; width * height * bpp];
+
+        for (i, byte) in bitmap.iter_mut().enumerate() {
+            *byte = (i % 256) as u8;
+        }
+
+        // Encode using all filter types
+        // 0 = None, 1 = Sub, 2 = Up, 3 = Average, 4 = Paeth
+        let filter_types = [0, 1, 2, 3, 4].to_vec();
+        let filtered =
+            apply_png_filters_with_types(&bitmap, width, height, bpp, bpp, &filter_types);
+
+        // Decode and extract actual used filters
+        let (decoded, extracted_filters) = undo_png_filters(&filtered, width, height, bpp);
+        assert_eq!(bitmap, decoded, "Decoding did not recover original bitmap");
+        assert_eq!(filter_types, extracted_filters, "Filter tracking mismatch");
+
+        // Re-encode using extracted filters
+        let reencoded =
+            apply_png_filters_with_types(&decoded, width, height, bpp, bpp, &extracted_filters);
+        assert_eq!(
+            filtered, reencoded,
+            "Re-encoding did not match original filtered data"
+        );
+    }
 }

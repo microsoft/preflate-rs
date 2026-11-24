@@ -8,7 +8,7 @@ This crate handles real-world binary files that contain embedded DEFLATE streams
 
 ## Features
 
-- Detects and processes raw DEFLATE, zlib-wrapped, PNG IDAT, ZIP, and JPEG streams
+- Detects DEFLATE through zlib, gzip, PNG IDAT and ZIP signatures, and processes JPEG files
 - Optionally re-encodes PNG images as lossless WebP for additional savings
 - JPEG files are re-compressed using [Lepton](https://github.com/microsoft/lepton_jpeg_rust)
 - Non-DEFLATE bytes are passed through as literal blocks
@@ -41,14 +41,17 @@ Both processors implement the `ProcessBuffer` trait for incremental use:
 use preflate_container::{PreflateContainerProcessor, RecreateContainerProcessor, ProcessBuffer};
 
 // Compression
-let mut compressor = PreflateContainerProcessor::new(&config);
+let mut compressor = PreflateContainerProcessor::new(&config, 9, false);
 compressor.process_buffer(&input_chunk, input_complete, &mut output)?;
 let stats = compressor.stats();
 
 // Decompression
-let mut decompressor = RecreateContainerProcessor::new();
+let mut decompressor = RecreateContainerProcessor::new(128 * 1024 * 1024);
 decompressor.process_buffer(&container_chunk, input_complete, &mut output)?;
 ```
+
+Whole-file helpers read the entire input into memory. Use the streaming processors
+or `ProcessBuffer::copy_to_end` for bounded input processing.
 
 ### DLL / fixed-size output buffer
 
@@ -79,7 +82,7 @@ pub struct PreflateContainerConfig {
     /// as literals. Default: 64 MB.
     pub max_chunk_size: usize,
 
-    /// Global cap on total plaintext held in memory. Default: 512 MB.
+    /// Global cap on total plaintext processed, not simultaneous memory. Default: 512 MB.
     pub total_plain_text_limit: u64,
 
     /// Per-chunk plaintext memory limit. Default: 128 MB.
@@ -110,7 +113,10 @@ pub struct PreflateStats {
 
 ## Container Format
 
-The output is a self-describing binary format (version 3). Version 3 uses the 0.8 corrections format, including explicit reference distances; version 2 containers are incompatible and rejected. Framing bytes are written raw; block payloads go through a single persistent Zstd encoder:
+The output is a self-describing binary format (version 3). Version 3 uses the
+developing 0.8 corrections format described in the [core README](../preflate/README.md#encoding-format);
+versions 1 and 2 are incompatible and rejected. Framing bytes are written raw;
+Zstd-compressed block payloads share a single persistent encoder:
 
 ```
 [0x03]                           ← format version byte
@@ -119,6 +125,8 @@ For each block:
   [type_byte]                    ← block kind + compression flag
   [varint: content_length]
   [content_bytes]                ← Zstd-compressed or raw, depending on type
+
+[0xFF] [crc32_le: 4 bytes]       ← final CRC-32 of original input, no length varint
 ```
 
 Block types:
@@ -132,7 +140,11 @@ Block types:
 | JPEG/Lepton | Lepton-recompressed JPEG (raw, bypasses Zstd) |
 | WebP | PNG stored as lossless WebP (raw, bypasses Zstd) |
 
-The Zstd encoder is flushed after each block payload so each block is independently decodable, while the persistent encoder context maintains cross-block history for better compression.
+The Zstd encoder is flushed after each block payload. Decode flush segments in
+sequence with the persistent decoder: they depend on preceding history and are
+not independently decodable frames.
+The final raw CRC block verifies the reconstructed output.
+See [AGENTS.md](AGENTS.md) for the wire layout and finalization rules.
 
 ## Stream Detection
 
@@ -145,12 +157,28 @@ The scanner (`scan_deflate.rs`) identifies DEFLATE stream boundaries by looking 
 - **JPEG markers** — SOI/APP0 structure
 
 Non-DEFLATE regions between streams are emitted as literal blocks.
+The compression scanner does not discover unwrapped raw DEFLATE in arbitrary
+data; wrapper bytes are preserved outside the transformed payload.
+
+## Diagnostics
+
+`scan_deflate_diagnostics` and `scan_deflate_diagnostics_with_options` analyze
+wrapper signatures without Zstd, WebP or Lepton. Raw mode instead attempts one
+DEFLATE stream at offset zero. Candidate and plaintext limits bound the work;
+the callback receives successful streams and failures, including possible
+signature false positives. Verification follows `PreflateConfig::verify_compression`.
+
+The optional `diagnostics` feature adds bounded traces and
+`diagnostic_deflate_payload`, which extracts a saved payload range or assembles
+PNG IDAT chunks. The [scanner CLI](../README.md#scanning-a-document-corpus-sqlite-and-json-diagnostics-no-zstd)
+uses these APIs for read-only reports.
 
 ## Feature Flags
 
 | Feature | Default | Description |
 |---|---|---|
 | `webp` | enabled | Re-encode PNG images as lossless WebP |
+| `diagnostics` | disabled | Detailed traces and saved-payload extraction; enables core diagnostics |
 
 ## Constraints
 

@@ -3,12 +3,17 @@
 libfuzzer harnesses for the preflate-rs workspace.
 
 These targets feed arbitrary bytes into the core and container APIs to find crashes, panics, or round-trip failures. Fuzzing requires nightly Rust.
+Install `cargo-fuzz` before running the commands below.
 
 ## Targets
 
 ### `fuzz_target_1` — core round-trip
 
-Feeds arbitrary bytes to `preflate_whole_deflate_stream` as a raw DEFLATE stream. If analysis succeeds, the result is immediately fed to `recreate_whole_deflate_stream` and the output must match the input exactly.
+Feeds arbitrary bytes to `preflate_whole_deflate_stream` as a raw DEFLATE stream.
+If analysis succeeds, the result is immediately fed to
+`recreate_whole_deflate_stream`. Default analysis configuration verifies exact
+reconstruction of the consumed DEFLATE bytes; bytes trailing the stream are not
+part of that check.
 
 ```rust
 fuzz_target!(|data: &[u8]| {
@@ -50,3 +55,12 @@ cargo +nightly fuzz run fuzz_target_1 -- -runs=1000000
 ## Corpus and Artifacts
 
 Crash inputs and corpus entries are stored under `fuzz/artifacts/` and `fuzz/corpus/` respectively (both gitignored). To seed the corpus with real files, copy them into the appropriate corpus directory before running.
+
+Generate synthetic seeds with the separate [corpus tooling](../corpus/README.md):
+
+```shell
+uv run --locked corpus/gen_fuzz.py
+```
+
+The default output is `fuzz/corpus/fuzz_container/`. Keep private inputs and
+generated seeds out of commits.

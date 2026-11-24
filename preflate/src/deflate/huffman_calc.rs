@@ -4,11 +4,16 @@
  *  This software incorporates material from third parties. See NOTICE.txt for details.
  *--------------------------------------------------------------------------------------------*/
 
+//! Huffman code-length calculation using compressor-specific tree-building rules.
+//! Reproduces symbol ordering and tie-breaking differences to reduce tree corrections.
+
 #[allow(dead_code)]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum HufftreeBitCalc {
     Zlib,
     Miniz,
+    ZlibCorrected,
+    Floyd,
 }
 
 /// Calculates the Huffman bit lengths for a given distribution of symbols.
@@ -26,10 +31,18 @@ pub fn calc_bit_lengths(
     match bit_calc {
         HufftreeBitCalc::Zlib => calc_zlib::calc_bit_lengths(sym_count, code_size_limit),
         HufftreeBitCalc::Miniz => calc_minzoxide::calc_bit_lengths(sym_count, code_size_limit),
+        HufftreeBitCalc::ZlibCorrected => {
+            calc_zlib::calc_bit_lengths_with_heap(sym_count, code_size_limit, false, true)
+        }
+        HufftreeBitCalc::Floyd => {
+            calc_zlib::calc_bit_lengths_with_heap(sym_count, code_size_limit, true, true)
+        }
     }
 }
 
 mod calc_minzoxide {
+    //! Miniz-compatible construction of length-limited Huffman trees.
+
     use std::mem;
 
     const MAX_SUPPORTED_HUFF_CODESIZE: usize = 32;
@@ -40,10 +53,10 @@ mod calc_minzoxide {
         let mut symbols0 = Vec::new();
         let mut max_used = 0;
 
-        for i in 0..sym_count.len() {
-            if sym_count[i] != 0 {
+        for (i, &count) in sym_count.iter().enumerate() {
+            if count != 0 {
                 symbols0.push(SymFreq {
-                    key: sym_count[i],
+                    key: count,
                     sym_index: i as u16,
                 });
                 max_used = i + 1;
@@ -215,29 +228,36 @@ mod calc_minzoxide {
         }
     }
 
-    /// verify that the huffman codes generated can be decoded with the huffman code tree
-    #[test]
-    fn roundtrip_huffman_code() {
-        // requires overflow treatment
-        let frequencies = [
-            1, 0, 1, 0, 9, 9, 8, 19, 36, 70, 73, 34, 5, 6, 0, 0, 11, 1, 0,
-        ];
-        let code_lengths = calc_bit_lengths(&frequencies, 7);
-        assert_eq!(
-            code_lengths[..],
-            [7, 0, 7, 0, 5, 5, 5, 4, 3, 2, 2, 3, 7, 5, 0, 0, 5, 7]
-        );
+    #[cfg(test)]
+    mod tests {
+        use super::*;
 
-        let frequencies = [2, 0, 0, 0, 8, 7, 4, 5, 54, 32, 4, 6, 3, 1, 2, 0, 34, 0, 0];
-        let code_lengths = calc_bit_lengths(&frequencies, 7);
-        assert_eq!(
-            code_lengths[..],
-            [7, 0, 0, 0, 4, 5, 6, 5, 2, 2, 5, 5, 6, 7, 6, 0, 2]
-        );
+        /// verify that the huffman codes generated can be decoded with the huffman code tree
+        #[test]
+        fn roundtrip_huffman_code() {
+            // requires overflow treatment
+            let frequencies = [
+                1, 0, 1, 0, 9, 9, 8, 19, 36, 70, 73, 34, 5, 6, 0, 0, 11, 1, 0,
+            ];
+            let code_lengths = calc_bit_lengths(&frequencies, 7);
+            assert_eq!(
+                code_lengths[..],
+                [7, 0, 7, 0, 5, 5, 5, 4, 3, 2, 2, 3, 7, 5, 0, 0, 5, 7]
+            );
+
+            let frequencies = [2, 0, 0, 0, 8, 7, 4, 5, 54, 32, 4, 6, 3, 1, 2, 0, 34, 0, 0];
+            let code_lengths = calc_bit_lengths(&frequencies, 7);
+            assert_eq!(
+                code_lengths[..],
+                [7, 0, 0, 0, 4, 5, 6, 5, 2, 2, 5, 5, 6, 7, 6, 0, 2]
+            );
+        }
     }
 }
 
 mod calc_zlib {
+    //! Zlib-style heap-based tree construction and alternative tie-breaking rules.
+
     #[derive(Copy, Clone, Debug)]
     enum HuffTree {
         Leaf(usize),
@@ -279,7 +299,7 @@ mod calc_zlib {
     /// Restore the heap property by moving down the tree starting at node k.
     /// Exchange a node with the smallest of its two sons if necessary.
     /// Stop when the heap property is re-established (each father smaller than its two sons).
-    fn pqdownheap(heap: &mut Vec<HuffTreeNode>, mut root: usize) {
+    fn pqdownheap(heap: &mut [HuffTreeNode], mut root: usize) {
         /// Compares two subtrees using the tree depth as a tie-breaker when frequencies are equal.
         fn smaller(n: &HuffTreeNode, m: &HuffTreeNode) -> bool {
             n.freq < m.freq || (n.freq == m.freq && n.depth <= m.depth)
@@ -313,6 +333,44 @@ mod calc_zlib {
     const SMALLEST: usize = 0;
 
     pub fn calc_bit_lengths(sym_freq: &[u16], max_bits: usize) -> Vec<u8> {
+        calc_bit_lengths_with_heap(sym_freq, max_bits, false, false)
+    }
+
+    fn restore_heap(heap: &mut [HuffTreeNode], floyd: bool) {
+        if !floyd {
+            pqdownheap(heap, SMALLEST);
+            return;
+        }
+        let value = heap[0];
+        let mut hole = 0;
+        while 2 * hole + 1 < heap.len() {
+            let mut child = 2 * hole + 1;
+            if child + 1 < heap.len()
+                && (heap[child].freq, heap[child].depth)
+                    > (heap[child + 1].freq, heap[child + 1].depth)
+            {
+                child += 1;
+            }
+            heap[hole] = heap[child];
+            hole = child;
+        }
+        while hole != 0 {
+            let parent = (hole - 1) / 2;
+            if (heap[parent].freq, heap[parent].depth) <= (value.freq, value.depth) {
+                break;
+            }
+            heap[hole] = heap[parent];
+            hole = parent;
+        }
+        heap[hole] = value;
+    }
+
+    pub(super) fn calc_bit_lengths_with_heap(
+        sym_freq: &[u16],
+        max_bits: usize,
+        floyd: bool,
+        corrected_single_symbol: bool,
+    ) -> Vec<u8> {
         // construct binary heap so that we can get out the frequencies in ascending order
         let mut heap = Vec::new();
         let mut max_code = 0;
@@ -335,7 +393,9 @@ mod calc_zlib {
             // in order to ensure we have a valid tree
             node_bit_len[max_code] = 1;
 
-            if max_code != 0 {
+            if corrected_single_symbol && max_code == 1 {
+                node_bit_len.push(1);
+            } else if max_code != 0 {
                 node_bit_len[0] = 1;
             } else {
                 node_bit_len.push(1);
@@ -344,10 +404,24 @@ mod calc_zlib {
             return node_bit_len;
         }
 
-        let mut n = heap.len() / 2;
-        while n >= 1 {
-            n -= 1;
-            pqdownheap(&mut heap, n);
+        if floyd {
+            for index in 1..heap.len() {
+                let mut child = index;
+                while child != 0 {
+                    let parent = (child - 1) / 2;
+                    if heap[parent].freq <= heap[child].freq {
+                        break;
+                    }
+                    heap.swap(parent, child);
+                    child = parent;
+                }
+            }
+        } else {
+            let mut n = heap.len() / 2;
+            while n >= 1 {
+                n -= 1;
+                pqdownheap(&mut heap, n);
+            }
         }
 
         let mut nodes = Vec::new();
@@ -356,7 +430,7 @@ mod calc_zlib {
             // get the two smallest frequencies and combine them into one new node
             let least1 = heap[SMALLEST];
             heap[SMALLEST] = heap.pop().unwrap();
-            pqdownheap(&mut heap, SMALLEST);
+            restore_heap(&mut heap, floyd);
 
             let least2 = heap[SMALLEST];
 
@@ -381,7 +455,7 @@ mod calc_zlib {
                 break;
             } else {
                 heap[SMALLEST] = node;
-                pqdownheap(&mut heap, 0);
+                restore_heap(&mut heap, floyd);
             }
         }
 
@@ -452,70 +526,93 @@ mod calc_zlib {
     }
 
     #[cfg(test)]
-    fn test_result(sym_freq: &[u16], max_bits: usize, expected: &[u8]) {
-        let result = calc_bit_lengths(sym_freq, max_bits);
-        assert_eq!(result[..], expected[..]);
-    }
+    mod tests {
+        use super::*;
 
-    #[test]
-    fn sift_down_t() {
-        let freq = [10, 9, 8, 7, 6, 5, 4];
+        #[test]
+        fn diagnostic_tree_profiles_preserve_legacy_ties_and_single_symbols() {
+            use super::super::{HufftreeBitCalc, calc_bit_lengths};
 
-        let mut heap: Vec<HuffTreeNode> = freq
-            .iter()
-            .map(|&x| HuffTreeNode {
-                freq: x,
-                depth: 0,
-                tree: HuffTree::Leaf(0),
-            })
-            .collect();
-
-        println!("{:?}", heap.iter().map(|x| x.freq).collect::<Vec<_>>());
-        pqdownheap(&mut heap, 0);
-        println!("{:?}", heap.iter().map(|x| x.freq).collect::<Vec<_>>());
-
-        let mut n = heap.len() - 1;
-        while n >= 1 {
-            n -= 1;
-            pqdownheap(&mut heap, n);
+            assert_eq!(calc_bit_lengths(HufftreeBitCalc::Zlib, &[0, 5], 15), [1, 1]);
+            assert_eq!(
+                calc_bit_lengths(HufftreeBitCalc::ZlibCorrected, &[0, 5], 15),
+                [0, 1, 1]
+            );
+            assert_eq!(
+                calc_bit_lengths(HufftreeBitCalc::Floyd, &[1, 1, 1, 1, 1], 15),
+                [3, 3, 2, 2, 2]
+            );
+            assert_ne!(
+                calc_bit_lengths(HufftreeBitCalc::Zlib, &[1, 1, 1, 1, 1], 15),
+                calc_bit_lengths(HufftreeBitCalc::Floyd, &[1, 1, 1, 1, 1], 15),
+            );
         }
 
-        loop {
-            println!("{}", heap[0].freq);
+        fn test_result(sym_freq: &[u16], max_bits: usize, expected: &[u8]) {
+            let result = calc_bit_lengths(sym_freq, max_bits);
+            assert_eq!(result[..], expected[..]);
+        }
 
-            if heap.len() == 1 {
-                break;
-            }
-            heap[0] = heap.pop().unwrap();
+        #[test]
+        fn sift_down_t() {
+            let freq = [10, 9, 8, 7, 6, 5, 4];
+
+            let mut heap: Vec<HuffTreeNode> = freq
+                .iter()
+                .map(|&x| HuffTreeNode {
+                    freq: x,
+                    depth: 0,
+                    tree: HuffTree::Leaf(0),
+                })
+                .collect();
+
+            println!("{:?}", heap.iter().map(|x| x.freq).collect::<Vec<_>>());
             pqdownheap(&mut heap, 0);
+            println!("{:?}", heap.iter().map(|x| x.freq).collect::<Vec<_>>());
+
+            let mut n = heap.len() - 1;
+            while n >= 1 {
+                n -= 1;
+                pqdownheap(&mut heap, n);
+            }
+
+            loop {
+                println!("{}", heap[0].freq);
+
+                if heap.len() == 1 {
+                    break;
+                }
+                heap[0] = heap.pop().unwrap();
+                pqdownheap(&mut heap, 0);
+            }
         }
-    }
 
-    #[test]
-    fn roundtrip_huffman_code_simple() {
-        test_result(&[0, 1, 2, 4, 8, 16, 32], 7, &[0, 5, 5, 4, 3, 2, 1]);
-    }
+        #[test]
+        fn roundtrip_huffman_code_simple() {
+            test_result(&[0, 1, 2, 4, 8, 16, 32], 7, &[0, 5, 5, 4, 3, 2, 1]);
+        }
 
-    // requires overflow treatment
-    #[test]
-    fn roundtrip_huffman_code_overflow() {
-        test_result(
-            &[
-                1, 0, 1, 1, 5, 10, 9, 18, 29, 59, 91, 28, 11, 1, 2, 0, 12, 1, 0,
-            ],
-            7,
-            &[7, 0, 7, 7, 6, 5, 5, 4, 3, 2, 2, 3, 5, 7, 7, 0, 5, 7],
-        );
-    }
+        // requires overflow treatment
+        #[test]
+        fn roundtrip_huffman_code_overflow() {
+            test_result(
+                &[
+                    1, 0, 1, 1, 5, 10, 9, 18, 29, 59, 91, 28, 11, 1, 2, 0, 12, 1, 0,
+                ],
+                7,
+                &[7, 0, 7, 7, 6, 5, 5, 4, 3, 2, 2, 3, 5, 7, 7, 0, 5, 7],
+            );
+        }
 
-    #[test]
-    fn roundtrip_huffman_code_normal() {
-        test_result(
-            &[
-                1, 0, 1, 0, 9, 9, 8, 19, 36, 70, 73, 34, 5, 6, 0, 0, 11, 1, 0,
-            ],
-            7,
-            &[7, 0, 7, 0, 5, 5, 5, 4, 3, 2, 2, 3, 7, 5, 0, 0, 5, 7],
-        );
+        #[test]
+        fn roundtrip_huffman_code_normal() {
+            test_result(
+                &[
+                    1, 0, 1, 0, 9, 9, 8, 19, 36, 70, 73, 34, 5, 6, 0, 0, 11, 1, 0,
+                ],
+                7,
+                &[7, 0, 7, 0, 5, 5, 5, 4, 3, 2, 2, 3, 7, 5, 0, 0, 5, 7],
+            );
+        }
     }
 }

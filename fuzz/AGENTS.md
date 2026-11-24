@@ -1,7 +1,10 @@
 # fuzz (preflate-rs-fuzz)
 
-libfuzzer harnesses for fuzzing the core and container APIs. Not published; requires
-the `fuzzing` cargo feature.
+These instructions supplement the root [AGENTS.md](../AGENTS.md).
+
+libfuzzer harnesses for fuzzing the core and container APIs. Not published;
+requires nightly Rust and cargo-fuzz. The `fuzzing` feature is currently empty
+and is not required by the targets.
 
 ## Harnesses
 

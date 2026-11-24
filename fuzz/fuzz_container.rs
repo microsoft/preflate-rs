@@ -1,3 +1,6 @@
+//! Fuzzes the container pipeline using arbitrary file bytes.
+//! Compresses accepted inputs and checks that reconstruction returns exactly the original bytes.
+
 #![no_main]
 
 use preflate_container::{

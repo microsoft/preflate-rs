@@ -1,8 +1,6 @@
-//! Debug implementation of the cabac reader and writer.
-//!
-//! It is used to verify that the
-//! correct context is always passed into the get and put functions. If the correct index is not passed, it
-//! can lead to very subtle consistency bugs, so it is worthwhile to test with the debug implementation.
+//! Test implementations of the arithmetic-coder traits that record context use.
+//! Checks that encoding and decoding select the same probability contexts in the same order.
+
 use std::io::{Read, Result, Write};
 
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
@@ -11,15 +9,9 @@ use super::traits::{CabacReader, CabacWriter};
 
 // we make sure that every context has a different value so that we can detect when we've made
 // a mistake and are using the wrong context
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Default)]
 pub struct DebugContext {
     value: u32,
-}
-
-impl Default for DebugContext {
-    fn default() -> Self {
-        DebugContext { value: 0 }
-    }
 }
 
 /// Decoder for debugging purposes only. It will check that the correct context is passed in the same order.
@@ -31,7 +23,7 @@ pub struct DebugReader<R> {
 impl<R: Read> DebugReader<R> {
     pub fn new(reader: R) -> Result<Self> {
         Ok(DebugReader {
-            reader: reader,
+            reader,
             counter: 100,
         })
     }
@@ -69,7 +61,7 @@ pub struct DebugWriter<W> {
 impl<W: Write> DebugWriter<W> {
     pub fn new(writer: W) -> Result<Self> {
         Ok(DebugWriter {
-            writer: writer,
+            writer,
             counter: 100,
         })
     }
@@ -101,28 +93,33 @@ impl<W: Write> CabacWriter<DebugContext> for DebugWriter<W> {
     }
 }
 
-#[test]
-fn roundtrip_value() {
-    let mut output = Vec::with_capacity(1000);
-    let mut writer = DebugWriter::new(&mut output).unwrap();
-    let mut context = [DebugContext::default(); 8];
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    for i in 0..100 {
-        writer.put(i & 1 == 1, &mut context[i % 4]).unwrap();
-        writer.put_bypass(i & 1 == 1).unwrap();
-        writer.put_n_bits(0x456, 24, &mut context).unwrap();
-        writer.put_unary_encoded(i, &mut context).unwrap();
-    }
+    #[test]
+    fn roundtrip_value() {
+        let mut output = Vec::with_capacity(1000);
+        let mut writer = DebugWriter::new(&mut output).unwrap();
+        let mut context = [DebugContext::default(); 8];
 
-    writer.finish().unwrap();
+        for i in 0..100 {
+            writer.put(i & 1 == 1, &mut context[i % 4]).unwrap();
+            writer.put_bypass(i & 1 == 1).unwrap();
+            writer.put_n_bits(0x456, 24, &mut context).unwrap();
+            writer.put_unary_encoded(i, &mut context).unwrap();
+        }
 
-    let mut reader = DebugReader::new(&output[..]).unwrap();
-    context.fill(DebugContext::default());
+        writer.finish().unwrap();
 
-    for i in 0..100 {
-        assert_eq!(reader.get(&mut context[i % 4]).unwrap(), i & 1 == 1);
-        assert_eq!(reader.get_bypass().unwrap(), i & 1 == 1);
-        assert_eq!(reader.get_n_bits(24, &mut context).unwrap(), 0x456);
-        assert_eq!(reader.get_unary_encoded(&mut context).unwrap(), i);
+        let mut reader = DebugReader::new(&output[..]).unwrap();
+        context.fill(DebugContext::default());
+
+        for i in 0..100 {
+            assert_eq!(reader.get(&mut context[i % 4]).unwrap(), i & 1 == 1);
+            assert_eq!(reader.get_bypass().unwrap(), i & 1 == 1);
+            assert_eq!(reader.get_n_bits(24, &mut context).unwrap(), 0x456);
+            assert_eq!(reader.get_unary_encoded(&mut context).unwrap(), i);
+        }
     }
 }

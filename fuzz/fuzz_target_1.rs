@@ -1,3 +1,7 @@
+//! Fuzzes raw DEFLATE parsing and reconstruction with arbitrary input.
+//! For accepted streams, checks that the plaintext and correction data can be
+//! consumed by the reconstruction API.
+
 #![no_main]
 
 use preflate_rs::{preflate_whole_deflate_stream, recreate_whole_deflate_stream, PreflateConfig};

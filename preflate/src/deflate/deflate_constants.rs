@@ -4,6 +4,9 @@
  *  This software incorporates material from third parties. See NOTICE.txt for details.
  *--------------------------------------------------------------------------------------------*/
 
+//! DEFLATE alphabet sizes, code tables, and length/distance mappings.
+//! Shares the format's symbol definitions between parsing, prediction, and writing.
+
 use deranged::RangedU8;
 
 pub const LITERAL_COUNT: usize = 256;
@@ -47,9 +50,8 @@ const DIST_CODE_TABLE: [DistCode; 512] = into_array([
     29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29,
 ]);
 
-/// Convert a slice of u8 into an array of ConstRangedX. Useful for const initialization, eg
-///  const CONTARRAY : [ConstRangedX<1,10>;5] = ConstRangedX::<1,10>::into_array([1,2,3,4,5]);
-/// will panic if any value is out of range
+/// Converts byte values to ranged integers for constant lookup tables.
+/// Panics if any value is outside `0..=MAX`.
 pub const fn into_array<const N: usize, const MAX: u8>(a: [u8; N]) -> [RangedU8<0, MAX>; N] {
     let mut r = [RangedU8::<0, MAX>::MIN; N];
     let mut i = 0;
@@ -102,7 +104,6 @@ pub fn quantize_distance(dist: u32) -> DistCode {
     } else {
         256 + ((dist - 1) >> 7)
     } as usize]
-        .into()
 }
 pub fn quantize_length(len: u32) -> LengthCode {
     LENGTH_CODE_TABLE[len as usize - MIN_MATCH as usize]

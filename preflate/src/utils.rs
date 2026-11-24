@@ -1,5 +1,7 @@
+//! Loads fixtures from the sample directory and compares round-trip results.
+//! Assertion helpers identify the first differing byte or token to aid debugging.
+
 #[allow(dead_code)]
-#[cfg(test)]
 pub fn write_file(filename: &str, data: &[u8]) {
     let filename = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("..")
@@ -10,11 +12,8 @@ pub fn write_file(filename: &str, data: &[u8]) {
     std::io::Write::write_all(&mut writecomp, data).unwrap();
 }
 
-#[cfg(test)]
 pub fn read_file(filename: &str) -> Vec<u8> {
-    use std::fs::File;
-    use std::io::Read;
-    use std::path::Path;
+    use std::{fs::File, io::Read, path::Path};
 
     let filename = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("..")
@@ -30,7 +29,6 @@ pub fn read_file(filename: &str) -> Vec<u8> {
 }
 
 /// handy function to compare two arrays, and print the first mismatch. Useful for debugging.
-#[cfg(test)]
 #[track_caller]
 pub fn assert_eq_array<T: PartialEq + std::fmt::Debug>(a: &[T], b: &[T]) {
     use core::panic;
@@ -64,7 +62,6 @@ pub fn assert_eq_array<T: PartialEq + std::fmt::Debug>(a: &[T], b: &[T]) {
     }
 }
 
-#[cfg(test)]
 #[track_caller]
 pub fn assert_block_eq(
     a: &crate::deflate::deflate_token::DeflateTokenBlock,
@@ -91,14 +88,14 @@ pub fn assert_block_eq(
                 huffman_type: hb,
             },
         ) => {
-            assert_eq_array(&ta, &tb);
+            assert_eq_array(ta, tb);
             assert_eq!(ha, hb);
         }
         (
             DeflateTokenBlockType::Stored { uncompressed: ua },
             DeflateTokenBlockType::Stored { uncompressed: ub },
         ) => {
-            assert_eq_array(&ua, &ub);
+            assert_eq_array(ua, ub);
         }
         _ => {
             panic!("unexpected block type");
@@ -107,7 +104,6 @@ pub fn assert_block_eq(
     assert_eq!(a.last, b.last, "last flag mismatch");
 }
 
-#[cfg(test)]
 pub fn test_on_all_deflate_files(f: impl Fn(&[u8])) {
     use std::io::Read;
 
@@ -129,4 +125,12 @@ pub fn test_on_all_deflate_files(f: impl Fn(&[u8])) {
             f(&buffer);
         }
     }
+}
+
+static INIT: std::sync::Once = std::sync::Once::new();
+/// Initialize the logger for tests. This is a no-op if the logger is already initialized.
+pub fn init_logging() {
+    INIT.call_once(|| {
+        let _ = env_logger::builder().is_test(true).try_init();
+    });
 }

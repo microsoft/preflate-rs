@@ -4,11 +4,13 @@
  *  This software incorporates material from third parties. See NOTICE.txt for details.
  *--------------------------------------------------------------------------------------------*/
 
-use crate::deflate::huffman_encoding::HuffmanOriginalEncoding;
+//! Token, block, and symbol-frequency representations of parsed DEFLATE data.
+//! Retains references, tree encodings, and framing details needed for exact bitstream reconstruction.
 
 use super::deflate_constants::{
     DIST_CODE_COUNT, LITLENDIST_CODE_COUNT, NONLEN_CODE_COUNT, quantize_distance, quantize_length,
 };
+use crate::deflate::huffman_encoding::HuffmanOriginalEncoding;
 
 /// In a DEFLATE stream, tokens are either literals (bytes) or references to previous bytes
 /// with a distance and length.
@@ -18,12 +20,7 @@ pub enum DeflateToken {
     Reference(DeflateTokenReference),
 }
 
-impl DeflateToken {
-    #[cfg(test)]
-    pub fn new_ref(len: u32, dist: u32) -> DeflateToken {
-        DeflateToken::Reference(DeflateTokenReference::new(len, dist))
-    }
-}
+impl DeflateToken {}
 
 /// In the case of a distance and length, the length is the number of bytes to copy from the
 /// previous bytes, and the distance is the number of bytes back to start copying from.
@@ -68,18 +65,13 @@ pub const BT_STORED: u32 = 1;
 pub const BT_DYNAMICHUFF: u32 = 0;
 pub const BT_STATICHUFF: u32 = 2;
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Default)]
 pub enum DeflateHuffmanType {
+    #[default]
     Static,
     Dynamic {
         huffman_encoding: HuffmanOriginalEncoding,
     },
-}
-
-impl Default for DeflateHuffmanType {
-    fn default() -> Self {
-        DeflateHuffmanType::Static
-    }
 }
 
 #[derive(PartialEq)]
@@ -99,7 +91,7 @@ impl std::fmt::Debug for DeflateTokenBlockType {
         match self {
             DeflateTokenBlockType::Huffman {
                 tokens,
-                huffman_type: DeflateHuffmanType::Static { .. },
+                huffman_type: DeflateHuffmanType::Static,
             } => {
                 write!(f, "StaticHuffman {{ tokens: len={} }}", tokens.len(),)
             }
@@ -156,6 +148,17 @@ impl TokenFrequency {
                     [NONLEN_CODE_COUNT + usize::from(quantize_length(t.len()).get())] += 1;
                 self.distance_codes[usize::from(quantize_distance(t.dist()).get())] += 1;
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    impl DeflateToken {
+        pub fn new_ref(len: u32, dist: u32) -> DeflateToken {
+            DeflateToken::Reference(DeflateTokenReference::new(len, dist))
         }
     }
 }
