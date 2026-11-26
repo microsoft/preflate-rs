@@ -62,6 +62,9 @@ pub enum ExitCode {
 
     /// Out of memory
     OutOfMemory = 29,
+
+    /// The configured compression work budget was exhausted
+    CompressionEffortLimit = 30,
 }
 
 impl Display for ExitCode {

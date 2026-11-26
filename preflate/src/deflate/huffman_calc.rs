@@ -140,7 +140,7 @@ mod calc_minzoxide {
             0 => (),
             1 => symbols[0].key = 1,
             n => {
-                symbols[0].key += symbols[1].key;
+                symbols[0].key = symbols[0].key.wrapping_add(symbols[1].key);
                 let mut root = 0;
                 let mut leaf = 2;
                 for next in 1..n - 1 {
@@ -234,6 +234,13 @@ mod calc_minzoxide {
             code_lengths[..],
             [7, 0, 0, 0, 4, 5, 6, 5, 2, 2, 5, 5, 6, 7, 6, 0, 2]
         );
+    }
+
+    #[test]
+    fn large_frequencies_use_release_build_arithmetic() {
+        let frequencies = [u16::MAX, u16::MAX, 1];
+        let lengths = calc_bit_lengths(&frequencies, 15);
+        assert_eq!(lengths.len(), frequencies.len());
     }
 }
 

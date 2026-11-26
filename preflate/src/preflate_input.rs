@@ -167,6 +167,10 @@ impl<'a> PreflateInput<'a> {
         }
     }
 
+    pub(crate) fn available_history(&self) -> u32 {
+        self.pos as u32
+    }
+
     #[inline(always)]
     pub fn pos(&self) -> u32 {
         (self.pos + self.data.pos_offset - self.data.prefix_length) as u32

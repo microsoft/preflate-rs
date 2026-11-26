@@ -127,6 +127,9 @@ pub unsafe extern "C" fn create_compression_context(flags: u32) -> *mut std::ffi
 /// Frees the compression context
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn free_compression_context(context: *mut std::ffi::c_void) {
+    if context.is_null() {
+        return;
+    }
     unsafe {
         let x = Box::from_raw(context as *mut CompressionContext);
         assert_eq!(
@@ -208,6 +211,16 @@ pub unsafe extern "C" fn get_compression_stats(
     overhead_bytes: *mut u64,
     hash_algorithm: *mut u32,
 ) {
+    if context.is_null()
+        || deflate_compressed_size.is_null()
+        || zstd_compressed_size.is_null()
+        || zstd_baseline_size.is_null()
+        || uncompressed_size.is_null()
+        || overhead_bytes.is_null()
+        || hash_algorithm.is_null()
+    {
+        return;
+    }
     unsafe {
         let context = CompressionContext::from_pointer(context);
 
@@ -310,6 +323,9 @@ pub unsafe extern "C" fn create_decompression_context(
 /// Frees the decompression context
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn free_decompression_context(context: *mut std::ffi::c_void) {
+    if context.is_null() {
+        return;
+    }
     unsafe {
         let x = Box::from_raw(context as *mut DecompressionContext);
         assert_eq!(
@@ -623,6 +639,41 @@ fn get_cstring<'a, const N: usize>(error_string: &'a [u8; N]) -> &'a std::ffi::C
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn null_context_and_stats_pointers_are_ignored() {
+        let mut stats = [42u64; 5];
+        let mut hash_algorithm = 42u32;
+        unsafe {
+            let stats = stats.as_mut_ptr();
+            free_compression_context(null_mut());
+            free_decompression_context(null_mut());
+            get_compression_stats(
+                null_mut(),
+                stats,
+                stats.add(1),
+                stats.add(2),
+                stats.add(3),
+                stats.add(4),
+                &mut hash_algorithm,
+            );
+
+            let context = create_compression_context(1);
+            assert!(!context.is_null());
+            get_compression_stats(
+                context,
+                stats,
+                stats.add(1),
+                null_mut(),
+                stats.add(3),
+                stats.add(4),
+                &mut hash_algorithm,
+            );
+            free_compression_context(context);
+        }
+        assert_eq!(stats, [42; 5]);
+        assert_eq!(hash_algorithm, 42);
+    }
 
     #[test]
     fn invalid_sizes_and_absent_error_buffers_return_errors() {

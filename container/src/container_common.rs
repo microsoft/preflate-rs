@@ -58,6 +58,21 @@ pub(crate) fn check_size(size: impl SizeValue, limit: usize, name: &str) -> Resu
     Ok(size)
 }
 
+pub(crate) fn charge_compression_effort(remaining: &mut Option<u64>, amount: usize) -> Result<()> {
+    if let Some(left) = remaining {
+        if let Some(balance) = left.checked_sub(amount as u64) {
+            *left = balance;
+        } else {
+            *left = 0;
+            return Err(preflate_rs::PreflateError::new(
+                ExitCode::CompressionEffortLimit,
+                "Compression effort limit exceeded",
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Configuration for the deflate process
 #[derive(Debug, Clone)]
 pub struct PreflateContainerConfig {
@@ -80,6 +95,11 @@ pub struct PreflateContainerConfig {
     /// hit this limit, we will stop looking for deflate streams and just write
     /// out the rest of the data as literal blocks.
     pub total_plain_text_limit: u64,
+
+    /// Maximum cumulative compression effort. Charges input/scanned/candidate bytes,
+    /// parsed plaintext, and conservative estimator and prediction work bounds.
+    /// None disables the limit. This does not affect container decompression.
+    pub compression_effort_limit: Option<u64>,
 
     /// The maximum size of a plain text chunk that we will decompress at a time. This limits
     /// the memory usage of the decompression process.
@@ -118,6 +138,7 @@ impl Default for PreflateContainerConfig {
             max_chunk_size: 64 * 1024 * 1024,
             compressed_block_limit: 256 * 1024 * 1024,
             total_plain_text_limit: 512 * 1024 * 1024,
+            compression_effort_limit: Some(8 * 1024 * 1024 * 1024),
             chunk_plain_text_limit: 128 * 1024 * 1024,
             correction_limit: 128 * 1024 * 1024,
             decoded_block_limit: 256 * 1024 * 1024,
@@ -132,6 +153,7 @@ impl Default for PreflateContainerConfig {
 impl PreflateContainerConfig {
     pub fn preflate_config(&self) -> PreflateConfig {
         PreflateConfig {
+            compression_effort_limit: None,
             max_chain_length: self.max_chain_length,
             plain_text_limit: self.chunk_plain_text_limit,
             correction_limit: self.correction_limit,
@@ -330,6 +352,7 @@ pub trait ProcessBuffer {
 pub(crate) mod test {
     use std::io::{Cursor, Write};
     use std::num::Saturating;
+    use std::panic::{AssertUnwindSafe, catch_unwind};
 
     use preflate_rs::{AddContext, Result};
 
@@ -849,6 +872,227 @@ pub(crate) mod test {
         let mut dec = RecreateContainerProcessor::new(usize::MAX);
         let recreated = dec.process_vec(&compressed).unwrap();
         assert_eq_array(&original, &recreated);
+    }
+
+    #[test]
+    fn total_plain_text_limit_counts_finished_deflate_streams() {
+        let original = crate::utils::read_file("test_two_zlib_streams.bin");
+        let mut encoder = PreflateContainerProcessor::new(
+            &PreflateContainerConfig {
+                total_plain_text_limit: 1,
+                ..PreflateContainerConfig::default()
+            },
+            1,
+            false,
+        );
+        let compressed = encoder.process_vec(&original).unwrap();
+        let blocks = parse_wire_block_types(&compressed);
+        assert_eq!(
+            blocks
+                .iter()
+                .filter(|&&(_, kind)| kind == BLOCK_TYPE_DEFLATE)
+                .count(),
+            1,
+            "the first independent DEFLATE stream must exhaust the analysis budget"
+        );
+        assert_eq!(
+            blocks.last().map(|&(_, kind)| kind),
+            Some(BLOCK_TYPE_LITERAL)
+        );
+        assert_eq!(
+            RecreateContainerProcessor::new(usize::MAX)
+                .process_vec(&compressed)
+                .unwrap(),
+            original
+        );
+    }
+
+    #[test]
+    fn total_plain_text_limit_stops_deflate_continuations() {
+        let original = crate::utils::read_file("sample1.bin.gz");
+        let mut encoder = PreflateContainerProcessor::new(
+            &PreflateContainerConfig {
+                min_chunk_size: 0,
+                total_plain_text_limit: 1,
+                ..PreflateContainerConfig::default()
+            },
+            1,
+            false,
+        );
+        let mut compressed = Vec::new();
+        encoder
+            .process_buffer(&original[..200_000], false, &mut compressed)
+            .unwrap();
+        assert_eq!(
+            parse_wire_block_types(&compressed)
+                .iter()
+                .filter(|&&(_, kind)| kind == BLOCK_TYPE_DEFLATE)
+                .count(),
+            1,
+            "the first segment must enter DEFLATE continuation"
+        );
+        encoder
+            .process_buffer(&original[200_000..], false, &mut compressed)
+            .unwrap();
+        encoder.process_buffer(&[], true, &mut compressed).unwrap();
+
+        let blocks = parse_wire_block_types(&compressed);
+        assert_eq!(
+            blocks
+                .iter()
+                .filter(|&&(_, kind)| kind == BLOCK_TYPE_DEFLATE_CONTINUE)
+                .count(),
+            0,
+            "continuations must not be analyzed after the budget is exceeded"
+        );
+        assert_eq!(
+            blocks.last().map(|&(_, kind)| kind),
+            Some(BLOCK_TYPE_LITERAL)
+        );
+        assert_eq!(
+            RecreateContainerProcessor::new(usize::MAX)
+                .process_vec_size(&compressed, 10_000)
+                .unwrap(),
+            original
+        );
+    }
+
+    #[test]
+    fn empty_input_produces_decodable_container() {
+        let config = PreflateContainerConfig::default();
+        let mut encoder = PreflateContainerProcessor::new(&config, 1, false);
+        let compressed = encoder.process_vec(&[]).unwrap();
+        let mut decoder = RecreateContainerProcessor::new(1);
+        assert_eq!(decoder.process_vec_size(&compressed, 1).unwrap(), b"");
+    }
+
+    #[test]
+    fn compression_effort_limit_is_cumulative_and_terminal() {
+        let config = PreflateContainerConfig {
+            min_chunk_size: 0,
+            compression_effort_limit: Some(70),
+            ..PreflateContainerConfig::default()
+        };
+        let mut compressor = PreflateContainerProcessor::new(&config, 1, false);
+        let mut output = Vec::new();
+        compressor
+            .process_buffer(&[b'A'; 32], false, &mut output)
+            .unwrap();
+        let error = compressor
+            .process_buffer(&[b'A'; 16], true, &mut output)
+            .unwrap_err();
+        assert_eq!(
+            error.exit_code(),
+            preflate_rs::ExitCode::CompressionEffortLimit
+        );
+        assert!(
+            error
+                .message()
+                .contains("Compression effort limit exceeded")
+        );
+        assert!(compressor.process_buffer(&[], true, &mut output).is_err());
+    }
+
+    #[test]
+    fn failed_candidate_exhausts_effort_without_literal_fallback() {
+        let mut data = vec![0x78, 0x9c];
+        data.extend_from_slice(&[b'A'; 1024]);
+        let config = PreflateContainerConfig {
+            compression_effort_limit: Some((data.len() * 2) as u64),
+            ..PreflateContainerConfig::default()
+        };
+        let error = PreflateContainerProcessor::new(&config, 1, false)
+            .process_vec(&data)
+            .unwrap_err();
+        assert!(
+            error
+                .message()
+                .contains("Compression effort limit exceeded")
+        );
+    }
+
+    #[test]
+    fn sufficient_effort_preserves_v2_output_and_decoder_has_no_effort_limit() {
+        let data = crate::utils::read_file("sample1.bin.gz");
+        let unlimited = PreflateContainerConfig {
+            compression_effort_limit: None,
+            ..PreflateContainerConfig::default()
+        };
+        let encoded = PreflateContainerProcessor::new(&unlimited, 1, false)
+            .process_vec(&data)
+            .unwrap();
+        let bounded = PreflateContainerConfig {
+            compression_effort_limit: Some(u64::MAX),
+            ..PreflateContainerConfig::default()
+        };
+        assert_eq!(
+            PreflateContainerProcessor::new(&bounded, 1, false)
+                .process_vec(&data)
+                .unwrap(),
+            encoded
+        );
+        let decoder_config = PreflateContainerConfig {
+            compression_effort_limit: Some(0),
+            ..PreflateContainerConfig::default()
+        };
+        assert_eq!(
+            RecreateContainerProcessor::with_config(4096, &decoder_config)
+                .process_vec(&encoded)
+                .unwrap(),
+            data
+        );
+    }
+
+    #[test]
+    fn malformed_literal_frames_do_not_panic_or_return_wrong_output() {
+        let original = b"literal payload without a deflate signature".repeat(4);
+        assert_roundtrip(&original);
+        let config = PreflateContainerConfig {
+            max_chunk_size: 1024,
+            compressed_block_limit: 4096,
+            decoded_block_limit: 1024,
+            chunk_plain_text_limit: 1024,
+            ..PreflateContainerConfig::default()
+        };
+        let encoded = PreflateContainerProcessor::new(&config, 1, false)
+            .process_vec(&original)
+            .unwrap();
+        assert_eq!(encoded[1], BLOCK_COMPRESSION_ZSTD | BLOCK_TYPE_LITERAL);
+        let mut cursor = Cursor::new(&encoded[2..]);
+        let payload_length = read_varint(&mut cursor).unwrap() as usize;
+        let payload_start = 2 + cursor.position() as usize;
+
+        let check = |bytes: &[u8], truncated: bool| {
+            let outcome = catch_unwind(AssertUnwindSafe(|| {
+                let mut output = Vec::new();
+                let mut decoder = RecreateContainerProcessor::with_config(64, &config);
+                decoder
+                    .process_buffer(bytes, true, &mut output)
+                    .map(|()| output)
+            }));
+            match outcome {
+                Ok(Ok(_)) if truncated => panic!("truncated v2 container was accepted"),
+                Ok(Ok(output)) => assert_eq!(output, original),
+                Ok(Err(_)) => {}
+                Err(_) => panic!("decoder panicked on malformed container"),
+            }
+        };
+
+        for length in 0..encoded.len() {
+            check(&encoded[..length], true);
+        }
+        for index in payload_start..payload_start + payload_length.min(32) {
+            for bit in 0..8 {
+                let mut mutated = encoded.clone();
+                mutated[index] ^= 1 << bit;
+                check(&mutated, false);
+            }
+        }
+        for index in encoded.len() - 4..encoded.len() {
+            let mut mutated = encoded.clone();
+            mutated[index] ^= 1;
+            assert_decoder_fails(&mutated, preflate_rs::ExitCode::InvalidCompressedWrapper);
+        }
     }
 
     // ── Multi-scheme fixture tests ───────────────────────────────────────────────

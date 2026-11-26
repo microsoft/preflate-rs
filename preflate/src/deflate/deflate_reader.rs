@@ -10,6 +10,7 @@ use crate::{
     deflate::deflate_token::{DeflateHuffmanType, DeflateToken, DeflateTokenReference},
     preflate_error::{AddContext, ExitCode, Result, err_exit_code},
     preflate_input::PlainText,
+    stream_processor::charge_effort,
 };
 
 use std::io::Cursor;
@@ -85,7 +86,16 @@ impl DeflateParser {
         }
     }
 
+    #[cfg(test)]
     pub fn parse(&mut self, compressed_data: &[u8]) -> Result<DeflateContents> {
+        self.parse_with_effort(compressed_data, &mut None)
+    }
+
+    pub fn parse_with_effort(
+        &mut self,
+        compressed_data: &[u8],
+        effort: &mut Option<u64>,
+    ) -> Result<DeflateContents> {
         let mut blocks = Vec::new();
 
         let mut cursor = &mut Cursor::new(compressed_data);
@@ -104,7 +114,7 @@ impl DeflateParser {
             self.bit_reader.get(8 - bits_left, cursor)?;
         }
 
-        match self.read_blocks_internal(&mut cursor, &mut blocks, &mut checkpoint) {
+        match self.read_blocks_internal(&mut cursor, &mut blocks, &mut checkpoint, effort) {
             Err(e) => {
                 // reset back to known good checkpoint before returning the error.
                 // this allows callers to try again once they have more data
@@ -151,8 +161,12 @@ impl DeflateParser {
         reader: &mut Cursor<&[u8]>,
         blocks: &mut Vec<DeflateTokenBlock>,
         checkpoint: &mut Checkpoint,
+        effort: &mut Option<u64>,
     ) -> Result<()> {
         loop {
+            if self.state == DeflateParserState::StartBlock {
+                charge_effort(effort, 512)?;
+            }
             let (last, mode) = match self.state {
                 DeflateParserState::StartBlock => (
                     self.bit_reader.get(1, reader)? != 0,
@@ -197,6 +211,7 @@ impl DeflateParser {
                             "Plain text limit exceeded",
                         );
                     }
+                    charge_effort(effort, u64::from(len))?;
                     self.plain_text.check_growth(len as usize)?;
                     let mut uncompressed = Vec::with_capacity(len as usize);
 
@@ -224,6 +239,7 @@ impl DeflateParser {
                         &mut self.bit_reader,
                         reader,
                         self.plain_text_limit,
+                        effort,
                     )
                     .context()?;
 
@@ -253,6 +269,7 @@ impl DeflateParser {
                         &mut self.bit_reader,
                         reader,
                         self.plain_text_limit,
+                        effort,
                     )
                     .context()?;
 
@@ -291,6 +308,7 @@ fn decode_tokens(
     bit_reader: &mut BitReader,
     reader: &mut Cursor<&[u8]>,
     plain_text_limit: usize,
+    effort: &mut Option<u64>,
 ) -> Result<()> {
     let mut earliest_reference = i32::MAX;
     let mut cur_pos = 0;
@@ -307,6 +325,7 @@ fn decode_tokens(
             if plain_text.len() >= plain_text_limit {
                 return err_exit_code(ExitCode::PlainTextLimit, "Plain text limit exceeded");
             }
+            charge_effort(effort, 1)?;
             plain_text.check_growth(1)?;
             plain_text.push(lit_len as u8);
             tokens.push(DeflateToken::Literal(lit_len as u8));
@@ -345,6 +364,7 @@ fn decode_tokens(
             if len as usize > plain_text_limit.saturating_sub(plain_text.len()) {
                 return err_exit_code(ExitCode::PlainTextLimit, "Plain text limit exceeded");
             }
+            charge_effort(effort, u64::from(len) + 1)?;
             plain_text.check_growth(len as usize)?;
             plain_text.append_reference(dist, len)?;
             tokens.push(DeflateToken::Reference(DeflateTokenReference::new(

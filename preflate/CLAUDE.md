@@ -20,7 +20,11 @@ preflate_whole_deflate_stream(input, config) -> Result<(Vec<u8>, Vec<u8>)>
 recreate_whole_deflate_stream(plaintext, correction_data) -> Result<Vec<u8>>
 ```
 
-`PreflateConfig` controls `max_chain_length`, `plain_text_limit`, and `verify_compression`.
+`PreflateConfig` controls `max_chain_length`, `plain_text_limit`, `verify_compression`,
+and `compression_effort_limit` (8 GiB units by default; `None` disables it).
+The container compressor uses `PreflateStreamProcessor::decompress_with_effort()` to
+charge its shared counter instead of the standalone processor's counter.
+Reconstruction/decompression does not spend this budget.
 
 ## Processing Pipeline
 

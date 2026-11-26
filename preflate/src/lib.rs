@@ -53,6 +53,10 @@ pub use stream_processor::{
 /// Configure the preflate stream processor
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PreflateConfig {
+    /// Cumulative analysis effort for a standalone stream processor. None disables
+    /// the limit. Container compression supplies its own shared budget instead.
+    pub compression_effort_limit: Option<u64>,
+
     /// Maximum number of lookups we will do in the hash chain. This will limit the
     /// amount of CPU time we spend on each chunk.
     pub max_chain_length: u32,
@@ -75,6 +79,7 @@ pub struct PreflateConfig {
 impl Default for PreflateConfig {
     fn default() -> Self {
         Self {
+            compression_effort_limit: Some(8 * 1024 * 1024 * 1024),
             max_chain_length: 4096,
             plain_text_limit: 128 * 1024 * 1024,
             correction_limit: 128 * 1024 * 1024,

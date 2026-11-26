@@ -36,12 +36,40 @@ If `--baseline true` is set, a second column shows what raw Zstd (without prefla
 
 If verification fails (reconstructed output does not match original), the tool prints the first differing byte position and exits with an error.
 
+Compression uses the default cumulative 8 GiB deterministic effort budget. If it
+is exhausted, that file is skipped with `CompressionEffortLimit` rather than
+silently falling back to a literal block. Library callers can adjust or disable
+the budget with `PreflateContainerConfig::compression_effort_limit`; container
+decompression is unaffected.
+
 ## Building
 
 ```shell
 cargo build --release -p preflate_util
 # Binary at: target/release/preflate_util.exe (Windows) or target/release/preflate_util (Linux)
 ```
+
+## Adversarial input sweep
+
+`preflate_adversarial` is a separate executable that deterministically tests boundary sizes,
+repeated and pseudo-random bytes, false format signatures, zlib/gzip/ZIP/PNG streams,
+damaged DEFLATE payloads and zlib/PNG checksums, tiny or invalid IDAT runs,
+truncation, and adjacent streams.
+Each case is compressed and reconstructed with multiple
+input chunk sizes; recognized raw DEFLATE streams are also checked for bit-exact recreation.
+The Lepton/JPEG library is not exercised intentionally.
+Release-mode unit tests also flip bits within raw DEFLATE streams and check that
+accepted mutations reconstruct byte-for-byte.
+
+```shell
+cargo run --release -p preflate_util --bin preflate_adversarial -- --seeds 4 --max-size 65536 --max-cases 1200
+```
+
+Use `--seed N` to reproduce a sweep and `--max-chain N` to set the predictor budget.
+The runner writes only failing inputs under `target` in an `adversarial-failures` directory
+(`--artifacts` overrides it) and exits nonzero on any panic, container error, or round-trip
+mismatch. The reported count of unsupported raw DEFLATE streams is informational: the
+container must still preserve them as literal bytes.
 
 ## Example
 
