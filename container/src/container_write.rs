@@ -180,7 +180,7 @@ pub struct PreflateContainerProcessor {
     /// running CRC-32 of all input bytes, written as the final block
     input_crc: CrcHasher,
 
-    /// each block is individually compressed with this encoder (v2 format)
+    /// each block is individually compressed with this encoder (v3 format)
     encoder: Option<zstd::stream::write::Encoder<'static, Vec<u8>>>,
 
     /// when present, all raw input is also fed to this encoder so we can measure
@@ -189,7 +189,7 @@ pub struct PreflateContainerProcessor {
 }
 
 impl PreflateContainerProcessor {
-    /// Creates a processor that uses v2 format with a persistent Zstd encoder shared
+    /// Creates a processor that uses v3 format with a persistent Zstd encoder shared
     /// across all non-JPEG blocks. JPEG blocks bypass the encoder entirely.
     pub fn new(config: &PreflateContainerConfig, level: i32, test_baseline: bool) -> Self {
         let mut config = config.clone();
@@ -524,7 +524,7 @@ impl PreflateContainerProcessor {
 
         if input_complete && !self.input_complete {
             if matches!(self.state, ChunkParseState::Start) {
-                writer.write_all(&[COMPRESSED_WRAPPER_VERSION_2])?;
+                writer.write_all(&[COMPRESSED_WRAPPER_VERSION_3])?;
                 self.state = ChunkParseState::Searching(None);
             }
             self.input_complete = true;

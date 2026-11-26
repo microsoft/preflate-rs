@@ -1340,10 +1340,11 @@ mod tests {
         assert_eq!(error.exit_code(), ExitCode::InvalidPredictionData);
         assert_eq!(reader.position(), 0);
 
-        let data = bitcode::encode(&ReconstructionData {
+        let data = ReconstructionData {
             parameters: empty_stream_parameters(),
             corrections: vec![0; 1024],
-        });
+        }
+        .write();
         assert!(data.len() < 1024);
         let error = RecreateStreamProcessor::with_config(PreflateConfig {
             correction_limit: data.len(),
@@ -1372,10 +1373,11 @@ mod tests {
             parameters.window_bits = window_bits;
             parameters.hash_algorithm = hash_algorithm;
             parameters.max_token_count = max_token_count;
-            let corrections = bitcode::encode(&ReconstructionData {
+            let corrections = ReconstructionData {
                 parameters,
                 corrections: Vec::new(),
-            });
+            }
+            .write();
             let error = recreate_whole_deflate_stream(&[], &corrections).unwrap_err();
             assert_eq!(error.exit_code(), ExitCode::InvalidPredictionData);
         }
@@ -1383,9 +1385,9 @@ mod tests {
 
     #[test]
     fn reconstruction_rejects_chain_depth_above_configured_limit() {
-        let mut data: ReconstructionData = bitcode::decode(&empty_block_corrections(1)).unwrap();
+        let mut data = ReconstructionData::read(&empty_block_corrections(1)).unwrap();
         data.parameters.max_chain = 5;
-        let corrections = bitcode::encode(&data);
+        let corrections = data.write();
         let config = PreflateConfig {
             max_chain_length: 4,
             ..PreflateConfig::default()
@@ -1415,10 +1417,11 @@ mod tests {
         encoder.encode_correction_bool(CodecCorrection::Last, true, false);
         encoder.encode_correction_bool(CodecCorrection::EndOfChunk, true, false);
         encoder.finish();
-        let data = bitcode::encode(&ReconstructionData {
+        let data = ReconstructionData {
             parameters,
             corrections,
-        });
+        }
+        .write();
         let error = recreate_whole_deflate_stream(b"unused", &data).unwrap_err();
         assert_eq!(error.exit_code(), ExitCode::InvalidPredictionData);
     }
@@ -1438,10 +1441,11 @@ mod tests {
             encoder.encode_correction_bool(CodecCorrection::EndOfChunk, i == count - 1, true);
         }
         encoder.finish();
-        bitcode::encode(&ReconstructionData {
+        ReconstructionData {
             parameters,
             corrections,
-        })
+        }
+        .write()
     }
 
     #[test]
@@ -1515,10 +1519,11 @@ mod tests {
         let (_, blocks) = recreator
             .recompress(
                 &mut Cursor::new([]),
-                &bitcode::encode(&ReconstructionData {
+                &ReconstructionData {
                     parameters,
                     corrections,
-                }),
+                }
+                .write(),
             )
             .unwrap();
         let DeflateTokenBlockType::Huffman {
@@ -1533,7 +1538,7 @@ mod tests {
 
     #[test]
     fn corrupted_cabac_corrections_do_not_panic() {
-        let data: ReconstructionData = bitcode::decode(&empty_block_corrections(1)).unwrap();
+        let data = ReconstructionData::read(&empty_block_corrections(1)).unwrap();
         let config = PreflateConfig {
             max_chain_length: 8,
             plain_text_limit: 1024,
@@ -1541,10 +1546,11 @@ mod tests {
             ..PreflateConfig::default()
         };
         let check = |corrections| {
-            let encoded = bitcode::encode(&ReconstructionData {
+            let encoded = ReconstructionData {
                 parameters: data.parameters,
                 corrections,
-            });
+            }
+            .write();
             catch_unwind(AssertUnwindSafe(|| {
                 RecreateStreamProcessor::with_config(config)
                     .recompress(&mut Cursor::new([]), &encoded)

@@ -803,7 +803,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_v2_frame_without_crc() {
+    fn rejects_v3_frame_without_crc() {
         let original = b"literal payload";
         let encoded =
             PreflateContainerProcessor::new(&PreflateContainerConfig::default(), 1, false)
@@ -838,7 +838,11 @@ mod tests {
             let mut decoder = RecreateContainerProcessor::with_config(1, &config);
             assert!(
                 decoder
-                    .process_buffer(&[2, kind], false, &mut Vec::new())
+                    .process_buffer(
+                        &[COMPRESSED_WRAPPER_VERSION_3, kind],
+                        false,
+                        &mut Vec::new()
+                    )
                     .is_ok()
             );
             let error = decoder
@@ -851,7 +855,15 @@ mod tests {
         assert!(
             decoder
                 .process_buffer(
-                    &[2, 0x40, 0x80, 0x80, 0x80, 0x80, 0x80],
+                    &[
+                        COMPRESSED_WRAPPER_VERSION_3,
+                        0x40,
+                        0x80,
+                        0x80,
+                        0x80,
+                        0x80,
+                        0x80,
+                    ],
                     false,
                     &mut Vec::new()
                 )

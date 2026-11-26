@@ -43,7 +43,7 @@ fn process_limited_buffer(
 effort budget of 8 GiB units by default (`None` disables it). It charges scanned and
 candidate input bytes, parsed plaintext, and conservative estimator and prediction
 work. Exceeding the budget is a terminal compression error, not a literal fallback;
-under-budget streams retain their original v2 encoding. The budget does not apply
+under-budget streams retain their original v3 encoding. The budget does not apply
 to container decompression; independently used core analyzers have their own
 default budget.
 
@@ -104,7 +104,7 @@ Mask constants (defined in `container_processor.rs`):
 - Each flush segment is decodable in sequence: the decoder is a persistent
   `zstd::stream::raw::Decoder` that maintains cross-block history, so compression
   quality benefits from all previously seen blocks.
-- The encoder discards Zstd finish bytes after flushing the blocks. The outer v2
+- The encoder discards Zstd finish bytes after flushing the blocks. The outer v3
   container ends with the required CRC-32 end block, not bare EOF.
 
 ### Inner payload layout (inside Zstd, after decompression)
