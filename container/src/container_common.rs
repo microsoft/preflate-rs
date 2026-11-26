@@ -1,6 +1,77 @@
-use std::io::{BufRead, Read, Write};
+use std::{
+    io::{BufRead, Read, Write},
+    num::Saturating,
+};
 
-use preflate_rs::{AddContext, HashAlgorithm, PreflateConfig, Result};
+use crate::utils::DEFAULT_MAX_PENDING_OUTPUT;
+use preflate_rs::{
+    AddContext, ExitCode, HashAlgorithm, PreflateConfig, PreflateError, Result, err_exit_code,
+};
+
+/// A size or length, either exact or computed with `Saturating` arithmetic.
+///
+/// Conversions return errors instead of truncating or overflowing, so a value that
+/// does not fit can never reach a limit check or the wire format.
+pub(crate) trait SizeValue: Sized {
+    fn to_usize(self) -> Result<usize>;
+
+    fn to_u32(self) -> Result<u32> {
+        u32::try_from(self.to_usize()?).map_err(|_| size_out_of_range())
+    }
+}
+
+macro_rules! exact_size_value {
+    ($($t:ty),*) => {$(
+        impl SizeValue for $t {
+            fn to_usize(self) -> Result<usize> {
+                usize::try_from(self).map_err(|_| size_out_of_range())
+            }
+        }
+    )*};
+}
+
+exact_size_value!(usize, u32, u64);
+
+/// Saturating `+` and `*` stop at exactly `usize::MAX`, which no real size can reach.
+impl SizeValue for Saturating<usize> {
+    fn to_usize(self) -> Result<usize> {
+        if self.0 == usize::MAX {
+            return Err(size_out_of_range());
+        }
+        Ok(self.0)
+    }
+}
+
+fn size_out_of_range() -> PreflateError {
+    PreflateError::new(ExitCode::InvalidParameter, "Size exceeds integer range")
+}
+
+/// Returns the size if it is within the limit.
+pub(crate) fn check_size(size: impl SizeValue, limit: usize, name: &str) -> Result<usize> {
+    let size = size.to_usize()?;
+    if size > limit {
+        return err_exit_code(
+            ExitCode::InvalidCompressedWrapper,
+            format!("{name} limit exceeded"),
+        );
+    }
+    Ok(size)
+}
+
+pub(crate) fn charge_compression_effort(remaining: &mut Option<u64>, amount: usize) -> Result<()> {
+    if let Some(left) = remaining {
+        if let Some(balance) = left.checked_sub(amount as u64) {
+            *left = balance;
+        } else {
+            *left = 0;
+            return Err(preflate_rs::PreflateError::new(
+                ExitCode::CompressionEffortLimit,
+                "Compression effort limit exceeded",
+            ));
+        }
+    }
+    Ok(())
+}
 
 /// Configuration for the deflate process
 #[derive(Debug, Clone)]
@@ -15,6 +86,9 @@ pub struct PreflateContainerConfig {
     /// just write it out as a literal block.
     pub max_chunk_size: usize,
 
+    /// Maximum compressed bytes in one container block.
+    pub compressed_block_limit: usize,
+
     /// The maximum overall size of plain text that we will compress. This is
     /// global to the entire container and limits the amount of processing that
     /// we will do to avoid running out of CPU time on a single file. Once we
@@ -22,9 +96,26 @@ pub struct PreflateContainerConfig {
     /// out the rest of the data as literal blocks.
     pub total_plain_text_limit: u64,
 
+    /// Maximum cumulative compression effort. Charges input/scanned/candidate bytes,
+    /// parsed plaintext, and conservative estimator and prediction work bounds.
+    /// None disables the limit. This does not affect container decompression.
+    pub compression_effort_limit: Option<u64>,
+
     /// The maximum size of a plain text chunk that we will decompress at a time. This limits
     /// the memory usage of the decompression process.
     pub chunk_plain_text_limit: usize,
+
+    /// Maximum encoded or decoded correction bytes per chunk.
+    pub correction_limit: usize,
+
+    /// Maximum decompressed container payload bytes per block.
+    pub decoded_block_limit: usize,
+
+    /// Maximum decoded pixel bytes per image.
+    pub image_limit: usize,
+
+    /// Maximum queued output bytes when using fixed-size output buffers.
+    pub max_pending_output: usize,
 
     /// true if we should verify that the decompressed data can be recompressed to the same bytes.
     /// This is important since there may be corner cases where the data may not yield the same bytes.
@@ -45,8 +136,14 @@ impl Default for PreflateContainerConfig {
         PreflateContainerConfig {
             min_chunk_size: 1024 * 1024,
             max_chunk_size: 64 * 1024 * 1024,
+            compressed_block_limit: 256 * 1024 * 1024,
             total_plain_text_limit: 512 * 1024 * 1024,
+            compression_effort_limit: Some(8 * 1024 * 1024 * 1024),
             chunk_plain_text_limit: 128 * 1024 * 1024,
+            correction_limit: 128 * 1024 * 1024,
+            decoded_block_limit: 256 * 1024 * 1024,
+            image_limit: 128 * 1024 * 1024,
+            max_pending_output: DEFAULT_MAX_PENDING_OUTPUT,
             max_chain_length: 4096,
             validate_compression: true,
         }
@@ -56,8 +153,10 @@ impl Default for PreflateContainerConfig {
 impl PreflateContainerConfig {
     pub fn preflate_config(&self) -> PreflateConfig {
         PreflateConfig {
+            compression_effort_limit: None,
             max_chain_length: self.max_chain_length,
             plain_text_limit: self.chunk_plain_text_limit,
+            correction_limit: self.correction_limit,
             verify_compression: self.validate_compression,
         }
     }
@@ -101,18 +200,22 @@ pub(crate) fn write_varint(destination: &mut impl Write, value: u32) -> std::io:
 
 pub(crate) fn read_varint(source: &mut impl Read) -> std::io::Result<u32> {
     let mut result = 0;
-    let mut shift = 0;
-    loop {
+    for shift in (0..35).step_by(7) {
         let mut byte = [0u8; 1];
         source.read_exact(&mut byte)?;
         let byte = byte[0];
-        result |= ((byte & 0x7F) as u32) << shift;
-        shift += 7;
+        if shift == 28 && byte > 0x0f {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "Container varint exceeds u32",
+            ));
+        }
+        result |= u32::from(byte & 0x7F) << shift;
         if byte & 0x80 == 0 {
-            break;
+            return Ok(result);
         }
     }
-    Ok(result)
+    unreachable!()
 }
 
 #[test]
@@ -146,6 +249,10 @@ pub struct PreflateStats {
 
 /// Processes an input buffer and writes the output to a writer
 pub trait ProcessBuffer {
+    fn pending_output_limit(&self) -> usize {
+        DEFAULT_MAX_PENDING_OUTPUT
+    }
+
     fn process_buffer(
         &mut self,
         input: &[u8],
@@ -191,6 +298,12 @@ pub trait ProcessBuffer {
         output: &mut impl Write,
         read_chunk_size: usize,
     ) -> Result<()> {
+        if read_chunk_size == 0 {
+            return err_exit_code(
+                ExitCode::InvalidParameter,
+                "Read chunk size must be nonzero",
+            );
+        }
         let mut input_complete = false;
         loop {
             let buffer: &[u8];
@@ -237,7 +350,9 @@ pub trait ProcessBuffer {
 
 #[cfg(test)]
 pub(crate) mod test {
-    use std::io::Write;
+    use std::io::{Cursor, Write};
+    use std::num::Saturating;
+    use std::panic::{AssertUnwindSafe, catch_unwind};
 
     use preflate_rs::{AddContext, Result};
 
@@ -245,12 +360,32 @@ pub(crate) mod test {
         BLOCK_COMPRESSION_MASK, BLOCK_COMPRESSION_NONE, BLOCK_COMPRESSION_ZSTD, BLOCK_TYPE_DEFLATE,
         BLOCK_TYPE_DEFLATE_CONTINUE, BLOCK_TYPE_JPEG_LEPTON, BLOCK_TYPE_LITERAL, BLOCK_TYPE_MASK,
         BLOCK_TYPE_PNG, BLOCK_TYPE_WEBP, COMPRESSED_WRAPPER_VERSION_2, PreflateContainerConfig,
-        ProcessBuffer, read_varint,
+        ProcessBuffer, SizeValue, check_size, read_varint,
     };
     use crate::container_read::RecreateContainerProcessor;
     use crate::container_write::PreflateContainerProcessor;
 
     pub struct NopProcessBuffer {}
+
+    #[test]
+    fn rejects_zero_read_chunk_size() {
+        assert!(
+            NopProcessBuffer {}
+                .copy_to_end_size(&mut Cursor::new(b"input"), &mut Vec::new(), 0)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn size_values_reject_truncation_and_saturation() {
+        assert_eq!(u32::MAX.to_usize().unwrap(), u32::MAX as usize);
+        assert_eq!((u32::MAX as usize).to_u32().unwrap(), u32::MAX);
+        assert!((u64::from(u32::MAX) + 1).to_u32().is_err());
+
+        let saturated = Saturating(usize::MAX) + Saturating(1);
+        assert!(saturated.to_u32().is_err());
+        assert!(check_size(saturated, usize::MAX, "Saturated").is_err());
+    }
 
     impl ProcessBuffer for NopProcessBuffer {
         fn process_buffer(
@@ -398,7 +533,7 @@ pub(crate) mod test {
             let compression = type_byte & BLOCK_COMPRESSION_MASK;
             let block_type = type_byte & BLOCK_TYPE_MASK;
             blocks.push((compression, block_type));
-            let size = read_varint(&mut cursor).unwrap() as u64;
+            let size = u64::from(read_varint(&mut cursor).unwrap());
             cursor.set_position(cursor.position() + size);
         }
         blocks
@@ -729,6 +864,227 @@ pub(crate) mod test {
         let mut dec = RecreateContainerProcessor::new(usize::MAX);
         let recreated = dec.process_vec(&compressed).unwrap();
         assert_eq_array(&original, &recreated);
+    }
+
+    #[test]
+    fn total_plain_text_limit_counts_finished_deflate_streams() {
+        let original = crate::utils::read_file("test_two_zlib_streams.bin");
+        let mut encoder = PreflateContainerProcessor::new(
+            &PreflateContainerConfig {
+                total_plain_text_limit: 1,
+                ..PreflateContainerConfig::default()
+            },
+            1,
+            false,
+        );
+        let compressed = encoder.process_vec(&original).unwrap();
+        let blocks = parse_wire_block_types(&compressed);
+        assert_eq!(
+            blocks
+                .iter()
+                .filter(|&&(_, kind)| kind == BLOCK_TYPE_DEFLATE)
+                .count(),
+            1,
+            "the first independent DEFLATE stream must exhaust the analysis budget"
+        );
+        assert_eq!(
+            blocks.last().map(|&(_, kind)| kind),
+            Some(BLOCK_TYPE_LITERAL)
+        );
+        assert_eq!(
+            RecreateContainerProcessor::new(usize::MAX)
+                .process_vec(&compressed)
+                .unwrap(),
+            original
+        );
+    }
+
+    #[test]
+    fn total_plain_text_limit_stops_deflate_continuations() {
+        let original = crate::utils::read_file("sample1.bin.gz");
+        let mut encoder = PreflateContainerProcessor::new(
+            &PreflateContainerConfig {
+                min_chunk_size: 0,
+                total_plain_text_limit: 1,
+                ..PreflateContainerConfig::default()
+            },
+            1,
+            false,
+        );
+        let mut compressed = Vec::new();
+        encoder
+            .process_buffer(&original[..200_000], false, &mut compressed)
+            .unwrap();
+        assert_eq!(
+            parse_wire_block_types(&compressed)
+                .iter()
+                .filter(|&&(_, kind)| kind == BLOCK_TYPE_DEFLATE)
+                .count(),
+            1,
+            "the first segment must enter DEFLATE continuation"
+        );
+        encoder
+            .process_buffer(&original[200_000..], false, &mut compressed)
+            .unwrap();
+        encoder.process_buffer(&[], true, &mut compressed).unwrap();
+
+        let blocks = parse_wire_block_types(&compressed);
+        assert_eq!(
+            blocks
+                .iter()
+                .filter(|&&(_, kind)| kind == BLOCK_TYPE_DEFLATE_CONTINUE)
+                .count(),
+            0,
+            "continuations must not be analyzed after the budget is exceeded"
+        );
+        assert_eq!(
+            blocks.last().map(|&(_, kind)| kind),
+            Some(BLOCK_TYPE_LITERAL)
+        );
+        assert_eq!(
+            RecreateContainerProcessor::new(usize::MAX)
+                .process_vec_size(&compressed, 10_000)
+                .unwrap(),
+            original
+        );
+    }
+
+    #[test]
+    fn empty_input_produces_decodable_container() {
+        let config = PreflateContainerConfig::default();
+        let mut encoder = PreflateContainerProcessor::new(&config, 1, false);
+        let compressed = encoder.process_vec(&[]).unwrap();
+        let mut decoder = RecreateContainerProcessor::new(1);
+        assert_eq!(decoder.process_vec_size(&compressed, 1).unwrap(), b"");
+    }
+
+    #[test]
+    fn compression_effort_limit_is_cumulative_and_terminal() {
+        let config = PreflateContainerConfig {
+            min_chunk_size: 0,
+            compression_effort_limit: Some(70),
+            ..PreflateContainerConfig::default()
+        };
+        let mut compressor = PreflateContainerProcessor::new(&config, 1, false);
+        let mut output = Vec::new();
+        compressor
+            .process_buffer(&[b'A'; 32], false, &mut output)
+            .unwrap();
+        let error = compressor
+            .process_buffer(&[b'A'; 16], true, &mut output)
+            .unwrap_err();
+        assert_eq!(
+            error.exit_code(),
+            preflate_rs::ExitCode::CompressionEffortLimit
+        );
+        assert!(
+            error
+                .message()
+                .contains("Compression effort limit exceeded")
+        );
+        assert!(compressor.process_buffer(&[], true, &mut output).is_err());
+    }
+
+    #[test]
+    fn failed_candidate_exhausts_effort_without_literal_fallback() {
+        let mut data = vec![0x78, 0x9c];
+        data.extend_from_slice(&[b'A'; 1024]);
+        let config = PreflateContainerConfig {
+            compression_effort_limit: Some((data.len() * 2) as u64),
+            ..PreflateContainerConfig::default()
+        };
+        let error = PreflateContainerProcessor::new(&config, 1, false)
+            .process_vec(&data)
+            .unwrap_err();
+        assert!(
+            error
+                .message()
+                .contains("Compression effort limit exceeded")
+        );
+    }
+
+    #[test]
+    fn sufficient_effort_preserves_v2_output_and_decoder_has_no_effort_limit() {
+        let data = crate::utils::read_file("sample1.bin.gz");
+        let unlimited = PreflateContainerConfig {
+            compression_effort_limit: None,
+            ..PreflateContainerConfig::default()
+        };
+        let encoded = PreflateContainerProcessor::new(&unlimited, 1, false)
+            .process_vec(&data)
+            .unwrap();
+        let bounded = PreflateContainerConfig {
+            compression_effort_limit: Some(u64::MAX),
+            ..PreflateContainerConfig::default()
+        };
+        assert_eq!(
+            PreflateContainerProcessor::new(&bounded, 1, false)
+                .process_vec(&data)
+                .unwrap(),
+            encoded
+        );
+        let decoder_config = PreflateContainerConfig {
+            compression_effort_limit: Some(0),
+            ..PreflateContainerConfig::default()
+        };
+        assert_eq!(
+            RecreateContainerProcessor::with_config(4096, &decoder_config)
+                .process_vec(&encoded)
+                .unwrap(),
+            data
+        );
+    }
+
+    #[test]
+    fn malformed_literal_frames_do_not_panic_or_return_wrong_output() {
+        let original = b"literal payload without a deflate signature".repeat(4);
+        assert_roundtrip(&original);
+        let config = PreflateContainerConfig {
+            max_chunk_size: 1024,
+            compressed_block_limit: 4096,
+            decoded_block_limit: 1024,
+            chunk_plain_text_limit: 1024,
+            ..PreflateContainerConfig::default()
+        };
+        let encoded = PreflateContainerProcessor::new(&config, 1, false)
+            .process_vec(&original)
+            .unwrap();
+        assert_eq!(encoded[1], BLOCK_COMPRESSION_ZSTD | BLOCK_TYPE_LITERAL);
+        let mut cursor = Cursor::new(&encoded[2..]);
+        let payload_length = read_varint(&mut cursor).unwrap() as usize;
+        let payload_start = 2 + cursor.position() as usize;
+
+        let check = |bytes: &[u8], truncated: bool| {
+            let outcome = catch_unwind(AssertUnwindSafe(|| {
+                let mut output = Vec::new();
+                let mut decoder = RecreateContainerProcessor::with_config(64, &config);
+                decoder
+                    .process_buffer(bytes, true, &mut output)
+                    .map(|()| output)
+            }));
+            match outcome {
+                Ok(Ok(_)) if truncated => panic!("truncated v2 container was accepted"),
+                Ok(Ok(output)) => assert_eq!(output, original),
+                Ok(Err(_)) => {}
+                Err(_) => panic!("decoder panicked on malformed container"),
+            }
+        };
+
+        for length in 0..encoded.len() {
+            check(&encoded[..length], true);
+        }
+        for index in payload_start..payload_start + payload_length.min(32) {
+            for bit in 0..8 {
+                let mut mutated = encoded.clone();
+                mutated[index] ^= 1 << bit;
+                check(&mutated, false);
+            }
+        }
+        for index in encoded.len() - 4..encoded.len() {
+            let mut mutated = encoded.clone();
+            mutated[index] ^= 1;
+            assert_decoder_fails(&mutated, preflate_rs::ExitCode::InvalidCompressedWrapper);
+        }
     }
 
     // ── Multi-scheme fixture tests ───────────────────────────────────────────────

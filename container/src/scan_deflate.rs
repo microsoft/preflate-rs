@@ -2,6 +2,7 @@ use std::{io::Cursor, ops::Range};
 
 use crate::{
     PreflateContainerConfig,
+    container_common::charge_compression_effort,
     idat_parse::{IdatContents, PngHeader, parse_idat, parse_ihdr},
 };
 
@@ -12,9 +13,9 @@ use preflate_rs::{
 };
 
 use byteorder::{LittleEndian, ReadBytesExt};
-use std::io::{Read, Seek};
+use std::io::Read;
 
-use preflate_rs::Result;
+use preflate_rs::{PreflateError, Result};
 
 /// The minimum size of a block that is considered for splitting into chunks
 const MIN_BLOCKSIZE: usize = 1024;
@@ -26,7 +27,7 @@ pub struct FoundStream {
 
 pub enum FoundStreamType {
     /// Deflate stream
-    DeflateStream(TokenPredictorParameters, PreflateStreamProcessor),
+    DeflateStream(TokenPredictorParameters, Box<PreflateStreamProcessor>),
 
     /// PNG IDAT, which is a concatenated Zlib stream of IDAT chunks. This
     /// is special since the Deflate stream is split into IDAT chunks.
@@ -93,10 +94,97 @@ fn next_signature(src: &[u8], index: &mut usize) -> Option<Signature> {
     None
 }
 
+fn small_idat_run_end(src: &[u8], start: usize, input_complete: bool) -> Option<usize> {
+    let mut pos = start;
+    let mut payload_len = 0usize;
+    loop {
+        let header = match src.get(pos..pos.checked_add(8)?) {
+            Some(header) => header,
+            None => return (input_complete && pos > start).then_some(src.len()),
+        };
+        if &header[4..8] != b"IDAT" {
+            return (pos > start && (input_complete || src.len() - pos > 8)).then_some(pos);
+        }
+        let chunk_len = u32::from_be_bytes(header[..4].try_into().ok()?) as usize;
+        payload_len = payload_len.checked_add(chunk_len)?;
+        if payload_len >= 6 {
+            return None;
+        }
+        pos = pos.checked_add(chunk_len)?.checked_add(12)?;
+        if pos > src.len() {
+            return input_complete.then_some(src.len());
+        }
+    }
+}
+
+fn first_bad_idat_chunk(src: &[u8], start: usize) -> Option<usize> {
+    let mut pos = start;
+    loop {
+        let header = src.get(pos..pos.checked_add(8)?)?;
+        if &header[4..8] != b"IDAT" {
+            return None;
+        }
+        let length = u32::from_be_bytes(header[..4].try_into().ok()?) as usize;
+        let end = pos.checked_add(length)?.checked_add(8)?;
+        let crc = src.get(end..end.checked_add(4)?)?;
+        let mut hash = crc32fast::Hasher::new();
+        hash.update(b"IDAT");
+        hash.update(src.get(pos + 8..end)?);
+        if hash.finalize().to_be_bytes() != crc {
+            return Some(pos);
+        }
+        pos = end + 4;
+    }
+}
+
+struct IdatSuffixCache {
+    chunk_sizes: Vec<u32>,
+    payload: Vec<u8>,
+    next_chunk: usize,
+    next_start: usize,
+    payload_offset: usize,
+    end: usize,
+}
+
+impl IdatSuffixCache {
+    fn new(start: usize, idat: IdatContents, deflate: Vec<u8>) -> Self {
+        let mut payload = Vec::with_capacity(deflate.len() + 6);
+        payload.extend_from_slice(&idat.zlib_header);
+        payload.extend_from_slice(&deflate);
+        payload.extend_from_slice(&idat.addler32.to_be_bytes());
+        let first_chunk = idat.chunk_sizes[0] as usize;
+        Self {
+            next_start: start + first_chunk + 12,
+            end: start + idat.total_chunk_length,
+            chunk_sizes: idat.chunk_sizes,
+            payload,
+            next_chunk: 1,
+            payload_offset: first_chunk,
+        }
+    }
+
+    fn next(&mut self, start: usize) -> Option<(&[u8], &[u32], usize)> {
+        if start != self.next_start || self.next_chunk >= self.chunk_sizes.len() {
+            return None;
+        }
+        let offset = self.payload_offset;
+        let chunk = self.next_chunk;
+        self.payload_offset += self.chunk_sizes[chunk] as usize;
+        self.next_start += self.chunk_sizes[chunk] as usize + 12;
+        self.next_chunk += 1;
+        Some((
+            &self.payload[offset..],
+            &self.chunk_sizes[chunk..],
+            self.end - start,
+        ))
+    }
+}
+
 pub enum FindStreamResult {
     None,
     Found(Range<usize>, FoundStream),
     ShortRead,
+    EffortExceeded(PreflateError),
 }
 
 /// Scans for deflate streams in a zlib compressed file, decompresses the streams and
@@ -106,14 +194,45 @@ pub fn find_compressable_stream(
     prev_ihdr: &mut Option<PngHeader>,
     input_complete: bool,
     config: &PreflateContainerConfig,
+    effort: &mut Option<u64>,
 ) -> FindStreamResult {
     let mut index: usize = 0;
-    while let Some(signature) = next_signature(src, &mut index) {
+    let mut next_nul = None;
+    let mut nul_search_start = 0;
+    let mut small_idat_end = 0;
+    let mut next_small_idat = 0;
+    let mut bad_idat_end = 0;
+    let mut next_bad_idat = 0;
+    let mut idat_cache: Option<IdatSuffixCache> = None;
+    loop {
+        let previous_index = index;
+        let signature = next_signature(src, &mut index);
+        let scanned = if signature.is_some() {
+            index - previous_index + 1
+        } else {
+            src.len().saturating_sub(previous_index)
+        };
+        if let Err(e) = charge_compression_effort(effort, scanned) {
+            return FindStreamResult::EffortExceeded(e);
+        }
+        let Some(signature) = signature else { break };
         match signature {
             Signature::Zlib(_) => {
+                if let Err(e) = charge_compression_effort(effort, src.len() - index) {
+                    return FindStreamResult::EffortExceeded(e);
+                }
                 let mut state = PreflateStreamProcessor::new(&config.preflate_config());
 
-                if let Ok(res) = state.decompress(&src[index + 2..]) {
+                let result = state.decompress_with_effort(&src[index + 2..], effort);
+                if let Err(ref e) = result
+                    && e.exit_code() == ExitCode::CompressionEffortLimit
+                {
+                    return FindStreamResult::EffortExceeded(e.clone());
+                }
+                if let Err(e) = charge_compression_effort(effort, state.plain_text().len()) {
+                    return FindStreamResult::EffortExceeded(e);
+                }
+                if let Ok(res) = result {
                     if state.plain_text().len() > MIN_BLOCKSIZE {
                         index += 2;
                         return FindStreamResult::Found(
@@ -121,7 +240,7 @@ pub fn find_compressable_stream(
                             FoundStream {
                                 chunk_type: FoundStreamType::DeflateStream(
                                     res.parameters.unwrap(),
-                                    state,
+                                    Box::new(state),
                                 ),
                                 corrections: res.corrections,
                             },
@@ -131,19 +250,48 @@ pub fn find_compressable_stream(
             }
 
             Signature::Gzip => {
+                if let Err(e) = charge_compression_effort(effort, src.len() - index) {
+                    return FindStreamResult::EffortExceeded(e);
+                }
                 let mut cursor = Cursor::new(&src[index..]);
-                if skip_gzip_header(&mut cursor).is_ok() {
+                if skip_gzip_header(&mut cursor, |cursor| {
+                    let start = index + cursor.position() as usize;
+                    if next_nul.is_none_or(|position| position < start) {
+                        let search_start = nul_search_start.max(start);
+                        next_nul = src[search_start..]
+                            .iter()
+                            .position(|&byte| byte == 0)
+                            .map(|offset| search_start + offset);
+                        nul_search_start = next_nul.map_or(src.len(), |position| position + 1);
+                    }
+                    let position = next_nul.ok_or_else(|| {
+                        std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "GZIP string")
+                    })?;
+                    cursor.set_position((position - index + 1) as u64);
+                    Ok(())
+                })
+                .is_ok()
+                {
                     let start = index + cursor.position() as usize;
 
                     let mut state = PreflateStreamProcessor::new(&config.preflate_config());
-                    if let Ok(res) = state.decompress(&src[start..]) {
+                    let result = state.decompress_with_effort(&src[start..], effort);
+                    if let Err(ref e) = result
+                        && e.exit_code() == ExitCode::CompressionEffortLimit
+                    {
+                        return FindStreamResult::EffortExceeded(e.clone());
+                    }
+                    if let Err(e) = charge_compression_effort(effort, state.plain_text().len()) {
+                        return FindStreamResult::EffortExceeded(e);
+                    }
+                    if let Ok(res) = result {
                         if state.plain_text().len() > MIN_BLOCKSIZE {
                             return FindStreamResult::Found(
                                 start..start + res.compressed_size,
                                 FoundStream {
                                     chunk_type: FoundStreamType::DeflateStream(
                                         res.parameters.unwrap(),
-                                        state,
+                                        Box::new(state),
                                     ),
                                     corrections: res.corrections,
                                 },
@@ -154,16 +302,26 @@ pub fn find_compressable_stream(
             }
 
             Signature::ZipLocalFileHeader => {
-                if let Ok((header_size, res, state)) =
-                    parse_zip_stream(&src[index..], &config.preflate_config())
+                if let Err(e) = charge_compression_effort(effort, src.len() - index) {
+                    return FindStreamResult::EffortExceeded(e);
+                }
+                let result = parse_zip_stream(&src[index..], &config.preflate_config(), effort);
+                if let Err(ref e) = result
+                    && e.exit_code() == ExitCode::CompressionEffortLimit
                 {
+                    return FindStreamResult::EffortExceeded(e.clone());
+                }
+                if let Ok((header_size, res, state)) = result {
+                    if let Err(e) = charge_compression_effort(effort, state.plain_text().len()) {
+                        return FindStreamResult::EffortExceeded(e);
+                    }
                     if state.plain_text().len() > MIN_BLOCKSIZE {
                         return FindStreamResult::Found(
                             index + header_size..index + header_size + res.compressed_size,
                             FoundStream {
                                 chunk_type: FoundStreamType::DeflateStream(
                                     res.parameters.unwrap(),
-                                    state,
+                                    Box::new(state),
                                 ),
                                 corrections: res.corrections,
                             },
@@ -194,12 +352,104 @@ pub fn find_compressable_stream(
                     // idat has the length first, then the "IDAT", so we need to look back 4 bytes
                     // if we find and IDAT
                     let real_start = index - 4;
+                    if index == next_bad_idat && real_start < bad_idat_end {
+                        let length =
+                            u32::from_be_bytes(src[real_start..index].try_into().unwrap()) as usize;
+                        next_bad_idat = index + length + 12;
+                        index += 1;
+                        continue;
+                    }
+                    if let Some((bytes, sizes, length)) =
+                        idat_cache.as_mut().and_then(|cache| cache.next(real_start))
+                    {
+                        if bytes.len() >= 6 {
+                            if let Err(e) = charge_compression_effort(effort, bytes.len()) {
+                                return FindStreamResult::EffortExceeded(e);
+                            }
+                            let png_header = *prev_ihdr;
+                            *prev_ihdr = None;
+                            let mut state = PreflateStreamProcessor::new(&config.preflate_config());
+                            let payload = &bytes[2..bytes.len() - 4];
+                            let result = state.decompress_with_effort(payload, effort);
+                            if let Err(ref e) = result
+                                && e.exit_code() == ExitCode::CompressionEffortLimit
+                            {
+                                return FindStreamResult::EffortExceeded(e.clone());
+                            }
+                            if let Err(e) =
+                                charge_compression_effort(effort, state.plain_text().len())
+                            {
+                                return FindStreamResult::EffortExceeded(e);
+                            }
+                            if let Ok(res) = result
+                                && res.compressed_size == payload.len()
+                            {
+                                if length > MIN_BLOCKSIZE {
+                                    return FindStreamResult::Found(
+                                        real_start..real_start + length,
+                                        FoundStream {
+                                            chunk_type: FoundStreamType::IDATDeflate(
+                                                res.parameters.unwrap(),
+                                                IdatContents {
+                                                    chunk_sizes: sizes.to_vec(),
+                                                    zlib_header: [bytes[0], bytes[1]],
+                                                    total_chunk_length: length,
+                                                    addler32: u32::from_be_bytes(
+                                                        bytes[bytes.len() - 4..]
+                                                            .try_into()
+                                                            .unwrap(),
+                                                    ),
+                                                    png_header,
+                                                },
+                                                state.detach_plain_text(),
+                                            ),
+                                            corrections: res.corrections,
+                                        },
+                                    );
+                                }
+                                index = real_start + length;
+                            }
+                        }
+                        index += 1;
+                        continue;
+                    }
+                    if index == next_small_idat && index < small_idat_end {
+                        let length =
+                            u32::from_be_bytes(src[real_start..index].try_into().unwrap()) as usize;
+                        next_small_idat = index + length + 12;
+                        index += 1;
+                        continue;
+                    }
+                    if let Err(e) = charge_compression_effort(effort, src.len() - real_start) {
+                        return FindStreamResult::EffortExceeded(e);
+                    }
+                    if let Some(end) = small_idat_run_end(src, real_start, input_complete) {
+                        small_idat_end = end;
+                        let length =
+                            u32::from_be_bytes(src[real_start..index].try_into().unwrap()) as usize;
+                        next_small_idat = index + length + 12;
+                        index += 1;
+                        continue;
+                    }
                     match parse_idat(*prev_ihdr, &src[real_start..]) {
                         Ok((idat_contents, payload)) => {
                             *prev_ihdr = None;
                             let mut state = PreflateStreamProcessor::new(&config.preflate_config());
 
-                            if let Ok(res) = state.decompress(&payload) {
+                            let result = state.decompress_with_effort(&payload, effort);
+                            if let Err(ref e) = result
+                                && e.exit_code() == ExitCode::CompressionEffortLimit
+                            {
+                                return FindStreamResult::EffortExceeded(e.clone());
+                            }
+                            if let Err(e) =
+                                charge_compression_effort(effort, state.plain_text().len())
+                            {
+                                return FindStreamResult::EffortExceeded(e);
+                            }
+                            if let Ok(res) = result
+                                && res.compressed_size == payload.len()
+                            {
                                 let length = idat_contents.total_chunk_length;
                                 if length > MIN_BLOCKSIZE {
                                     return FindStreamResult::Found(
@@ -220,17 +470,33 @@ pub fn find_compressable_stream(
                                     index = real_start + idat_contents.total_chunk_length;
                                 }
                             }
+                            if index == real_start + 4 && idat_contents.chunk_sizes.len() > 1 {
+                                idat_cache =
+                                    Some(IdatSuffixCache::new(real_start, idat_contents, payload));
+                            }
                         }
                         Err(e) => {
                             if e.exit_code() == ExitCode::ShortRead && !input_complete {
                                 // we don't have the whole IDAT chunk yet, so tell the caller they need to extend the buffer
                                 return FindStreamResult::ShortRead;
                             }
+                            if e.exit_code() == ExitCode::InvalidIDat
+                                && let Some(bad) = first_bad_idat_chunk(src, real_start)
+                            {
+                                bad_idat_end = bad;
+                                let length =
+                                    u32::from_be_bytes(src[real_start..index].try_into().unwrap())
+                                        as usize;
+                                next_bad_idat = index + length + 12;
+                            }
                         }
                     }
                 }
             }
             Signature::JPEG => {
+                if let Err(e) = charge_compression_effort(effort, src.len() - index) {
+                    return FindStreamResult::EffortExceeded(e);
+                }
                 let mut output = Vec::new();
 
                 // only required feature is that we can stop reading at the EOI marker
@@ -294,7 +560,10 @@ pub fn find_compressable_stream(
     FindStreamResult::None
 }
 
-fn skip_gzip_header<R: Read>(reader: &mut R) -> Result<()> {
+fn skip_gzip_header<'a>(
+    reader: &mut Cursor<&'a [u8]>,
+    mut skip_string: impl FnMut(&mut Cursor<&'a [u8]>) -> Result<()>,
+) -> Result<()> {
     let mut buffer = [0; 10];
     reader.read_exact(&mut buffer)?; // Read past the fixed 10-byte GZIP header
 
@@ -306,19 +575,21 @@ fn skip_gzip_header<R: Read>(reader: &mut R) -> Result<()> {
         // FEXTRA flag is set, read extra data
         let mut extra_len = [0; 2];
         reader.read_exact(&mut extra_len)?;
-        let extra_len = u16::from_le_bytes(extra_len);
-        let mut extra = vec![0; extra_len as usize];
-        reader.read_exact(&mut extra)?;
+        let end = reader.position() as usize + usize::from(u16::from_le_bytes(extra_len));
+        if end > reader.get_ref().len() {
+            return err_exit_code(ExitCode::ShortRead, "Incomplete GZIP extra field");
+        }
+        reader.set_position(end as u64);
     }
 
     if buffer[3] & 0x08 != 0 {
         // FNAME flag is set, read null-terminated file name
-        while reader.read_u8()? != 0 {}
+        skip_string(reader)?;
     }
 
     if buffer[3] & 0x10 != 0 {
         // FCOMMENT flag is set, read null-terminated comment
-        while reader.read_u8()? != 0 {}
+        skip_string(reader)?;
     }
 
     if buffer[3] & 0x02 != 0 {
@@ -358,8 +629,8 @@ impl ZipLocalFileHeader {
             last_mod_file_time: binary_reader.read_u16::<LittleEndian>()?,
             last_mod_file_date: binary_reader.read_u16::<LittleEndian>()?,
             crc32: binary_reader.read_u32::<LittleEndian>()?,
-            compressed_size: binary_reader.read_u32::<LittleEndian>()? as u64,
-            uncompressed_size: binary_reader.read_u32::<LittleEndian>()? as u64,
+            compressed_size: u64::from(binary_reader.read_u32::<LittleEndian>()?),
+            uncompressed_size: u64::from(binary_reader.read_u32::<LittleEndian>()?),
             file_name_length: binary_reader.read_u16::<LittleEndian>()?,
             extra_field_length: binary_reader.read_u16::<LittleEndian>()?,
         };
@@ -372,6 +643,7 @@ impl ZipLocalFileHeader {
 fn parse_zip_stream(
     contents: &[u8],
     config: &PreflateConfig,
+    effort: &mut Option<u64>,
 ) -> Result<(usize, PreflateStreamChunkResult, PreflateStreamProcessor)> {
     let mut binary_reader = Cursor::new(&contents);
 
@@ -382,22 +654,24 @@ fn parse_zip_stream(
         return err_exit_code(ExitCode::InvalidDeflate, "No local header");
     }
 
-    // read extended information
-    let mut file_name_buf = vec![0; zip_local_file_header.file_name_length as usize];
-    binary_reader.read_exact(&mut file_name_buf)?;
-    //let _path = String::from_utf8(file_name_buf).map_err( PreflateError)?;
-
-    // Skip Extra field
-    let mut extra_field_buf = vec![0; zip_local_file_header.extra_field_length.into()];
-    binary_reader.read_exact(&mut extra_field_buf)?;
+    let deflate_start_position = binary_reader.position() as usize
+        + usize::from(zip_local_file_header.file_name_length)
+        + usize::from(zip_local_file_header.extra_field_length);
+    if deflate_start_position > contents.len() {
+        return err_exit_code(ExitCode::ShortRead, "Incomplete ZIP header fields");
+    }
 
     // Handle the compressed DATA. Currently only Deflate (8) and uncompressed (0) are supported.
     if zip_local_file_header.compression_method == 8 {
-        let deflate_start_position = binary_reader.stream_position()? as usize;
-
         let mut state = PreflateStreamProcessor::new(config);
 
-        if let Ok(res) = state.decompress(&contents[deflate_start_position..]) {
+        let result = state.decompress_with_effort(&contents[deflate_start_position..], effort);
+        if let Err(ref e) = result
+            && e.exit_code() == ExitCode::CompressionEffortLimit
+        {
+            return Err(e.clone());
+        }
+        if let Ok(res) = result {
             return Ok((deflate_start_position, res, state));
         }
     }
@@ -424,6 +698,7 @@ fn find_streams(f: &[u8], chunk_size_limit: usize) -> Vec<(Range<usize>, ChunkTy
         &mut None,
         true,
         &PreflateContainerConfig::default(),
+        &mut None,
     ) {
         let r = offset + loc.start..offset + loc.end;
 
@@ -556,4 +831,288 @@ fn parse_docx() {
             (1025579..1025926, DeflateStream)
         ]
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn skip_string(reader: &mut impl Read) -> Result<()> {
+        while reader.read_u8()? != 0 {}
+        Ok(())
+    }
+
+    #[test]
+    fn skips_large_gzip_extra_without_allocating() {
+        let mut header = vec![0x1f, 0x8b, 8, 0x04, 0, 0, 0, 0, 0, 0];
+        header.extend_from_slice(&u16::MAX.to_le_bytes());
+        header.resize(header.len() + u16::MAX as usize, 0);
+        let mut reader = Cursor::new(header.as_slice());
+        skip_gzip_header(&mut reader, skip_string).unwrap();
+        assert_eq!(reader.position() as usize, header.len());
+
+        reader = Cursor::new(&header[..header.len() - 1]);
+        assert!(skip_gzip_header(&mut reader, skip_string).is_err());
+    }
+
+    #[test]
+    fn repeated_gzip_names_do_not_rescan_unterminated_suffix() {
+        let mut data = vec![b'A'; 128 * 1024];
+        for position in (0..data.len() - 10).step_by(16) {
+            data[position..position + 10]
+                .copy_from_slice(&[0x1f, 0x8b, 8, 0x08, b'A', b'A', b'A', b'A', b'A', b'A']);
+        }
+        assert!(matches!(
+            find_compressable_stream(
+                &data,
+                &mut None,
+                true,
+                &PreflateContainerConfig::default(),
+                &mut None
+            ),
+            FindStreamResult::None
+        ));
+    }
+
+    #[test]
+    fn repeated_gzip_headers_skip_large_extra_fields_without_copying() {
+        let mut data = vec![b'A'; 128 * 1024];
+        for position in (0..data.len() - 12).step_by(16) {
+            data[position..position + 12].copy_from_slice(&[
+                0x1f, 0x8b, 8, 0x04, b'A', b'A', b'A', b'A', b'A', b'A', 0xff, 0xff,
+            ]);
+        }
+        assert!(matches!(
+            find_compressable_stream(
+                &data,
+                &mut None,
+                true,
+                &PreflateContainerConfig::default(),
+                &mut None
+            ),
+            FindStreamResult::None
+        ));
+    }
+
+    #[test]
+    fn repeated_zip_headers_skip_large_fields_without_copying() {
+        let mut data = vec![b'A'; 128 * 1024];
+        for position in (0..data.len() - 30).step_by(32) {
+            data[position..position + 30].copy_from_slice(&[
+                b'P', b'K', 3, 4, 20, 0, 0, 0, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 0xff, 0xff,
+            ]);
+        }
+        assert!(matches!(
+            find_compressable_stream(
+                &data,
+                &mut None,
+                true,
+                &PreflateContainerConfig::default(),
+                &mut None
+            ),
+            FindStreamResult::None
+        ));
+    }
+
+    #[test]
+    fn tiny_idat_run_is_examined_once() {
+        let mut data = Vec::new();
+        for _ in 0..2048 {
+            data.extend_from_slice(&[0, 0, 0, 0]);
+            data.extend_from_slice(b"IDAT");
+            data.extend_from_slice(&crc32fast::hash(b"IDAT").to_be_bytes());
+        }
+        let run_end = data.len();
+        data.extend_from_slice(&[0, 0, 0, 0]);
+        data.extend_from_slice(b"IEND");
+        data.extend_from_slice(&crc32fast::hash(b"IEND").to_be_bytes());
+        assert_eq!(small_idat_run_end(&data, 0, true), Some(run_end));
+        assert!(matches!(
+            find_compressable_stream(
+                &data,
+                &mut None,
+                true,
+                &PreflateContainerConfig::default(),
+                &mut None
+            ),
+            FindStreamResult::None
+        ));
+        let mut zlib = vec![0x78, 0x9c];
+        zlib.extend_from_slice(&crate::utils::read_file("compressed_zlib_level1.deflate"));
+        assert!(matches!(
+            find_compressable_stream(
+                &zlib,
+                &mut None,
+                true,
+                &PreflateContainerConfig::default(),
+                &mut None
+            ),
+            FindStreamResult::Found(_, _)
+        ));
+        data.extend_from_slice(&zlib);
+        match find_compressable_stream(
+            &data,
+            &mut None,
+            true,
+            &PreflateContainerConfig::default(),
+            &mut None,
+        ) {
+            FindStreamResult::Found(range, _) => assert_eq!(range.start, run_end + 14),
+            FindStreamResult::None => panic!("valid zlib stream after IDAT run was not found"),
+            FindStreamResult::ShortRead => panic!("complete input requested more data"),
+            FindStreamResult::EffortExceeded(e) => panic!("unlimited scan exceeded budget: {e}"),
+        }
+
+        data.truncate(run_end);
+        assert_eq!(small_idat_run_end(&data, 0, true), Some(run_end));
+        assert!(matches!(
+            find_compressable_stream(
+                &data,
+                &mut None,
+                true,
+                &PreflateContainerConfig::default(),
+                &mut None
+            ),
+            FindStreamResult::None
+        ));
+        assert!(matches!(
+            find_compressable_stream(
+                &data,
+                &mut None,
+                false,
+                &PreflateContainerConfig::default(),
+                &mut None
+            ),
+            FindStreamResult::ShortRead
+        ));
+    }
+
+    #[test]
+    fn cached_idat_suffix_keeps_valid_later_stream() {
+        use crate::{PreflateContainerProcessor, ProcessBuffer, RecreateContainerProcessor};
+
+        let mut zlib = vec![0x78, 0x9c];
+        zlib.extend_from_slice(&crate::utils::read_file("compressed_zlib_level1.deflate"));
+        zlib.extend_from_slice(&[0; 4]);
+        let mut data = Vec::new();
+        let chunks = std::iter::repeat_n(b"\0\0\0\0\0\0".as_slice(), 64)
+            .chain(std::iter::once(zlib.as_slice()));
+        for chunk in chunks {
+            data.extend_from_slice(&(chunk.len() as u32).to_be_bytes());
+            data.extend_from_slice(b"IDAT");
+            data.extend_from_slice(chunk);
+            let mut crc = crc32fast::Hasher::new();
+            crc.update(b"IDAT");
+            crc.update(chunk);
+            data.extend_from_slice(&crc.finalize().to_be_bytes());
+        }
+        data.extend_from_slice(&[0, 0, 0, 0]);
+        data.extend_from_slice(b"IEND");
+        data.extend_from_slice(&crc32fast::hash(b"IEND").to_be_bytes());
+
+        match find_compressable_stream(
+            &data,
+            &mut None,
+            true,
+            &PreflateContainerConfig::default(),
+            &mut None,
+        ) {
+            FindStreamResult::Found(
+                range,
+                FoundStream {
+                    chunk_type: FoundStreamType::IDATDeflate(_, idat, _),
+                    ..
+                },
+            ) => {
+                assert_eq!(range, 64 * 18..data.len() - 12);
+                assert_eq!(idat.chunk_sizes, vec![zlib.len() as u32]);
+                assert_eq!(idat.zlib_header, [0x78, 0x9c]);
+            }
+            _ => panic!("valid later IDAT stream not found"),
+        }
+
+        let config = PreflateContainerConfig::default();
+        let encoded = PreflateContainerProcessor::new(&config, 1, false)
+            .process_vec(&data)
+            .unwrap();
+        let decoded = RecreateContainerProcessor::new(4096)
+            .process_vec(&encoded)
+            .unwrap();
+        assert_eq!(decoded, data);
+    }
+
+    #[test]
+    fn corrupt_idat_prefix_keeps_valid_later_stream() {
+        let mut zlib = vec![0x78, 0x9c];
+        zlib.extend_from_slice(&crate::utils::read_file("compressed_zlib_level1.deflate"));
+        zlib.extend_from_slice(&[0; 4]);
+        let mut data = Vec::new();
+        let chunks = std::iter::repeat_n(b"\0\0\0\0\0\0".as_slice(), 64)
+            .chain([b"broken".as_slice(), zlib.as_slice()]);
+        for (i, chunk) in chunks.enumerate() {
+            data.extend_from_slice(&(chunk.len() as u32).to_be_bytes());
+            data.extend_from_slice(b"IDAT");
+            data.extend_from_slice(chunk);
+            let mut crc = crc32fast::Hasher::new();
+            crc.update(b"IDAT");
+            crc.update(chunk);
+            data.extend_from_slice(&(crc.finalize() ^ u32::from(i == 64)).to_be_bytes());
+        }
+        data.extend_from_slice(&[0, 0, 0, 0]);
+        data.extend_from_slice(b"IEND");
+        data.extend_from_slice(&crc32fast::hash(b"IEND").to_be_bytes());
+        match find_compressable_stream(
+            &data,
+            &mut None,
+            true,
+            &PreflateContainerConfig::default(),
+            &mut None,
+        ) {
+            FindStreamResult::Found(range, _) => assert_eq!(range, 65 * 18..data.len() - 12),
+            _ => panic!("valid IDAT suffix after bad CRC not found"),
+        }
+    }
+
+    #[test]
+    fn overlapping_idat_signature_inside_payload_is_still_scanned() {
+        let mut zlib = vec![0x78, 0x9c];
+        zlib.extend_from_slice(&crate::utils::read_file("compressed_zlib_level1.deflate"));
+        zlib.extend_from_slice(&[0; 4]);
+
+        let mut inner = Vec::new();
+        inner.extend_from_slice(&(zlib.len() as u32).to_be_bytes());
+        inner.extend_from_slice(b"IDAT");
+        inner.extend_from_slice(&zlib);
+        let mut crc = crc32fast::Hasher::new();
+        crc.update(b"IDAT");
+        crc.update(&zlib);
+        inner.extend_from_slice(&crc.finalize().to_be_bytes());
+
+        let mut data = Vec::new();
+        data.extend_from_slice(&(inner.len() as u32).to_be_bytes());
+        data.extend_from_slice(b"IDAT");
+        data.extend_from_slice(&inner);
+        let mut crc = crc32fast::Hasher::new();
+        crc.update(b"IDAT");
+        crc.update(&inner);
+        data.extend_from_slice(&crc.finalize().to_be_bytes());
+        data.extend_from_slice(&[0, 0, 0, 0]);
+        data.extend_from_slice(b"IDAT");
+        data.extend_from_slice(&crc32fast::hash(b"IDAT").to_be_bytes());
+        data.extend_from_slice(&[0, 0, 0, 0]);
+        data.extend_from_slice(b"IEND");
+        data.extend_from_slice(&crc32fast::hash(b"IEND").to_be_bytes());
+
+        match find_compressable_stream(
+            &data,
+            &mut None,
+            true,
+            &PreflateContainerConfig::default(),
+            &mut None,
+        ) {
+            FindStreamResult::Found(range, _) => assert_eq!(range, 8..8 + inner.len()),
+            _ => panic!("overlapping valid IDAT stream was not found"),
+        }
+    }
 }

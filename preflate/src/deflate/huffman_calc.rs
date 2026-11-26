@@ -140,7 +140,7 @@ mod calc_minzoxide {
             0 => (),
             1 => symbols[0].key = 1,
             n => {
-                symbols[0].key += symbols[1].key;
+                symbols[0].key = symbols[0].key.wrapping_add(symbols[1].key);
                 let mut root = 0;
                 let mut leaf = 2;
                 for next in 1..n - 1 {
@@ -235,6 +235,13 @@ mod calc_minzoxide {
             [7, 0, 0, 0, 4, 5, 6, 5, 2, 2, 5, 5, 6, 7, 6, 0, 2]
         );
     }
+
+    #[test]
+    fn large_frequencies_use_release_build_arithmetic() {
+        let frequencies = [u16::MAX, u16::MAX, 1];
+        let lengths = calc_bit_lengths(&frequencies, 15);
+        assert_eq!(lengths.len(), frequencies.len());
+    }
 }
 
 mod calc_zlib {
@@ -320,7 +327,7 @@ mod calc_zlib {
         for (index, &freq) in sym_freq.iter().enumerate() {
             if freq > 0 {
                 heap.push(HuffTreeNode {
-                    freq: freq as u32,
+                    freq: u32::from(freq),
                     depth: 0,
                     tree: HuffTree::Leaf(index),
                 });

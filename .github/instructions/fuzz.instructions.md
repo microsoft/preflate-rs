@@ -1,3 +1,7 @@
+---
+applyTo: "fuzz/**/*"
+---
+
 # fuzz (preflate-rs-fuzz)
 
 libfuzzer harnesses for fuzzing the core and container APIs. Not published; requires

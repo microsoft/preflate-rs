@@ -41,12 +41,12 @@ Both processors implement the `ProcessBuffer` trait for incremental use:
 use preflate_container::{PreflateContainerProcessor, RecreateContainerProcessor, ProcessBuffer};
 
 // Compression
-let mut compressor = PreflateContainerProcessor::new(&config);
+let mut compressor = PreflateContainerProcessor::new(&config, 9, false);
 compressor.process_buffer(&input_chunk, input_complete, &mut output)?;
 let stats = compressor.stats();
 
 // Decompression
-let mut decompressor = RecreateContainerProcessor::new();
+let mut decompressor = RecreateContainerProcessor::with_config(1024 * 1024, &config);
 decompressor.process_buffer(&container_chunk, input_complete, &mut output)?;
 ```
 
@@ -92,6 +92,29 @@ pub struct PreflateContainerConfig {
     pub max_chain_length: u32,
 }
 ```
+
+## Resource limits
+
+Both processors reuse `PreflateContainerConfig`. Its additional per-block limits
+default to 256 MiB for `compressed_block_limit`, `decoded_block_limit` and
+`max_pending_output`, and 128 MiB for `correction_limit` and `image_limit`.
+`chunk_plain_text_limit` remains the plaintext bound. Image limits count decoded
+pixel bytes; filtered plaintext is also checked against the plaintext limit.
+The defaults cover the largest records that earlier releases write with default
+settings: up to 128 MiB of plaintext per record, even when that plaintext is
+incompressible.
+
+The decoder's `capacity` argument controls ingestion increments, not the memory
+budget. Compression splits large caller buffers before copying them, and the
+whole-stream helpers read incrementally. `process_limited_buffer` uses the
+processor's pending-output limit for both compression and decompression.
+
+Limit violations return errors; discard the affected processor and partial output.
+The limits do not change the wire format, but previously accepted oversized
+streams may require higher limits. They are per-buffer budgets, not a total
+process-memory guarantee: dictionaries, native codec workspaces, and concurrent
+buffers also consume memory. Public config struct literals must include the new
+fields or use `..Default::default()`.
 
 ## Statistics
 
@@ -155,4 +178,4 @@ Non-DEFLATE regions between streams are emitted as literal blocks.
 ## Constraints
 
 - **No unsafe code** — `#![forbid(unsafe_code)]`
-- Minimum Rust version: **1.89**, Edition **2024**
+- Minimum Rust version: **1.99.1**, Edition **2024**

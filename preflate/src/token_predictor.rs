@@ -20,7 +20,7 @@ use crate::{
         preflate_parse_config::MatchingType,
     },
     hash_chain_holder::{HashChainHolder, MatchResult, new_hash_chain_holder},
-    preflate_error::{AddContext, ExitCode, Result, err_exit_code},
+    preflate_error::{AddContext, ExitCode, PreflateError, Result, err_exit_code},
     preflate_input::PreflateInput,
     statistical_codec::{CodecCorrection, PredictionDecoder, PredictionEncoder},
     tree_predictor::{predict_tree_for_block, recreate_tree_for_block},
@@ -323,12 +323,12 @@ impl TokenPredictor {
         let bt = codec.decode_correction_diff(
             CodecCorrection::BlockTypeCorrection,
             self.predict_block_type(),
-        );
+        )?;
 
         match bt {
             BT_STORED => {
                 let uncompressed_len = codec
-                    .decode_correction_diff(CodecCorrection::UncompressBlockLenCorrection, 65535);
+                    .decode_correction_diff(CodecCorrection::UncompressBlockLenCorrection, 65535)?;
 
                 if uncompressed_len > 65535 || uncompressed_len > input.remaining() {
                     return err_exit_code(ExitCode::InvalidDeflate, "Invalid stored block len");
@@ -343,7 +343,7 @@ impl TokenPredictor {
                 }
 
                 let last =
-                    codec.decode_correction_bool(CodecCorrection::Last, input.remaining() == 0);
+                    codec.decode_correction_bool(CodecCorrection::Last, input.remaining() == 0)?;
 
                 return Ok(DeflateTokenBlock {
                     block_type: DeflateTokenBlockType::Stored { uncompressed },
@@ -358,7 +358,7 @@ impl TokenPredictor {
             }
         }
 
-        let mut blocksize = codec.decode_correction(CodecCorrection::TokenCount);
+        let mut blocksize = codec.decode_correction(CodecCorrection::TokenCount)?;
         if blocksize == 0 {
             blocksize = self.max_token_count;
         } else {
@@ -367,7 +367,10 @@ impl TokenPredictor {
 
         // rust aborts on OOM, so check before we allocate to avoid crashing the process
         let mut tokens = Vec::new();
-        if tokens.try_reserve_exact(blocksize as usize).is_err() {
+        if tokens
+            .try_reserve_exact(blocksize.min(input.remaining()) as usize)
+            .is_err()
+        {
             return err_exit_code(ExitCode::OutOfMemory, "Out of memory");
         }
 
@@ -389,7 +392,7 @@ impl TokenPredictor {
             match self.predict_token(input) {
                 DeflateToken::Literal(l) => {
                     let not_ok =
-                        codec.decode_misprediction(CodecCorrection::LiteralPredictionWrong);
+                        codec.decode_misprediction(CodecCorrection::LiteralPredictionWrong)?;
                     if !not_ok {
                         self.commit_token(&DeflateToken::Literal(l), input);
                         freq.commit_token(&DeflateToken::Literal(l));
@@ -404,7 +407,7 @@ impl TokenPredictor {
                 }
                 DeflateToken::Reference(r) => {
                     let not_ok =
-                        codec.decode_misprediction(CodecCorrection::ReferencePredictionWrong);
+                        codec.decode_misprediction(CodecCorrection::ReferencePredictionWrong)?;
                     if not_ok {
                         let c = input.cur_char(0);
                         self.commit_token(&DeflateToken::Literal(c), input);
@@ -418,11 +421,22 @@ impl TokenPredictor {
                 }
             }
 
-            let new_len =
-                codec.decode_correction_diff(CodecCorrection::LenCorrection, predicted_ref.len());
+            let new_len = codec
+                .decode_correction_diff(CodecCorrection::LenCorrection, predicted_ref.len())?;
+            if !(3..=258).contains(&new_len) || new_len > input.remaining() {
+                return err_exit_code(ExitCode::InvalidPredictionData, "Invalid reference length");
+            }
 
             if new_len != predicted_ref.len() {
-                let hops = codec.decode_correction(CodecCorrection::DistAfterLenCorrection) + 1;
+                let hops = codec
+                    .decode_correction(CodecCorrection::DistAfterLenCorrection)?
+                    .checked_add(1)
+                    .ok_or_else(|| {
+                        PreflateError::new(
+                            ExitCode::InvalidPredictionData,
+                            "Reference hop count overflow",
+                        )
+                    })?;
 
                 predicted_ref = DeflateTokenReference::new(
                     new_len,
@@ -431,7 +445,7 @@ impl TokenPredictor {
                         .with_context(|| format!("hop_match l={} {:?}", new_len, predicted_ref))?,
                 );
             } else {
-                let hops = codec.decode_correction(CodecCorrection::DistOnlyCorrection);
+                let hops = codec.decode_correction(CodecCorrection::DistOnlyCorrection)?;
                 if hops != 0 {
                     let new_dist = self
                         .state
@@ -454,7 +468,7 @@ impl TokenPredictor {
             }
         };
 
-        let last = codec.decode_correction_bool(CodecCorrection::Last, input.remaining() == 0);
+        let last = codec.decode_correction_bool(CodecCorrection::Last, input.remaining() == 0)?;
 
         let b = DeflateTokenBlock {
             last,

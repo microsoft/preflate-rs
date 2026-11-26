@@ -161,7 +161,10 @@ impl HashChainHolder for () {
     }
 
     fn hop_match(&self, _len: u32, _hops: u32, _input: &PreflateInput) -> Result<u32> {
-        unimplemented!()
+        err_exit_code(
+            ExitCode::InvalidPredictionData,
+            "Reference correction requires a dictionary",
+        )
     }
 
     fn add_missing_previous_hash(&mut self, _input: &PreflateInput) {}
@@ -212,6 +215,9 @@ impl<H: HashChain + 'static> HashChainHolder for HashChainHolderImpl<H> {
         if max_len < target_reference.len() {
             return err_exit_code(ExitCode::InvalidDeflate, "max_len < target_reference.len()");
         }
+        if max_len < H::get_num_hash_bytes() as u32 {
+            return err_exit_code(ExitCode::MatchNotFound, "Not enough input for hash lookup");
+        }
 
         let max_chain_org = 0xffff; // max hash chain length
         let mut max_chain = max_chain_org; // max hash chain length
@@ -246,8 +252,6 @@ impl<H: HashChain + 'static> HashChainHolder for HashChainHolderImpl<H> {
 
             max_chain -= 1;
         }
-        self.hash.assert_dictionary_valid(*target_reference, input);
-
         err_exit_code(ExitCode::MatchNotFound, "no match found")
     }
 
@@ -257,6 +261,12 @@ impl<H: HashChain + 'static> HashChainHolder for HashChainHolderImpl<H> {
         let max_len = std::cmp::min(input.remaining(), MAX_MATCH);
         if max_len < len {
             return err_exit_code(ExitCode::RecompressFailed, "not enough data left to match");
+        }
+        if max_len < H::get_num_hash_bytes() as u32 {
+            return err_exit_code(
+                ExitCode::RecompressFailed,
+                "Not enough input for hash lookup",
+            );
         }
 
         let cur_max_dist = std::cmp::min(input.pos(), self.window_bytes);
@@ -283,7 +293,10 @@ impl<H: HashChain + 'static> HashChainHolder for HashChainHolderImpl<H> {
 
     /// adds the hashes that couldn't be added because we were at the boundary.
     fn add_missing_previous_hash(&mut self, input: &PreflateInput) {
-        let length = H::get_num_hash_bytes() as u32 - 1;
+        let length = (H::get_num_hash_bytes() as u32 - 1).min(input.available_history());
+        if length == 0 {
+            return;
+        }
 
         self.hash.update_hash(
             input.cur_chars(-(length as i32)),
@@ -405,6 +418,10 @@ fn match_less3<const OFFSET: u32>(
     best_len: u32,
     mut iter: impl Iterator<Item = u32>,
 ) -> MatchResult {
+    if max_chain == 0 {
+        return MatchResult::NoMoreMatchesFound;
+    }
+
     let input_chars = input.cur_chars(OFFSET as i32);
 
     // look at last two characters of best length so far
@@ -575,4 +592,83 @@ fn calc_diff(diff: u64) -> u32 {
         return diff.trailing_zeros() / 8;
     }
     return 8;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::deflate::deflate_reader::parse_deflate_whole;
+    use crate::estimator::preflate_parameter_estimator::estimate_preflate_parameters;
+    use crate::preflate_input::PlainText;
+
+    #[test]
+    fn short_prefix_adds_available_hashes() {
+        let (contents, fixture_text) = parse_deflate_whole(&[1, 0, 0, 255, 255]).unwrap();
+        let mut params = estimate_preflate_parameters(&contents, &fixture_text).unwrap();
+        params.window_bits = 15;
+        params.hash_algorithm = HashAlgorithm::Libdeflate4Fast;
+
+        for prefix in [b"".as_slice(), b"a", b"aa"] {
+            let mut text = PlainText::new_with_data(prefix.to_vec());
+            text.shrink_to_dictionary();
+            text.append(b"aaaa");
+            let input = PreflateInput::new(&text);
+            let mut holder =
+                HashChainHolderImpl::new(&params, HashChainDefault::new(LibdeflateHash4Fast {}));
+
+            holder.add_missing_previous_hash(&input);
+            if !prefix.is_empty() {
+                assert_eq!(
+                    holder
+                        .calculate_hops(&DeflateTokenReference::new(3, 1), &input)
+                        .unwrap(),
+                    1
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn zero_depth_does_not_walk_hash_chain() {
+        let plain_text = PlainText::new_with_data(b"aaab".to_vec());
+        let mut input = PreflateInput::new(&plain_text);
+        input.advance(1);
+
+        assert!(matches!(
+            match_less3::<0>(&input, 3, 1, 1, 3, 0, 1, std::iter::once(1)),
+            MatchResult::NoMoreMatchesFound
+        ));
+    }
+
+    #[test]
+    fn missing_dictionary_match_returns_error_instead_of_panicking() {
+        let (contents, plain_text) = parse_deflate_whole(&[1, 0, 0, 255, 255]).unwrap();
+        let params = estimate_preflate_parameters(&contents, &plain_text).unwrap();
+        let text = PlainText::new_with_data(b"aaaa".to_vec());
+        let mut input = PreflateInput::new(&text);
+        input.advance(1);
+        let reference = DeflateTokenReference::new(3, 1);
+
+        let normal = HashChainHolderImpl::new(&params, HashChainDefault::new(MiniZHash {}));
+        assert_eq!(
+            normal
+                .calculate_hops(&reference, &input)
+                .unwrap_err()
+                .exit_code(),
+            ExitCode::MatchNotFound
+        );
+
+        let libdeflate = HashChainHolderImpl::new(&params, HashChainLibflate4::new());
+        assert_eq!(
+            libdeflate
+                .calculate_hops(&reference, &input)
+                .unwrap_err()
+                .exit_code(),
+            ExitCode::MatchNotFound
+        );
+        assert_eq!(
+            libdeflate.hop_match(3, 1, &input).unwrap_err().exit_code(),
+            ExitCode::RecompressFailed
+        );
+    }
 }

@@ -50,7 +50,7 @@ extends:
               workflow: Rust
               rust:
                 rustToolchain:
-                  version: ms-prod-1.90
+                  version: ms-prod-1.99
                   toolchainFeed: $(toolchainFeed)
                   cratesIoFeed: $(cratesIoFeed)
                 target: x86_64-pc-windows-msvc

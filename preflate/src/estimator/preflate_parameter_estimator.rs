@@ -11,7 +11,7 @@ use crate::{
     deflate::{deflate_constants, deflate_reader::DeflateContents},
     estimator::{add_policy_estimator::DictionaryAddPolicy, preflate_parse_config::MatchingType},
     hash_algorithm::HashAlgorithm,
-    preflate_error::Result,
+    preflate_error::{ExitCode, Result, err_exit_code},
     preflate_input::PlainText,
 };
 
@@ -49,6 +49,33 @@ pub struct TokenPredictorParameters {
     pub hash_algorithm: HashAlgorithm,
 
     pub block_type_strategy: BlockTypeStrategy,
+}
+
+impl TokenPredictorParameters {
+    pub fn validate(&self) -> Result<()> {
+        if self.max_token_count == 0 || self.window_bits > 15 {
+            return err_exit_code(
+                ExitCode::InvalidPredictionData,
+                "Invalid token count or window size",
+            );
+        }
+        if let HashAlgorithm::Zlib { hash_shift, .. } = self.hash_algorithm
+            && hash_shift >= 16
+        {
+            return err_exit_code(ExitCode::InvalidPredictionData, "Invalid hash shift");
+        }
+        if self.hash_algorithm != HashAlgorithm::None
+            && !self.very_far_matches_detected
+            && matches!(self.strategy, PreflateStrategy::Default)
+            && self.window_bits < 9
+        {
+            return err_exit_code(
+                ExitCode::InvalidPredictionData,
+                "Dictionary window is too small",
+            );
+        }
+        Ok(())
+    }
 }
 
 #[derive(Encode, Decode, Debug, Copy, Clone, Eq, PartialEq)]

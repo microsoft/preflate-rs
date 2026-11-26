@@ -3,7 +3,7 @@ use std::{
     io::{Read, Write},
 };
 
-use preflate_rs::Result;
+use preflate_rs::{ExitCode, PreflateError, Result, err_exit_code};
 
 use crate::ProcessBuffer;
 
@@ -77,7 +77,10 @@ struct LimitedOutputWriter<'a> {
     amount_written: usize,
     output_buffer: &'a mut [u8],
     extra_queue: &'a mut VecDeque<u8>,
+    max_pending_output: usize,
 }
+
+pub(crate) const DEFAULT_MAX_PENDING_OUTPUT: usize = 256 * 1024 * 1024;
 
 impl Write for LimitedOutputWriter<'_> {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
@@ -85,6 +88,22 @@ impl Write for LimitedOutputWriter<'_> {
             .len()
             .min(self.output_buffer.len() - self.amount_written);
 
+        let spill = buf.len() - amount_for_output;
+        if spill
+            > self
+                .max_pending_output
+                .saturating_sub(self.extra_queue.len())
+        {
+            return Err(
+                PreflateError::new(ExitCode::OutOfMemory, "Pending output limit exceeded").into(),
+            );
+        }
+        self.extra_queue.try_reserve(spill).map_err(|_| {
+            std::io::Error::from(PreflateError::new(
+                ExitCode::OutOfMemory,
+                "Unable to reserve pending output",
+            ))
+        })?;
         self.output_buffer[self.amount_written..self.amount_written + amount_for_output]
             .copy_from_slice(&buf[..amount_for_output]);
         self.amount_written += amount_for_output;
@@ -117,6 +136,7 @@ pub fn process_limited_buffer(
     output_buffer: &mut [u8],
     output_extra: &mut VecDeque<u8>,
 ) -> Result<(bool, usize)> {
+    let max_pending_output = process.pending_output_limit();
     // first write any extra data we have pending from last time
     let mut amount_written = 0;
     while amount_written < output_buffer.len() && output_extra.len() > 0 {
@@ -125,11 +145,15 @@ pub fn process_limited_buffer(
             .unwrap();
     }
 
+    if output_extra.len() > max_pending_output {
+        return err_exit_code(ExitCode::OutOfMemory, "Pending output limit exceeded");
+    }
     // now call process buffer with the remaining space
     let mut w = LimitedOutputWriter {
         amount_written,
         output_buffer,
         extra_queue: output_extra,
+        max_pending_output,
     };
     process.process_buffer(input, input_complete, &mut w)?;
 
@@ -183,4 +207,38 @@ fn test_process_limited_buffer() {
     assert_eq!(written, 3);
     assert_eq!(&output[..3], b"Hi!");
     assert_eq!(extra.len(), 0);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct BoundedEcho;
+
+    impl ProcessBuffer for BoundedEcho {
+        fn pending_output_limit(&self) -> usize {
+            4
+        }
+
+        fn process_buffer(&mut self, input: &[u8], _: bool, writer: &mut impl Write) -> Result<()> {
+            writer.write_all(input)?;
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn pending_output_budget_applies_across_calls() {
+        let mut extra = VecDeque::new();
+        let mut process = BoundedEcho;
+        process_limited_buffer(&mut process, b"abcd", false, &mut [], &mut extra).unwrap();
+        assert_eq!(extra.len(), 4);
+        let error =
+            process_limited_buffer(&mut process, b"e", false, &mut [], &mut extra).unwrap_err();
+        assert_eq!(error.exit_code(), ExitCode::OutOfMemory);
+        assert_eq!(extra.len(), 4);
+        let mut output = [0; 2];
+        process_limited_buffer(&mut process, b"ef", false, &mut output, &mut extra).unwrap();
+        assert_eq!(&output, b"ab");
+        assert_eq!(extra, b"cdef");
+    }
 }

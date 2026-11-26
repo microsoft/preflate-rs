@@ -10,6 +10,7 @@ use crate::{
     deflate::deflate_token::{DeflateHuffmanType, DeflateToken, DeflateTokenReference},
     preflate_error::{AddContext, ExitCode, Result, err_exit_code},
     preflate_input::PlainText,
+    stream_processor::charge_effort,
 };
 
 use std::io::Cursor;
@@ -17,6 +18,7 @@ use std::io::Cursor;
 use super::{
     bit_reader::ReadBits,
     deflate_constants,
+    deflate_constants::MAX_BLOCKS_PER_CHUNK,
     deflate_token::{DeflateTokenBlock, DeflateTokenBlockType},
 };
 
@@ -84,7 +86,16 @@ impl DeflateParser {
         }
     }
 
+    #[cfg(test)]
     pub fn parse(&mut self, compressed_data: &[u8]) -> Result<DeflateContents> {
+        self.parse_with_effort(compressed_data, &mut None)
+    }
+
+    pub fn parse_with_effort(
+        &mut self,
+        compressed_data: &[u8],
+        effort: &mut Option<u64>,
+    ) -> Result<DeflateContents> {
         let mut blocks = Vec::new();
 
         let mut cursor = &mut Cursor::new(compressed_data);
@@ -103,7 +114,7 @@ impl DeflateParser {
             self.bit_reader.get(8 - bits_left, cursor)?;
         }
 
-        match self.read_blocks_internal(&mut cursor, &mut blocks, &mut checkpoint) {
+        match self.read_blocks_internal(&mut cursor, &mut blocks, &mut checkpoint, effort) {
             Err(e) => {
                 // reset back to known good checkpoint before returning the error.
                 // this allows callers to try again once they have more data
@@ -150,8 +161,12 @@ impl DeflateParser {
         reader: &mut Cursor<&[u8]>,
         blocks: &mut Vec<DeflateTokenBlock>,
         checkpoint: &mut Checkpoint,
+        effort: &mut Option<u64>,
     ) -> Result<()> {
         loop {
+            if self.state == DeflateParserState::StartBlock {
+                charge_effort(effort, 512)?;
+            }
             let (last, mode) = match self.state {
                 DeflateParserState::StartBlock => (
                     self.bit_reader.get(1, reader)? != 0,
@@ -161,6 +176,13 @@ impl DeflateParser {
                     return Ok(());
                 }
             };
+
+            if blocks.len() == MAX_BLOCKS_PER_CHUNK {
+                return err_exit_code(
+                    ExitCode::InvalidPredictionData,
+                    "Block count exceeds per-chunk limit",
+                );
+            }
 
             match mode {
                 0 => {
@@ -183,6 +205,14 @@ impl DeflateParser {
                         return err_exit_code(ExitCode::InvalidDeflate, "Block length mismatch");
                     }
 
+                    if len as usize > self.plain_text_limit.saturating_sub(self.plain_text.len()) {
+                        return err_exit_code(
+                            ExitCode::PlainTextLimit,
+                            "Plain text limit exceeded",
+                        );
+                    }
+                    charge_effort(effort, u64::from(len))?;
+                    self.plain_text.check_growth(len as usize)?;
                     let mut uncompressed = Vec::with_capacity(len as usize);
 
                     for _i in 0..len {
@@ -209,6 +239,7 @@ impl DeflateParser {
                         &mut self.bit_reader,
                         reader,
                         self.plain_text_limit,
+                        effort,
                     )
                     .context()?;
 
@@ -238,6 +269,7 @@ impl DeflateParser {
                         &mut self.bit_reader,
                         reader,
                         self.plain_text_limit,
+                        effort,
                     )
                     .context()?;
 
@@ -276,6 +308,7 @@ fn decode_tokens(
     bit_reader: &mut BitReader,
     reader: &mut Cursor<&[u8]>,
     plain_text_limit: usize,
+    effort: &mut Option<u64>,
 ) -> Result<()> {
     let mut earliest_reference = i32::MAX;
     let mut cur_pos = 0;
@@ -289,6 +322,11 @@ fn decode_tokens(
 
         let lit_len: u32 = decoder.fetch_next_literal_code(bit_reader, reader)?.into();
         if lit_len < 256 {
+            if plain_text.len() >= plain_text_limit {
+                return err_exit_code(ExitCode::PlainTextLimit, "Plain text limit exceeded");
+            }
+            charge_effort(effort, 1)?;
+            plain_text.check_growth(1)?;
             plain_text.push(lit_len as u8);
             tokens.push(DeflateToken::Literal(lit_len as u8));
             cur_pos += 1;
@@ -300,7 +338,7 @@ fn decode_tokens(
                 return err_exit_code(ExitCode::InvalidDeflate, "Invalid length code");
             }
             let len: u32 = deflate_constants::MIN_MATCH
-                + deflate_constants::LENGTH_BASE_TABLE[lcode as usize] as u32
+                + u32::from(deflate_constants::LENGTH_BASE_TABLE[lcode as usize])
                 + bit_reader.get(
                     deflate_constants::LENGTH_EXTRA_TABLE[lcode as usize].into(),
                     reader,
@@ -311,18 +349,23 @@ fn decode_tokens(
                 return err_exit_code(ExitCode::InvalidDeflate, "Non-standard 258 length code");
             }
 
-            let dcode = decoder.fetch_next_distance_char(bit_reader, reader)? as u32;
+            let dcode = u32::from(decoder.fetch_next_distance_char(bit_reader, reader)?);
             if dcode >= deflate_constants::DIST_CODE_COUNT as u32 {
                 return err_exit_code(ExitCode::InvalidDeflate, "Invalid distance code");
             }
 
             let dist = 1
-                + deflate_constants::DIST_BASE_TABLE[dcode as usize] as u32
+                + u32::from(deflate_constants::DIST_BASE_TABLE[dcode as usize])
                 + bit_reader.get(
                     deflate_constants::DIST_EXTRA_TABLE[dcode as usize].into(),
                     reader,
                 )?;
 
+            if len as usize > plain_text_limit.saturating_sub(plain_text.len()) {
+                return err_exit_code(ExitCode::PlainTextLimit, "Plain text limit exceeded");
+            }
+            charge_effort(effort, u64::from(len) + 1)?;
+            plain_text.check_growth(len as usize)?;
             plain_text.append_reference(dist, len)?;
             tokens.push(DeflateToken::Reference(DeflateTokenReference::new(
                 len, dist,
