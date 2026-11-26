@@ -1,3 +1,7 @@
+---
+applyTo: "preflate/**/*"
+---
+
 # preflate (core library)
 
 Core DEFLATE analysis and reconstruction. Analyzes a DEFLATE bitstream, extracts the

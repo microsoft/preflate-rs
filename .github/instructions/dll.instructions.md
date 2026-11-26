@@ -1,3 +1,7 @@
+---
+applyTo: "dll/**/*"
+---
+
 # dll (preflate_rs_0_8)
 
 C-compatible DLL for .NET interop. Exposes a streaming compress/decompress API as

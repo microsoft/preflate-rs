@@ -1,3 +1,7 @@
+---
+applyTo: "tests/**/*"
+---
+
 # tests (integration tests)
 
 End-to-end round-trip tests against real sample files in `samples/`.
