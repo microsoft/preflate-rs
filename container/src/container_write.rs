@@ -7,7 +7,7 @@ use crate::{
         BLOCK_COMPRESSION_NONE, BLOCK_COMPRESSION_ZSTD, BLOCK_TYPE_DEFLATE,
         BLOCK_TYPE_DEFLATE_CONTINUE, BLOCK_TYPE_JPEG_LEPTON, BLOCK_TYPE_LITERAL, BLOCK_TYPE_PNG,
         BLOCK_TYPE_WEBP, PreflateContainerConfig, PreflateStats, ProcessBuffer, SizeValue,
-        check_size, write_varint,
+        charge_compression_effort, check_size, write_varint,
     },
     idat_parse::{IdatContents, PngHeader},
     scan_deflate::{FindStreamResult, FoundStream, FoundStreamType, find_compressable_stream},
@@ -165,7 +165,9 @@ pub struct PreflateContainerProcessor {
     content: Vec<u8>,
     compression_stats: PreflateStats,
     input_complete: bool,
+    failed: bool,
     total_plain_text_seen: u64,
+    remaining_effort: Option<u64>,
 
     /// used to track the last attempted chunk size, in case we
     /// need more input to continue, we will collect at least min_chunk_size
@@ -200,8 +202,10 @@ impl PreflateContainerProcessor {
             content: Vec::new(),
             compression_stats: PreflateStats::default(),
             input_complete: false,
+            failed: false,
             state: ChunkParseState::Start,
             total_plain_text_seen: 0,
+            remaining_effort: config.compression_effort_limit,
             last_attempt_chunk_size: 0,
             config,
             input_crc: CrcHasher::new(),
@@ -229,38 +233,52 @@ impl ProcessBuffer for PreflateContainerProcessor {
         input_complete: bool,
         writer: &mut impl Write,
     ) -> Result<()> {
-        let maximum = self.config.max_chunk_size;
-        if maximum == 0 {
+        if self.failed {
             return Err(PreflateError::new(
-                ExitCode::InvalidParameter,
-                "Chunk size must be nonzero",
+                ExitCode::InvalidCompressedWrapper,
+                "compressor cannot be reused after an error",
             ));
         }
-        let mut position = 0;
-        while position < input.len() {
-            let available = maximum.saturating_sub(self.content.len());
-            if available == 0 {
-                self.process_chunk(&[], false, writer)?;
-                if self.content.len() >= maximum {
-                    return Err(PreflateError::new(
-                        ExitCode::InvalidParameter,
-                        "Compression buffer made no progress",
-                    ));
-                }
-                continue;
+        self.failed = true;
+        let result = (|| {
+            charge_compression_effort(&mut self.remaining_effort, input.len())?;
+            let maximum = self.config.max_chunk_size;
+            if maximum == 0 {
+                return Err(PreflateError::new(
+                    ExitCode::InvalidParameter,
+                    "Chunk size must be nonzero",
+                ));
             }
-            let end = position + available.min(input.len() - position);
-            self.process_chunk(
-                &input[position..end],
-                input_complete && end == input.len(),
-                writer,
-            )?;
-            position = end;
+            let mut position = 0;
+            while position < input.len() {
+                let available = maximum.saturating_sub(self.content.len());
+                if available == 0 {
+                    self.process_chunk(&[], false, writer)?;
+                    if self.content.len() >= maximum {
+                        return Err(PreflateError::new(
+                            ExitCode::InvalidParameter,
+                            "Compression buffer made no progress",
+                        ));
+                    }
+                    continue;
+                }
+                let end = position + available.min(input.len() - position);
+                self.process_chunk(
+                    &input[position..end],
+                    input_complete && end == input.len(),
+                    writer,
+                )?;
+                position = end;
+            }
+            if input.is_empty() {
+                self.process_chunk(input, input_complete, writer)?;
+            }
+            Ok(())
+        })();
+        if result.is_ok() {
+            self.failed = false;
         }
-        if input.is_empty() {
-            self.process_chunk(input, input_complete, writer)?;
-        }
-        Ok(())
+        result
     }
 
     fn stats(&self) -> PreflateStats {
@@ -337,8 +355,16 @@ impl PreflateContainerProcessor {
                         prev_ihdr,
                         input_complete,
                         &self.config,
+                        &mut self.remaining_effort,
                     ) {
                         FindStreamResult::Found(next, chunk) => {
+                            let plain_text_size = match &chunk.chunk_type {
+                                FoundStreamType::DeflateStream(_, state) => {
+                                    state.plain_text().len()
+                                }
+                                FoundStreamType::IDATDeflate(_, _, plain_text) => plain_text.len(),
+                                FoundStreamType::JPEGLepton(_) => 0,
+                            };
                             // the gap between the start and the beginning of the deflate stream
                             // is written out as a literal block
                             if next.start != 0 {
@@ -363,9 +389,11 @@ impl PreflateContainerProcessor {
                             )
                             .context()?;
                             self.compression_stats.zstd_compressed_size += compressed_size as u64;
+                            self.total_plain_text_seen = self
+                                .total_plain_text_seen
+                                .saturating_add(plain_text_size as u64);
 
                             if let Some(mut state) = next_state {
-                                self.total_plain_text_seen += state.plain_text().len() as u64;
                                 state.shrink_to_dictionary();
                                 self.state = ChunkParseState::DeflateContinue(state);
                             }
@@ -412,11 +440,23 @@ impl PreflateContainerProcessor {
                             self.content.clear();
                             self.last_attempt_chunk_size = 0;
                         }
+                        FindStreamResult::EffortExceeded(e) => return Err(e),
                     }
                 }
                 ChunkParseState::DeflateContinue(state) => {
+                    if self.total_plain_text_seen > self.config.total_plain_text_limit {
+                        self.state = ChunkParseState::Searching(None);
+                        continue;
+                    }
                     // here we have a deflate stream that we need to continue
-                    match state.decompress(&self.content) {
+                    charge_compression_effort(&mut self.remaining_effort, self.content.len())?;
+                    let decompressed =
+                        state.decompress_with_effort(&self.content, &mut self.remaining_effort);
+                    charge_compression_effort(
+                        &mut self.remaining_effort,
+                        state.plain_text().len(),
+                    )?;
+                    match decompressed {
                         Err(ref e)
                             if e.exit_code() == ExitCode::ShortRead
                                 && !input_complete
@@ -424,6 +464,9 @@ impl PreflateContainerProcessor {
                         {
                             // Not enough data to complete the next block yet; wait for more.
                             break;
+                        }
+                        Err(e) if e.exit_code() == ExitCode::CompressionEffortLimit => {
+                            return Err(e);
                         }
                         Err(_e) => {
                             // Stream analysis diverged or no more data is coming; give up on
@@ -458,7 +501,9 @@ impl PreflateContainerProcessor {
                             )?;
                             self.compression_stats.zstd_compressed_size += sz as u64;
 
-                            self.total_plain_text_seen += state.plain_text().len() as u64;
+                            self.total_plain_text_seen = self
+                                .total_plain_text_seen
+                                .saturating_add(state.plain_text().len() as u64);
                             self.compression_stats.overhead_bytes += res.corrections.len() as u64;
                             self.compression_stats.uncompressed_size +=
                                 state.plain_text().len() as u64;
@@ -478,6 +523,10 @@ impl PreflateContainerProcessor {
         }
 
         if input_complete && !self.input_complete {
+            if matches!(self.state, ChunkParseState::Start) {
+                writer.write_all(&[COMPRESSED_WRAPPER_VERSION_2])?;
+                self.state = ChunkParseState::Searching(None);
+            }
             self.input_complete = true;
 
             if self.content.len() > 0 {
@@ -591,6 +640,9 @@ fn webp_compress(
             "Filtered image",
         )?;
         if filtered == plain_text.len() {
+            if plain_text.chunks_exact(1 + w * bbp).any(|row| row[0] > 4) {
+                return preflate_rs::err_exit_code(ExitCode::InvalidIDat, "Invalid PNG filter");
+            }
             let (bitmap, filters) = undo_png_filters(plain_text, w, h, bbp);
 
             let enc = webp::Encoder::new(
@@ -658,6 +710,44 @@ mod tests {
     use std::io::{Cursor, Read};
 
     #[test]
+    fn compressor_cannot_report_success_after_final_crc_write_fails() {
+        struct FailCrcWriter;
+
+        impl Write for FailCrcWriter {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                if bytes == [0xff] {
+                    return Err(std::io::Error::other("CRC write failed"));
+                }
+                Ok(bytes.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let mut processor =
+            PreflateContainerProcessor::new(&PreflateContainerConfig::default(), 1, false);
+        assert!(
+            processor
+                .process_buffer(&[], true, &mut FailCrcWriter)
+                .is_err()
+        );
+        assert!(
+            processor
+                .process_buffer(&[], true, &mut Vec::new())
+                .is_err()
+        );
+
+        let mut processor =
+            PreflateContainerProcessor::new(&PreflateContainerConfig::default(), 1, false);
+        let mut encoded = Vec::new();
+        processor.process_buffer(&[], true, &mut encoded).unwrap();
+        processor.process_buffer(&[], true, &mut encoded).unwrap();
+        assert_eq!(encoded.len(), 6);
+    }
+
+    #[test]
     fn large_caller_buffer_is_split_into_bounded_chunks() {
         let config = PreflateContainerConfig {
             min_chunk_size: 1024,
@@ -688,5 +778,32 @@ mod tests {
             .process_buffer(&encoded, true, &mut restored)
             .unwrap();
         assert_eq!(restored, input);
+    }
+
+    #[cfg(feature = "webp")]
+    #[test]
+    fn invalid_png_filter_falls_back_from_webp_without_panicking() {
+        use crate::idat_parse::PngColorType;
+
+        let idat = IdatContents {
+            chunk_sizes: vec![6],
+            zlib_header: [0x78, 0x9c],
+            total_chunk_length: 18,
+            addler32: 0,
+            png_header: Some(PngHeader {
+                width: 1,
+                height: 1,
+                color_type: PngColorType::RGB,
+            }),
+        };
+        let error = webp_compress(
+            &mut Vec::new(),
+            &[5, 1, 2, 3],
+            &[],
+            &idat,
+            &PreflateContainerConfig::default(),
+        )
+        .unwrap_err();
+        assert_eq!(error.exit_code(), ExitCode::InvalidIDat);
     }
 }

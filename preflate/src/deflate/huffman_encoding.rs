@@ -77,7 +77,7 @@ pub fn calc_huffman_codes(code_lengths: &[u8]) -> Result<Vec<u16>> {
     Ok(result)
 }
 
-fn is_valid_huffman_code_lengths(code_lengths: &[u8]) -> bool {
+pub(super) fn is_valid_huffman_code_lengths(code_lengths: &[u8]) -> bool {
     // Ensure that the array is not empty
     if code_lengths.is_empty() {
         return false;

@@ -78,7 +78,7 @@ The table below shows overhead (corrections size as a percentage of uncompressed
 
 ### Requirements
 
-- [Rust 1.89 or above](https://www.rust-lang.org/tools/install)
+- [Rust 1.99.1 or above](https://www.rust-lang.org/tools/install)
 
 ### Build from Source
 

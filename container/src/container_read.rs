@@ -60,6 +60,7 @@ enum DecompressionState {
     CrcCheck {
         expected: u32,
     },
+    Done,
 }
 
 /// recreates the orignal content from the chunked data
@@ -68,6 +69,7 @@ pub struct RecreateContainerProcessor {
     config: PreflateContainerConfig,
     input: VecDeque<u8>,
     input_complete: bool,
+    failed: bool,
     state: DecompressionState,
 
     /// state of the predictor and plain text if we need to contiune a deflate stream
@@ -92,6 +94,7 @@ impl RecreateContainerProcessor {
             capacity,
             config: config.clone(),
             input_complete: false,
+            failed: false,
             state: DecompressionState::Start,
             deflate_continue_state: None,
             zstd_decoder: zstd::stream::raw::Decoder::new().expect("failed to create zstd decoder"),
@@ -111,6 +114,19 @@ impl ProcessBuffer for RecreateContainerProcessor {
         input_complete: bool,
         writer: &mut impl Write,
     ) -> Result<()> {
+        if self.failed {
+            return err_exit_code(
+                ExitCode::InvalidCompressedWrapper,
+                "decoder cannot be reused after an error",
+            );
+        }
+        self.failed = true;
+        if matches!(self.state, DecompressionState::Done) && !input.is_empty() {
+            return err_exit_code(
+                ExitCode::InvalidCompressedWrapper,
+                "data after CRC end block",
+            );
+        }
         if self.input_complete && (input.len() > 0 || !input_complete) {
             return Err(PreflateError::new(
                 ExitCode::InvalidParameter,
@@ -160,7 +176,13 @@ impl ProcessBuffer for RecreateContainerProcessor {
                         format!("CRC-32 mismatch: expected {expected:#010x}, got {actual:#010x}"),
                     );
                 }
-                self.state = DecompressionState::StartSegment;
+                if !self.input.is_empty() || amount_read < input.len() {
+                    return err_exit_code(
+                        ExitCode::InvalidCompressedWrapper,
+                        "data after CRC end block",
+                    );
+                }
+                self.state = DecompressionState::Done;
             }
 
             if amount_read == input.len() {
@@ -168,6 +190,11 @@ impl ProcessBuffer for RecreateContainerProcessor {
             }
         }
 
+        if self.input_complete && !matches!(self.state, DecompressionState::Done) {
+            return err_exit_code(ExitCode::InvalidCompressedWrapper, "missing CRC end block");
+        }
+
+        self.failed = false;
         Ok(())
     }
 }
@@ -381,6 +408,7 @@ impl RecreateContainerProcessor {
                     // CRC verification is handled in process_buffer after this returns.
                     break;
                 }
+                DecompressionState::Done => break,
             }
         }
 
@@ -537,7 +565,7 @@ fn process_compressed_block(
         BLOCK_TYPE_PNG => {
             let correction_length = read_varint(cursor)?.to_usize()?;
             let uncompressed_length = read_varint(cursor)?.to_usize()?;
-            let idat = IdatContents::read_from_bytestream(cursor)?;
+            let idat = IdatContents::read_from_bytestream(cursor, limits.max_chunk_size)?;
 
             let filters = if let Some(header) = &idat.png_header {
                 let pixels = checked_image_size(
@@ -656,6 +684,7 @@ fn webp_decompress(
 mod tests {
     use super::*;
     use crate::container_common::write_varint;
+    use crate::container_write::PreflateContainerProcessor;
     use crate::idat_parse::{PngColorType, PngHeader};
 
     #[test]
@@ -710,6 +739,89 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(error.exit_code(), ExitCode::InvalidCompressedWrapper);
+    }
+
+    #[test]
+    fn decoder_cannot_resume_after_error() {
+        let original = b"literal payload";
+        let encoded =
+            PreflateContainerProcessor::new(&PreflateContainerConfig::default(), 1, false)
+                .process_vec(original)
+                .unwrap();
+        let mut malformed = vec![3];
+        malformed.extend_from_slice(&encoded);
+
+        let mut decoder = RecreateContainerProcessor::new(malformed.len());
+        let mut output = Vec::new();
+        assert!(
+            decoder
+                .process_buffer(&malformed, false, &mut output)
+                .is_err()
+        );
+        assert!(decoder.process_buffer(&[], true, &mut output).is_err());
+        assert!(output.is_empty());
+
+        let mut decoder = RecreateContainerProcessor::new(encoded.len());
+        decoder
+            .process_buffer(&encoded[..2], false, &mut output)
+            .unwrap();
+        decoder
+            .process_buffer(&encoded[2..], true, &mut output)
+            .unwrap();
+        assert_eq!(output, original);
+    }
+
+    #[test]
+    fn rejects_data_after_verified_crc() {
+        let original = b"literal payload";
+        let encoded =
+            PreflateContainerProcessor::new(&PreflateContainerConfig::default(), 1, false)
+                .process_vec(original)
+                .unwrap();
+        let mut appended = encoded.clone();
+        appended.extend_from_slice(&encoded[1..]);
+
+        let mut decoder = RecreateContainerProcessor::new(1);
+        let mut output = Vec::new();
+        let error = decoder
+            .process_buffer(&appended, true, &mut output)
+            .unwrap_err();
+        assert_eq!(error.exit_code(), ExitCode::InvalidCompressedWrapper);
+        assert_eq!(output, original);
+
+        let mut decoder = RecreateContainerProcessor::new(1);
+        let mut output = Vec::new();
+        decoder
+            .process_buffer(&encoded, false, &mut output)
+            .unwrap();
+        decoder.process_buffer(&[], true, &mut output).unwrap();
+        let error = decoder
+            .process_buffer(&encoded[1..], true, &mut output)
+            .unwrap_err();
+        assert_eq!(error.exit_code(), ExitCode::InvalidCompressedWrapper);
+        assert_eq!(output, original);
+    }
+
+    #[test]
+    fn rejects_v2_frame_without_crc() {
+        let original = b"literal payload";
+        let encoded =
+            PreflateContainerProcessor::new(&PreflateContainerConfig::default(), 1, false)
+                .process_vec(original)
+                .unwrap();
+        assert_eq!(encoded[encoded.len() - 5], 0xff);
+        for (length, expected) in [
+            (1, ExitCode::InvalidCompressedWrapper),
+            (encoded.len() - 5, ExitCode::InvalidCompressedWrapper),
+            (encoded.len() - 1, ExitCode::ShortRead),
+        ] {
+            let mut decoder = RecreateContainerProcessor::new(1);
+            let mut output = Vec::new();
+            let error = decoder
+                .process_buffer(&encoded[..length], true, &mut output)
+                .unwrap_err();
+            assert_eq!(error.exit_code(), expected);
+        }
     }
 
     #[test]

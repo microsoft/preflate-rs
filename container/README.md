@@ -178,4 +178,4 @@ Non-DEFLATE regions between streams are emitted as literal blocks.
 ## Constraints
 
 - **No unsafe code** — `#![forbid(unsafe_code)]`
-- Minimum Rust version: **1.89**, Edition **2024**
+- Minimum Rust version: **1.99.1**, Edition **2024**

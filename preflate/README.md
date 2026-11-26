@@ -130,4 +130,4 @@ The following differences from the predicted stream are encoded:
 ## Constraints
 
 - **No unsafe code** — `#![forbid(unsafe_code)]`
-- Minimum Rust version: **1.89**, Edition **2024**
+- Minimum Rust version: **1.99.1**, Edition **2024**

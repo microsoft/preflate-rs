@@ -15,8 +15,10 @@ use crate::{
     PreflateConfig, Result,
     cabac_codec::{PredictionDecoderCabac, PredictionEncoderCabac},
     deflate::{
-        deflate_constants::MAX_BLOCKS_PER_CHUNK, deflate_reader::DeflateParser,
-        deflate_token::DeflateTokenBlock, deflate_writer::DeflateWriter,
+        deflate_constants::MAX_BLOCKS_PER_CHUNK,
+        deflate_reader::DeflateParser,
+        deflate_token::{DeflateTokenBlock, DeflateTokenBlockType},
+        deflate_writer::DeflateWriter,
     },
     estimator::preflate_parameter_estimator::{
         TokenPredictorParameters, estimate_preflate_parameters,
@@ -63,6 +65,47 @@ pub struct PreflateStreamChunkResult {
     pub blocks: Vec<DeflateTokenBlock>,
 }
 
+pub(crate) fn charge_effort(effort: &mut Option<u64>, amount: u64) -> Result<()> {
+    if let Some(remaining) = effort {
+        if let Some(balance) = remaining.checked_sub(amount) {
+            *remaining = balance;
+        } else {
+            *remaining = 0;
+            return Err(PreflateError::new(
+                ExitCode::CompressionEffortLimit,
+                "Compression effort limit exceeded",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn charge_prediction_effort(
+    effort: &mut Option<u64>,
+    blocks: &[DeflateTokenBlock],
+    max_chain: u32,
+) -> Result<()> {
+    let mut tokens = 0u64;
+    let mut stored = 0u64;
+    for block in blocks {
+        match &block.block_type {
+            DeflateTokenBlockType::Stored { uncompressed } => {
+                stored = stored.saturating_add(uncompressed.len() as u64);
+            }
+            DeflateTokenBlockType::Huffman {
+                tokens: block_tokens,
+                ..
+            } => {
+                tokens = tokens.saturating_add(block_tokens.len() as u64);
+            }
+        }
+    }
+    charge_effort(
+        effort,
+        stored.saturating_add(tokens.saturating_mul(u64::from(max_chain) * 2 + 8)),
+    )
+}
+
 /// Takes a stream of deflate compressed data removes the deflate compression, recording the data
 /// that can be used to reconstruct it along with the plain-text.
 #[derive(Debug)]
@@ -72,6 +115,7 @@ pub struct PreflateStreamProcessor {
     parser: DeflateParser,
     max_chain_length: u32,
     correction_limit: usize,
+    remaining_effort: Option<u64>,
 }
 
 impl PreflateStreamProcessor {
@@ -84,6 +128,7 @@ impl PreflateStreamProcessor {
             parser: DeflateParser::new(config.plain_text_limit),
             max_chain_length: config.max_chain_length,
             correction_limit: config.correction_limit,
+            remaining_effort: config.compression_effort_limit,
             validator: if config.verify_compression {
                 Some(RecreateStreamProcessor::with_config(*config))
             } else {
@@ -110,7 +155,27 @@ impl PreflateStreamProcessor {
 
     /// decompresses a deflate stream and returns the plaintext and cabac_encoded data that can be used to reconstruct it
     pub fn decompress(&mut self, compressed_data: &[u8]) -> Result<PreflateStreamChunkResult> {
-        let contents = self.parser.parse(compressed_data)?;
+        let mut effort = self.remaining_effort;
+        let result = self.decompress_with_effort(compressed_data, &mut effort);
+        self.remaining_effort = effort;
+        result
+    }
+
+    /// Analyzes a stream while charging the optional compression-only work budget.
+    pub fn decompress_with_effort(
+        &mut self,
+        compressed_data: &[u8],
+        effort: &mut Option<u64>,
+    ) -> Result<PreflateStreamChunkResult> {
+        let contents = self.parser.parse_with_effort(compressed_data, effort)?;
+
+        if self.predictor.is_none() {
+            // Up to six hash-table candidates traverse the plaintext in the estimator.
+            charge_effort(
+                effort,
+                (self.parser.plain_text().len() as u64).saturating_mul(6),
+            )?;
+        }
 
         let mut cabac_encoded = Vec::new();
 
@@ -118,6 +183,7 @@ impl PreflateStreamProcessor {
             PredictionEncoderCabac::new(VP8Writer::new(&mut cabac_encoded).unwrap());
 
         if let Some(predictor) = &mut self.predictor {
+            charge_prediction_effort(effort, &contents.blocks, self.max_chain_length)?;
             let mut input = PreflateInput::new(&self.parser.plain_text());
 
             // we are missing the last couple hashes in the dictionary since we didn't
@@ -180,6 +246,7 @@ impl PreflateStreamProcessor {
                 ));
             }
 
+            charge_prediction_effort(effort, &contents.blocks, params.max_chain)?;
             let mut input = PreflateInput::new(&self.parser.plain_text());
 
             let mut token_predictor = TokenPredictor::new(&params);
@@ -341,6 +408,12 @@ impl RecreateStreamProcessor {
                 return Err(PreflateError::new(
                     ExitCode::InvalidPredictionData,
                     "Decoded correction size limit exceeded",
+                ));
+            }
+            if r.parameters.max_chain > self.config.max_chain_length {
+                return Err(PreflateError::new(
+                    ExitCode::InvalidPredictionData,
+                    "Reconstruction chain depth limit exceeded",
                 ));
             }
 
@@ -1068,10 +1141,57 @@ mod tests {
     };
     use crate::hash_algorithm::HashAlgorithm;
     use std::io::BufReader;
+    use std::panic::{AssertUnwindSafe, catch_unwind};
 
     fn empty_stream_parameters() -> TokenPredictorParameters {
         let (contents, plain_text) = parse_deflate_whole(&[1, 0, 0, 255, 255]).unwrap();
         estimate_preflate_parameters(&contents, &plain_text).unwrap()
+    }
+
+    #[test]
+    fn effort_budget_stops_plaintext_expansion_before_analysis() {
+        let mut stored = vec![1, 64, 0, 191, 255];
+        stored.extend_from_slice(&[b'a'; 64]);
+        let mut budget = Some(512 + 63);
+        let error = PreflateStreamProcessor::new(&PreflateConfig::default())
+            .decompress_with_effort(&stored, &mut budget)
+            .err()
+            .unwrap();
+        assert_eq!(error.exit_code(), ExitCode::CompressionEffortLimit);
+        let small_default = PreflateConfig {
+            compression_effort_limit: Some(1),
+            ..PreflateConfig::default()
+        };
+        let error = PreflateStreamProcessor::new(&small_default)
+            .decompress(&stored)
+            .err()
+            .unwrap();
+        assert_eq!(error.exit_code(), ExitCode::CompressionEffortLimit);
+        assert_eq!(
+            PreflateStreamProcessor::new(&PreflateConfig::default())
+                .decompress(&stored)
+                .unwrap()
+                .compressed_size,
+            stored.len()
+        );
+
+        let deflate = crate::utils::read_file("compressed_zlib_level1.deflate");
+        let mut budget = Some(512 + 64);
+        let error = PreflateStreamProcessor::new(&PreflateConfig::default())
+            .decompress_with_effort(&deflate, &mut budget)
+            .err()
+            .unwrap();
+        assert_eq!(error.exit_code(), ExitCode::CompressionEffortLimit);
+
+        let mut parser = DeflateParser::new(128 * 1024 * 1024);
+        let mut remaining = Some(u64::MAX);
+        parser.parse_with_effort(&deflate, &mut remaining).unwrap();
+        let mut budget = Some(u64::MAX - remaining.unwrap());
+        let error = PreflateStreamProcessor::new(&PreflateConfig::default())
+            .decompress_with_effort(&deflate, &mut budget)
+            .err()
+            .unwrap();
+        assert_eq!(error.exit_code(), ExitCode::CompressionEffortLimit);
     }
 
     #[test]
@@ -1190,6 +1310,30 @@ mod tests {
             let error = recreate_whole_deflate_stream(&[], &corrections).unwrap_err();
             assert_eq!(error.exit_code(), ExitCode::InvalidPredictionData);
         }
+    }
+
+    #[test]
+    fn reconstruction_rejects_chain_depth_above_configured_limit() {
+        let mut data: ReconstructionData = bitcode::decode(&empty_block_corrections(1)).unwrap();
+        data.parameters.max_chain = 5;
+        let corrections = bitcode::encode(&data);
+        let config = PreflateConfig {
+            max_chain_length: 4,
+            ..PreflateConfig::default()
+        };
+        let error = RecreateStreamProcessor::with_config(config)
+            .recompress(&mut Cursor::new([]), &corrections)
+            .unwrap_err();
+        assert_eq!(error.exit_code(), ExitCode::InvalidPredictionData);
+
+        assert!(
+            RecreateStreamProcessor::with_config(PreflateConfig {
+                max_chain_length: 5,
+                ..config
+            })
+            .recompress(&mut Cursor::new([]), &corrections)
+            .is_ok()
+        );
     }
 
     #[test]
@@ -1316,5 +1460,55 @@ mod tests {
             panic!("Expected a static Huffman block");
         };
         assert_eq!(tokens.capacity(), 0);
+    }
+
+    #[test]
+    fn corrupted_cabac_corrections_do_not_panic() {
+        let data: ReconstructionData = bitcode::decode(&empty_block_corrections(1)).unwrap();
+        let config = PreflateConfig {
+            max_chain_length: 8,
+            plain_text_limit: 1024,
+            correction_limit: 1024,
+            ..PreflateConfig::default()
+        };
+        let check = |corrections| {
+            let encoded = bitcode::encode(&ReconstructionData {
+                parameters: data.parameters,
+                corrections,
+            });
+            catch_unwind(AssertUnwindSafe(|| {
+                RecreateStreamProcessor::with_config(config)
+                    .recompress(&mut Cursor::new([]), &encoded)
+            }))
+        };
+
+        for length in 0..data.corrections.len() {
+            assert!(
+                check(data.corrections[..length].to_vec()).is_ok(),
+                "truncated CABAC data at byte {length} caused a panic"
+            );
+        }
+        for index in 0..data.corrections.len() {
+            for bit in 0..8 {
+                let mut corrections = data.corrections.clone();
+                corrections[index] ^= 1 << bit;
+                assert!(
+                    check(corrections).is_ok(),
+                    "CABAC byte {index}, bit {bit} caused a panic"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn truncated_first_chunk_corrections_are_rejected() {
+        let encoded = empty_block_corrections(1);
+        assert!(recreate_whole_deflate_stream(&[], &encoded).is_ok());
+        for length in 0..encoded.len() {
+            assert!(
+                recreate_whole_deflate_stream(&[], &encoded[..length]).is_err(),
+                "accepted first-chunk corrections truncated to {length} bytes"
+            );
+        }
     }
 }

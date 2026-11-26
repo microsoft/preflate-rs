@@ -5,7 +5,7 @@ use std::{
 
 use byteorder::{ReadBytesExt, WriteBytesExt};
 
-use preflate_rs::{ExitCode, Result, err_exit_code};
+use preflate_rs::{ExitCode, PreflateError, Result, err_exit_code};
 
 use crate::container_common::{SizeValue, check_size, read_varint, write_varint};
 
@@ -52,14 +52,23 @@ pub struct IdatContents {
 }
 
 impl IdatContents {
-    pub fn read_from_bytestream(r: &mut impl Read) -> Result<IdatContents> {
+    pub fn read_from_bytestream(
+        r: &mut impl Read,
+        max_chunk_length: usize,
+    ) -> Result<IdatContents> {
         let mut chunk_sizes = Vec::new();
+        let mut encoded_chunk_length = Saturating(0usize);
 
         loop {
             let r = read_varint(r)?;
             if r == 0 {
                 break;
             }
+            encoded_chunk_length += Saturating(r.to_usize()?) + Saturating(12);
+            check_size(encoded_chunk_length, max_chunk_length, "PNG IDAT chunks")?;
+            chunk_sizes.try_reserve(1).map_err(|_| {
+                PreflateError::new(ExitCode::OutOfMemory, "Unable to reserve IDAT chunks")
+            })?;
             chunk_sizes.push(r);
         }
 
@@ -136,7 +145,7 @@ fn test_idat_header_roundtrip() {
 
     let mut cur = std::io::Cursor::new(&buffer);
 
-    let idat2 = IdatContents::read_from_bytestream(&mut cur).unwrap();
+    let idat2 = IdatContents::read_from_bytestream(&mut cur, 30039).unwrap();
 
     assert_eq!(idat, idat2);
 }
@@ -558,4 +567,29 @@ fn test_png_filter_round_trip_with_explicit_filters() {
         filtered, reencoded,
         "Re-encoding did not match original filtered data"
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bounds_idat_metadata_by_original_chunk_length() {
+        let metadata = IdatContents {
+            chunk_sizes: vec![1, 1],
+            zlib_header: [0; 2],
+            total_chunk_length: 8,
+            addler32: 0,
+            png_header: None,
+        };
+        let mut bytes = Vec::new();
+        metadata.write_to_bytestream(&mut bytes).unwrap();
+
+        assert_eq!(
+            IdatContents::read_from_bytestream(&mut bytes.as_slice(), 26).unwrap(),
+            metadata
+        );
+        let error = IdatContents::read_from_bytestream(&mut bytes.as_slice(), 25).unwrap_err();
+        assert_eq!(error.exit_code(), ExitCode::InvalidCompressedWrapper);
+    }
 }
