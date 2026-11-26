@@ -1,3 +1,7 @@
+---
+applyTo: "container/**/*"
+---
+
 # container (preflate-container)
 
 Scans binary files (ZIP, PNG, JPEG) for DEFLATE streams, orchestrates the

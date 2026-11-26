@@ -1,3 +1,7 @@
+---
+applyTo: "util/**/*"
+---
+
 # util (preflate_util CLI)
 
 CLI tool for manually testing preflate compression on files and directories.
