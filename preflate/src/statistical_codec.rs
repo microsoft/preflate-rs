@@ -5,6 +5,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 use crate::cabac_codec::{decode_difference, encode_difference};
+use crate::preflate_error::Result;
 
 /// correction indictions, which are followed by a 16 bit value
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -48,7 +49,7 @@ pub trait PredictionEncoder {
     }
 
     fn encode_misprediction(&mut self, action: CodecCorrection, actual_value: bool) {
-        self.encode_correction(action, actual_value as u32);
+        self.encode_correction(action, u32::from(actual_value));
     }
 
     /// if a bool is not equal, then we encode a 1, otherwise a 0
@@ -58,23 +59,27 @@ pub trait PredictionEncoder {
         actual_value: bool,
         predicted_value: bool,
     ) {
-        self.encode_correction(action, (actual_value != predicted_value) as u32)
+        self.encode_correction(action, u32::from(actual_value != predicted_value))
     }
 }
 
 pub trait PredictionDecoder {
-    fn decode_correction(&mut self, correction: CodecCorrection) -> u32;
+    fn decode_correction(&mut self, correction: CodecCorrection) -> Result<u32>;
     fn decode_verify_state(&mut self, message: &'static str, checksum: u64);
 
     #[inline]
-    fn decode_correction_diff(&mut self, correction: CodecCorrection, predicted_value: u32) -> u32 {
-        let actual_value = self.decode_correction(correction);
+    fn decode_correction_diff(
+        &mut self,
+        correction: CodecCorrection,
+        predicted_value: u32,
+    ) -> Result<u32> {
+        let actual_value = self.decode_correction(correction)?;
         decode_difference(predicted_value, actual_value)
     }
 
     #[inline]
-    fn decode_misprediction(&mut self, correction: CodecCorrection) -> bool {
-        self.decode_correction(correction) != 0
+    fn decode_misprediction(&mut self, correction: CodecCorrection) -> Result<bool> {
+        Ok(self.decode_correction(correction)? != 0)
     }
 
     /// if we encoded a 1 then swap the predicted value
@@ -82,8 +87,8 @@ pub trait PredictionDecoder {
         &mut self,
         correction: CodecCorrection,
         predicted_value: bool,
-    ) -> bool {
-        predicted_value ^ (self.decode_correction(correction) != 0)
+    ) -> Result<bool> {
+        Ok(predicted_value ^ (self.decode_correction(correction)? != 0))
     }
 }
 
@@ -220,12 +225,12 @@ impl PredictionDecoder for VerifyPredictionDecoder {
         );
     }
 
-    fn decode_correction(&mut self, correction: CodecCorrection) -> u32 {
+    fn decode_correction(&mut self, correction: CodecCorrection) -> Result<u32> {
         let x = self.pop().unwrap();
         match x {
             CodecAction::Correction(c, value) => {
                 assert_eq!(correction, c);
-                return value;
+                return Ok(value);
             }
             CodecAction::VerifyState(s, _h) => {
                 panic!("found VerifyState {}, expected {:?}", s, correction);
@@ -253,7 +258,7 @@ pub fn verify_decoder<T: PredictionDecoder>(decoder: &mut T, actions: &[CodecAct
     for action in actions {
         match action {
             &CodecAction::Correction(correction, value) => {
-                let x = decoder.decode_correction(correction);
+                let x = decoder.decode_correction(correction).unwrap();
                 assert_eq!(x, value);
             }
             &CodecAction::VerifyState(message, checksum) => {
@@ -286,8 +291,8 @@ pub struct AssertDefaultOnlyDecoder {}
 
 #[cfg(test)]
 impl PredictionDecoder for AssertDefaultOnlyDecoder {
-    fn decode_correction(&mut self, _correction: CodecCorrection) -> u32 {
-        0
+    fn decode_correction(&mut self, _correction: CodecCorrection) -> Result<u32> {
+        Ok(0)
     }
 
     fn decode_verify_state(&mut self, _message: &'static str, _checksum: u64) {}
@@ -323,11 +328,11 @@ where
     A: PredictionDecoder,
     B: PredictionDecoder,
 {
-    fn decode_correction(&mut self, correction: CodecCorrection) -> u32 {
-        let a = self.0.decode_correction(correction);
-        let b = self.1.decode_correction(correction);
+    fn decode_correction(&mut self, correction: CodecCorrection) -> Result<u32> {
+        let a = self.0.decode_correction(correction)?;
+        let b = self.1.decode_correction(correction)?;
         assert_eq!(a, b);
-        a
+        Ok(a)
     }
 
     fn decode_verify_state(&mut self, message: &'static str, checksum: u64) {

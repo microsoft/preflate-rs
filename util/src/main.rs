@@ -1,3 +1,7 @@
+#![forbid(trivial_casts)]
+#![forbid(trivial_numeric_casts)]
+#![deny(clippy::cast_lossless)]
+
 use clap::Parser;
 use cpu_time::ProcessTime;
 use env_logger::Builder;
@@ -121,9 +125,9 @@ fn main() {
             compress_start.elapsed()
         );
 
-        totalseen += stats.deflate_compressed_size as u64;
-        totalbaseline += stats.zstd_baseline_size as u64;
-        totalzstd += stats.zstd_compressed_size as u64;
+        totalseen += stats.deflate_compressed_size;
+        totalbaseline += stats.zstd_baseline_size;
+        totalzstd += stats.zstd_compressed_size;
 
         println!(
             "total seen ratio {totalzstd}:{totalbaseline}:{totalseen} {:.1}",

@@ -1,8 +1,8 @@
-# CLAUDE.md
+# Repository instructions
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+These instructions guide GitHub Copilot when working with code in this repository.
 
-> **Important:** This file (and all sub-project `CLAUDE.md` files) are checked into the
+> **Important:** This file and the path-specific files in `.github/instructions/` are checked into the
 > repository. Only include information that is valid for **any** developer or machine:
 > project conventions, architecture, commands, constraints. **Do not** add machine-specific
 > paths, personal tool preferences, local environment settings, or anything that would
@@ -68,6 +68,6 @@ The optional `webp` feature (enabled by default) allows PNG images to be stored 
 
 ### Code constraints
 
-- **No unsafe code** — enforced via `#![forbid(unsafe_code)]` in each crate.
-- Minimum Rust version: **1.89**, Edition **2024**.
+- **No unsafe code** in the core and container crates — enforced via `#![forbid(unsafe_code)]`.
+- Minimum Rust version: **1.99.1**, Edition **2024**.
 - `.cargo/config.toml` sets Windows MSVC linker flags (`/DYNAMICBASE`, `/CETCOMPAT`, `/guard:cf`).

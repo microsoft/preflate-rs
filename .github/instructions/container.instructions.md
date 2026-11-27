@@ -1,3 +1,7 @@
+---
+applyTo: "container/**/*"
+---
+
 # container (preflate-container)
 
 Scans binary files (ZIP, PNG, JPEG) for DEFLATE streams, orchestrates the
@@ -34,7 +38,14 @@ fn process_limited_buffer(
 ```
 
 `PreflateContainerConfig` holds knobs: `min_chunk_size`, `max_chunk_size`,
-`total_plain_text_limit`, `chunk_plain_text_limit`, `validate_compression`, `max_chain_length`.
+`total_plain_text_limit`, `compression_effort_limit`, `chunk_plain_text_limit`,
+`validate_compression`, `max_chain_length`. Compression has a cumulative deterministic
+effort budget of 8 GiB units by default (`None` disables it). It charges scanned and
+candidate input bytes, parsed plaintext, and conservative estimator and prediction
+work. Exceeding the budget is a terminal compression error, not a literal fallback;
+under-budget streams retain their original v3 encoding. The budget does not apply
+to container decompression; independently used core analyzers have their own
+default budget.
 
 ## Wire Format (v3 only)
 
@@ -47,6 +58,8 @@ Repeat for each block:
   [type]                           ← block type byte (1 byte, raw) — see bit-field below
   [varint(content_len)]            ← byte count of what follows (1–5 bytes, raw)
   [content_bytes × content_len]    ← meaning depends on type (see below)
+
+[0xFF][crc32_le]                   ← required end block; CRC-32 of reconstructed input
 ```
 
 All framing bytes (`type`, `varint`) are written directly to the output stream —
@@ -91,7 +104,8 @@ Mask constants (defined in `container_processor.rs`):
 - Each flush segment is decodable in sequence: the decoder is a persistent
   `zstd::stream::raw::Decoder` that maintains cross-block history, so compression
   quality benefits from all previously seen blocks.
-- The stream is terminated by EOF — there is no explicit end-of-stream block.
+- The encoder discards Zstd finish bytes after flushing the blocks. The outer v3
+  container ends with the required CRC-32 end block, not bare EOF.
 
 ### Inner payload layout (inside Zstd, after decompression)
 
@@ -192,7 +206,7 @@ src/
 
 ## Dependencies of Note
 
-- `lepton_jpeg` (0.5.1) — JPEG blocks are recompressed with Lepton, bypassing Zstd entirely.
+- `lepton_jpeg` (0.5.9) — JPEG blocks are recompressed with Lepton, bypassing Zstd entirely.
 - `zstd` (0.13) — single persistent encoder across all non-JPEG/WebP blocks.
 - `preflate-rs` — core analysis/reconstruction (path dependency).
 - `webp` (0.3, optional, default-enabled) — PNG images can be stored as WebP lossless.

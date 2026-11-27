@@ -4,10 +4,14 @@
  *  This software incorporates material from third parties. See NOTICE.txt for details.
  *--------------------------------------------------------------------------------------------*/
 
+#![forbid(trivial_casts)]
+#![forbid(trivial_numeric_casts)]
+#![deny(clippy::cast_lossless)]
+
 use std::fs::File;
 use std::io::Read;
 use std::path::Path;
-use std::{mem, ptr};
+use std::{mem::MaybeUninit, ptr};
 
 use libdeflate_sys::{libdeflate_alloc_compressor, libdeflate_deflate_compress};
 use preflate_container::{
@@ -217,22 +221,11 @@ fn libzsys_compress(input_data: &[u8], level: i32, strategy: Strategy) -> Vec<u8
     let mut output = Vec::new();
     use libz_sys::*;
     unsafe {
-        let mut z_stream = z_stream {
-            next_in: input_data.as_ptr() as *mut _,
-            avail_in: input_data.len() as u32,
-            next_out: ptr::null_mut(),
-            avail_out: 0,
-            total_in: 0,
-            total_out: 0,
-            msg: std::ptr::null_mut(),
-            state: std::ptr::null_mut(),
-            zalloc: mem::transmute(ptr::null::<u8>()),
-            zfree: mem::transmute(ptr::null::<u8>()),
-            opaque: ptr::null_mut(),
-            data_type: 0,
-            adler: 0,
-            reserved: 0,
-        };
+        // zlib requires null allocator callbacks before initialization, but the
+        // bindings represent them as non-nullable Rust function pointers.
+        let mut stream = MaybeUninit::<z_stream>::zeroed();
+        ptr::addr_of_mut!((*stream.as_mut_ptr()).next_in).write(input_data.as_ptr() as *mut _);
+        ptr::addr_of_mut!((*stream.as_mut_ptr()).avail_in).write(input_data.len() as u32);
 
         // Additional options for deflateInit2_
         let window_bits = 15; // Default window size
@@ -244,7 +237,7 @@ fn libzsys_compress(input_data: &[u8], level: i32, strategy: Strategy) -> Vec<u8
 
         assert_eq!(
             deflateInit2_(
-                &mut z_stream,
+                stream.as_mut_ptr(),
                 level,
                 Z_DEFLATED,
                 window_bits,
@@ -260,16 +253,17 @@ fn libzsys_compress(input_data: &[u8], level: i32, strategy: Strategy) -> Vec<u8
             ),
             Z_OK
         );
+        let z_stream = stream.as_mut_ptr();
 
         output.resize(input_data.len() + 1000, 0);
 
-        z_stream.next_out = output.as_mut_ptr() as *mut _;
-        z_stream.avail_out = output.len() as u32;
+        (*z_stream).next_out = output.as_mut_ptr() as *mut _;
+        (*z_stream).avail_out = output.len() as u32;
 
-        assert_eq!(Z_STREAM_END, deflate(&mut z_stream, Z_FINISH));
-        output.set_len(z_stream.total_out as usize);
+        assert_eq!(Z_STREAM_END, deflate(z_stream, Z_FINISH));
+        output.set_len(usize::try_from((*z_stream).total_out).unwrap());
 
-        assert_eq!(Z_OK, deflateEnd(&mut z_stream));
+        assert_eq!(Z_OK, deflateEnd(z_stream));
     }
     output
 }
@@ -300,22 +294,9 @@ fn libngzsys_compress(input_data: &[u8], level: i32) -> Vec<u8> {
         deflateInit2_, z_stream, zlibVersion,
     };
     unsafe {
-        let mut z_stream = z_stream {
-            next_in: input_data.as_ptr() as *mut _,
-            avail_in: input_data.len() as u32,
-            next_out: ptr::null_mut(),
-            avail_out: 0,
-            total_in: 0,
-            total_out: 0,
-            msg: std::ptr::null_mut(),
-            state: std::ptr::null_mut(),
-            zalloc: mem::transmute(ptr::null::<u8>()),
-            zfree: mem::transmute(ptr::null::<u8>()),
-            opaque: ptr::null_mut(),
-            data_type: 0,
-            adler: 0,
-            reserved: 0,
-        };
+        let mut stream = MaybeUninit::<z_stream>::zeroed();
+        ptr::addr_of_mut!((*stream.as_mut_ptr()).next_in).write(input_data.as_ptr() as *mut _);
+        ptr::addr_of_mut!((*stream.as_mut_ptr()).avail_in).write(input_data.len() as u32);
 
         // Additional options for deflateInit2_
         let window_bits = 15; // Default window size
@@ -327,7 +308,7 @@ fn libngzsys_compress(input_data: &[u8], level: i32) -> Vec<u8> {
 
         assert_eq!(
             deflateInit2_(
-                &mut z_stream,
+                stream.as_mut_ptr(),
                 level,
                 Z_DEFLATED,
                 window_bits,
@@ -338,16 +319,19 @@ fn libngzsys_compress(input_data: &[u8], level: i32) -> Vec<u8> {
             ),
             Z_OK
         );
+        let z_stream = stream.as_mut_ptr();
 
         output.resize(input_data.len() + 1000, 0);
 
-        z_stream.next_out = output.as_mut_ptr() as *mut _;
-        z_stream.avail_out = output.len() as u32;
+        (*z_stream).next_out = output.as_mut_ptr() as *mut _;
+        (*z_stream).avail_out = output.len() as u32;
 
-        assert_eq!(Z_STREAM_END, deflate(&mut z_stream, Z_FINISH));
-        output.set_len(z_stream.total_out as usize);
+        assert_eq!(Z_STREAM_END, deflate(z_stream, Z_FINISH));
+        // total_out is usize for native zlib-ng but c_ulong in its zlib-compat mode
+        #[allow(clippy::useless_conversion)]
+        output.set_len(usize::try_from((*z_stream).total_out).unwrap());
 
-        assert_eq!(Z_OK, deflateEnd(&mut z_stream));
+        assert_eq!(Z_OK, deflateEnd(z_stream));
     }
     output
 }

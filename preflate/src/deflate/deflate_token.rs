@@ -56,11 +56,11 @@ impl DeflateTokenReference {
     }
 
     pub fn len(&self) -> u32 {
-        (self.len as u32) + 3
+        u32::from(self.len) + 3
     }
 
     pub fn dist(&self) -> u32 {
-        self.dist as u32
+        u32::from(self.dist)
     }
 }
 
@@ -146,16 +146,36 @@ impl Default for TokenFrequency {
 }
 
 impl TokenFrequency {
+    /// Counts wrap at u16 to match corrections written by earlier release builds, where
+    /// the encoder and decoder relied on identical wrapping arithmetic.
     pub fn commit_token(&mut self, token: &DeflateToken) {
+        fn increment(value: &mut u16) {
+            *value = value.wrapping_add(1);
+        }
         match token {
             DeflateToken::Literal(lit) => {
-                self.literal_codes[*lit as usize] += 1;
+                increment(&mut self.literal_codes[*lit as usize]);
             }
             DeflateToken::Reference(t) => {
-                self.literal_codes
-                    [NONLEN_CODE_COUNT + usize::from(quantize_length(t.len()).get())] += 1;
-                self.distance_codes[usize::from(quantize_distance(t.dist()).get())] += 1;
+                increment(
+                    &mut self.literal_codes
+                        [NONLEN_CODE_COUNT + usize::from(quantize_length(t.len()).get())],
+                );
+                increment(&mut self.distance_codes[usize::from(quantize_distance(t.dist()).get())]);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn token_frequency_wraps_like_release_builds() {
+        let mut frequency = TokenFrequency::default();
+        frequency.literal_codes[b'a' as usize] = u16::MAX;
+        frequency.commit_token(&DeflateToken::Literal(b'a'));
+        assert_eq!(frequency.literal_codes[b'a' as usize], 0);
     }
 }

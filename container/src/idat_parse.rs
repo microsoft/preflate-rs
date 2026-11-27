@@ -1,10 +1,34 @@
-use std::io::{Read, Write};
+use std::{
+    io::{Read, Write},
+    num::Saturating,
+};
 
 use byteorder::{ReadBytesExt, WriteBytesExt};
 
-use preflate_rs::{ExitCode, Result, err_exit_code};
+use preflate_rs::{ExitCode, PreflateError, Result, err_exit_code};
 
-use crate::container_common::{read_varint, write_varint};
+use crate::container_common::{SizeValue, check_size, read_varint, write_varint};
+
+/// Sum of the IDAT chunk sizes. Saturates rather than overflowing, so callers must only
+/// compare the result or convert it with `to_usize`, which rejects a saturated sum.
+fn chunk_size_sum(chunk_sizes: &[u32]) -> Saturating<usize> {
+    chunk_sizes.iter().fold(Saturating(0), |total, &size| {
+        total + Saturating(size as usize)
+    })
+}
+
+pub(crate) fn checked_image_size(
+    width: usize,
+    height: usize,
+    bpp: usize,
+    limit: usize,
+) -> Result<usize> {
+    if width == 0 || height == 0 {
+        return err_exit_code(ExitCode::InvalidIDat, "Invalid image dimensions");
+    }
+    let size = Saturating(width) * Saturating(height) * Saturating(bpp);
+    check_size(size, limit, "Image pixels")
+}
 
 /// The contents of a PNG IDat stream. These are treated specially since they
 /// contain a Zlib stream that is split into multiple chunks and would be
@@ -28,14 +52,23 @@ pub struct IdatContents {
 }
 
 impl IdatContents {
-    pub fn read_from_bytestream(r: &mut impl Read) -> Result<IdatContents> {
+    pub fn read_from_bytestream(
+        r: &mut impl Read,
+        max_chunk_length: usize,
+    ) -> Result<IdatContents> {
         let mut chunk_sizes = Vec::new();
+        let mut encoded_chunk_length = Saturating(0usize);
 
         loop {
             let r = read_varint(r)?;
             if r == 0 {
                 break;
             }
+            encoded_chunk_length += Saturating(r.to_usize()?) + Saturating(12);
+            check_size(encoded_chunk_length, max_chunk_length, "PNG IDAT chunks")?;
+            chunk_sizes.try_reserve(1).map_err(|_| {
+                PreflateError::new(ExitCode::OutOfMemory, "Unable to reserve IDAT chunks")
+            })?;
             chunk_sizes.push(r);
         }
 
@@ -58,12 +91,12 @@ impl IdatContents {
         }
 
         // total chunk size is the sum of all the chunk sizes + 2 bytes for the zlib header + 4 bytes for the addler32
-        let total_chunk_length = chunk_sizes.iter().sum::<u32>() + 2 + 4;
+        let total_chunk_length = (chunk_size_sum(&chunk_sizes) + Saturating(6)).to_usize()?;
 
         Ok(IdatContents {
             chunk_sizes,
             zlib_header,
-            total_chunk_length: total_chunk_length as usize,
+            total_chunk_length,
             addler32: u32::from_be_bytes(addler32),
             png_header,
         })
@@ -112,7 +145,7 @@ fn test_idat_header_roundtrip() {
 
     let mut cur = std::io::Cursor::new(&buffer);
 
-    let idat2 = IdatContents::read_from_bytestream(&mut cur).unwrap();
+    let idat2 = IdatContents::read_from_bytestream(&mut cur, 30039).unwrap();
 
     assert_eq!(idat, idat2);
 }
@@ -224,7 +257,7 @@ pub fn parse_idat(
         }
 
         // stop if we don't have enough data for the chunk
-        if pos + chunk_len + 12 > png_idat_stream.len() {
+        if (Saturating(pos) + Saturating(chunk_len) + Saturating(12)).0 > png_idat_stream.len() {
             break;
         }
 
@@ -302,7 +335,7 @@ pub fn recreate_idat(
     output: &mut impl Write,
 ) -> Result<()> {
     // the total length of the chunks is the sum of the chunk sizes + 2 bytes for the zlib header + 4 bytes for the addler32
-    if idat.chunk_sizes.iter().sum::<u32>() as usize != deflate_stream.len() + 2 + 4 {
+    if chunk_size_sum(&idat.chunk_sizes) != Saturating(deflate_stream.len()) + Saturating(6) {
         return err_exit_code(
             ExitCode::InvalidIDat,
             "Chunk sizes do not match deflate stream length",
@@ -335,9 +368,9 @@ pub fn recreate_idat(
 }
 
 fn paeth_predictor(a: u8, b: u8, c: u8) -> u8 {
-    let a = a as i32;
-    let b = b as i32;
-    let c = c as i32;
+    let a = i32::from(a);
+    let b = i32::from(b);
+    let c = i32::from(c);
     let p = a + b - c;
     let pa = (p - a).abs();
     let pb = (p - b).abs();
@@ -381,7 +414,7 @@ pub fn undo_png_filters(
                 0 => scanline[x],
                 1 => scanline[x].wrapping_add(left),
                 2 => scanline[x].wrapping_add(above),
-                3 => scanline[x].wrapping_add(((left as u16 + above as u16) / 2) as u8),
+                3 => scanline[x].wrapping_add(((u16::from(left) + u16::from(above)) / 2) as u8),
                 4 => scanline[x].wrapping_add(paeth_predictor(left, above, upper_left)),
                 _ => panic!("Unknown filter type: {}", filter_type),
             };
@@ -471,7 +504,7 @@ fn process_line(
             0 => scanline[x],
             1 => scanline[x].wrapping_sub(left),
             2 => scanline[x].wrapping_sub(above),
-            3 => scanline[x].wrapping_sub(((left as u16 + above as u16) / 2) as u8),
+            3 => scanline[x].wrapping_sub(((u16::from(left) + u16::from(above)) / 2) as u8),
             4 => scanline[x].wrapping_sub(paeth_predictor(left, above, upper_left)),
             _ => panic!("Unknown filter type: {}", filter_type),
         };
@@ -534,4 +567,29 @@ fn test_png_filter_round_trip_with_explicit_filters() {
         filtered, reencoded,
         "Re-encoding did not match original filtered data"
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bounds_idat_metadata_by_original_chunk_length() {
+        let metadata = IdatContents {
+            chunk_sizes: vec![1, 1],
+            zlib_header: [0; 2],
+            total_chunk_length: 8,
+            addler32: 0,
+            png_header: None,
+        };
+        let mut bytes = Vec::new();
+        metadata.write_to_bytestream(&mut bytes).unwrap();
+
+        assert_eq!(
+            IdatContents::read_from_bytestream(&mut bytes.as_slice(), 26).unwrap(),
+            metadata
+        );
+        let error = IdatContents::read_from_bytestream(&mut bytes.as_slice(), 25).unwrap_err();
+        assert_eq!(error.exit_code(), ExitCode::InvalidCompressedWrapper);
+    }
 }

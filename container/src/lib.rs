@@ -8,6 +8,7 @@
 #![forbid(unsafe_code)]
 #![forbid(trivial_casts)]
 #![forbid(trivial_numeric_casts)]
+#![deny(clippy::cast_lossless)]
 #![forbid(non_ascii_idents)]
 #![forbid(redundant_lifetimes)]
 #![forbid(single_use_lifetimes)]
@@ -18,6 +19,9 @@
 #![warn(unused_macro_rules)]
 #![warn(unused_crate_dependencies)]
 #![warn(macro_use_extern_crate)]
+
+use preflate_rs::Result;
+use std::io::{BufReader, Read, Write};
 
 mod container_common;
 mod container_read;
@@ -36,28 +40,17 @@ pub use utils::process_limited_buffer;
 /// Convenience wrapper: compresses an entire input stream into the preflate container format.
 pub fn preflate_whole_into_container(
     config: &PreflateContainerConfig,
-    input: &mut impl std::io::Read,
-    output: &mut impl std::io::Write,
-) -> preflate_rs::Result<()> {
+    input: &mut impl Read,
+    output: &mut impl Write,
+) -> Result<()> {
     let mut processor = PreflateContainerProcessor::new(config, 9, false);
-    let mut buf = Vec::new();
-    input.read_to_end(&mut buf).map_err(|e| {
-        preflate_rs::PreflateError::new(preflate_rs::ExitCode::GeneralFailure, e.to_string())
-    })?;
-    processor.process_buffer(&buf, true, output)
+    processor.copy_to_end(&mut BufReader::new(input), output)
 }
 
 /// Convenience wrapper: recreates the original data from a preflate container stream.
-pub fn recreate_whole_from_container(
-    input: &mut impl std::io::Read,
-    output: &mut impl std::io::Write,
-) -> preflate_rs::Result<()> {
+pub fn recreate_whole_from_container(input: &mut impl Read, output: &mut impl Write) -> Result<()> {
     let mut processor = RecreateContainerProcessor::new(128 * 1024 * 1024);
-    let mut buf = Vec::new();
-    input.read_to_end(&mut buf).map_err(|e| {
-        preflate_rs::PreflateError::new(preflate_rs::ExitCode::GeneralFailure, e.to_string())
-    })?;
-    processor.process_buffer(&buf, true, output)
+    processor.copy_to_end(&mut BufReader::new(input), output)
 }
 
 #[cfg(test)]
@@ -69,4 +62,40 @@ pub fn init_logging() {
     INIT.call_once(|| {
         let _ = env_logger::builder().is_test(true).try_init();
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{self, Cursor};
+
+    struct StreamingRead<R>(R);
+
+    impl<R: Read> Read for StreamingRead<R> {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            assert!(
+                buffer.len() <= 8192,
+                "Reader must not be used to buffer the whole input"
+            );
+            self.0.read(buffer)
+        }
+    }
+
+    #[test]
+    fn whole_stream_helpers_read_incrementally() {
+        let input = (0u32..32_768)
+            .flat_map(u32::to_le_bytes)
+            .collect::<Vec<_>>();
+        let mut encoded = Vec::new();
+        preflate_whole_into_container(
+            &PreflateContainerConfig::default(),
+            &mut StreamingRead(Cursor::new(&input)),
+            &mut encoded,
+        )
+        .unwrap();
+        let mut restored = Vec::new();
+        recreate_whole_from_container(&mut StreamingRead(Cursor::new(&encoded)), &mut restored)
+            .unwrap();
+        assert_eq!(restored, input);
+    }
 }

@@ -8,6 +8,7 @@
 #![forbid(unsafe_code)]
 #![forbid(trivial_casts)]
 #![forbid(trivial_numeric_casts)]
+#![deny(clippy::cast_lossless)]
 #![forbid(non_ascii_idents)]
 #![forbid(redundant_lifetimes)]
 #![forbid(single_use_lifetimes)]
@@ -52,6 +53,10 @@ pub use stream_processor::{
 /// Configure the preflate stream processor
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PreflateConfig {
+    /// Cumulative analysis effort for a standalone stream processor. None disables
+    /// the limit. Container compression supplies its own shared budget instead.
+    pub compression_effort_limit: Option<u64>,
+
     /// Maximum number of lookups we will do in the hash chain. This will limit the
     /// amount of CPU time we spend on each chunk.
     pub max_chain_length: u32,
@@ -60,6 +65,10 @@ pub struct PreflateConfig {
     /// being recompressed. This limits memory usage and processing time, especially
     /// for files that are extremely compressed (eg zip bombs)
     pub plain_text_limit: usize,
+
+    /// Maximum encoded or decoded correction bytes per chunk. Default: 128 MiB, matching
+    /// the plaintext limit so records written by earlier releases remain readable.
+    pub correction_limit: usize,
 
     /// Decompress the data and verify that it can be recompressed to exactly the same bytes.
     /// This will slow down processing is isn't necessary if you are already doing end-to-end
@@ -70,8 +79,10 @@ pub struct PreflateConfig {
 impl Default for PreflateConfig {
     fn default() -> Self {
         Self {
+            compression_effort_limit: Some(8 * 1024 * 1024 * 1024),
             max_chain_length: 4096,
             plain_text_limit: 128 * 1024 * 1024,
+            correction_limit: 128 * 1024 * 1024,
             verify_compression: true,
         }
     }

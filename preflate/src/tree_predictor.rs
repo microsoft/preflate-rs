@@ -4,9 +4,11 @@
  *  This software incorporates material from third parties. See NOTICE.txt for details.
  *--------------------------------------------------------------------------------------------*/
 
+use std::ops::RangeInclusive;
+
 use crate::{
     cabac_codec::{decode_difference, encode_difference},
-    deflate::deflate_constants::{CODETREE_CODE_COUNT, TREE_CODE_ORDER_TABLE},
+    deflate::deflate_constants::{CODETREE_CODE_COUNT, NONLEN_CODE_COUNT, TREE_CODE_ORDER_TABLE},
     deflate::deflate_token::TokenFrequency,
     deflate::{
         huffman_calc::{HufftreeBitCalc, calc_bit_lengths},
@@ -15,6 +17,9 @@ use crate::{
     preflate_error::{ExitCode, Result, err_exit_code},
     statistical_codec::{CodecCorrection, PredictionDecoder, PredictionEncoder},
 };
+
+/// Largest literal/length count the 5-bit HLIT header field can express (257 + 31).
+const MAX_HLIT_CODE_COUNT: u32 = 288;
 
 pub fn predict_tree_for_block<D: PredictionEncoder>(
     huffman_encoding: &HuffmanOriginalEncoding,
@@ -106,25 +111,26 @@ pub fn recreate_tree_for_block<D: PredictionDecoder>(
 
     let mut bit_lengths = calc_bit_lengths(huffcalc, &freq.literal_codes, 15);
 
-    bit_lengths.resize(
-        codec.decode_correction_diff(
-            CodecCorrection::LiteralCountCorrection,
-            bit_lengths.len() as u32,
-        ) as usize,
-        0,
-    );
+    // the 5-bit HLIT field allows up to 288 codes, which the parser accepts and the writer re-emits
+    let literal_count = decode_tree_correction(
+        codec,
+        CodecCorrection::LiteralCountCorrection,
+        bit_lengths.len() as u32,
+        NONLEN_CODE_COUNT as u32..=MAX_HLIT_CODE_COUNT,
+    )?;
+    bit_lengths.resize(literal_count as usize, 0);
 
     result.num_literals = bit_lengths.len();
 
     let mut distance_code_lengths = calc_bit_lengths(huffcalc, &freq.distance_codes, 15);
 
-    distance_code_lengths.resize(
-        codec.decode_correction_diff(
-            CodecCorrection::DistanceCountCorrection,
-            distance_code_lengths.len() as u32,
-        ) as usize,
-        0,
-    );
+    let distance_count = decode_tree_correction(
+        codec,
+        CodecCorrection::DistanceCountCorrection,
+        distance_code_lengths.len() as u32,
+        1..=32,
+    )?;
+    distance_code_lengths.resize(distance_count as usize, 0);
 
     result.num_dist = distance_code_lengths.len();
 
@@ -139,10 +145,12 @@ pub fn recreate_tree_for_block<D: PredictionDecoder>(
 
     let mut tc_code_tree_len = calc_tc_lengths_without_trailing_zeros(&tc_code_tree);
 
-    tc_code_tree_len = codec.decode_correction_diff(
+    tc_code_tree_len = decode_tree_correction(
+        codec,
         CodecCorrection::TreeCodeBitLengthCorrection,
         tc_code_tree_len as u32,
-    ) as usize;
+        4..=CODETREE_CODE_COUNT as u32,
+    )? as usize;
 
     result.num_code_lengths = tc_code_tree_len;
 
@@ -151,13 +159,31 @@ pub fn recreate_tree_for_block<D: PredictionDecoder>(
     tc_code_tree.resize(CODETREE_CODE_COUNT, 0);
 
     for i in 0..tc_code_tree_len {
-        result.code_lengths[TREE_CODE_ORDER_TABLE[i]] = codec.decode_correction_diff(
+        result.code_lengths[TREE_CODE_ORDER_TABLE[i]] = decode_tree_correction(
+            codec,
             CodecCorrection::TreeCodeBitLengthCorrection,
             tc_code_tree[TREE_CODE_ORDER_TABLE[i]].into(),
-        ) as u8;
+            0..=7,
+        )? as u8;
     }
 
     Ok(result)
+}
+
+fn decode_tree_correction<D: PredictionDecoder>(
+    decoder: &mut D,
+    correction: CodecCorrection,
+    predicted: u32,
+    bounds: RangeInclusive<u32>,
+) -> Result<u32> {
+    let value = decode_difference(predicted, decoder.decode_correction(correction)?)?;
+    match value {
+        value if bounds.contains(&value) => Ok(value),
+        _ => err_exit_code(
+            ExitCode::InvalidPredictionData,
+            format!("Invalid Huffman tree correction: {correction:?}"),
+        ),
+    }
 }
 
 /// since treecodes are encoded in a different order (see TREE_CODE_ORDER_TABLE) in
@@ -257,10 +283,12 @@ fn reconstruct_ld_trees<D: PredictionDecoder>(
         let predicted_tree_code_type = predict_code_type(symbols, prev_code);
         prev_code = Some(symbols[0]);
 
-        let predicted_tree_code_type_u32 = decode_difference(
+        let predicted_tree_code_type_u32 = decode_tree_correction(
+            decoder,
+            CodecCorrection::LDTypeCorrection,
             predicted_tree_code_type as u32,
-            decoder.decode_correction(CodecCorrection::LDTypeCorrection),
-        );
+            0..=18,
+        )?;
 
         const TC_CODE: u32 = TreeCodeType::Code as u32;
         const TC_REPEAT: u32 = TreeCodeType::Repeat as u32;
@@ -275,18 +303,24 @@ fn reconstruct_ld_trees<D: PredictionDecoder>(
             _ => return err_exit_code(ExitCode::RecompressFailed, "Reconstruction failed"),
         };
 
-        let mut predicted_tree_code_data = predict_code_data(symbols, predicted_tree_code_type);
-
-        if predicted_tree_code_type != TreeCodeType::Code {
-            predicted_tree_code_data = decode_difference(
-                predicted_tree_code_data.into(),
-                decoder.decode_correction(CodecCorrection::RepeatCountCorrection),
-            ) as u8;
-        } else {
-            predicted_tree_code_data = decode_difference(
-                predicted_tree_code_data.into(),
-                decoder.decode_correction(CodecCorrection::LDBitLengthCorrection),
-            ) as u8;
+        let predicted_tree_code_data = predict_code_data(symbols, predicted_tree_code_type);
+        let (correction, bounds) = match predicted_tree_code_type {
+            TreeCodeType::Code => (CodecCorrection::LDBitLengthCorrection, 0..=15),
+            // a leading repeat is accepted by the parser and repeats a length of 0
+            TreeCodeType::Repeat => (CodecCorrection::RepeatCountCorrection, 3..=6),
+            TreeCodeType::ZeroShort => (CodecCorrection::RepeatCountCorrection, 3..=10),
+            TreeCodeType::ZeroLong => (CodecCorrection::RepeatCountCorrection, 11..=138),
+        };
+        let predicted_tree_code_data =
+            decode_tree_correction(decoder, correction, predicted_tree_code_data.into(), bounds)?
+                as u8;
+        if predicted_tree_code_type != TreeCodeType::Code
+            && predicted_tree_code_data as usize > symbols.len()
+        {
+            return err_exit_code(
+                ExitCode::InvalidPredictionData,
+                "Huffman repeat exceeds remaining symbols",
+            );
         }
 
         result.push((predicted_tree_code_type, predicted_tree_code_data));
@@ -423,12 +457,13 @@ fn encode_roundtrip_perfect() {
 
 #[test]
 fn encode_perfect_encoding() {
+    use crate::deflate::deflate_constants::LITLEN_CODE_COUNT;
     use crate::statistical_codec::{AssertDefaultOnlyDecoder, VerifyPredictionEncoder};
 
     let mut freq = TokenFrequency::default();
     // fill with random frequencies
     let mut v: u16 = 10;
-    freq.literal_codes.fill_with(|| {
+    freq.literal_codes[..LITLEN_CODE_COUNT].fill_with(|| {
         v = v.wrapping_add(997);
         v
     });
@@ -554,4 +589,159 @@ fn encode_totally_different_tree() {
     let regenerated_header = reconstruct_ld_trees(&mut decoder, &predicted_bit_len).unwrap();
 
     assert_eq!(actual_target_codes, regenerated_header.as_slice());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::statistical_codec::{
+        AssertDefaultOnlyDecoder, CodecAction, VerifyPredictionDecoder, VerifyPredictionEncoder,
+    };
+
+    #[test]
+    fn maximum_header_counts_roundtrip() {
+        let mut lengths = vec![(TreeCodeType::Code, 8); 226];
+        lengths.extend_from_slice(&[(TreeCodeType::Code, 9); 60]);
+        lengths.extend_from_slice(&[(TreeCodeType::Code, 0); 2]);
+        lengths.extend_from_slice(&[(TreeCodeType::Code, 5); 32]);
+        let mut code_lengths = [0; CODETREE_CODE_COUNT];
+        code_lengths[0] = 3;
+        code_lengths[5] = 3;
+        code_lengths[8] = 1;
+        code_lengths[9] = 2;
+        let tree = HuffmanOriginalEncoding {
+            lengths,
+            code_lengths,
+            num_literals: 288,
+            num_dist: 32,
+            num_code_lengths: 19,
+        };
+        let freq = TokenFrequency::default();
+        let mut encoder = VerifyPredictionEncoder::default();
+        predict_tree_for_block(&tree, &freq, &mut encoder, HufftreeBitCalc::Zlib).unwrap();
+        let recreated = recreate_tree_for_block(
+            &freq,
+            &mut VerifyPredictionDecoder::new(encoder.actions()),
+            HufftreeBitCalc::Zlib,
+        )
+        .unwrap();
+        assert_eq!(tree, recreated);
+    }
+
+    fn reject_tree_correction(correction: CodecCorrection, occurrence: usize, value: u32) {
+        let mut freq = TokenFrequency::default();
+        freq.literal_codes[0] = 100;
+        freq.literal_codes[1] = 50;
+        freq.literal_codes[2] = 25;
+        freq.distance_codes[..3].copy_from_slice(&[100, 50, 25]);
+        let tree = recreate_tree_for_block(
+            &freq,
+            &mut AssertDefaultOnlyDecoder {},
+            HufftreeBitCalc::Zlib,
+        )
+        .unwrap();
+        let mut encoder = VerifyPredictionEncoder::default();
+        predict_tree_for_block(&tree, &freq, &mut encoder, HufftreeBitCalc::Zlib).unwrap();
+        let mut actions = encoder.actions();
+        let action = actions
+            .iter_mut()
+            .filter_map(|action| match action {
+                CodecAction::Correction(c, value) if *c == correction => Some(value),
+                _ => None,
+            })
+            .nth(occurrence)
+            .unwrap();
+        *action = value;
+        let error = recreate_tree_for_block(
+            &freq,
+            &mut VerifyPredictionDecoder::new(actions),
+            HufftreeBitCalc::Zlib,
+        )
+        .unwrap_err();
+        assert_eq!(error.exit_code(), ExitCode::InvalidPredictionData);
+    }
+
+    #[test]
+    fn reject_invalid_tree_counts() {
+        for value in [0, 256, 289, 65_536] {
+            reject_tree_correction(
+                CodecCorrection::LiteralCountCorrection,
+                0,
+                encode_difference(257, value),
+            );
+        }
+        for value in [0, 33, 65_536] {
+            reject_tree_correction(
+                CodecCorrection::DistanceCountCorrection,
+                0,
+                encode_difference(3, value),
+            );
+        }
+        for correction in [
+            CodecCorrection::LiteralCountCorrection,
+            CodecCorrection::DistanceCountCorrection,
+            CodecCorrection::TreeCodeBitLengthCorrection,
+        ] {
+            for value in [u32::MAX - 1, u32::MAX] {
+                reject_tree_correction(correction, 0, value);
+            }
+        }
+        // These corrections decrease by 19 or increase by 20, independently of
+        // the predicted count, and so are always outside the header's 4..=19.
+        for value in [38, 41] {
+            reject_tree_correction(CodecCorrection::TreeCodeBitLengthCorrection, 0, value);
+        }
+        reject_tree_correction(CodecCorrection::TreeCodeBitLengthCorrection, 1, 17);
+    }
+
+    #[test]
+    fn reject_invalid_tree_symbols() {
+        for (code_type, value, count, prefix) in [
+            (TreeCodeType::Code, 16, 20, false),
+            (TreeCodeType::Code, 256, 20, false),
+            (TreeCodeType::Repeat, 0, 20, true),
+            (TreeCodeType::Repeat, 7, 20, true),
+            (TreeCodeType::Repeat, 3, 3, true),
+            (TreeCodeType::ZeroShort, 0, 20, false),
+            (TreeCodeType::ZeroShort, 2, 20, false),
+            (TreeCodeType::ZeroShort, 11, 20, false),
+            (TreeCodeType::ZeroShort, 10, 3, false),
+            (TreeCodeType::ZeroLong, 0, 20, false),
+            (TreeCodeType::ZeroLong, 10, 20, false),
+            (TreeCodeType::ZeroLong, 139, 200, false),
+            (TreeCodeType::ZeroLong, 138, 20, false),
+            (TreeCodeType::ZeroLong, 256, 300, false),
+        ] {
+            let symbols = vec![1; count];
+            let mut encoder = VerifyPredictionEncoder::default();
+            encoder.encode_verify_state("predict_ld_trees", 0);
+            let remaining = if prefix {
+                encoder.encode_correction(CodecCorrection::LDTypeCorrection, 0);
+                encoder.encode_correction(CodecCorrection::LDBitLengthCorrection, 0);
+                &symbols[1..]
+            } else {
+                &symbols[..]
+            };
+            encoder.encode_correction_diff(
+                CodecCorrection::LDTypeCorrection,
+                code_type as u32,
+                predict_code_type(remaining, prefix.then_some(1)) as u32,
+            );
+            encoder.encode_correction_diff(
+                if code_type == TreeCodeType::Code {
+                    CodecCorrection::LDBitLengthCorrection
+                } else {
+                    CodecCorrection::RepeatCountCorrection
+                },
+                value,
+                predict_code_data(remaining, code_type).into(),
+            );
+            let error = reconstruct_ld_trees(
+                &mut VerifyPredictionDecoder::new(encoder.actions()),
+                &symbols,
+            )
+            .unwrap_err();
+            assert_eq!(error.exit_code(), ExitCode::InvalidPredictionData);
+        }
+    }
 }

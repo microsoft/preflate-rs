@@ -41,8 +41,7 @@ fn copy_cstring_utf8_to_buffer(str: &str, target_error_string: &mut [u8]) {
     }
 
     // copy error string into the buffer as utf8
-    let b = std::ffi::CString::new(str).unwrap();
-    let b = b.as_bytes();
+    let b = str.as_bytes();
 
     let copy_len = std::cmp::min(b.len(), target_error_string.len() - 1);
 
@@ -51,6 +50,32 @@ fn copy_cstring_utf8_to_buffer(str: &str, target_error_string: &mut [u8]) {
 
     // always null terminated
     target_error_string[copy_len] = 0;
+}
+
+fn checked_buffer_len(pointer: *const u8, length: u64) -> Result<usize, PreflateError> {
+    if length > isize::MAX as u64 || (pointer.is_null() && length != 0) {
+        return Err(PreflateError::new(
+            ExitCode::InvalidParameter,
+            "Invalid buffer pointer or length",
+        ));
+    }
+    Ok(length as usize)
+}
+
+unsafe fn report_error(error: &PreflateError, buffer: *mut u8, length: u64) {
+    if buffer.is_null() && length == 0 {
+        return;
+    }
+    match checked_buffer_len(buffer, length) {
+        Ok(length) if length != 0 => unsafe {
+            copy_cstring_utf8_to_buffer(
+                error.message(),
+                std::slice::from_raw_parts_mut(buffer, length),
+            );
+        },
+        Ok(_) => {}
+        Err(e) => eprintln!("Unable to report error: {}", e.message()),
+    }
 }
 
 #[test]
@@ -102,6 +127,9 @@ pub unsafe extern "C" fn create_compression_context(flags: u32) -> *mut std::ffi
 /// Frees the compression context
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn free_compression_context(context: *mut std::ffi::c_void) {
+    if context.is_null() {
+        return;
+    }
     unsafe {
         let x = Box::from_raw(context as *mut CompressionContext);
         assert_eq!(
@@ -130,17 +158,26 @@ pub unsafe extern "C" fn compress_buffer(
 ) -> i32 {
     unsafe {
         match catch_unwind_result(|| {
+            if context.is_null() || result_size.is_null() {
+                return Err(PreflateError::new(
+                    ExitCode::InvalidParameter,
+                    "Null context or result pointer",
+                ));
+            }
+            *result_size = 0;
+            let input_len = checked_buffer_len(input_buffer, input_buffer_size)?;
+            let output_len = checked_buffer_len(output_buffer, output_buffer_size)?;
             let context = CompressionContext::from_pointer(context);
 
             let input = if input_buffer == null() {
                 &[]
             } else {
-                std::slice::from_raw_parts(input_buffer, input_buffer_size as usize)
+                std::slice::from_raw_parts(input_buffer, input_len)
             };
             let output = if output_buffer == null_mut() {
                 &mut []
             } else {
-                std::slice::from_raw_parts_mut(output_buffer, output_buffer_size as usize)
+                std::slice::from_raw_parts_mut(output_buffer, output_len)
             };
 
             let (done, buffer_written) = process_limited_buffer(
@@ -154,17 +191,9 @@ pub unsafe extern "C" fn compress_buffer(
             *result_size = buffer_written as u64;
             Ok(done)
         }) {
-            Ok(done) => done as i32,
+            Ok(done) => i32::from(done),
             Err(e) => {
-                if error_string != null_mut() {
-                    copy_cstring_utf8_to_buffer(
-                        e.message(),
-                        std::slice::from_raw_parts_mut(
-                            error_string,
-                            error_string_buffer_len as usize,
-                        ),
-                    );
-                }
+                report_error(&e, error_string, error_string_buffer_len);
                 -e.exit_code().as_integer_error_code()
             }
         }
@@ -182,6 +211,16 @@ pub unsafe extern "C" fn get_compression_stats(
     overhead_bytes: *mut u64,
     hash_algorithm: *mut u32,
 ) {
+    if context.is_null()
+        || deflate_compressed_size.is_null()
+        || zstd_compressed_size.is_null()
+        || zstd_baseline_size.is_null()
+        || uncompressed_size.is_null()
+        || overhead_bytes.is_null()
+        || hash_algorithm.is_null()
+    {
+        return;
+    }
     unsafe {
         let context = CompressionContext::from_pointer(context);
 
@@ -192,7 +231,7 @@ pub unsafe extern "C" fn get_compression_stats(
         *zstd_baseline_size = stats.zstd_baseline_size;
         *uncompressed_size = stats.uncompressed_size;
         *overhead_bytes = stats.overhead_bytes;
-        *hash_algorithm = stats.hash_algorithm.to_u16() as u32;
+        *hash_algorithm = u32::from(stats.hash_algorithm.to_u16());
     }
 }
 
@@ -284,6 +323,9 @@ pub unsafe extern "C" fn create_decompression_context(
 /// Frees the decompression context
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn free_decompression_context(context: *mut std::ffi::c_void) {
+    if context.is_null() {
+        return;
+    }
     unsafe {
         let x = Box::from_raw(context as *mut DecompressionContext);
         assert_eq!(
@@ -312,17 +354,27 @@ pub unsafe extern "C" fn decompress_buffer(
 ) -> i32 {
     unsafe {
         match catch_unwind_result(|| {
+            if context.is_null() || result_size.is_null() {
+                return Err(PreflateError::new(
+                    ExitCode::InvalidParameter,
+                    "Null context or result pointer",
+                ));
+            }
+
+            *result_size = 0;
+            let input_len = checked_buffer_len(input_buffer, input_buffer_size)?;
+            let output_len = checked_buffer_len(output_buffer, output_buffer_size)?;
             let context = DecompressionContext::from_pointer(context);
 
             let input = if input_buffer == null() {
                 &[]
             } else {
-                std::slice::from_raw_parts(input_buffer, input_buffer_size as usize)
+                std::slice::from_raw_parts(input_buffer, input_len)
             };
             let output = if output_buffer == null_mut() {
                 &mut []
             } else {
-                std::slice::from_raw_parts_mut(output_buffer, output_buffer_size as usize)
+                std::slice::from_raw_parts_mut(output_buffer, output_len)
             };
 
             let (done, buffer_written) = process_limited_buffer(
@@ -336,12 +388,9 @@ pub unsafe extern "C" fn decompress_buffer(
             *result_size = buffer_written as u64;
             Ok(done)
         }) {
-            Ok(done) => done as i32,
+            Ok(done) => i32::from(done),
             Err(e) => {
-                copy_cstring_utf8_to_buffer(
-                    e.message(),
-                    std::slice::from_raw_parts_mut(error_string, error_string_buffer_len as usize),
-                );
+                report_error(&e, error_string, error_string_buffer_len);
                 -e.exit_code().as_integer_error_code()
             }
         }
@@ -390,7 +439,7 @@ fn extern_interface() {
                 false,
                 compressed_chunk.as_mut_ptr(),
                 compressed_chunk.len() as u64,
-                (&mut result_size) as *mut u64,
+                &mut result_size,
                 error_string.as_mut_ptr(),
                 error_string.len() as u64,
             );
@@ -414,7 +463,7 @@ fn extern_interface() {
                 true,
                 compressed_chunk.as_mut_ptr(),
                 compressed_chunk.len() as u64,
-                (&mut result_size) as *mut u64,
+                &mut result_size,
                 error_string.as_mut_ptr(),
                 error_string.len() as u64,
             );
@@ -474,7 +523,7 @@ fn extern_interface() {
                 false,
                 decompressed_chunk.as_mut_ptr(),
                 decompressed_chunk.len() as u64,
-                (&mut result_size) as *mut u64,
+                &mut result_size,
                 error_string.as_mut_ptr(),
                 error_string.len() as u64,
             );
@@ -498,7 +547,7 @@ fn extern_interface() {
                 true,
                 decompressed_chunk.as_mut_ptr(),
                 decompressed_chunk.len() as u64,
-                (&mut result_size) as *mut u64,
+                &mut result_size,
                 error_string.as_mut_ptr(),
                 error_string.len() as u64,
             );
@@ -541,7 +590,7 @@ fn test_error_translation() {
             true,
             null_mut(),
             0,
-            (&mut result_size) as *mut u64,
+            &mut result_size,
             error_string.as_mut_ptr(),
             error_string.len() as u64,
         );
@@ -560,7 +609,7 @@ fn test_error_translation() {
             false,
             null_mut(),
             0,
-            (&mut result_size) as *mut u64,
+            &mut result_size,
             error_string.as_mut_ptr(),
             error_string.len() as u64,
         );
@@ -585,4 +634,102 @@ fn get_cstring<'a, const N: usize>(error_string: &'a [u8; N]) -> &'a std::ffi::C
 
     let error_string = std::ffi::CStr::from_bytes_with_nul(&error_string[0..len + 1]).unwrap();
     error_string
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn null_context_and_stats_pointers_are_ignored() {
+        let mut stats = [42u64; 5];
+        let mut hash_algorithm = 42u32;
+        unsafe {
+            let stats = stats.as_mut_ptr();
+            free_compression_context(null_mut());
+            free_decompression_context(null_mut());
+            get_compression_stats(
+                null_mut(),
+                stats,
+                stats.add(1),
+                stats.add(2),
+                stats.add(3),
+                stats.add(4),
+                &mut hash_algorithm,
+            );
+
+            let context = create_compression_context(1);
+            assert!(!context.is_null());
+            get_compression_stats(
+                context,
+                stats,
+                stats.add(1),
+                null_mut(),
+                stats.add(3),
+                stats.add(4),
+                &mut hash_algorithm,
+            );
+            free_compression_context(context);
+        }
+        assert_eq!(stats, [42; 5]);
+        assert_eq!(hash_algorithm, 42);
+    }
+
+    #[test]
+    fn invalid_sizes_and_absent_error_buffers_return_errors() {
+        let input = [0];
+        let mut written = 1;
+        unsafe {
+            let context = create_decompression_context(0, 1);
+            assert!(!context.is_null());
+            assert_eq!(
+                decompress_buffer(
+                    context,
+                    input.as_ptr(),
+                    u64::MAX,
+                    true,
+                    null_mut(),
+                    0,
+                    &mut written,
+                    null_mut(),
+                    0,
+                ),
+                -ExitCode::InvalidParameter.as_integer_error_code()
+            );
+            assert_eq!(written, 0);
+            assert!(
+                decompress_buffer(
+                    context,
+                    input.as_ptr(),
+                    1,
+                    true,
+                    null_mut(),
+                    0,
+                    &mut written,
+                    null_mut(),
+                    0,
+                ) < 0
+            );
+            free_decompression_context(context);
+
+            let context = create_compression_context(1);
+            assert!(!context.is_null());
+            assert_eq!(
+                compress_buffer(
+                    context,
+                    null(),
+                    1,
+                    true,
+                    null_mut(),
+                    0,
+                    &mut written,
+                    null_mut(),
+                    0,
+                ),
+                -ExitCode::InvalidParameter.as_integer_error_code()
+            );
+            free_compression_context(context);
+        }
+        assert!(checked_buffer_len(input.as_ptr(), u64::MAX).is_err());
+    }
 }
